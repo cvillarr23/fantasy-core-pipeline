@@ -1,0 +1,44 @@
+import logging
+from src.database import get_db_cursor
+from src.models import (
+    CREATE_PLAYERS_TABLE, 
+    CREATE_WEEKLY_STATS_TABLE, 
+    CREATE_LEAGUE_ROSTERS_TABLE,
+    CREATE_INDICES
+)
+
+logger = logging.getLogger("MigrationsEngine")
+
+def run_migrations():
+    """
+    Validates connection pool liveness and executes table schemas 
+    sequentially using IF NOT EXISTS guards on cluster boot.
+    """
+    logger.info("Starting structural database migrations...")
+    try:
+        with get_db_cursor() as cursor:
+            # 1. Execute base master metadata tables
+            logger.info("Validating 'players' metadata framework...")
+            cursor.execute(CREATE_PLAYERS_TABLE)
+            
+            # 2. Execute relational time-series metric tables
+            logger.info("Validating 'weekly_stats' telemetry tracking...")
+            cursor.execute(CREATE_WEEKLY_STATS_TABLE)
+            
+            # 3. Execute league active configurations roster tables
+            logger.info("Validating 'league_rosters' target matrices...")
+            cursor.execute(CREATE_LEAGUE_ROSTERS_TABLE)
+            
+            # 4. Generate query speed optimizations
+            logger.info("Optimizing relational query indices...")
+            cursor.execute(CREATE_INDICES)
+            
+        logger.info("Database migrations executed cleanly. System is ready.")
+    except Exception as e:
+        logger.error(f"Migration sequence aborted due to a critical error: {e}")
+        raise
+
+if __name__ == "__main__":
+    # Allows manual migration execution blocks during debugging phases
+    run_migrations()
+
