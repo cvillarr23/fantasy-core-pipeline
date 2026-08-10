@@ -1,0 +1,11 @@
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.7.4
+espn-api==0.33.0
+nflreadpy==0.1.2
+pulp==2.8.0
+psycopg2-binary==2.9.9
+polars==0.20.31
+pytest==8.2.2
+black==24.4.2
+mypy==1.10.0
