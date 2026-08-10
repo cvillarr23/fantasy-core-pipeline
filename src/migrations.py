@@ -1,8 +1,9 @@
 import logging
 from src.database import get_db_cursor
 from src.models import (
-    CREATE_PLAYERS_TABLE, 
-    CREATE_WEEKLY_STATS_TABLE, 
+    CREATE_PLAYERS_TABLE,
+    ADD_PLAYERS_GSIS_ID_COLUMN,
+    CREATE_WEEKLY_STATS_TABLE,
     CREATE_LEAGUE_ROSTERS_TABLE,
     CREATE_INDICES
 )
@@ -20,7 +21,8 @@ def run_migrations():
             # 1. Execute base master metadata tables
             logger.info("Validating 'players' metadata framework...")
             cursor.execute(CREATE_PLAYERS_TABLE)
-            
+            cursor.execute(ADD_PLAYERS_GSIS_ID_COLUMN)
+
             # 2. Execute relational time-series metric tables
             logger.info("Validating 'weekly_stats' telemetry tracking...")
             cursor.execute(CREATE_WEEKLY_STATS_TABLE)

@@ -2,7 +2,7 @@ import os
 import logging
 import nflreadpy as nfl
 import polars as pl
-from src.database import get_db_connection, get_db_cursor
+from src.database import get_db_connection
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NFLVerseIngestor")
@@ -42,12 +42,12 @@ def extract_weekly_metrics(year: int, week: int):
     # Note: Using nflverse common tracking variables (receiver_id, rusher_id)
     targets = df_week.filter(pl.col("receiver_id").is_not_null()).group_by(["receiver_id", "posteam"]).agg(
         pl.len().alias("player_targets"),
-        pl.filter(pl.col("yardline_10") <= 10).len().alias("redzone_targets")
+        (pl.col("yardline_10") <= 10).fill_null(False).sum().alias("redzone_targets")
     ).rename({"receiver_id": "gsis_id"})
 
     carries = df_week.filter(pl.col("rusher_id").is_not_null()).group_by(["rusher_id", "posteam"]).agg(
         pl.len().alias("player_carries"),
-        pl.filter(pl.col("yardline_10") <= 10).len().alias("redzone_carries")
+        (pl.col("yardline_10") <= 10).fill_null(False).sum().alias("redzone_carries")
     ).rename({"rusher_id": "gsis_id"})
 
     # Combine data tracking layers together
@@ -62,29 +62,31 @@ def extract_weekly_metrics(year: int, week: int):
     # Batch save metrics straight down into the PostgreSQL weekly tables
     logger.info("Syncing utilization metrics down to stateful storage...")
     
-    # Map nfl gsis_ids back to local player matching IDs inside the database
+    # Map nfl gsis_ids back to local player IDs via players.gsis_id (populated by the
+    # Sleeper sync - nflverse gsis_ids and Sleeper player_ids are different ID spaces,
+    # so this can't be matched by name or by player_id directly).
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             upsert_query = """
                 INSERT INTO weekly_stats (player_id, week, target_share, high_value_touches)
                 VALUES (
-                    (SELECT player_id FROM players WHERE name = %s OR player_id = %s LIMIT 1),
+                    (SELECT player_id FROM players WHERE gsis_id = %s LIMIT 1),
                     %s, %s, %s
                 )
                 ON CONFLICT (player_id, week) DO UPDATE SET
                     target_share = EXCLUDED.target_share,
                     high_value_touches = EXCLUDED.high_value_touches;
             """
-            
+
             # Pack values cleanly into tuple lists for optimal execution performance
             batch_data = []
             for row in processed_stats.iter_rows(named=True):
                 if row["gsis_id"]:
                     batch_data.append((
-                        row["gsis_id"], row["gsis_id"], week, 
+                        row["gsis_id"], week,
                         float(row["target_share"]), int(row["high_value_touches"])
                     ))
-            
+
             cursor.executemany(upsert_query, batch_data)
             
     logger.info(f"Successfully processed and committed {len(batch_data)} metric rows for Week {week}.")

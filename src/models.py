@@ -8,8 +8,14 @@ CREATE TABLE IF NOT EXISTS players (
     team VARCHAR(10) NOT NULL,
     status VARCHAR(20) NOT NULL,
     injury_status VARCHAR(20),
+    gsis_id VARCHAR(20),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+"""
+
+# Backfills gsis_id on players tables created before this column existed.
+ADD_PLAYERS_GSIS_ID_COLUMN = """
+ALTER TABLE players ADD COLUMN IF NOT EXISTS gsis_id VARCHAR(20);
 """
 
 CREATE_WEEKLY_STATS_TABLE = """
