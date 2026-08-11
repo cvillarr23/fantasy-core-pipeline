@@ -62,7 +62,23 @@ def test_fetch_league_config_reads_lineup_slot_counts_from_raw_json():
 
     assert config["team_count"] == 10
     assert config["scoring_type"] == "H2H_POINTS"
-    assert config["lineup_slot_counts"]["23"] == 1
+    assert config["lineup_slot_counts"]["RB/WR/TE"] == 1
+
+
+def test_fetch_league_config_translates_slot_ids_to_position_labels():
+    """Raw lineupSlotCounts is keyed by ESPN slot ID, not position name - persisting it
+    as-is would make every downstream lineup_slot_counts.get('RB', 0) silently return 0."""
+    mock_league = MagicMock()
+    mock_league.settings.team_count = 10
+    mock_league.settings.scoring_type = "H2H_POINTS"
+    mock_league.settings.name = "Test League"
+
+    config = sl.fetch_league_config(mock_league, RAW_MSETTINGS)
+
+    assert config["lineup_slot_counts"] == {
+        "QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 7, "IR": 1,
+    }
+    assert "2" not in config["lineup_slot_counts"]
 
 
 def test_build_roster_rows_maps_espn_id_to_player_id():

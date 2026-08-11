@@ -47,15 +47,24 @@ def fetch_raw_league_data(league: League) -> dict:
     return league.espn_request.league_get(params={"view": ["mSettings", "mRoster", "mTeam"]})
 
 
+def _lineup_slot_counts_by_label(raw_counts: dict) -> dict:
+    """The raw mSettings payload keys lineupSlotCounts by ESPN slot ID (e.g. "2" -> RB
+    count, "23" -> FLEX count). Downstream VORP baseline/rank math looks positions up by
+    label ("RB", "RB/WR/TE"), so translate via POSITION_MAP before persisting - leaving
+    it slot-ID-keyed would make every lineup_slot_counts.get(pos, 0) silently return 0."""
+    return {POSITION_MAP.get(int(slot_id), slot_id): count for slot_id, count in raw_counts.items()}
+
+
 def fetch_league_config(league: League, raw: dict) -> dict:
     """team_count/scoring_type/name come from espn_api's typed Settings object;
     lineup_slot_counts and the full scoring settings block are only in the raw JSON."""
     settings = raw.get("settings", {})
+    raw_slot_counts = settings.get("rosterSettings", {}).get("lineupSlotCounts", {})
     return {
         "team_count": league.settings.team_count,
         "scoring_type": league.settings.scoring_type,
         "name": league.settings.name,
-        "lineup_slot_counts": settings.get("rosterSettings", {}).get("lineupSlotCounts", {}),
+        "lineup_slot_counts": _lineup_slot_counts_by_label(raw_slot_counts),
         "scoring_settings": settings.get("scoringSettings", {}),
     }
 
