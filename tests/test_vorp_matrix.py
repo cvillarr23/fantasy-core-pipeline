@@ -100,16 +100,18 @@ def test_coefficient_qb_signal_uses_negative_pressure_rate():
     assert coef_a > coef_b
 
 
-def test_coefficient_rb_signal_uses_negative_depth_chart_delta():
+def test_coefficient_rb_signal_uses_positive_depth_chart_delta():
+    """depth_chart_delta (from metrics_extractor.compute_depth_chart_delta) is
+    prior_rank - current_rank: POSITIVE means the player climbed the depth chart, i.e.
+    improved. The climber must score higher, not lower."""
     df = _coef_frame([
         {"player_id": "a", "position": "RB", "depth_chart_delta": 2, "team": "AAA", "team_implied_total": 22.0},
         {"player_id": "b", "position": "RB", "depth_chart_delta": -2, "team": "AAA", "team_implied_total": 22.0},
     ])
     out = vm.compute_matchup_coefficient(df)
-    # A negative delta (climbed the depth chart) should score higher than a positive one.
     coef_a = out.filter(pl.col("player_id") == "a")["matchup_coefficient"].item()
     coef_b = out.filter(pl.col("player_id") == "b")["matchup_coefficient"].item()
-    assert coef_b > coef_a
+    assert coef_a > coef_b
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +153,35 @@ def test_largest_remainder_allocation_zero_total():
     assert alloc == {"RB": 0, "WR": 0}
 
 
+def test_resolve_all_flex_allocations_only_counts_configured_slot_types():
+    """A league with only RB/WR/TE configured (this repo's real league) must not have its
+    zero-count RB/WR and WR/TE entries contribute anything."""
+    league_config = {"team_count": 10, "lineup_slot_counts": {"RB/WR/TE": 1, "RB/WR": 0, "WR/TE": 0}}
+    empty_rosters = pl.DataFrame(schema={"slot_position": pl.Utf8, "position": pl.Utf8})
+    alloc = vm.resolve_all_flex_allocations(league_config, empty_rosters)
+    assert alloc == {"RB": 5, "WR": 4, "TE": 1}
+
+
+def test_resolve_all_flex_allocations_sums_across_multiple_slot_types():
+    """A league using RB/WR/TE AND WR/TE FLEX slots must have both contribute to the
+    combined per-position allocation, not just the first/largest one."""
+    league_config = {"team_count": 10, "lineup_slot_counts": {"RB/WR/TE": 1, "WR/TE": 1}}
+    empty_rosters = pl.DataFrame(schema={"slot_position": pl.Utf8, "position": pl.Utf8})
+    alloc = vm.resolve_all_flex_allocations(league_config, empty_rosters)
+    # RB/WR/TE (10 slots, default weights 0.5/0.4/0.1) -> RB5/WR4/TE1
+    # WR/TE (10 slots, renormalized WR/TE-only weights 0.8/0.2) -> WR8/TE2
+    assert alloc["RB"] == 5
+    assert alloc["WR"] == 4 + 8
+    assert alloc["TE"] == 1 + 2
+
+
+def test_resolve_flex_allocation_restricts_default_weights_to_eligible_positions():
+    empty_rosters = pl.DataFrame(schema={"slot_position": pl.Utf8, "position": pl.Utf8})
+    alloc = vm.resolve_flex_allocation(10, empty_rosters, eligible_positions=("WR", "TE"))
+    assert "RB" not in alloc
+    assert sum(alloc.values()) == 10
+
+
 # ---------------------------------------------------------------------------
 # calculate_replacement_baselines
 # ---------------------------------------------------------------------------
@@ -185,7 +216,7 @@ def test_baseline_lands_on_rank_n_plus_1_for_real_ten_team_league_shape():
         all_rows.extend(rows)
     df = pl.DataFrame(all_rows, schema=schema)
 
-    baselines = vm.calculate_replacement_baselines(df, league_config, flex_alloc)
+    baselines = vm.calculate_replacement_baselines(df, league_config, flex_alloc, rosters_populated=False)
 
     for pos in ["QB", "RB", "WR", "TE"]:
         expected = 100.0 - rank_at[pos] * 1.0
@@ -197,7 +228,7 @@ def test_baseline_falls_back_to_pool_minimum_when_pool_shorter_than_rank():
     rows, schema = _deep_pool_frame("QB", 3)
     df = pl.DataFrame(rows, schema=schema)
 
-    baselines = vm.calculate_replacement_baselines(df, league_config, {})
+    baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=False)
 
     assert baselines["QB"] == 98.0  # min of the 3-player pool (100, 99, 98)
 
@@ -207,9 +238,52 @@ def test_baseline_empty_pool_uses_default_baselines():
     df = pl.DataFrame(schema=schema)
     league_config = {"team_count": 10, "lineup_slot_counts": {}}
 
-    baselines = vm.calculate_replacement_baselines(df, league_config, {})
+    baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=False)
 
     assert baselines == vm.DEFAULT_BASELINES
+
+
+def test_baseline_uses_best_actual_non_starter_when_rosters_populated():
+    """Post-draft, rank N+1 in raw sorted order is not reliable - a benched
+    high-projection player can occupy that rank without being a starter. The baseline
+    must be the best player NOT currently starting (a true replacement/waiver pickup),
+    even if raw rank alone would have picked someone else."""
+    league_config = {"team_count": 1, "lineup_slot_counts": {"RB": 1}}
+    df = pl.DataFrame(
+        [
+            # Rank 1 by projection, but rostered as a bench player -> not the baseline.
+            {"player_id": "bench_star", "position": "RB", "adjusted_projected_points": 20.0, "is_starter": False},
+            {"player_id": "starter", "position": "RB", "adjusted_projected_points": 15.0, "is_starter": True},
+            # Best actual non-starter/free agent -> this is the true replacement.
+            {"player_id": "waiver_pickup", "position": "RB", "adjusted_projected_points": 10.0, "is_starter": False},
+            {"player_id": "deep_bench", "position": "RB", "adjusted_projected_points": 5.0, "is_starter": False},
+        ],
+        schema={"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64, "is_starter": pl.Boolean},
+    )
+
+    baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=True)
+
+    # Raw rank_at=1 (1 team x 1 RB slot) would have landed on "starter" (15.0) by rank
+    # alone; the real answer is the best non-starter, "bench_star" (20.0).
+    assert baselines["RB"] == 20.0
+
+
+def test_baseline_falls_back_to_structural_rank_when_rosters_populated_but_no_non_starter_found():
+    """Defensive fallback: if every player at a position is somehow marked a starter
+    (shouldn't happen with real data, but must not crash), fall back to the structural
+    rank_at approach rather than erroring."""
+    league_config = {"team_count": 1, "lineup_slot_counts": {"RB": 1}}
+    df = pl.DataFrame(
+        [
+            {"player_id": "a", "position": "RB", "adjusted_projected_points": 20.0, "is_starter": True},
+            {"player_id": "b", "position": "RB", "adjusted_projected_points": 15.0, "is_starter": True},
+        ],
+        schema={"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64, "is_starter": pl.Boolean},
+    )
+
+    baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=True)
+
+    assert baselines["RB"] == 15.0  # rank_at=1 -> second-ranked player, structural fallback
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +377,7 @@ def test_empty_rosters_yields_all_scarcity_multipliers_of_one():
     schema = {"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64, "is_rostered": pl.Boolean}
     df = pl.DataFrame(all_rows, schema=schema)
 
-    baselines = vm.calculate_replacement_baselines(df, league_config, flex_alloc)
+    baselines = vm.calculate_replacement_baselines(df, league_config, flex_alloc, rosters_populated=False)
     df = vm.compute_vorp(df, baselines)
     multipliers = vm.compute_scarcity_multipliers(df, rank_at)
 

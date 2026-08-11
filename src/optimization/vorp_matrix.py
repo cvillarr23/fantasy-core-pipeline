@@ -26,6 +26,11 @@ SCARCITY_DEPTH_FACTOR = 0.5
 SCARCITY_MAX_MULTIPLIER = 1.35
 DEFAULT_BASELINES = {"QB": 10.0, "RB": 8.0, "WR": 8.0, "TE": 5.0}
 FLEX_SLOT_NAMES = {"RB/WR/TE", "RB/WR", "WR/TE"}
+FLEX_SLOT_ELIGIBLE_POSITIONS = {
+    "RB/WR/TE": ("RB", "WR", "TE"),
+    "RB/WR": ("RB", "WR"),
+    "WR/TE": ("WR", "TE"),
+}
 SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
 
 
@@ -75,18 +80,16 @@ def compute_matchup_coefficient(df: pl.DataFrame) -> pl.DataFrame:
     df = df.join(teams.select(["team", "season", "week", "market_z"]), on=["team", "season", "week"], how="left")
     df = df.with_columns(pl.col("market_z").fill_null(0.0))
 
-    df = df.with_columns(
-        pl.when(pl.col("position") == "RB").then(-pl.col("depth_chart_delta"))
-        .otherwise(pl.col("depth_chart_delta"))
-        .alias("_rb_signal_raw")
-    )
+    # depth_chart_delta (from metrics_extractor.compute_depth_chart_delta) is
+    # prior_rank - current_rank: POSITIVE means the player moved up the depth chart, i.e.
+    # improved. Used directly here, unnegated, so climbers get a higher signal_z/coefficient.
     df = df.with_columns(
         pl.when(pl.col("position") == "QB").then(-pl.col("pressure_rate_allowed"))
         .when(pl.col("position").is_in(["WR", "TE"])).then(pl.col("avg_separation"))
-        .when(pl.col("position") == "RB").then(pl.col("_rb_signal_raw"))
+        .when(pl.col("position") == "RB").then(pl.col("depth_chart_delta"))
         .otherwise(None)
         .alias("_signal_raw")
-    ).drop("_rb_signal_raw")
+    )
 
     df = _zscore_within(df, "_signal_raw", ["position", "season", "week"], "signal_z")
     df = df.drop("_signal_raw")
@@ -116,47 +119,96 @@ def _largest_remainder_allocate(weights: dict, total: int) -> dict:
     return floors
 
 
-def resolve_flex_allocation(flex_slots_total: int, roster_df: pl.DataFrame) -> dict:
+def _default_weights_for(eligible_positions) -> dict:
+    """FLEX_DEFAULT_WEIGHTS restricted to a slot type's eligible positions and
+    renormalized to sum to 1.0 (e.g. WR/TE has no RB share to redistribute)."""
+    subset = {pos: FLEX_DEFAULT_WEIGHTS[pos] for pos in eligible_positions}
+    total = sum(subset.values())
+    return {pos: w / total for pos, w in subset.items()}
+
+
+def resolve_flex_allocation(flex_slots_total: int, roster_df: pl.DataFrame, eligible_positions=("RB", "WR", "TE")) -> dict:
     """
-    Derives FLEX-eligible slot weights from observed league_rosters usage (grouped by the
-    player's real position), falling back to FLEX_DEFAULT_WEIGHTS when fewer than 10 such
-    rows exist - the only path that runs pre-draft, when league_rosters is empty.
+    Derives FLEX-eligible slot weights from observed league_rosters usage restricted to
+    `eligible_positions` (grouped by the player's real position), falling back to
+    FLEX_DEFAULT_WEIGHTS (renormalized to that subset) when fewer than 10 such rows exist
+    - the only path that runs pre-draft, when league_rosters is empty.
     """
     flex_rows = (
-        roster_df.filter(pl.col("slot_position").is_in(list(FLEX_SLOT_NAMES)))
+        roster_df.filter(
+            pl.col("slot_position").is_in(list(FLEX_SLOT_NAMES)) & pl.col("position").is_in(list(eligible_positions))
+        )
         if not roster_df.is_empty() else roster_df
     )
     if roster_df.is_empty() or flex_rows.height < 10:
-        weights = FLEX_DEFAULT_WEIGHTS
+        weights = _default_weights_for(eligible_positions)
     else:
         counts = flex_rows.group_by("position").agg(pl.len().alias("n"))
         total = counts["n"].sum()
         weights = {row["position"]: row["n"] / total for row in counts.iter_rows(named=True)}
-        for pos in FLEX_DEFAULT_WEIGHTS:
+        for pos in eligible_positions:
             weights.setdefault(pos, 0.0)
 
     return _largest_remainder_allocate(weights, flex_slots_total)
 
 
-def calculate_replacement_baselines(df: pl.DataFrame, league_config: dict, flex_alloc: dict) -> dict:
+def resolve_all_flex_allocations(league_config: dict, roster_df: pl.DataFrame) -> dict:
     """
-    rank_at[pos] = starting slots (including FLEX share) across the whole league. Baseline
-    is the value at 0-indexed row rank_at[pos] - i.e. rank N+1, the first non-starter, per
-    the issue's spec. Falls back to the pool's minimum if it's shorter than that, or to
+    Aggregates FLEX allocation across every configured FLEX slot type (RB/WR/TE, RB/WR,
+    WR/TE), each restricted to its own eligible positions, and sums the resulting
+    per-position counts. A league using more than one FLEX slot type must not have its
+    other types silently ignored (this repo's real league only uses RB/WR/TE, but the
+    schema/constants explicitly declare support for all three).
+    """
+    lineup_slot_counts = league_config["lineup_slot_counts"]
+    team_count = league_config["team_count"]
+    combined = defaultdict(int)
+    for slot_name, eligible_positions in FLEX_SLOT_ELIGIBLE_POSITIONS.items():
+        slot_count = lineup_slot_counts.get(slot_name, 0)
+        if slot_count <= 0:
+            continue
+        alloc = resolve_flex_allocation(slot_count * team_count, roster_df, eligible_positions)
+        for pos, n in alloc.items():
+            combined[pos] += n
+    return dict(combined)
+
+
+def calculate_replacement_baselines(
+    df: pl.DataFrame, league_config: dict, flex_alloc: dict, rosters_populated: bool
+) -> dict:
+    """
+    Once real rosters exist (`rosters_populated`), the baseline is the best actual
+    non-starter (or free agent) at the position - rank N+1 in raw sorted order is not
+    reliable post-draft, since a benched high-projection player occupies a slot in that
+    ranking without being a starter. Pre-draft (rosters_populated=False, the only state
+    that exists before the Sept 8 draft), there is no starter data to consult, so this
+    falls back to the structural rank_at[pos] = starting slots (including FLEX share)
+    across the league - i.e. rank N+1, the first non-starter, per the issue's spec.
+    Falls back further to the pool's minimum if it's shorter than that, or to
     DEFAULT_BASELINES if the pool is empty.
     """
     lineup_slot_counts = league_config["lineup_slot_counts"]
     team_count = league_config["team_count"]
     baselines = {}
     for pos in SKILL_POSITIONS:
-        rank_at = lineup_slot_counts.get(pos, 0) * team_count + flex_alloc.get(pos, 0)
         pool = (
             df.filter(pl.col("position") == pos)
             .sort(["adjusted_projected_points", "player_id"], descending=[True, False])
         )
         if pool.is_empty():
             baselines[pos] = DEFAULT_BASELINES.get(pos, 0.0)
-        elif pool.height > rank_at:
+            continue
+
+        if rosters_populated:
+            # is_starter is NULL for free agents (not on any roster) - fill_null(False)
+            # correctly treats them as eligible replacement candidates, not starters.
+            non_starters = pool.filter(~pl.col("is_starter").fill_null(False))
+            if not non_starters.is_empty():
+                baselines[pos] = float(non_starters.row(0, named=True)["adjusted_projected_points"])
+                continue
+
+        rank_at = lineup_slot_counts.get(pos, 0) * team_count + flex_alloc.get(pos, 0)
+        if pool.height > rank_at:
             baselines[pos] = float(pool.row(rank_at, named=True)["adjusted_projected_points"])
         else:
             baselines[pos] = float(pool["adjusted_projected_points"].min())
@@ -257,10 +309,12 @@ def run_vorp_pipeline(season: int, week: int) -> int:
             cursor.execute("""
                 SELECT p.player_id, p.position, s.projected_points, s.team_implied_total,
                        s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team,
-                       (r.player_id IS NOT NULL) AS is_rostered
+                       (r.player_id IS NOT NULL) AS is_rostered, r.is_starter
                 FROM players p
                 JOIN weekly_stats s ON p.player_id = s.player_id
-                LEFT JOIN (SELECT DISTINCT player_id FROM league_rosters) r ON p.player_id = r.player_id
+                LEFT JOIN (
+                    SELECT DISTINCT ON (player_id) player_id, is_starter FROM league_rosters
+                ) r ON p.player_id = r.player_id
                 WHERE s.season = %s AND s.week = %s;
             """, (season, week))
             rows = cursor.fetchall()
@@ -269,7 +323,7 @@ def run_vorp_pipeline(season: int, week: int) -> int:
             "player_id": pl.Utf8, "position": pl.Utf8, "projected_points": pl.Float64,
             "team_implied_total": pl.Float64, "avg_separation": pl.Float64,
             "pressure_rate_allowed": pl.Float64, "depth_chart_delta": pl.Int64,
-            "team": pl.Utf8, "is_rostered": pl.Boolean,
+            "team": pl.Utf8, "is_rostered": pl.Boolean, "is_starter": pl.Boolean,
         }
         df = pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
         if df.is_empty():
@@ -278,10 +332,9 @@ def run_vorp_pipeline(season: int, week: int) -> int:
         df = df.with_columns([pl.lit(season).alias("season"), pl.lit(week).alias("week")])
 
         df = compute_matchup_coefficient(df)
-        flex_slots_total = league_config["lineup_slot_counts"].get("RB/WR/TE", 0) * league_config["team_count"]
-        flex_alloc = resolve_flex_allocation(flex_slots_total, roster_df)
+        flex_alloc = resolve_all_flex_allocations(league_config, roster_df)
         rank_at = calculate_rank_at(league_config, flex_alloc)
-        baselines = calculate_replacement_baselines(df, league_config, flex_alloc)
+        baselines = calculate_replacement_baselines(df, league_config, flex_alloc, rosters_populated=not roster_df.is_empty())
         df = compute_vorp(df, baselines)
         multipliers = compute_scarcity_multipliers(df, rank_at)
         df = apply_scarcity(df, multipliers)
