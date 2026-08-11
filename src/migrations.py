@@ -4,6 +4,8 @@ from src.models import (
     CREATE_PLAYERS_TABLE,
     ADD_PLAYERS_GSIS_ID_COLUMN,
     CREATE_WEEKLY_STATS_TABLE,
+    ADD_WEEKLY_STATS_ADVANCED_COLUMNS,
+    MIGRATE_WEEKLY_STATS_PK_ADD_SEASON,
     CREATE_LEAGUE_ROSTERS_TABLE,
     CREATE_INDICES
 )
@@ -26,7 +28,26 @@ def run_migrations():
             # 2. Execute relational time-series metric tables
             logger.info("Validating 'weekly_stats' telemetry tracking...")
             cursor.execute(CREATE_WEEKLY_STATS_TABLE)
-            
+            cursor.execute(ADD_WEEKLY_STATS_ADVANCED_COLUMNS)
+            cursor.execute(MIGRATE_WEEKLY_STATS_PK_ADD_SEASON)
+            # MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (via a Postgres NOTICE, not
+            # an error) if pre-existing rows have a NULL season. If that happened, the CORE-04
+            # extractor's `ON CONFLICT (player_id, season, week)` upsert has no matching
+            # constraint to target and every insert would fail. Fail startup loudly here
+            # instead of letting that surface later as an opaque psycopg2 error mid-ingestion.
+            cursor.execute("""
+                SELECT 1 FROM information_schema.key_column_usage
+                WHERE table_name = 'weekly_stats' AND constraint_name = 'weekly_stats_pkey'
+                AND column_name = 'season';
+            """)
+            if cursor.fetchone() is None:
+                raise RuntimeError(
+                    "weekly_stats has pre-existing rows with a NULL season, so its primary key "
+                    "could not be migrated to (player_id, season, week). CORE-04 ingestion cannot "
+                    "run until those rows are backfilled with a reviewed season value and this "
+                    "migration is re-run."
+                )
+
             # 3. Execute league active configurations roster tables
             logger.info("Validating 'league_rosters' target matrices...")
             cursor.execute(CREATE_LEAGUE_ROSTERS_TABLE)
