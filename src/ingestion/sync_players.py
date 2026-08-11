@@ -14,7 +14,10 @@ from src.database import get_db_connection
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SleeperPlayerSync")
 
-AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672//")
+# Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
+# parses as vhost "" (empty string) in pika, not "/", and RabbitMQ then rejects the
+# connection with "vhost  not found" instead of connecting to the default vhost.
+AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f")
 REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
