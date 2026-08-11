@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # The existing codebase predates this workflow and isn't black-clean yet, so this
+      # reports formatting drift without blocking merges until a dedicated reformat pass.
+      - name: black --check
+        run: black --check .
+        continue-on-error: true
+
+      # Same rationale as black: several modules currently lack type stubs for
+      # third-party deps (psycopg2, nflreadpy, pika), which mypy flags but shouldn't
+      # block merges on its own.
+      - name: mypy
+        run: mypy src/
+        continue-on-error: true
+
+      - name: pytest
+        env:
+          DB_PASSWORD: test
+        run: pytest tests/ -v
+
+  build-and-push:
+    needs: lint-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fantasy-core-pipeline:latest
+            ghcr.io/${{ github.repository_owner }}/fantasy-core-pipeline:${{ github.sha }}
