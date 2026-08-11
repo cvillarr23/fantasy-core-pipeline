@@ -11,7 +11,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NFLVerseIngestor")
 
 RELEVANT_PLAY_TYPES = ["pass", "run"]
-REDZONE_YARDLINE = 20
+# CORE-04 defines high_value_touches as carries/targets "explicitly inside the opponent's
+# 10-yard line" - i.e. yardline_100 <= 10, not the broader 20-yard-line red zone.
+HIGH_VALUE_TOUCH_YARDLINE = 10
 ROUTE_RUNNING_POSITIONS = {"WR", "RB", "TE"}
 
 # nflverse team abbreviations occasionally diverge from PFR/legacy codes across the
@@ -62,9 +64,14 @@ def filter_week_plays(df_pbp: pl.DataFrame, week: int) -> pl.DataFrame:
 
 def compute_usage_shares(df_week: pl.DataFrame) -> pl.DataFrame:
     """
-    Target/rush share, using team target and carry counts (not total pass plays, which
-    would also count sacks/scrambles) as denominators. Uses a coalescing full join so a
-    pure rusher with zero targets (or vice versa) still survives with a non-null gsis_id,
+    Target/rush share. CORE-04 defines target_share as targets divided by the team's total
+    passing attempts - so the denominator is built from `pass_attempt == 1` rows (which
+    still excludes sacks/scrambles, since those aren't attempts), not from the count of
+    plays that happened to have a receiver_id, which would undercount attempts by
+    excluding throwaways (an attempt with no intended receiver). rush_share's denominator
+    is the count of actual carries, since the issue doesn't define a separate "rush
+    attempts" concept the way it does for targets. Uses a coalescing full join so a pure
+    rusher with zero targets (or vice versa) still survives with a non-null gsis_id,
     rather than being dropped the way a non-coalescing outer join would drop it.
     """
     empty_schema = {
@@ -79,7 +86,7 @@ def compute_usage_shares(df_week: pl.DataFrame) -> pl.DataFrame:
         .group_by(["receiver_id", "team"])
         .agg([
             pl.len().alias("targets"),
-            (pl.col("yardline_100") <= REDZONE_YARDLINE).fill_null(False).sum().alias("redzone_targets"),
+            (pl.col("yardline_100") <= HIGH_VALUE_TOUCH_YARDLINE).fill_null(False).sum().alias("redzone_targets"),
         ])
         .rename({"receiver_id": "gsis_id"})
     )
@@ -88,11 +95,15 @@ def compute_usage_shares(df_week: pl.DataFrame) -> pl.DataFrame:
         .group_by(["rusher_id", "team"])
         .agg([
             pl.len().alias("carries"),
-            (pl.col("yardline_100") <= REDZONE_YARDLINE).fill_null(False).sum().alias("redzone_carries"),
+            (pl.col("yardline_100") <= HIGH_VALUE_TOUCH_YARDLINE).fill_null(False).sum().alias("redzone_carries"),
         ])
         .rename({"rusher_id": "gsis_id"})
     )
-    team_targets = targets.group_by("team").agg(pl.col("targets").sum().alias("team_targets"))
+    team_targets = (
+        df_week.filter(pl.col("pass_attempt").fill_null(0) == 1)
+        .group_by("team")
+        .agg(pl.len().alias("team_targets"))
+    )
     team_carries = carries.group_by("team").agg(pl.col("carries").sum().alias("team_carries"))
 
     usage = (
@@ -154,8 +165,20 @@ def compute_route_participation(df_participation: pl.DataFrame, df_week: pl.Data
     Route participation, derived from nflverse's play-participation feed: explode each
     dropback play's offense_players/offense_positions lists (semicolon-delimited, aligned
     index-wise) and count appearances by WR/RB/TE players, divided by the team's total
-    dropbacks that week. If the participation feed has no rows for this season (nflverse
-    has historically had gaps in this dataset), this degrades to an empty/NULL frame
+    dropbacks that week.
+
+    KNOWN LIMITATION: nflverse's participation data records who was on the field for a
+    dropback, not who actually ran a route - a pass-blocking RB or in-line blocking TE
+    is indistinguishable here from one who released into a route. There is no per-player
+    route/block flag in any nflverse dataset (the participation feed's own `route` column
+    only describes the single targeted receiver's route on that play, and FTN charting has
+    no player IDs at all), so this is the closest available proxy and will overstate route
+    rate for run-blocking-heavy backs/tight ends. Treat it as "eligible offensive skill
+    player on the field for a dropback" rather than a confirmed route-run count.
+
+    If the participation feed has no rows for this season/year (nflreadpy currently caps
+    load_participation() at a fixed season range and raises for years outside it - see
+    _safe_load's handling in extract_weekly_metrics), this degrades to an empty/NULL frame
     rather than raising, since route_rate is a nice-to-have on top of target/rush share.
     """
     empty_schema = {"gsis_id": pl.Utf8, "route_rate": pl.Float64}
@@ -605,6 +628,11 @@ def extract_weekly_metrics(year: int, week: int) -> int:
     crosswalk = build_gsis_pfr_crosswalk(df_players)
 
     df_snaps = _safe_load(nfl.load_snap_counts, "snap_counts", year)
+    # nflreadpy currently validates load_participation()'s season argument against a fixed
+    # upper bound that lags the real current season by up to a year, so this call can raise
+    # ValueError for the in-progress season. _safe_load converts that into an empty frame,
+    # and compute_route_participation degrades route_rate to NULL rather than failing the
+    # whole run - route_rate is a nice-to-have, not load-bearing for this ingestion.
     df_participation = _safe_load(nfl.load_participation, "participation", year)
     df_ngs_passing = _safe_load(nfl.load_nextgen_stats, "ngs_passing", year, stat_type="passing")
     df_ngs_receiving = _safe_load(nfl.load_nextgen_stats, "ngs_receiving", year, stat_type="receiving")

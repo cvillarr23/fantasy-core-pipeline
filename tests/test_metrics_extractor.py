@@ -128,7 +128,7 @@ def test_compute_usage_shares_target_share_uses_team_targets_not_pass_plays():
 def test_compute_usage_shares_includes_rush_only_players():
     df_week = _pbp_frame([
         {"receiver_id": "WR1", "posteam": "BUF"},
-        {"rusher_id": "RB1", "posteam": "BUF", "play_type": "run", "receiver_id": None},
+        {"rusher_id": "RB1", "posteam": "BUF", "play_type": "run", "receiver_id": None, "pass_attempt": 0.0},
     ])
     result = me.compute_usage_shares(me.filter_week_plays(df_week, 1))
     rb_row = result.filter(pl.col("gsis_id") == "RB1")
@@ -142,8 +142,11 @@ def test_compute_usage_shares_includes_rush_only_players():
     assert row["target_share"] == pytest.approx(0.0)
 
 
-def test_compute_usage_shares_high_value_touches_uses_yardline_100():
+def test_compute_usage_shares_high_value_touches_inside_the_10_only():
+    # CORE-04 defines high_value_touches as touches "explicitly inside the opponent's
+    # 10-yard line" - the 11-20 range (broader "red zone") must NOT count.
     df_week = _pbp_frame([
+        {"receiver_id": "WR1", "posteam": "BUF", "yardline_100": 8},
         {"receiver_id": "WR1", "posteam": "BUF", "yardline_100": 15},
         {"receiver_id": "WR1", "posteam": "BUF", "yardline_100": 40},
     ])
@@ -152,8 +155,22 @@ def test_compute_usage_shares_high_value_touches_uses_yardline_100():
     assert row["high_value_touches"] == 1
 
 
+def test_compute_usage_shares_target_share_denominator_includes_throwaways():
+    # A throwaway is a real pass_attempt with no receiver_id - it must count toward the
+    # team's attempts denominator even though it never generates a "target" for anyone.
+    df_week = _pbp_frame([
+        {"receiver_id": "WR1", "posteam": "BUF", "pass_attempt": 1.0},
+        {"receiver_id": None, "rusher_id": None, "posteam": "BUF", "pass_attempt": 1.0},
+    ])
+    result = me.compute_usage_shares(me.filter_week_plays(df_week, 1))
+    row = result.filter(pl.col("gsis_id") == "WR1").row(0, named=True)
+    assert row["target_share"] == pytest.approx(0.5)
+
+
 def test_compute_usage_shares_null_share_when_team_has_zero_targets():
-    df_week = _pbp_frame([{"rusher_id": "RB1", "posteam": "BUF", "play_type": "run", "receiver_id": None}])
+    df_week = _pbp_frame([{
+        "rusher_id": "RB1", "posteam": "BUF", "play_type": "run", "receiver_id": None, "pass_attempt": 0.0,
+    }])
     result = me.compute_usage_shares(me.filter_week_plays(df_week, 1))
     row = result.filter(pl.col("gsis_id") == "RB1").row(0, named=True)
     # the team threw zero passes this week, so target_share is null (not a computed 0.0/0).
