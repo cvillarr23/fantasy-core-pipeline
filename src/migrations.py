@@ -3,10 +3,14 @@ from src.database import get_db_cursor
 from src.models import (
     CREATE_PLAYERS_TABLE,
     ADD_PLAYERS_GSIS_ID_COLUMN,
+    ADD_PLAYERS_ESPN_ID_COLUMN,
     CREATE_WEEKLY_STATS_TABLE,
     ADD_WEEKLY_STATS_ADVANCED_COLUMNS,
+    ADD_WEEKLY_STATS_VORP_COLUMNS,
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON,
     CREATE_LEAGUE_ROSTERS_TABLE,
+    ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
+    CREATE_LEAGUE_SETTINGS_TABLE,
     CREATE_INDICES
 )
 
@@ -24,11 +28,13 @@ def run_migrations():
             logger.info("Validating 'players' metadata framework...")
             cursor.execute(CREATE_PLAYERS_TABLE)
             cursor.execute(ADD_PLAYERS_GSIS_ID_COLUMN)
+            cursor.execute(ADD_PLAYERS_ESPN_ID_COLUMN)
 
             # 2. Execute relational time-series metric tables
             logger.info("Validating 'weekly_stats' telemetry tracking...")
             cursor.execute(CREATE_WEEKLY_STATS_TABLE)
             cursor.execute(ADD_WEEKLY_STATS_ADVANCED_COLUMNS)
+            cursor.execute(ADD_WEEKLY_STATS_VORP_COLUMNS)
             cursor.execute(MIGRATE_WEEKLY_STATS_PK_ADD_SEASON)
             # MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (via a Postgres NOTICE, not
             # an error) if pre-existing rows have a NULL season. If that happened, the CORE-04
@@ -51,7 +57,11 @@ def run_migrations():
             # 3. Execute league active configurations roster tables
             logger.info("Validating 'league_rosters' target matrices...")
             cursor.execute(CREATE_LEAGUE_ROSTERS_TABLE)
-            
+            cursor.execute(ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN)
+
+            logger.info("Validating 'league_settings' configuration table...")
+            cursor.execute(CREATE_LEAGUE_SETTINGS_TABLE)
+
             # 4. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
             cursor.execute(CREATE_INDICES)

@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS players (
     status VARCHAR(20) NOT NULL,
     injury_status VARCHAR(20),
     gsis_id VARCHAR(20),
+    espn_id VARCHAR(20),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -16,6 +17,13 @@ CREATE TABLE IF NOT EXISTS players (
 # Backfills gsis_id on players tables created before this column existed.
 ADD_PLAYERS_GSIS_ID_COLUMN = """
 ALTER TABLE players ADD COLUMN IF NOT EXISTS gsis_id VARCHAR(20);
+"""
+
+# Backfills espn_id (CORE-05) on players tables created before this column existed.
+# Populated by sync_id_crosswalk from the DynastyProcess crosswalk, and joined against
+# ESPN roster payloads in sync_league to resolve league_rosters rows.
+ADD_PLAYERS_ESPN_ID_COLUMN = """
+ALTER TABLE players ADD COLUMN IF NOT EXISTS espn_id VARCHAR(20);
 """
 
 CREATE_WEEKLY_STATS_TABLE = """
@@ -82,6 +90,17 @@ ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS opponent_moneyline INT;
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS team_implied_total REAL;
 """
 
+# Backfills the VORP audit columns (CORE-05) on weekly_stats tables created before this
+# migration existed. Nullable with no DEFAULT, same rationale as CORE-04's advanced
+# columns: "not computed yet" must be a real NULL, not a 0.0 that VORP math would treat
+# as a legitimate zero-value coefficient/baseline.
+ADD_WEEKLY_STATS_VORP_COLUMNS = """
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS matchup_coefficient REAL;
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS adjusted_projected_points REAL;
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS vorp_base REAL;
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS scarcity_multiplier REAL;
+"""
+
 # Re-keys weekly_stats on (player_id, season, week) so week 1 of one season no longer
 # collides with week 1 of another. Idempotent: if the constraint has already been migrated,
 # the DROP/ADD pair is skipped. Also skips (with a NOTICE, not an error) if existing rows
@@ -119,10 +138,34 @@ CREATE TABLE IF NOT EXISTS league_rosters (
 );
 """
 
+# Backfills is_starter (CORE-05) on league_rosters tables created before this column
+# existed. True for any slot outside bench/IR (ESPN lineupSlotId 20/21).
+ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN = """
+ALTER TABLE league_rosters ADD COLUMN IF NOT EXISTS is_starter BOOLEAN;
+"""
+
+# League-level config synced from ESPN (CORE-05): team count, scoring format, and lineup
+# slot counts, needed to compute replacement baselines and FLEX allocation. Single-league
+# for now (no league_id FK elsewhere) - see CORE-05 planning notes for why multi-league
+# support is deferred.
+CREATE_LEAGUE_SETTINGS_TABLE = """
+CREATE TABLE IF NOT EXISTS league_settings (
+    league_id VARCHAR(50) PRIMARY KEY,
+    season INT NOT NULL,
+    name VARCHAR(100),
+    team_count INT NOT NULL,
+    scoring_type VARCHAR(30),
+    lineup_slot_counts JSONB NOT NULL,
+    scoring_settings JSONB,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
 CREATE INDEX IF NOT EXISTS idx_weekly_stats_lookup ON weekly_stats(week);
 CREATE INDEX IF NOT EXISTS idx_players_gsis_id ON players(gsis_id);
+CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
 """
 
