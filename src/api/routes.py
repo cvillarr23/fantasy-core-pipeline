@@ -12,7 +12,10 @@ logger = logging.getLogger("GatewayRoutes")
 router = APIRouter()
 
 # Load AMQP broker settings securely injected into environment variables
-AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672//")
+# Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
+# parses as vhost "" (empty string) in pika, not "/", and RabbitMQ then rejects the
+# connection with "vhost  not found" instead of connecting to the default vhost.
+AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f")
 
 # ------------------------------------------------------------------------------
 # PYDANTIC DATA TRANSFER OBJECTS (SCHEMAS)
