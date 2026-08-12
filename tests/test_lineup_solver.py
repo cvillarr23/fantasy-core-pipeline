@@ -7,6 +7,10 @@ def _player(pid, position, vorp_score, name=None):
     return {"player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score}
 
 
+def _current(position, slot_position=None):
+    return {"position": position, "slot_position": slot_position or position}
+
+
 # ---------------------------------------------------------------------------
 # build_and_solve_lineup
 # ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ def test_load_roster_pool_excludes_out_players():
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("rb1", "Runner Back", "RB", 5.0)]
 
-    rows = ls.load_roster_pool(mock_cursor, team_id="1", week=3)
+    rows = ls.load_roster_pool(mock_cursor, team_id="1", season=2025, week=3)
 
     query = mock_cursor.execute.call_args[0][0]
     assert "injury_status" in query
@@ -98,11 +102,23 @@ def test_load_roster_pool_excludes_out_players():
     assert rows == [{"player_id": "rb1", "name": "Runner Back", "position": "RB", "vorp_score": 5.0}]
 
 
+def test_load_roster_pool_filters_by_season_and_week():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+
+    ls.load_roster_pool(mock_cursor, team_id="1", season=2025, week=3)
+
+    query, params = mock_cursor.execute.call_args[0]
+    assert "s.season = %s" in query
+    assert "s.week = %s" in query
+    assert params == ("1", 2025, 3)
+
+
 def test_load_roster_pool_coalesces_null_vorp_score():
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("wr1", "Wide Out", "WR", 0.0)]
 
-    ls.load_roster_pool(mock_cursor, team_id="1", week=3)
+    ls.load_roster_pool(mock_cursor, team_id="1", season=2025, week=3)
 
     query = mock_cursor.execute.call_args[0][0]
     assert "COALESCE(s.vorp_score, 0.0)" in query
@@ -117,17 +133,28 @@ def test_compute_lineup_swaps_pairs_add_and_drop_by_position():
         {"player_id": "rb_new", "name": "New RB", "position": "RB"},
         {"player_id": "rb_old_kept", "name": "Kept RB", "position": "RB"},
     ]
-    current = {"rb_old_kept": "RB", "rb_bench_me": "RB"}
+    current = {"rb_old_kept": _current("RB", "RB1"), "rb_bench_me": _current("RB", "RB2")}
 
     swaps = ls.compute_lineup_swaps(optimal, current)
 
-    assert swaps == [{"drop_player_id": "rb_bench_me", "add_player_id": "rb_new", "slot": "RB"}]
+    assert swaps == [{"drop_player_id": "rb_bench_me", "add_player_id": "rb_new", "slot": "RB2"}]
 
 
 def test_compute_lineup_swaps_returns_empty_when_already_optimal():
     optimal = [{"player_id": "rb1", "name": "RB One", "position": "RB"}]
-    current = {"rb1": "RB"}
+    current = {"rb1": _current("RB", "RB1")}
     assert ls.compute_lineup_swaps(optimal, current) == []
+
+
+def test_compute_lineup_swaps_reports_dropped_players_actual_flex_slot():
+    # The dropped starter is a WR sitting in the FLEX slot, not a dedicated WR slot.
+    # The emitted "slot" must be the vacated FLEX frame, not the player's own position.
+    optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB"}]
+    current = {"wr_in_flex": _current("WR", "FLEX")}
+
+    swaps = ls.compute_lineup_swaps(optimal, current)
+
+    assert swaps == [{"drop_player_id": "wr_in_flex", "add_player_id": "rb_new", "slot": "FLEX"}]
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +169,7 @@ def test_publish_lineup_swaps_posts_expected_payload():
         ls.publish_lineup_swaps("team-1", swaps)
 
     url, kwargs = mock_post.call_args[0], mock_post.call_args[1]
-    assert url[0] == f"{ls.CORE_API_BASE_URL}/trigger/lineup"
+    assert url[0] == f"{ls.CORE_API_BASE_URL}/v1/trigger/lineup"
     assert kwargs["json"] == {"team_id": "team-1", "optimized_swaps": swaps}
 
 
@@ -167,13 +194,14 @@ def test_optimize_weekly_lineup_skips_publish_when_no_delta():
     mock_cursor.fetchall.side_effect = [
         [("qb1", "QB One", "QB", 10.0), ("rb1", "RB One", "RB", 8.0), ("rb2", "RB Two", "RB", 7.0),
          ("wr1", "WR One", "WR", 6.0), ("wr2", "WR Two", "WR", 5.0), ("te1", "TE One", "TE", 4.0)],
-        [("qb1", "QB"), ("rb1", "RB"), ("rb2", "RB"), ("wr1", "WR"), ("wr2", "WR"), ("te1", "TE")],
+        [("qb1", "QB", "QB"), ("rb1", "RB", "RB1"), ("rb2", "RB", "RB2"), ("wr1", "WR", "WR1"),
+         ("wr2", "WR", "WR2"), ("te1", "TE", "TE")],
     ]
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
-        swap_count = ls.optimize_weekly_lineup(team_id="1", week=1)
+        swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
 
     assert swap_count == 0
     mock_post.assert_not_called()
@@ -185,20 +213,23 @@ def test_optimize_weekly_lineup_end_to_end_with_swaps():
         [("qb1", "QB One", "QB", 10.0), ("rb1", "RB One", "RB", 8.0), ("rb2", "RB Two", "RB", 7.0),
          ("wr1", "WR One", "WR", 6.0), ("wr2", "WR Two", "WR", 5.0), ("te1", "TE One", "TE", 4.0),
          ("wr_old", "Old WR", "WR", 1.0), ("wr_bench", "Bench WR", "WR", 20.0)],
-        [("qb1", "QB"), ("rb1", "RB"), ("rb2", "RB"), ("wr1", "WR"), ("wr2", "WR"), ("te1", "TE"), ("wr_old", "WR")],
+        [("qb1", "QB", "QB"), ("rb1", "RB", "RB1"), ("rb2", "RB", "RB2"), ("wr1", "WR", "WR1"),
+         ("wr2", "WR", "WR2"), ("te1", "TE", "TE"), ("wr_old", "WR", "FLEX")],
     ]
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         mock_post.return_value = MagicMock(status_code=202)
-        swap_count = ls.optimize_weekly_lineup(team_id="1", week=1)
+        swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
 
     assert swap_count == 1
     mock_post.assert_called_once()
+    url = mock_post.call_args[0][0]
     payload = mock_post.call_args[1]["json"]
+    assert url == f"{ls.CORE_API_BASE_URL}/v1/trigger/lineup"
     assert payload["optimized_swaps"] == [
-        {"drop_player_id": "wr_old", "add_player_id": "wr_bench", "slot": "WR"}
+        {"drop_player_id": "wr_old", "add_player_id": "wr_bench", "slot": "FLEX"}
     ]
 
 
@@ -209,7 +240,7 @@ def test_optimize_weekly_lineup_no_roster_returns_zero():
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
-        swap_count = ls.optimize_weekly_lineup(team_id="1", week=1)
+        swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
 
     assert swap_count == 0
     mock_post.assert_not_called()

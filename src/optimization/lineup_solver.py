@@ -23,19 +23,22 @@ POSITION_MINIMUMS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1}
 QB_MAXIMUM = 1
 
 
-def load_roster_pool(cursor, team_id: str, week: int) -> list:
-    """Roster-eligible players for a team/week: excludes OUT players and anyone with
-    no weekly_stats row (bye week). COALESCE guards a player somehow missing a
-    CORE-05 vorp_score by treating them as replacement-level rather than crashing."""
+def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
+    """Roster-eligible players for a team/season/week: excludes OUT players and anyone
+    with no weekly_stats row (bye week). weekly_stats is keyed by (player_id, season,
+    week), so both must be filtered - week alone lets a player accumulate multiple rows
+    across seasons and returns an arbitrary one's vorp_score. COALESCE guards a player
+    somehow missing a CORE-05 vorp_score by treating them as replacement-level rather
+    than crashing."""
     query = """
         SELECT p.player_id, p.name, p.position, COALESCE(s.vorp_score, 0.0) AS vorp_score
         FROM players p
         JOIN league_rosters r ON p.player_id = r.player_id
         JOIN weekly_stats s ON p.player_id = s.player_id
-        WHERE r.team_id = %s AND s.week = %s
+        WHERE r.team_id = %s AND s.season = %s AND s.week = %s
           AND (p.injury_status IS NULL OR p.injury_status != 'Out');
     """
-    cursor.execute(query, (team_id, week))
+    cursor.execute(query, (team_id, season, week))
     return [
         {"player_id": pid, "name": name, "position": pos, "vorp_score": vorp_score}
         for pid, name, pos, vorp_score in cursor.fetchall()
@@ -82,20 +85,30 @@ def build_and_solve_lineup(roster_pool: list) -> list:
 
 
 def load_current_starters(cursor, team_id: str) -> dict:
+    """Maps player_id -> {"position", "slot_position"} for the team's currently-started
+    players. slot_position (e.g. "RB1", "FLEX") is the actual roster slot, distinct from
+    the player's real position - a WR started in FLEX has position="WR" but
+    slot_position="FLEX", and a swap must report the slot being vacated, not the
+    position of whoever happened to be sitting in it."""
     query = """
-        SELECT p.player_id, p.position
+        SELECT p.player_id, p.position, r.slot_position
         FROM league_rosters r
         JOIN players p ON r.player_id = p.player_id
         WHERE r.team_id = %s AND r.is_starter = TRUE;
     """
     cursor.execute(query, (team_id,))
-    return {pid: pos for pid, pos in cursor.fetchall()}
+    return {
+        pid: {"position": pos, "slot_position": slot_position}
+        for pid, pos, slot_position in cursor.fetchall()
+    }
 
 
 def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list:
     """Diffs the solver's optimal lineup against the currently-set starters, pairing
     each add with a same-position drop where possible (falling back to any remaining
-    drop, e.g. an added RB filling what had been a WR's FLEX slot)."""
+    drop, e.g. an added RB filling what had been a WR's FLEX slot). The emitted "slot"
+    is the *dropped* starter's actual roster slot_position (e.g. "FLEX"), not the
+    added player's position - that's the lineup frame actually being replaced."""
     optimal_by_id = {p["player_id"]: p for p in optimal_starters}
     optimal_ids = set(optimal_by_id)
     current_ids = set(current_starters)
@@ -107,7 +120,7 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
     remaining_drops = list(to_drop)
     for add_player in to_add:
         drop_id = next(
-            (pid for pid in remaining_drops if current_starters[pid] == add_player["position"]),
+            (pid for pid in remaining_drops if current_starters[pid]["position"] == add_player["position"]),
             remaining_drops[0] if remaining_drops else None,
         )
         if drop_id is None:
@@ -116,7 +129,7 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
         swaps.append({
             "drop_player_id": drop_id,
             "add_player_id": add_player["player_id"],
-            "slot": add_player["position"],
+            "slot": current_starters[drop_id]["slot_position"],
         })
 
     return swaps
@@ -128,7 +141,7 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
         return
 
     response = requests.post(
-        f"{CORE_API_BASE_URL}/trigger/lineup",
+        f"{CORE_API_BASE_URL}/v1/trigger/lineup",
         json={"team_id": team_id, "optimized_swaps": swaps},
         timeout=10,
     )
@@ -136,14 +149,14 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
     logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane.")
 
 
-def optimize_weekly_lineup(team_id: str, week: int) -> int:
-    logger.info(f"Assembling mathematical optimization model for Team {team_id} Week {week}...")
+def optimize_weekly_lineup(team_id: str, season: int, week: int) -> int:
+    logger.info(f"Assembling mathematical optimization model for Team {team_id} Season {season} Week {week}...")
 
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            roster_pool = load_roster_pool(cursor, team_id, week)
+            roster_pool = load_roster_pool(cursor, team_id, season, week)
             if not roster_pool:
-                logger.error(f"No active roster metrics found for Team {team_id} Week {week}.")
+                logger.error(f"No active roster metrics found for Team {team_id} Season {season} Week {week}.")
                 return 0
 
             optimal_starters = build_and_solve_lineup(roster_pool)
@@ -154,7 +167,7 @@ def optimize_weekly_lineup(team_id: str, week: int) -> int:
 
     swaps = compute_lineup_swaps(optimal_starters, current_starters)
     logger.info(
-        f"Optimal lineup for Team {team_id} Week {week}: "
+        f"Optimal lineup for Team {team_id} Season {season} Week {week}: "
         f"{[p['name'] for p in optimal_starters]}"
     )
     publish_lineup_swaps(team_id, swaps)
@@ -164,6 +177,7 @@ def optimize_weekly_lineup(team_id: str, week: int) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Solve the optimal weekly lineup for a team via ILP.")
     parser.add_argument("--team-id", type=str, required=True)
+    parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, required=True)
     args = parser.parse_args()
-    optimize_weekly_lineup(team_id=args.team_id, week=args.week)
+    optimize_weekly_lineup(team_id=args.team_id, season=args.season, week=args.week)
