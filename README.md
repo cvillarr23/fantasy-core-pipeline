@@ -5,7 +5,71 @@ The core intelligence layer of your automated fantasy football infrastructure. I
 ## Repository Layout
 *   `src/api/`: FastAPI Control Plane router, middleware definitions, and Model Context Protocol (MCP) data tools.
 *   `src/ingestion/`: Scrapers managing deterministic JSON transformations from Sleeper and `nflverse`.
-*   `src/optimization/`: `PuLP` matrix logic calculating dynamic VORP values and optimizing active lineups.
+*   `src/optimization/`: `PuLP` matrix logic calculating dynamic VORP values and optimizing active lineups and live draft-day picks.
+
+## Architecture: how the algorithms chain together
+
+Ingestion feeds CORE-05's VORP matrix, which both the weekly lineup solver (CORE-06) and
+the live draft-day board (CORE-08) consume as their objective weight. Both optimizers hand
+off to FastAPI, which is the only thing in this repo that talks to RabbitMQ - neither
+optimization module publishes directly, so `fantasy-browser-worker`'s bots only ever react
+to messages that passed through the control-plane API.
+
+```mermaid
+flowchart TD
+    subgraph Ingestion
+        SP[sync_players] --> SL[sync_league]
+        SL --> SPR[sync_projections]
+        SPR --> ME[metrics_extractor]
+    end
+
+    ME --> VM["CORE-05: vorp_matrix<br/>(batch VORP + scarcity)"]
+    VM -->|"weekly_stats.vorp_score"| LS["CORE-06: lineup_solver<br/>(weekly ILP)"]
+    VM -.->|"scarcity fns reused directly,<br/>re-run per pick"| DM["CORE-08: draft_matrix<br/>(live draft-day ILP)"]
+
+    RW["fantasy-browser-worker<br/>draft_picks:{leagueId} Redis Stream"] -->|XREADGROUP| DM
+
+    LS -->|"POST /v1/trigger/lineup"| API[FastAPI Control Plane]
+    DM -->|"POST /v1/trigger/draft-pick"| API
+    API -->|lineup_updates queue| MQ[(RabbitMQ)]
+    API -->|draft_targets queue| MQ
+    MQ --> LB[lineup_bot]
+    MQ -.->|"not wired yet - WORKER-06"| DB2["draft_clicker (planned)"]
+```
+
+`draft_clicker` already exists in `fantasy-browser-worker` and expects this exact
+`{player_id, name}` payload shape, but isn't dispatched to consume `draft_targets` yet -
+that wiring, plus declaring the queue in `fantasy-infra`, is WORKER-06/INFRA-07, not part
+of this repo.
+
+### CORE-08's live draft-day loop
+
+```mermaid
+sequenceDiagram
+    participant Worker as fantasy-browser-worker
+    participant Redis as Redis Stream
+    participant DM as draft_matrix listener
+    participant DB as Postgres
+    participant API as FastAPI
+    participant MQ as RabbitMQ
+
+    Worker->>Redis: XADD draft_picks:{leagueId}
+    DM->>Redis: XREADGROUP (consumer group)
+    DM->>DB: persist_draft_pick (ON CONFLICT DO NOTHING)
+    DM->>DB: load undrafted pool
+    DM->>DM: recompute_scarcity_vorp (reuses CORE-05 fns)
+    DM->>DM: build_and_solve_draft_pick (ILP over undrafted pool)
+    DM->>DM: select_recommended_target
+    DM->>Redis: HSET draft:{leagueId}:board (recommendation visible to UI)
+    DM->>Redis: poll draft:{leagueId}:pause:{pickNumber} for delay window
+    alt human paused via future web UI
+        DM->>DM: skip auto-publish
+    else delay elapsed, not paused
+        DM->>API: POST /v1/trigger/draft-pick
+        API->>MQ: publish to draft_targets (durable)
+    end
+    DM->>Redis: XACK
+```
 
 ## Local Configuration
 Ensure you match your system parameters before booting the engine:

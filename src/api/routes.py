@@ -29,6 +29,11 @@ class LineupTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
     optimized_swaps: List[SwapInstruction] = Field(..., description="Array of mathematical player reallocations")
 
+class DraftPickTriggerPayload(BaseModel):
+    team_id: str = Field(..., description="Target local league team identification number")
+    player_id: str = Field(..., description="players.player_id (Sleeper-namespaced ID, not espn_id) of the recommended draft target")
+    name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
+
 # ------------------------------------------------------------------------------
 # ROUTE ENDPOINTS
 # ------------------------------------------------------------------------------
@@ -99,5 +104,46 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
 
     except Exception as e:
         logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
+
+@router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
+def trigger_draft_pick(payload: DraftPickTriggerPayload):
+    """
+    Draft-day counterpart to /trigger/lineup (CORE-08): publishes the live optimizer's
+    recommended draft target to the click-bot queue. Same asymmetric gateway shape -
+    HTTP in, durable AMQP message out - the optimizer module never touches pika directly.
+    """
+    tracking_id = str(uuid.uuid4())
+    logger.info(f"Gateway processing draft pick command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
+
+    try:
+        params = pika.URLParameters(AMQP_URL)
+        connection = pika.BlockingConnection(params)
+        channel = connection.channel()
+
+        channel.queue_declare(queue="draft_targets", durable=True)
+
+        message_body = json.dumps({"tracking_id": tracking_id, **payload.model_dump()})
+
+        channel.basic_publish(
+            exchange="",
+            routing_key="draft_targets",
+            body=message_body,
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type="application/json"
+            )
+        )
+        connection.close()
+        logger.info(f"Draft pick target committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
+        return {
+            "status": "accepted",
+            "queue": "draft_targets",
+            "team_id": payload.team_id,
+            "tracking_id": tracking_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Gateway failed to push draft pick target onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
