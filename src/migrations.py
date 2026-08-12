@@ -11,6 +11,7 @@ from src.models import (
     CREATE_LEAGUE_ROSTERS_TABLE,
     ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
     CREATE_LEAGUE_SETTINGS_TABLE,
+    CREATE_EXECUTION_LOG_TABLE,
     CREATE_INDICES
 )
 
@@ -62,7 +63,11 @@ def run_migrations():
             logger.info("Validating 'league_settings' configuration table...")
             cursor.execute(CREATE_LEAGUE_SETTINGS_TABLE)
 
-            # 4. Generate query speed optimizations
+            # 4. Execute worker execution telemetry table (INFRA-06)
+            logger.info("Validating 'execution_log' worker telemetry table...")
+            cursor.execute(CREATE_EXECUTION_LOG_TABLE)
+
+            # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
             cursor.execute(CREATE_INDICES)
             
