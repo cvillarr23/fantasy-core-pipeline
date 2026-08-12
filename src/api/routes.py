@@ -31,7 +31,7 @@ class LineupTriggerPayload(BaseModel):
 
 class DraftPickTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
-    player_id: str = Field(..., description="Unique ESPN/Sleeper tracking ID of the recommended draft target")
+    player_id: str = Field(..., description="players.player_id (Sleeper-namespaced ID, not espn_id) of the recommended draft target")
     name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
 
 # ------------------------------------------------------------------------------

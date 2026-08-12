@@ -34,8 +34,13 @@ flowchart TD
     API -->|lineup_updates queue| MQ[(RabbitMQ)]
     API -->|draft_targets queue| MQ
     MQ --> LB[lineup_bot]
-    MQ --> DB2[draft_clicker]
+    MQ -.->|"not wired yet - WORKER-06"| DB2["draft_clicker (planned)"]
 ```
+
+`draft_clicker` already exists in `fantasy-browser-worker` and expects this exact
+`{player_id, name}` payload shape, but isn't dispatched to consume `draft_targets` yet -
+that wiring, plus declaring the queue in `fantasy-infra`, is WORKER-06/INFRA-07, not part
+of this repo.
 
 ### CORE-08's live draft-day loop
 

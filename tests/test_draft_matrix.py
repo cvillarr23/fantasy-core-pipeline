@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import MagicMock, patch
 
 from src.optimization import draft_matrix as dm
@@ -49,6 +50,28 @@ def test_compute_position_caps_shrinks_as_we_draft():
 
 
 # ---------------------------------------------------------------------------
+# compute_draftable_roster_size
+# ---------------------------------------------------------------------------
+
+def test_compute_draftable_roster_size_uses_be_not_full_sum():
+    # IR must not inflate bench capacity - only BE is real draftable bench depth.
+    config = {
+        "team_count": 10,
+        "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 6, "IR": 2},
+    }
+    starting_total, bench_total = dm.compute_draftable_roster_size(config)
+    assert starting_total == 7
+    assert bench_total == 6
+
+
+def test_compute_draftable_roster_size_falls_back_without_be_key():
+    config = {"team_count": 10, "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1}}
+    starting_total, bench_total = dm.compute_draftable_roster_size(config)
+    assert starting_total == 7
+    assert bench_total == dm.DEFAULT_ROSTER_SIZE - 7
+
+
+# ---------------------------------------------------------------------------
 # build_and_solve_draft_pick
 # ---------------------------------------------------------------------------
 
@@ -82,6 +105,22 @@ def test_build_and_solve_draft_pick_empty_pool_returns_empty():
 def test_build_and_solve_draft_pick_zero_remaining_picks_returns_empty():
     pool = [_player("rb1", "RB", 10.0)]
     assert dm.build_and_solve_draft_pick(pool, {"RB": 5}, remaining_picks=0) == []
+
+
+def test_build_and_solve_draft_pick_fills_slots_even_with_negative_vorp():
+    # vorp_score is intentionally signed - a "<=" budget constraint would let the solver
+    # maximize by taking nobody once every candidate is below replacement, even though a
+    # real draft still forces a pick every round. Must still fill target_picks.
+    pool = [_player("rb1", "RB", -5.0), _player("rb2", "RB", -3.0), _player("wr1", "WR", -10.0)]
+    selected = dm.build_and_solve_draft_pick(pool, position_caps={"RB": 2, "WR": 1, "QB": 0, "TE": 0}, remaining_picks=2)
+    assert len(selected) == 2
+    assert {p["player_id"] for p in selected} == {"rb1", "rb2"}
+
+
+def test_build_and_solve_draft_pick_zero_position_caps_returns_empty():
+    pool = [_player("rb1", "RB", 10.0)]
+    selected = dm.build_and_solve_draft_pick(pool, position_caps={"RB": 0, "WR": 0, "QB": 0, "TE": 0}, remaining_picks=5)
+    assert selected == []
 
 
 # ---------------------------------------------------------------------------
@@ -134,17 +173,31 @@ def test_load_team_position_counts_query_shape():
     assert params == ("L1", 2026, "7")
 
 
-def test_persist_draft_pick_uses_on_conflict_do_nothing():
+def test_persist_draft_pick_returns_true_when_inserted():
     mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (5,)
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    dm.persist_draft_pick(mock_conn, league_id="L1", season=2026, pick_number=5, round_=1, team_id="7", player_id="p1")
+    inserted = dm.persist_draft_pick(mock_conn, league_id="L1", season=2026, pick_number=5, round_=1, team_id="7", player_id="p1")
 
+    assert inserted is True
     query, params = mock_cursor.execute.call_args[0]
     assert "ON CONFLICT" in query
     assert "DO NOTHING" in query
+    assert "RETURNING" in query
     assert params == ("L1", 2026, 5, 1, "7", "p1")
+
+
+def test_persist_draft_pick_returns_false_when_already_recorded():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    inserted = dm.persist_draft_pick(mock_conn, league_id="L1", season=2026, pick_number=5, round_=1, team_id="7", player_id="p1")
+
+    assert inserted is False
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +224,37 @@ def test_wait_for_pause_or_timeout_aborts_when_paused():
     assert result is False
 
 
+def test_wait_for_pause_or_timeout_checks_again_after_final_sleep():
+    # A pause set during the very last polling window must still be caught - checking
+    # only before each sleep would miss it and publish anyway.
+    mock_client = MagicMock()
+    calls = {"n": 0}
+
+    def _get(key):
+        calls["n"] += 1
+        return "1" if calls["n"] > 2 else None
+
+    mock_client.get.side_effect = _get
+
+    result = dm.wait_for_pause_or_timeout(mock_client, "L1", pick_number=3, delay_seconds=2, sleep_fn=lambda s: None)
+
+    assert result is False
+    assert calls["n"] == 3  # 2 pre-sleep checks + 1 final check
+
+
+def test_wait_for_pause_or_timeout_aborts_when_cancelled():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    result = dm.wait_for_pause_or_timeout(
+        mock_client, "L1", pick_number=3, delay_seconds=5, cancel_event=cancel_event, sleep_fn=lambda s: None
+    )
+
+    assert result is False
+
+
 # ---------------------------------------------------------------------------
 # publish_draft_target
 # ---------------------------------------------------------------------------
@@ -188,44 +272,104 @@ def test_publish_draft_target_posts_expected_payload():
 
 
 # ---------------------------------------------------------------------------
+# hold_and_publish
+# ---------------------------------------------------------------------------
+
+def test_hold_and_publish_publishes_when_not_cancelled():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0, name="Some Back")
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda s: None)
+
+    mock_post.assert_called_once()
+
+
+def test_hold_and_publish_skips_when_cancelled():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    cancel_event = threading.Event()
+    cancel_event.set()
+    target = _player("p1", "RB", 10.0)
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
+
+    mock_post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _schedule_publish
+# ---------------------------------------------------------------------------
+
+def test_schedule_publish_cancels_previous_pending_job():
+    mock_client = MagicMock()
+    pending_state = {}
+    old_event = threading.Event()
+    pending_state["cancel_event"] = old_event
+
+    with patch("src.optimization.draft_matrix.threading.Thread") as mock_thread_cls:
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        dm._schedule_publish(mock_client, "L1", "7", 5, _player("p1", "RB", 1.0), delay_seconds=8, pending_state=pending_state)
+
+    assert old_event.is_set()
+    assert pending_state["cancel_event"] is not old_event
+    mock_thread.start.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # handle_pick_event (orchestrator)
 # ---------------------------------------------------------------------------
 
-def test_handle_pick_event_skips_recommendation_when_we_just_picked():
+def _mock_conn_returning(inserted: bool):
     mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (1,) if inserted else None
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    return mock_conn, mock_cursor
+
+
+def test_handle_pick_event_skips_when_already_recorded():
+    mock_conn, _ = _mock_conn_returning(inserted=False)
     mock_client = MagicMock()
+    event = {"pick_number": "1", "round": "1", "team_id": "3", "player_id": "p1"}
 
-    event = {"pick_number": "1", "round": "1", "team_id": "7", "player_id": "p1"}
-
-    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.draft_matrix.requests.post") as mock_post:
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
-        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", delay_seconds=1, event=event)
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
-    mock_post.assert_not_called()
+    assert result is None
     mock_client.hset.assert_not_called()
 
 
-def test_handle_pick_event_publishes_after_opponent_pick():
-    mock_cursor = MagicMock()
-    mock_conn = MagicMock()
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+def test_handle_pick_event_skips_recommendation_when_we_just_picked():
+    mock_conn, _ = _mock_conn_returning(inserted=True)
     mock_client = MagicMock()
-    mock_client.get.return_value = None
+    event = {"pick_number": "1", "round": "1", "team_id": "7", "player_id": "p1"}
 
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_client.hset.assert_not_called()
+
+
+def test_handle_pick_event_returns_recommendation_after_opponent_pick():
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
     event = {"pick_number": "1", "round": "1", "team_id": "3", "player_id": "p1"}
     target = _player("p2", "RB", 10.0, name="Best Back")
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.draft_matrix.compute_draft_recommendation", return_value=target), \
-         patch("src.optimization.draft_matrix.time.sleep"), \
-         patch("src.optimization.draft_matrix.requests.post") as mock_post:
+         patch("src.optimization.draft_matrix.compute_draft_recommendation", return_value=target):
         mock_get_conn.return_value.__enter__.return_value = mock_conn
-        mock_post.return_value = MagicMock(status_code=202)
-        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", delay_seconds=1, event=event)
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
+    assert result == (target, 2)
     mock_client.hset.assert_called_once()
-    mock_post.assert_called_once()
-    assert mock_post.call_args[1]["json"]["player_id"] == "p2"
+    hset_kwargs = mock_client.hset.call_args.kwargs
+    assert hset_kwargs["mapping"]["recommended_player_id"] == "p2"
