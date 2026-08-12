@@ -174,6 +174,23 @@ CREATE TABLE IF NOT EXISTS execution_log (
 );
 """
 
+# One row per live draft pick (CORE-08), sourced from fantasy-browser-worker's
+# draft_picks:{leagueId} Redis Stream. Durable local mirror of draft state so the
+# real-time listener can resume the undrafted pool after a restart mid-draft instead of
+# replaying the entire Stream from scratch or, worse, guessing.
+CREATE_DRAFT_PICKS_TABLE = """
+CREATE TABLE IF NOT EXISTS draft_picks (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    pick_number INT NOT NULL,
+    round INT,
+    team_id VARCHAR(50) NOT NULL,
+    player_id VARCHAR(50) REFERENCES players(player_id) ON DELETE CASCADE,
+    drafted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (league_id, season, pick_number)
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
@@ -181,5 +198,6 @@ CREATE INDEX IF NOT EXISTS idx_weekly_stats_lookup ON weekly_stats(week);
 CREATE INDEX IF NOT EXISTS idx_players_gsis_id ON players(gsis_id);
 CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
 CREATE INDEX IF NOT EXISTS idx_execution_log_executed_at ON execution_log(executed_at);
+CREATE INDEX IF NOT EXISTS idx_draft_picks_league_season ON draft_picks(league_id, season);
 """
 

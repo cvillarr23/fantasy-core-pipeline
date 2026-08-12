@@ -12,6 +12,7 @@ from src.models import (
     ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
     CREATE_LEAGUE_SETTINGS_TABLE,
     CREATE_EXECUTION_LOG_TABLE,
+    CREATE_DRAFT_PICKS_TABLE,
     CREATE_INDICES
 )
 
@@ -66,6 +67,10 @@ def run_migrations():
             # 4. Execute worker execution telemetry table (INFRA-06)
             logger.info("Validating 'execution_log' worker telemetry table...")
             cursor.execute(CREATE_EXECUTION_LOG_TABLE)
+
+            # 4b. Execute live draft-day pick ledger (CORE-08)
+            logger.info("Validating 'draft_picks' live draft ledger...")
+            cursor.execute(CREATE_DRAFT_PICKS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
