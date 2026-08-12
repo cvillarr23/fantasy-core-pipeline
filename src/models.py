@@ -161,11 +161,25 @@ CREATE TABLE IF NOT EXISTS league_settings (
 );
 """
 
+# One row per browser-worker transaction (lineup update, waiver claim), written on
+# completion (INFRA-06) so Grafana can chart worker execution latency/success rate.
+CREATE_EXECUTION_LOG_TABLE = """
+CREATE TABLE IF NOT EXISTS execution_log (
+    id SERIAL PRIMARY KEY,
+    transaction_type VARCHAR(30) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    duration_ms INTEGER,
+    error_message TEXT,
+    executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
 CREATE INDEX IF NOT EXISTS idx_weekly_stats_lookup ON weekly_stats(week);
 CREATE INDEX IF NOT EXISTS idx_players_gsis_id ON players(gsis_id);
 CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
+CREATE INDEX IF NOT EXISTS idx_execution_log_executed_at ON execution_log(executed_at);
 """
 
