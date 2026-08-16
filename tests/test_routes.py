@@ -1,22 +1,10 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-import pytest
-from fastapi.testclient import TestClient
-
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
     yield cursor or MagicMock()
-
-
-@pytest.fixture
-def client():
-    with patch("src.api.main.run_migrations"):
-        from src.api.main import app
-
-        with TestClient(app) as test_client:
-            yield test_client
 
 
 def test_health_check_healthy(client):
