@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Mirrors .github/workflows/ci.yml's lint-test job: black/mypy report drift without
+# blocking (same continue-on-error as CI), pytest is the only step that blocks - here,
+# blocking the commit instead of the merge. Enable with:
+#   git config core.hooksPath .githooks
+set -uo pipefail
+
+echo "[pre-commit] black --check ."
+black --check . || echo "[pre-commit] black reported formatting drift (non-blocking)."
+
+echo "[pre-commit] mypy src/"
+mypy src/ || echo "[pre-commit] mypy reported type errors (non-blocking)."
+
+echo "[pre-commit] pytest tests/"
+DB_PASSWORD=test pytest tests/ -q
+pytest_status=$?
+
+if [ "$pytest_status" -ne 0 ]; then
+    echo "[pre-commit] pytest failed - commit blocked. Fix the failing test(s) or use 'git commit --no-verify' to bypass (not recommended)."
+    exit 1
+fi
+
+exit 0

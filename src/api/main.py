@@ -3,6 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from src.migrations import run_migrations
 from src.api.routes import router
+from src.api.mcp_server import mcp_asgi_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("GatewayEngine")
@@ -44,4 +45,10 @@ async def catch_exceptions_middleware(request: Request, call_next):
 
 # Bind the unified API route configurations
 app.include_router(router, prefix="/v1")
+
+# Mount the MCP (Model Context Protocol) server (CORE-07) - its own routes already carry
+# absolute paths (/mcp, /.well-known/oauth-protected-resource/mcp), so it's mounted at
+# the app root rather than under a prefix. Registered after include_router() so /v1/*
+# still resolves first; Starlette tries routes in registration order.
+app.mount("/", mcp_asgi_app)
 
