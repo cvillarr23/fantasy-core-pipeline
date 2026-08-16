@@ -79,5 +79,36 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+`requirements.txt`'s pins target the `python:3.11-slim` image used in `Dockerfile` and
+CI. On newer local Python versions (3.13+), some pins (`pydantic-core`,
+`psycopg2-binary`) may fail to build from source - install unpinned/latest versions in
+your local venv instead (`pip install fastapi uvicorn pydantic ... `, omitting `==`
+version pins) rather than editing `requirements.txt` itself.
+
+## Running CI Checks Locally
+`.github/workflows/ci.yml`'s `lint-test` job runs three steps in order; reproduce them
+the same way before pushing:
+```bash
+black --check .      # non-blocking in CI (continue-on-error), but keep drift visible
+mypy src/             # also non-blocking - several third-party deps lack type stubs
+DB_PASSWORD=test pytest tests/ -v   # this one DOES block merges
+```
+`pytest` is the only step that actually fails the CI job; `black`/`mypy` only report
+formatting/typing drift without blocking. `DB_PASSWORD` just silences a startup warning
+in `src/database.py` - no real credential is used, since `tests/conftest.py` mocks the
+Postgres connection pool before test collection, so the whole suite runs without a live
+database or broker.
+
+If `pip install -r requirements.txt` itself fails in CI (a dependency conflict, not a
+lint/test failure), reproduce the *exact* resolution CI sees with:
+```bash
+docker run --rm -v "$PWD/requirements.txt:/req.txt:ro" python:3.11-slim \
+  pip install --dry-run -r /req.txt
+```
+This matters because environment markers in a package's dependencies (e.g. "requires X
+version Y on Python >=3.14") are evaluated against whichever Python is *running* pip -
+so a local dry run under a newer interpreter than 3.11 can report a false conflict (or
+miss a real one) that CI's actual 3.11 runner wouldn't hit.
+
 ## Project Tracking
 Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-core-pipeline/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-browser-worker` and `fantasy-infra`.
