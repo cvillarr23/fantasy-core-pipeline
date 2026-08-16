@@ -85,6 +85,18 @@ CI. On newer local Python versions (3.13+), some pins (`pydantic-core`,
 your local venv instead (`pip install fastapi uvicorn pydantic ... `, omitting `==`
 version pins) rather than editing `requirements.txt` itself.
 
+## Pre-commit Hook
+`.githooks/pre-commit` runs the same three checks as CI's `lint-test` job (see below)
+before each commit, blocking on pytest failures the same way CI blocks merges. Git
+doesn't auto-enable hooks committed to a repo (that would let a clone run arbitrary code
+on checkout), so opt in once per clone:
+```bash
+git config core.hooksPath .githooks
+```
+This is a local, per-clone setting - not something a global `git config --global` value
+or this repo's history can turn on for you. Bypass it for one commit with
+`git commit --no-verify` if you need to (e.g. a WIP commit on a scratch branch).
+
 ## Running CI Checks Locally
 `.github/workflows/ci.yml`'s `lint-test` job runs three steps in order; reproduce them
 the same way before pushing:
