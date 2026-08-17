@@ -191,6 +191,34 @@ CREATE TABLE IF NOT EXISTS draft_picks (
 );
 """
 
+# Draft-day config for the browser-driven control plane (CORE-10): league/team/season the
+# draft-sync Job (a wrapper around draft_matrix.py's listener) should start with. Single
+# active config per league_id, upserted via ON CONFLICT - mirrors league_settings' single-
+# row-per-league shape.
+CREATE_DRAFT_CONFIG_TABLE = """
+CREATE TABLE IF NOT EXISTS draft_config (
+    league_id VARCHAR(50) PRIMARY KEY,
+    team_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+# Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in
+# draft_matrix.py's handle_pick_event - ESPN's API cannot supply draft-slot assignment
+# pre-draft (league.draft stays empty until ESPN marks the draft fully complete), so this
+# is the only reliable source. Rounds 2+ turn order is derived from this via standard snake
+# math, not stored per-round.
+CREATE_DRAFT_SLOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS draft_slots (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    team_id VARCHAR(50) NOT NULL,
+    slot_number INT NOT NULL,
+    PRIMARY KEY (league_id, season, team_id)
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
@@ -199,5 +227,6 @@ CREATE INDEX IF NOT EXISTS idx_players_gsis_id ON players(gsis_id);
 CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
 CREATE INDEX IF NOT EXISTS idx_execution_log_executed_at ON execution_log(executed_at);
 CREATE INDEX IF NOT EXISTS idx_draft_picks_league_season ON draft_picks(league_id, season);
+CREATE INDEX IF NOT EXISTS idx_draft_slots_league_season ON draft_slots(league_id, season);
 """
 

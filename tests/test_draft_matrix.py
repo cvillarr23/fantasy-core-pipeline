@@ -428,3 +428,70 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     mock_client.hset.assert_called_once()
     hset_kwargs = mock_client.hset.call_args.kwargs
     assert hset_kwargs["mapping"]["recommended_player_id"] == "p2"
+
+
+def test_handle_pick_event_records_draft_slot_on_round_one_pick():
+    """CORE-10 turn-order tracking: a round-1 pick's arrival order is the team's
+    permanent snake-draft slot, and it must be recorded even when we're the team that
+    just picked (no recommendation is computed in that branch, but the slot still is)."""
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    event = {"pick_number": "3", "round": "1", "team_id": "7", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_persist_slot:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_persist_slot.assert_called_once_with(mock_conn, "L1", 2026, "7", 3)
+
+
+def test_handle_pick_event_skips_slot_recording_outside_round_one():
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    event = {"pick_number": "12", "round": "2", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation", return_value=None), \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_persist_slot:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_persist_slot.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# persist_draft_slot / compute_on_the_clock_team (CORE-10 turn order)
+# ---------------------------------------------------------------------------
+def test_persist_draft_slot_query_shape():
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    dm.persist_draft_slot(mock_conn, league_id="L1", season=2026, team_id="7", slot_number=3)
+
+    query, params = mock_cursor.execute.call_args[0]
+    assert "ON CONFLICT" in query
+    assert "DO NOTHING" in query
+    assert params == ("L1", 2026, "7", 3)
+
+
+def test_compute_on_the_clock_team_round_one_is_direct_lookup():
+    slot_map = {"a": 1, "b": 2, "c": 3}
+    assert dm.compute_on_the_clock_team(2, team_count=3, slot_map=slot_map) == "b"
+
+
+def test_compute_on_the_clock_team_round_two_reverses_order():
+    # 3-team snake: round 1 = a,b,c (picks 1-3); round 2 reverses = c,b,a (picks 4-6).
+    slot_map = {"a": 1, "b": 2, "c": 3}
+    assert dm.compute_on_the_clock_team(4, team_count=3, slot_map=slot_map) == "c"
+    assert dm.compute_on_the_clock_team(5, team_count=3, slot_map=slot_map) == "b"
+    assert dm.compute_on_the_clock_team(6, team_count=3, slot_map=slot_map) == "a"
+
+
+def test_compute_on_the_clock_team_returns_none_when_slot_unknown():
+    assert dm.compute_on_the_clock_team(2, team_count=3, slot_map={"a": 1}) is None
+
+
+def test_compute_on_the_clock_team_returns_none_for_zero_team_count():
+    assert dm.compute_on_the_clock_team(1, team_count=0, slot_map={}) is None
