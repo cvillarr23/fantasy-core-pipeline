@@ -242,6 +242,38 @@ def select_recommended_target(selected: list, starting_needs: dict) -> Optional[
 
 
 # ------------------------------------------------------------------------------
+# Snake-draft turn order (CORE-10)
+# ------------------------------------------------------------------------------
+def persist_draft_slot(conn, league_id: str, season: int, team_id: str, slot_number: int) -> None:
+    """Records a team's round-1 pick_number as its permanent draft slot. ON CONFLICT DO
+    NOTHING keyed on (league_id, season, team_id) - a team's slot is fixed the moment they
+    make their first pick, so a replayed Stream entry (see persist_draft_pick) must never
+    overwrite it."""
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO draft_slots (league_id, season, team_id, slot_number)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (league_id, season, team_id) DO NOTHING;
+        """, (league_id, season, team_id, slot_number))
+
+
+def compute_on_the_clock_team(next_pick_number: int, team_count: int, slot_map: dict) -> Optional[str]:
+    """Standard snake-draft order: round 1 goes slot 1 -> team_count, round 2 reverses
+    team_count -> 1, and so on. slot_map is {team_id: slot_number} as recorded by
+    persist_draft_slot - only ever populated from real round-1 pick arrivals (see module
+    docstring in handle_pick_event: ESPN's API can't supply this pre-draft). Returns None
+    if the slot for the computed position isn't known yet, e.g. asking about round 2+
+    before every team has made its round-1 pick."""
+    if team_count <= 0:
+        return None
+    round_num = (next_pick_number - 1) // team_count + 1
+    position_in_round = (next_pick_number - 1) % team_count + 1
+    slot = position_in_round if round_num % 2 == 1 else team_count - position_in_round + 1
+    by_slot = {v: k for k, v in slot_map.items()}
+    return by_slot.get(slot)
+
+
+# ------------------------------------------------------------------------------
 # Draft pick persistence
 # ------------------------------------------------------------------------------
 def persist_draft_pick(conn, league_id: str, season: int, pick_number: int, round_: Optional[int], team_id: str, player_id: str) -> bool:
@@ -359,7 +391,7 @@ def compute_draft_recommendation(cursor, league_id: str, season: int, week: int,
     remaining_picks = max(0, starting_total + bench_total - sum(drafted_by_us.values()))
 
     undrafted_pool = [
-        {"player_id": r["player_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"]}
+        {"player_id": r["player_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"], "team": r["team"]}
         for r in pool_df.iter_rows(named=True)
     ]
     selected = build_and_solve_draft_pick(undrafted_pool, position_caps, remaining_picks)
@@ -385,16 +417,27 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
     Tracking real turn order is a follow-up, not solved here."""
     with tracer.start_as_current_span("draft_pick.handle_event", attributes={"league_id": league_id, "team_id": our_team_id}):
         with get_db_connection() as conn:
+            pick_number = int(event["pick_number"])
+            round_ = int(event.get("round", 0)) or None
             inserted = persist_draft_pick(
                 conn, league_id, season,
-                pick_number=int(event["pick_number"]),
-                round_=int(event.get("round", 0)) or None,
+                pick_number=pick_number,
+                round_=round_,
                 team_id=event["team_id"],
                 player_id=event["player_id"],
             )
             if not inserted:
                 logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
                 return None
+            if round_ == 1:
+                # Round 1 pick arrival order *is* each team's snake-draft slot (see
+                # compute_on_the_clock_team) - the only reliable source, since ESPN's API
+                # can't supply draft-slot assignment pre-draft. Requires the worker to
+                # actually send round=1 on these events; if round is ever omitted for
+                # round-1 picks, slot tracking silently stays empty for that team rather
+                # than guessing - a missing slot just means on_the_clock_team_id can't be
+                # computed yet, not a wrong recommendation.
+                persist_draft_slot(conn, league_id, season, event["team_id"], pick_number)
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None

@@ -13,6 +13,8 @@ from src.models import (
     CREATE_LEAGUE_SETTINGS_TABLE,
     CREATE_EXECUTION_LOG_TABLE,
     CREATE_DRAFT_PICKS_TABLE,
+    CREATE_DRAFT_CONFIG_TABLE,
+    CREATE_DRAFT_SLOTS_TABLE,
     CREATE_INDICES
 )
 
@@ -71,6 +73,11 @@ def run_migrations():
             # 4b. Execute live draft-day pick ledger (CORE-08)
             logger.info("Validating 'draft_picks' live draft ledger...")
             cursor.execute(CREATE_DRAFT_PICKS_TABLE)
+
+            # 4c. Execute draft-day control plane tables (CORE-10)
+            logger.info("Validating 'draft_config' and 'draft_slots' control plane tables...")
+            cursor.execute(CREATE_DRAFT_CONFIG_TABLE)
+            cursor.execute(CREATE_DRAFT_SLOTS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
