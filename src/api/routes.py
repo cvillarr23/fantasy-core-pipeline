@@ -5,6 +5,7 @@ import uuid
 import pika
 from typing import List
 from fastapi import APIRouter, HTTPException, status
+from opentelemetry import propagate
 from pydantic import BaseModel, Field
 from src.database import get_db_cursor
 
@@ -83,6 +84,14 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         # 3. Serialize our structured Pydantic body, stamped with a correlation ID, into a compact system string mapping
         message_body = json.dumps({"tracking_id": tracking_id, **payload.model_dump()})
 
+        # W3C trace context, separate from tracking_id above: tracking_id stays the
+        # human/log-facing correlation UUID already returned to callers; traceparent is
+        # the machine-facing OTel context so fantasy-browser-worker's eventual consumer
+        # span (WORKER-09) can link back into this same trace instead of starting a
+        # disconnected one.
+        carrier: dict = {}
+        propagate.inject(carrier)
+
         # 4. Publish message with high persistence markers to survive unexpected broker reboots
         channel.basic_publish(
             exchange="",
@@ -90,7 +99,8 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
             body=message_body,
             properties=pika.BasicProperties(
                 delivery_mode=2, # Make message persistent on disk
-                content_type="application/json"
+                content_type="application/json",
+                headers=carrier,
             )
         )
         connection.close()
@@ -125,13 +135,17 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
 
         message_body = json.dumps({"tracking_id": tracking_id, **payload.model_dump()})
 
+        carrier: dict = {}
+        propagate.inject(carrier)
+
         channel.basic_publish(
             exchange="",
             routing_key="draft_targets",
             body=message_body,
             properties=pika.BasicProperties(
                 delivery_mode=2,
-                content_type="application/json"
+                content_type="application/json",
+                headers=carrier,
             )
         )
         connection.close()

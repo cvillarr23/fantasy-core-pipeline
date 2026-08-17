@@ -13,8 +13,12 @@ from collections import defaultdict
 import polars as pl
 
 from src.database import get_db_connection
+from src.telemetry import configure_tracing, configure_trace_logging
+from opentelemetry import trace
 
-logging.basicConfig(level=logging.INFO)
+tracer = trace.get_tracer("vorp_matrix")
+
+configure_trace_logging()
 logger = logging.getLogger("VORPMatrix")
 
 W_MARKET = 0.06
@@ -301,58 +305,72 @@ def run_vorp_pipeline(season: int, week: int) -> int:
     persist, inside one connection."""
     logger.info(f"Running dynamic VORP matrix pipeline for season {season} week {week}...")
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            league_config = load_league_config(cursor)
-            roster_df = load_roster_positions(cursor)
+    with tracer.start_as_current_span("vorp_pipeline.run", attributes={"season": season, "week": week}):
+        with get_db_connection() as conn:
+            with tracer.start_as_current_span("vorp_pipeline.load_config"):
+                with conn.cursor() as cursor:
+                    league_config = load_league_config(cursor)
+                    roster_df = load_roster_positions(cursor)
 
-            cursor.execute("""
-                SELECT p.player_id, p.position, s.projected_points, s.team_implied_total,
-                       s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team,
-                       (r.player_id IS NOT NULL) AS is_rostered, r.is_starter
-                FROM players p
-                JOIN weekly_stats s ON p.player_id = s.player_id
-                LEFT JOIN (
-                    SELECT DISTINCT ON (player_id) player_id, is_starter FROM league_rosters
-                ) r ON p.player_id = r.player_id
-                WHERE s.season = %s AND s.week = %s;
-            """, (season, week))
-            rows = cursor.fetchall()
+            with tracer.start_as_current_span("vorp_pipeline.load_stats"):
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT p.player_id, p.position, s.projected_points, s.team_implied_total,
+                               s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team,
+                               (r.player_id IS NOT NULL) AS is_rostered, r.is_starter
+                        FROM players p
+                        JOIN weekly_stats s ON p.player_id = s.player_id
+                        LEFT JOIN (
+                            SELECT DISTINCT ON (player_id) player_id, is_starter FROM league_rosters
+                        ) r ON p.player_id = r.player_id
+                        WHERE s.season = %s AND s.week = %s;
+                    """, (season, week))
+                    rows = cursor.fetchall()
 
-        schema = {
-            "player_id": pl.Utf8, "position": pl.Utf8, "projected_points": pl.Float64,
-            "team_implied_total": pl.Float64, "avg_separation": pl.Float64,
-            "pressure_rate_allowed": pl.Float64, "depth_chart_delta": pl.Int64,
-            "team": pl.Utf8, "is_rostered": pl.Boolean, "is_starter": pl.Boolean,
-        }
-        df = pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
-        if df.is_empty():
-            logger.warning(f"No weekly_stats rows found for {season} week {week}; nothing to compute.")
-            return 0
-        df = df.with_columns([pl.lit(season).alias("season"), pl.lit(week).alias("week")])
+                schema = {
+                    "player_id": pl.Utf8, "position": pl.Utf8, "projected_points": pl.Float64,
+                    "team_implied_total": pl.Float64, "avg_separation": pl.Float64,
+                    "pressure_rate_allowed": pl.Float64, "depth_chart_delta": pl.Int64,
+                    "team": pl.Utf8, "is_rostered": pl.Boolean, "is_starter": pl.Boolean,
+                }
+                df = pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
+                if df.is_empty():
+                    logger.warning(f"No weekly_stats rows found for {season} week {week}; nothing to compute.")
+                    return 0
+                df = df.with_columns([pl.lit(season).alias("season"), pl.lit(week).alias("week")])
 
-        df = compute_matchup_coefficient(df)
-        flex_alloc = resolve_all_flex_allocations(league_config, roster_df)
-        rank_at = calculate_rank_at(league_config, flex_alloc)
-        baselines = calculate_replacement_baselines(df, league_config, flex_alloc, rosters_populated=not roster_df.is_empty())
-        df = compute_vorp(df, baselines)
-        multipliers = compute_scarcity_multipliers(df, rank_at)
-        df = apply_scarcity(df, multipliers)
+            with tracer.start_as_current_span("vorp_pipeline.matchup_coefficient"):
+                df = compute_matchup_coefficient(df)
 
-        persist_rows = [
-            (
-                r["matchup_coefficient"], r["adjusted_projected_points"], r["vorp_base"],
-                r["scarcity_multiplier"], r["vorp_score"], r["player_id"], season, week,
-            )
-            for r in df.iter_rows(named=True)
-        ]
-        written = persist_vorp_matrix(conn, persist_rows)
+            with tracer.start_as_current_span("vorp_pipeline.flex_allocation"):
+                flex_alloc = resolve_all_flex_allocations(league_config, roster_df)
+                rank_at = calculate_rank_at(league_config, flex_alloc)
+
+            with tracer.start_as_current_span("vorp_pipeline.baselines"):
+                baselines = calculate_replacement_baselines(df, league_config, flex_alloc, rosters_populated=not roster_df.is_empty())
+
+            with tracer.start_as_current_span("vorp_pipeline.vorp_and_scarcity"):
+                df = compute_vorp(df, baselines)
+                multipliers = compute_scarcity_multipliers(df, rank_at)
+                df = apply_scarcity(df, multipliers)
+
+            with tracer.start_as_current_span("vorp_pipeline.persist"):
+                persist_rows = [
+                    (
+                        r["matchup_coefficient"], r["adjusted_projected_points"], r["vorp_base"],
+                        r["scarcity_multiplier"], r["vorp_score"], r["player_id"], season, week,
+                    )
+                    for r in df.iter_rows(named=True)
+                ]
+                written = persist_vorp_matrix(conn, persist_rows)
 
     logger.info(f"VORP matrix pipeline complete: {written} row(s) updated for {season} week {week}.")
     return written
 
 
 if __name__ == "__main__":
+    configure_tracing("vorp-matrix")
+
     parser = argparse.ArgumentParser(description="Compute the dynamic VORP matrix for a season/week.")
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, required=True)
