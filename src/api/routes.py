@@ -34,6 +34,8 @@ class DraftPickTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
     player_id: str = Field(..., description="players.player_id (Sleeper-namespaced ID, not espn_id) of the recommended draft target")
     name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
+    position: str = Field(..., description="Player's position, for a name+position+team match against ESPN's own player pool")
+    pro_team: str = Field(..., description="Player's NFL team abbreviation, for a name+position+team match against ESPN's own player pool")
 
 # ------------------------------------------------------------------------------
 # ROUTE ENDPOINTS

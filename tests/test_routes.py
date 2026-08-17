@@ -95,7 +95,7 @@ def test_trigger_draft_pick_success(client):
     mock_connection = MagicMock()
     mock_connection.channel.return_value = mock_channel
 
-    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back"}
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "position": "RB", "pro_team": "KC"}
 
     with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
         response = client.post("/v1/trigger/draft-pick", json=payload)
@@ -115,7 +115,7 @@ def test_trigger_draft_pick_success(client):
 
 
 def test_trigger_draft_pick_broker_failure(client):
-    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back"}
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "position": "RB", "pro_team": "KC"}
 
     with patch("src.api.routes.pika.BlockingConnection", side_effect=Exception("broker down")):
         response = client.post("/v1/trigger/draft-pick", json=payload)
