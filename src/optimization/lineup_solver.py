@@ -11,11 +11,14 @@ import os
 
 import pulp
 import requests
+from opentelemetry import propagate, trace
 
 from src.database import get_db_connection
+from src.telemetry import configure_tracing, configure_trace_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_trace_logging()
 logger = logging.getLogger("LineupSolver")
+tracer = trace.get_tracer("lineup_solver")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-api.core.svc.cluster.local:8000")
 TOTAL_STARTERS = 7
@@ -140,9 +143,15 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
         logger.info(f"Lineup already optimal for Team {team_id}; nothing to publish.")
         return
 
+    # Inject this pipeline run's trace context so the FastAPI-side root span (CORE-12)
+    # becomes a child of this trace instead of starting a disconnected one.
+    headers: dict = {}
+    propagate.inject(headers)
+
     response = requests.post(
         f"{CORE_API_BASE_URL}/v1/trigger/lineup",
         json={"team_id": team_id, "optimized_swaps": swaps},
+        headers=headers,
         timeout=10,
     )
     response.raise_for_status()
@@ -152,29 +161,37 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
 def optimize_weekly_lineup(team_id: str, season: int, week: int) -> int:
     logger.info(f"Assembling mathematical optimization model for Team {team_id} Season {season} Week {week}...")
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            roster_pool = load_roster_pool(cursor, team_id, season, week)
-            if not roster_pool:
-                logger.error(f"No active roster metrics found for Team {team_id} Season {season} Week {week}.")
-                return 0
+    with tracer.start_as_current_span("lineup_solver.run", attributes={"team_id": team_id, "season": season, "week": week}):
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
+                    roster_pool = load_roster_pool(cursor, team_id, season, week)
+                    if not roster_pool:
+                        logger.error(f"No active roster metrics found for Team {team_id} Season {season} Week {week}.")
+                        return 0
 
-            optimal_starters = build_and_solve_lineup(roster_pool)
-            if not optimal_starters:
-                return 0
+                with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
+                    optimal_starters = build_and_solve_lineup(roster_pool)
+                    if not optimal_starters:
+                        return 0
 
-            current_starters = load_current_starters(cursor, team_id)
+                with tracer.start_as_current_span("lineup_solver.load_current_starters"):
+                    current_starters = load_current_starters(cursor, team_id)
 
-    swaps = compute_lineup_swaps(optimal_starters, current_starters)
-    logger.info(
-        f"Optimal lineup for Team {team_id} Season {season} Week {week}: "
-        f"{[p['name'] for p in optimal_starters]}"
-    )
-    publish_lineup_swaps(team_id, swaps)
-    return len(swaps)
+        with tracer.start_as_current_span("lineup_solver.compute_lineup_swaps"):
+            swaps = compute_lineup_swaps(optimal_starters, current_starters)
+        logger.info(
+            f"Optimal lineup for Team {team_id} Season {season} Week {week}: "
+            f"{[p['name'] for p in optimal_starters]}"
+        )
+        with tracer.start_as_current_span("lineup_solver.publish_lineup_swaps"):
+            publish_lineup_swaps(team_id, swaps)
+        return len(swaps)
 
 
 if __name__ == "__main__":
+    configure_tracing("lineup-solver")
+
     parser = argparse.ArgumentParser(description="Solve the optimal weekly lineup for a team via ILP.")
     parser.add_argument("--team-id", type=str, required=True)
     parser.add_argument("--season", type=int, required=True)

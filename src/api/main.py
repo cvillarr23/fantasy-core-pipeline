@@ -3,11 +3,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from src.migrations import run_migrations
 from src.api.routes import router
 from src.api.mcp_server import mcp, mcp_asgi_app
+from src.telemetry import configure_tracing, configure_trace_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_tracing("fantasy-core-api")
+configure_trace_logging()
+
 logger = logging.getLogger("GatewayEngine")
 
 
@@ -64,3 +68,9 @@ app.include_router(router, prefix="/v1")
 # the app root rather than under a prefix. Registered after include_router() so /v1/*
 # still resolves first; Starlette tries routes in registration order.
 app.mount("/", mcp_asgi_app)
+
+# Instrumented last, after every route/mount is registered (CORE-12) - instrument_app()
+# wraps the already-assembled ASGI middleware stack, and instrumenting before the /mcp
+# mount above risks that sub-app's requests showing up as an unlabeled catch-all span
+# instead of getting accurate http.route templating.
+FastAPIInstrumentor.instrument_app(app)

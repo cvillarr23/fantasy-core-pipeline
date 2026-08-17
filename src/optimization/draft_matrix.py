@@ -26,8 +26,10 @@ import polars as pl
 import pulp
 import redis
 import requests
+from opentelemetry import context, propagate, trace
 
 from src.database import get_db_connection
+from src.telemetry import configure_tracing, configure_trace_logging
 from src.optimization.vorp_matrix import (
     SKILL_POSITIONS,
     FLEX_DEFAULT_WEIGHTS,
@@ -44,8 +46,9 @@ from src.optimization.vorp_matrix import (
     apply_scarcity,
 )
 
-logging.basicConfig(level=logging.INFO)
+configure_trace_logging()
 logger = logging.getLogger("DraftMatrix")
+tracer = trace.get_tracer("draft_matrix")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-api.core.svc.cluster.local:8000")
 REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
@@ -295,9 +298,13 @@ def wait_for_pause_or_timeout(
 
 
 def publish_draft_target(team_id: str, target: dict) -> None:
+    headers: dict = {}
+    propagate.inject(headers)
+
     response = requests.post(
         f"{CORE_API_BASE_URL}/v1/trigger/draft-pick",
         json={"team_id": team_id, "player_id": target["player_id"], "name": target["name"]},
+        headers=headers,
         timeout=10,
     )
     response.raise_for_status()
@@ -307,13 +314,25 @@ def publish_draft_target(team_id: str, target: dict) -> None:
 def hold_and_publish(
     r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
+    trace_context: Optional[context.Context] = None,
 ) -> None:
     """Runs the cancellable delay window and publishes if it elapses uninterrupted. Called
     from a background thread (see _schedule_publish) so the Stream consumer loop keeps
     reading new picks instead of blocking through the delay - a positional run during the
-    wait would otherwise queue up unprocessed while draft_matrix sits idle."""
-    if wait_for_pause_or_timeout(r_client, league_id, pick_number, delay_seconds, cancel_event=cancel_event, sleep_fn=sleep_fn):
-        publish_draft_target(team_id, target)
+    wait would otherwise queue up unprocessed while draft_matrix sits idle.
+
+    Runs on a separate OS thread, which (unlike an asyncio task) does not automatically
+    inherit the calling thread's OTel context - trace_context is the parent span's context
+    captured by _schedule_publish before spawning this thread, and must be explicitly
+    re-attached here or the eventual publish span silently starts a disconnected trace."""
+    token = context.attach(trace_context) if trace_context is not None else None
+    try:
+        with tracer.start_as_current_span("draft_pick.hold_and_publish", attributes={"team_id": team_id, "pick_number": pick_number}):
+            if wait_for_pause_or_timeout(r_client, league_id, pick_number, delay_seconds, cancel_event=cancel_event, sleep_fn=sleep_fn):
+                publish_draft_target(team_id, target)
+    finally:
+        if token is not None:
+            context.detach(token)
 
 
 # ------------------------------------------------------------------------------
@@ -358,34 +377,35 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
     right before we're actually on the clock - each new one supersedes the last via
     _schedule_publish's cancel_event, so only the freshest ever actually publishes.
     Tracking real turn order is a follow-up, not solved here."""
-    with get_db_connection() as conn:
-        inserted = persist_draft_pick(
-            conn, league_id, season,
-            pick_number=int(event["pick_number"]),
-            round_=int(event.get("round", 0)) or None,
-            team_id=event["team_id"],
-            player_id=event["player_id"],
-        )
-        if not inserted:
-            logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
-            return None
-        if event["team_id"] == our_team_id:
-            logger.info("We just picked; no recommendation to compute until the next opponent pick.")
-            return None
-        with conn.cursor() as cursor:
-            target = compute_draft_recommendation(cursor, league_id, season, week, our_team_id)
+    with tracer.start_as_current_span("draft_pick.handle_event", attributes={"league_id": league_id, "team_id": our_team_id}):
+        with get_db_connection() as conn:
+            inserted = persist_draft_pick(
+                conn, league_id, season,
+                pick_number=int(event["pick_number"]),
+                round_=int(event.get("round", 0)) or None,
+                team_id=event["team_id"],
+                player_id=event["player_id"],
+            )
+            if not inserted:
+                logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
+                return None
+            if event["team_id"] == our_team_id:
+                logger.info("We just picked; no recommendation to compute until the next opponent pick.")
+                return None
+            with conn.cursor() as cursor:
+                target = compute_draft_recommendation(cursor, league_id, season, week, our_team_id)
 
-    if target is None:
-        logger.info("No feasible draft recommendation for the current undrafted pool.")
-        return None
+        if target is None:
+            logger.info("No feasible draft recommendation for the current undrafted pool.")
+            return None
 
-    next_pick_number = int(event["pick_number"]) + 1
-    r_client.hset(f"draft:{league_id}:board", mapping={
-        "recommended_player_id": target["player_id"],
-        "recommended_name": target["name"],
-        "pick_number": next_pick_number,
-    })
-    return target, next_pick_number
+        next_pick_number = int(event["pick_number"]) + 1
+        r_client.hset(f"draft:{league_id}:board", mapping={
+            "recommended_player_id": target["player_id"],
+            "recommended_name": target["name"],
+            "pick_number": next_pick_number,
+        })
+        return target, next_pick_number
 
 
 def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int, pending_state: dict) -> None:
@@ -398,54 +418,61 @@ def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, 
         old_cancel_event.set()
     cancel_event = threading.Event()
     pending_state["cancel_event"] = cancel_event
+
+    # Capture the calling thread's OTel context (this span, e.g. handle_pick_event's) so
+    # hold_and_publish can re-attach it on the new OS thread - threading.Thread does not
+    # inherit context automatically the way asyncio tasks do.
+    trace_context = context.get_current()
     threading.Thread(
         target=hold_and_publish,
-        args=(r_client, league_id, team_id, pick_number, target, delay_seconds, cancel_event),
+        args=(r_client, league_id, team_id, pick_number, target, delay_seconds, cancel_event, time.sleep, trace_context),
         daemon=True,
     ).start()
 
 
 def _process_entries(r_client, stream_key: str, league_id: str, season: int, week: int, team_id: str, delay_seconds: int, pending_state: dict, entries: list) -> None:
-    for _stream, messages in entries:
-        for entry_id, fields in messages:
-            try:
-                result = handle_pick_event(r_client, league_id, season, week, team_id, fields)
-                if result is not None:
-                    target, next_pick_number = result
-                    _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state)
-            except Exception as e:
-                logger.error(f"Failed to process draft pick event {entry_id}: {e}")
-            finally:
-                r_client.xack(stream_key, CONSUMER_GROUP, entry_id)
+    with tracer.start_as_current_span("draft_listener.process_batch", attributes={"league_id": league_id}):
+        for _stream, messages in entries:
+            for entry_id, fields in messages:
+                try:
+                    result = handle_pick_event(r_client, league_id, season, week, team_id, fields)
+                    if result is not None:
+                        target, next_pick_number = result
+                        _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state)
+                except Exception as e:
+                    logger.error(f"Failed to process draft pick event {entry_id}: {e}")
+                finally:
+                    r_client.xack(stream_key, CONSUMER_GROUP, entry_id)
 
 
 def run_draft_listener(league_id: str, team_id: str, season: int, week: int, delay_seconds: int) -> None:
     """Long-running entrypoint: consumes fantasy-browser-worker's
     draft_picks:{leagueId} Redis Stream via a consumer group so a restart resumes from the
     last acked pick instead of silently missing one."""
-    r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-    r_client.ping()
+    with tracer.start_as_current_span("draft_listener.startup", attributes={"league_id": league_id, "team_id": team_id}):
+        r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r_client.ping()
 
-    stream_key = f"draft_picks:{league_id}"
-    consumer_name = f"draft-matrix-{team_id}"
-    try:
-        r_client.xgroup_create(stream_key, CONSUMER_GROUP, id="0", mkstream=True)
-    except redis.ResponseError as e:
-        if "BUSYGROUP" not in str(e):
-            raise
+        stream_key = f"draft_picks:{league_id}"
+        consumer_name = f"draft-matrix-{team_id}"
+        try:
+            r_client.xgroup_create(stream_key, CONSUMER_GROUP, id="0", mkstream=True)
+        except redis.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
 
-    pending_state: dict = {}
+        pending_state: dict = {}
 
-    # Drain this consumer's own unacked backlog first (crash/restart recovery): reading
-    # only ">" returns brand-new entries and would treat anything delivered-but-never-
-    # acked before a crash as gone forever, breaking the durability the consumer group
-    # exists for. (Scope note: this recovers this exact consumer name's own backlog, not
-    # another dead consumer's via XAUTOCLAIM - out of scope for a single-team listener.)
-    while True:
-        backlog = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: "0"}, count=100)
-        if not backlog or not backlog[0][1]:
-            break
-        _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, backlog)
+        # Drain this consumer's own unacked backlog first (crash/restart recovery): reading
+        # only ">" returns brand-new entries and would treat anything delivered-but-never-
+        # acked before a crash as gone forever, breaking the durability the consumer group
+        # exists for. (Scope note: this recovers this exact consumer name's own backlog, not
+        # another dead consumer's via XAUTOCLAIM - out of scope for a single-team listener.)
+        while True:
+            backlog = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: "0"}, count=100)
+            if not backlog or not backlog[0][1]:
+                break
+            _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, backlog)
 
     logger.info(f"Listening on '{stream_key}' as consumer '{consumer_name}' for league {league_id}...")
     while True:
@@ -456,6 +483,8 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
 
 if __name__ == "__main__":
+    configure_tracing("draft-matrix")
+
     parser = argparse.ArgumentParser(description="Run the live draft-day board matrix listener.")
     parser.add_argument("--league-id", type=str, required=True)
     parser.add_argument("--team-id", type=str, required=True, help="Our own team_id in the league")
