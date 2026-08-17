@@ -391,7 +391,7 @@ def compute_draft_recommendation(cursor, league_id: str, season: int, week: int,
     remaining_picks = max(0, starting_total + bench_total - sum(drafted_by_us.values()))
 
     undrafted_pool = [
-        {"player_id": r["player_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"]}
+        {"player_id": r["player_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"], "team": r["team"]}
         for r in pool_df.iter_rows(named=True)
     ]
     selected = build_and_solve_draft_pick(undrafted_pool, position_caps, remaining_picks)

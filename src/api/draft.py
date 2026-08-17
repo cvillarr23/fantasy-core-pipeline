@@ -11,9 +11,10 @@ Two known gaps, both flagged rather than guessed at:
   - `last_clicker_action` in /status has no data source yet - fantasy-browser-worker's
     click bot isn't wired to consume `draft_targets` yet (WORKER-06, unshipped elsewhere).
     Always null here until that ships.
-  - /start's Job image comes from a required DRAFT_SYNC_IMAGE env var with no default -
-    the real image ref lives in fantasy-infra, out of this repo's scope, same "flag the
-    stale/missing default instead of guessing" pattern as CORE_API_BASE_URL.
+  - /start's Job image and its DB/Redis/API env config come from required env vars with no
+    defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
+    this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
+    CORE_API_BASE_URL.
 """
 import asyncio
 import json
@@ -30,7 +31,7 @@ from kubernetes.config.config_exception import ConfigException
 from pydantic import BaseModel, Field
 
 from src.database import get_db_cursor
-from src.optimization.draft_matrix import compute_on_the_clock_team
+from src.optimization.draft_matrix import compute_draft_recommendation, compute_on_the_clock_team, publish_draft_target
 
 logger = logging.getLogger("DraftControlPlane")
 draft_router = APIRouter()
@@ -39,6 +40,16 @@ REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "default")
 DRAFT_SYNC_IMAGE = os.getenv("DRAFT_SYNC_IMAGE")
+# Names of the k8s Secret/ConfigMap the draft-sync Job's container should pull DB_PASSWORD,
+# DB_HOST/NAME/USER, REDIS_HOST/PORT, and CORE_API_BASE_URL from - the Job's Pod does not
+# inherit this API Pod's own environment, and draft_matrix.py imports src.database, which
+# opens a connection pool at import time and needs these to be real. No defaults: the
+# actual Secret/ConfigMap names are fantasy-infra's to define, not this repo's to guess.
+DRAFT_SYNC_ENV_SECRET = os.getenv("DRAFT_SYNC_ENV_SECRET")
+DRAFT_SYNC_ENV_CONFIGMAP = os.getenv("DRAFT_SYNC_ENV_CONFIGMAP")
+# Draft-sync listener defaults to week 1 preseason projections (matches draft_matrix.py's
+# own --week CLI default) - draft config doesn't track a week, since a draft has none.
+DRAFT_SYNC_WEEK = 1
 
 SSE_POLL_INTERVAL_SECONDS = 2
 
@@ -149,28 +160,39 @@ def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
     return compute_on_the_clock_team(latest_pick_number + 1, team_count, slot_map)
 
 
-def _pipeline_health(job_state: str, cursor) -> str:
-    try:
-        cursor.execute("SELECT 1;")
-        db_ok = True
-    except Exception:
-        db_ok = False
-    return "healthy" if job_state == "Active" and db_ok else "degraded"
-
-
 def _build_status(league_id: str, season: int, limit: int) -> dict:
-    r_client = _redis_client()
+    """Every datastore read is isolated in its own try/except: a Postgres or Redis outage
+    must surface as pipeline_health="degraded" in a normal 200 response (so the browser can
+    make the documented auto-picker fallback decision), not escape as an unhandled
+    exception that turns the whole endpoint into a 500."""
     job_state = _job_state(league_id)
-    with get_db_cursor() as cursor:
-        recent_picks = _recent_picks(cursor, league_id, season, limit)
-        on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
-        pipeline_health = _pipeline_health(job_state, cursor)
+
+    redis_ok = True
+    recommendation: dict = {}
+    try:
+        recommendation = _recommendation(_redis_client(), league_id)
+    except Exception as e:
+        logger.error(f"Failed to read Redis recommendation board for league {league_id}: {e}")
+        redis_ok = False
+
+    db_ok = True
+    recent_picks: list = []
+    on_the_clock_team_id = None
+    try:
+        with get_db_cursor() as cursor:
+            recent_picks = _recent_picks(cursor, league_id, season, limit)
+            on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
+    except Exception as e:
+        logger.error(f"Failed to read draft picks/slots for league {league_id}: {e}")
+        db_ok = False
+
+    pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok else "degraded"
 
     return {
         "league_id": league_id,
         "season": season,
         "job_state": job_state,
-        "recommendation": _recommendation(r_client, league_id),
+        "recommendation": recommendation,
         "last_clicker_action": None,
         "recent_picks": recent_picks,
         "on_the_clock_team_id": on_the_clock_team_id,
@@ -205,6 +227,8 @@ def start_draft_sync():
     most recently stored /config, replacing the manual `kubectl apply` step."""
     if not DRAFT_SYNC_IMAGE:
         raise HTTPException(status_code=500, detail="DRAFT_SYNC_IMAGE is not configured - the draft-sync container image ref must be supplied via env var.")
+    if not DRAFT_SYNC_ENV_SECRET or not DRAFT_SYNC_ENV_CONFIGMAP:
+        raise HTTPException(status_code=500, detail="DRAFT_SYNC_ENV_SECRET and DRAFT_SYNC_ENV_CONFIGMAP must both be configured - the Job's Pod does not inherit this API Pod's own DB/Redis/API environment.")
 
     try:
         with get_db_cursor() as cursor:
@@ -217,6 +241,15 @@ def start_draft_sync():
     if row is None:
         raise HTTPException(status_code=400, detail="No draft config stored yet - POST /v1/draft/config first.")
     league_id, team_id, season = row
+
+    # A second listener for the same league would share the browser-worker's Redis Stream
+    # consumer name (draft-matrix-{team_id}) but keep an entirely separate in-process
+    # pending_state - a newer pick handled by one process can't cancel the other's pending
+    # delayed publish, so two Active Jobs for one league can race and double-publish a
+    # stale draft target. Reject rather than silently creating a duplicate.
+    existing_state = _job_state(league_id)
+    if existing_state == "Active":
+        raise HTTPException(status_code=409, detail=f"A draft-sync Job for league {league_id} is already Active - stop it before starting another.")
 
     job_name = f"draft-sync-{league_id}-{int(time.time())}"
     job = client.V1Job(
@@ -236,6 +269,10 @@ def start_draft_sync():
                                 "--league-id", str(league_id),
                                 "--team-id", str(team_id),
                                 "--season", str(season),
+                            ],
+                            env_from=[
+                                client.V1EnvFromSource(config_map_ref=client.V1ConfigMapEnvSource(name=DRAFT_SYNC_ENV_CONFIGMAP)),
+                                client.V1EnvFromSource(secret_ref=client.V1SecretEnvSource(name=DRAFT_SYNC_ENV_SECRET)),
                             ],
                         )
                     ],
@@ -273,13 +310,17 @@ async def stream_draft_status(request: Request, league_id: str, season: int, lim
 
 async def _draft_status_event_generator(request: Request, league_id: str, season: int, limit: int):
     """Split out from stream_draft_status so it can be driven directly in tests without
-    relying on a real ASGI transport's disconnect detection."""
+    relying on a real ASGI transport's disconnect detection.
+
+    _build_status does blocking k8s/Postgres/Redis I/O - calling it inline here would stall
+    the event loop thread for every connected SSE client every poll interval. Offloaded via
+    asyncio.to_thread so slow infra doesn't stall unrelated requests or other streams."""
     last_payload = None
     while True:
         if await request.is_disconnected():
             break
         try:
-            payload = _build_status(league_id, season, limit)
+            payload = await asyncio.to_thread(_build_status, league_id, season, limit)
         except Exception as e:
             logger.error(f"Draft status stream aggregation failed for league {league_id}: {e}")
             payload = {"error": str(e)}
@@ -307,6 +348,13 @@ def pause_draft(payload: DraftPauseRequest):
 
 @draft_router.post("/resume", status_code=status.HTTP_200_OK)
 def resume_draft(payload: DraftPauseRequest):
+    """Clearing the pause key alone does not resume anything: draft_matrix.py's
+    wait_for_pause_or_timeout returns False as soon as it observes the key set, at which
+    point hold_and_publish has already exited with nothing left to notice a later deletion
+    - draft_matrix.py runs in a separate Job Pod this API process has no other channel into.
+    So /resume recomputes a fresh recommendation and republishes it immediately - the human
+    already decided to proceed, so there's no cancellable delay window to wait through this
+    time, unlike the normal auto-draft path."""
     r_client = _redis_client()
     pick_number = payload.pick_number
     if pick_number is None:
@@ -316,4 +364,28 @@ def resume_draft(payload: DraftPauseRequest):
         pick_number = int(board["pick_number"])
 
     r_client.delete(f"draft:{payload.league_id}:pause:{pick_number}")
-    return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number}
+
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT team_id, season FROM draft_config WHERE league_id = %s;", (payload.league_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise HTTPException(status_code=400, detail="No draft config stored for this league - POST /v1/draft/config first.")
+            team_id, season = row
+            target = compute_draft_recommendation(cursor, payload.league_id, season, DRAFT_SYNC_WEEK, team_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to recompute draft recommendation on resume for league {payload.league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to recompute draft recommendation: {str(e)}")
+
+    if target is None:
+        return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number, "published": False, "detail": "No feasible recommendation for the current undrafted pool."}
+
+    try:
+        publish_draft_target(team_id, target)
+    except Exception as e:
+        logger.error(f"Failed to publish resumed draft target for league {payload.league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to publish resumed draft target: {str(e)}")
+
+    return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number, "published": True, "player_id": target["player_id"], "name": target["name"]}
