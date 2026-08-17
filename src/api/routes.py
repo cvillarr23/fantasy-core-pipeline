@@ -81,16 +81,23 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         # 2. Declare and enforce durable queue settings matching the infrastructure layer
         channel.queue_declare(queue="lineup_updates", durable=True)
 
-        # 3. Serialize our structured Pydantic body, stamped with a correlation ID, into a compact system string mapping
-        message_body = json.dumps({"tracking_id": tracking_id, **payload.model_dump()})
-
-        # W3C trace context, separate from tracking_id above: tracking_id stays the
+        # W3C trace context, separate from tracking_id below: tracking_id stays the
         # human/log-facing correlation UUID already returned to callers; traceparent is
         # the machine-facing OTel context so fantasy-browser-worker's eventual consumer
         # span (WORKER-09) can link back into this same trace instead of starting a
-        # disconnected one.
+        # disconnected one. Per #26's spec this rides in the AMQP JSON body itself
+        # (alongside tracking_id), not only in AMQP message properties, so a consumer
+        # that only parses the body - not pika headers - can still recover it.
         carrier: dict = {}
         propagate.inject(carrier)
+
+        # 3. Serialize our structured Pydantic body, stamped with a correlation ID and
+        # trace context, into a compact system string mapping
+        message_body = json.dumps({
+            "tracking_id": tracking_id,
+            "traceparent": carrier.get("traceparent"),
+            **payload.model_dump(),
+        })
 
         # 4. Publish message with high persistence markers to survive unexpected broker reboots
         channel.basic_publish(
@@ -133,10 +140,14 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
 
         channel.queue_declare(queue="draft_targets", durable=True)
 
-        message_body = json.dumps({"tracking_id": tracking_id, **payload.model_dump()})
-
         carrier: dict = {}
         propagate.inject(carrier)
+
+        message_body = json.dumps({
+            "tracking_id": tracking_id,
+            "traceparent": carrier.get("traceparent"),
+            **payload.model_dump(),
+        })
 
         channel.basic_publish(
             exchange="",

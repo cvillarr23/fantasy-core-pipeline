@@ -63,10 +63,18 @@ class TraceIdLogFilter(logging.Filter):
 
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s [trace_id=%(trace_id)s] %(name)s: %(message)s"
+_logging_configured = False
 
 
 def configure_trace_logging() -> None:
     """Attaches TraceIdLogFilter and a trace_id-aware format to the root logger's handlers.
+
+    Idempotent, same as configure_tracing() above: several modules in this repo call this
+    at their own import time (e.g. draft_matrix.py imports vorp_matrix.py, which calls
+    this itself, then draft_matrix.py's own module body calls it again) - without a guard,
+    every such call would re-run setFormatter()/addFilter() on the same handler(s), piling
+    up duplicate TraceIdLogFilter instances that each redundantly recompute the same
+    current-span lookup per log record.
 
     Every entrypoint in this repo imports src.database at some point, which itself calls
     logging.basicConfig() with no format at import time - since basicConfig() is a no-op
@@ -83,6 +91,10 @@ def configure_trace_logging() -> None:
     this repo is a child of root, a root-Logger-level filter would silently never fire
     and every formatted record would KeyError on %(trace_id)s.
     """
+    global _logging_configured
+    if _logging_configured:
+        return
+
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     if not root.handlers:
@@ -90,3 +102,4 @@ def configure_trace_logging() -> None:
     for handler in root.handlers:
         handler.setFormatter(logging.Formatter(_LOG_FORMAT))
         handler.addFilter(TraceIdLogFilter())
+    _logging_configured = True
