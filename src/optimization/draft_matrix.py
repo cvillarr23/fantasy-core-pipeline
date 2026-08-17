@@ -303,7 +303,13 @@ def publish_draft_target(team_id: str, target: dict) -> None:
 
     response = requests.post(
         f"{CORE_API_BASE_URL}/v1/trigger/draft-pick",
-        json={"team_id": team_id, "player_id": target["player_id"], "name": target["name"]},
+        json={
+            "team_id": team_id,
+            "player_id": target["player_id"],
+            "name": target["name"],
+            "position": target["position"],
+            "pro_team": target["team"],
+        },
         headers=headers,
         timeout=10,
     )

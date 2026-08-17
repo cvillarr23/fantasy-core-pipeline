@@ -16,8 +16,8 @@ LEAGUE_CONFIG = {
 }
 
 
-def _player(pid, position, vorp_score, name=None):
-    return {"player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score}
+def _player(pid, position, vorp_score, name=None, team="KC"):
+    return {"player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score, "team": team}
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +275,13 @@ def test_publish_draft_target_posts_expected_payload():
 
     url, kwargs = mock_post.call_args[0], mock_post.call_args[1]
     assert url[0] == f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
-    assert kwargs["json"] == {"team_id": "7", "player_id": "p1", "name": "Some Back"}
+    assert kwargs["json"] == {
+        "team_id": "7",
+        "player_id": "p1",
+        "name": "Some Back",
+        "position": "RB",
+        "pro_team": "KC",
+    }
 
 
 # ---------------------------------------------------------------------------
