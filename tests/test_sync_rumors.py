@@ -13,6 +13,7 @@ class _FakeEntry(dict):
 
 def test_normalize_rotowire_item_maps_fields():
     entry = _FakeEntry({
+        "id": "rotowire-12345",
         "guid": "rotowire-12345",
         "title": "Christian McCaffrey (knee) questionable for Sunday",
         "summary": "McCaffrey was limited in practice.",
@@ -29,7 +30,23 @@ def test_normalize_rotowire_item_maps_fields():
     assert result["published_at"].year == 2026
 
 
-def test_normalize_rotowire_item_falls_back_to_link_when_guid_missing():
+def test_normalize_rotowire_item_prefers_id_over_guid():
+    """feedparser 6.x exposes the RSS <guid> under the `id` key; `guid` is only a
+    best-effort fallback for parser/feed variants that don't set `id`."""
+    entry = _FakeEntry({
+        "id": "nfl634024",
+        "guid": "some-other-value",
+        "title": "Some news",
+        "link": "https://www.rotowire.com/football/news/999",
+        "published_parsed": None,
+    })
+
+    result = sync_rumors.normalize_rotowire_item(entry)
+
+    assert result["source_item_id"] == "nfl634024"
+
+
+def test_normalize_rotowire_item_falls_back_to_link_when_id_and_guid_missing():
     entry = _FakeEntry({
         "title": "Some news",
         "link": "https://www.rotowire.com/football/news/999",
@@ -42,46 +59,9 @@ def test_normalize_rotowire_item_falls_back_to_link_when_guid_missing():
     assert result["published_at"] is None
 
 
-def test_normalize_reddit_item_maps_fields():
-    post = {
-        "name": "t3_abc123",
-        "title": "Beat writer: RB1 expected to play Sunday",
-        "selftext": "Source says he's a full go.",
-        "permalink": "/r/fantasyfootball/comments/abc123/rb1_update/",
-        "created_utc": 1755280800.0,
-    }
-
-    result = sync_rumors.normalize_reddit_item(post)
-
-    assert result["source_item_id"] == "t3_abc123"
-    assert "RB1 expected to play" in result["raw_text"]
-    assert "full go" in result["raw_text"]
-    assert result["url"] == "https://reddit.com/r/fantasyfootball/comments/abc123/rb1_update/"
-    assert result["published_at"] is not None
-
-
 def test_fetch_rotowire_rss_soft_fails_after_retries():
     with patch("src.ingestion.sync_rumors.requests.get", side_effect=requests.RequestException("boom")):
         result = sync_rumors.fetch_rotowire_rss()
-
-    assert result == []
-
-
-def test_fetch_reddit_new_sets_user_agent_header():
-    mock_response = MagicMock()
-    mock_response.json.return_value = {"data": {"children": []}}
-
-    with patch("src.ingestion.sync_rumors.requests.get", return_value=mock_response) as mock_get:
-        sync_rumors.fetch_reddit_new()
-
-    headers = mock_get.call_args.kwargs["headers"]
-    assert "User-Agent" in headers
-    assert headers["User-Agent"] != ""
-
-
-def test_fetch_reddit_new_soft_fails_after_retries():
-    with patch("src.ingestion.sync_rumors.requests.get", side_effect=requests.RequestException("boom")):
-        result = sync_rumors.fetch_reddit_new()
 
     assert result == []
 
@@ -171,25 +151,42 @@ def test_sync_rumors_skips_when_lock_held():
     mock_redis_instance.set.return_value = None  # NX failed: lock already held
 
     with patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
-         patch("src.ingestion.sync_rumors.fetch_rotowire_rss") as mock_fetch_rss, \
-         patch("src.ingestion.sync_rumors.fetch_reddit_new") as mock_fetch_reddit:
+         patch("src.ingestion.sync_rumors.fetch_rotowire_rss") as mock_fetch_rss:
         sync_rumors.sync_rumors(force=False)
 
     mock_fetch_rss.assert_not_called()
-    mock_fetch_reddit.assert_not_called()
 
 
-def test_sync_rumors_continues_when_one_source_fails():
+def test_sync_rumors_soft_fails_when_source_raises():
     mock_redis_instance = MagicMock()
     mock_redis_instance.set.return_value = True
 
-    reddit_item = {
-        "name": "t3_abc123",
+    with patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.fetch_rotowire_rss", side_effect=Exception("rss down")), \
+         patch("src.ingestion.sync_rumors.get_db_connection") as mock_get_conn, \
+         patch("src.ingestion.sync_rumors.persist_signals") as mock_persist:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+
+        sync_rumors.sync_rumors(force=True)  # should not raise
+
+    mock_persist.assert_called_once_with(mock_conn, [])
+    mock_redis_instance.set.assert_called()  # lock acquire + mark_synced
+
+
+def test_sync_rumors_matches_and_persists_fetched_items():
+    mock_redis_instance = MagicMock()
+    mock_redis_instance.set.return_value = True
+
+    rss_entry = _FakeEntry({
+        "id": "nfl634024",
         "title": "Christian McCaffrey full participant in practice",
-        "selftext": "",
-        "permalink": "/r/fantasyfootball/comments/abc123/",
-        "created_utc": 1755280800.0,
-    }
+        "link": "https://www.rotowire.com/football/news/1",
+        "published_parsed": None,
+    })
 
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
@@ -197,8 +194,7 @@ def test_sync_rumors_continues_when_one_source_fails():
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
-         patch("src.ingestion.sync_rumors.fetch_rotowire_rss", side_effect=Exception("rss down")), \
-         patch("src.ingestion.sync_rumors.fetch_reddit_new", return_value=[reddit_item]), \
+         patch("src.ingestion.sync_rumors.fetch_rotowire_rss", return_value=[rss_entry]), \
          patch("src.ingestion.sync_rumors.get_db_connection") as mock_get_conn, \
          patch("src.ingestion.sync_rumors.persist_signals") as mock_persist:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
@@ -208,6 +204,6 @@ def test_sync_rumors_continues_when_one_source_fails():
     mock_persist.assert_called_once()
     persisted_rows = mock_persist.call_args.args[1]
     assert len(persisted_rows) == 1
-    assert persisted_rows[0]["source"] == "reddit_fantasyfootball"
+    assert persisted_rows[0]["source"] == "rotowire_rss"
     assert persisted_rows[0]["player_id"] == "4046"
     mock_redis_instance.set.assert_called()  # lock acquire + mark_synced

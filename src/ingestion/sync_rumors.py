@@ -1,7 +1,7 @@
 """
-Polls a small, fixed set of trusted free news/rumor sources (RotoWire's NFL news RSS feed
-and r/fantasyfootball's public JSON feed), fuzzy-matches each item to a `players` row, and
-persists the raw text + source + timestamp + matched player id to `raw_signals`.
+Polls a small, fixed set of trusted free news/rumor sources (currently just RotoWire's NFL
+news RSS feed), fuzzy-matches each item to a `players` row, and persists the raw text +
+source + timestamp + matched player id to `raw_signals`.
 
 Deliberately deterministic, fetch-normalize-store only - no sentiment/confidence
 interpretation happens here (that's a downstream LLM concern, WORKER-13 in
@@ -9,6 +9,11 @@ fantasy-browser-worker). Has no "must run after X" ordering dependency on the re
 pipeline, but does depend on `players` already being populated by `sync_players` for
 matching to be useful - an empty player table just means every item goes unmatched, not a
 crash.
+
+r/fantasyfootball was originally planned as a second source, but its unauthenticated
+`.json` endpoint returns HTTP 403 (Reddit disabled anonymous listing access) - adding it
+properly needs an OAuth client against oauth.reddit.com plus a quality/relevance filter to
+avoid flooding `raw_signals` with low-effort posts, tracked as a follow-up (CORE-14, #38).
 """
 import hashlib
 import logging
@@ -30,8 +35,6 @@ REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 ROTOWIRE_NEWS_RSS_URL = "https://www.rotowire.com/rss/news.php?sport=NFL"
-REDDIT_FANTASYFOOTBALL_URL = "https://www.reddit.com/r/fantasyfootball/new.json"
-REDDIT_USER_AGENT = "fantasy-core-pipeline/1.0 (CORE-13 rumor ingestion)"
 
 SYNC_LOCK_KEY = "rumors:sync:last_run"
 SYNC_LOCK_TTL_SECONDS = 15 * 60
@@ -63,53 +66,23 @@ def fetch_rotowire_rss() -> list:
     return []
 
 
-def fetch_reddit_new() -> list:
-    """Fetches recent posts from r/fantasyfootball's public JSON feed, retrying on failure."""
-    last_error = None
-    for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
-        try:
-            logger.info(f"Fetching r/fantasyfootball new posts (attempt {attempt}/{FETCH_RETRY_ATTEMPTS})...")
-            response = requests.get(
-                REDDIT_FANTASYFOOTBALL_URL,
-                headers={"User-Agent": REDDIT_USER_AGENT},
-                timeout=(FETCH_CONNECT_TIMEOUT_SECONDS, FETCH_READ_TIMEOUT_SECONDS),
-            )
-            response.raise_for_status()
-            payload = response.json()
-            return [child["data"] for child in payload.get("data", {}).get("children", [])]
-        except requests.RequestException as e:
-            last_error = e
-            logger.warning(f"Reddit fetch attempt {attempt} failed: {e}")
-    logger.error(f"Exhausted all {FETCH_RETRY_ATTEMPTS} attempts fetching r/fantasyfootball; skipping this source.")
-    return []
-
-
 def normalize_rotowire_item(entry) -> dict:
-    """Maps a feedparser RSS entry to the common intermediate shape."""
+    """
+    Maps a feedparser RSS entry to the common intermediate shape. Reads `id` first, not
+    `guid` - feedparser 6.x's FeedParserDict aliases "guid" to "id" internally for plain
+    attribute/`.get()` access, but reading `id` directly is the documented, literal key
+    (visible in `entry.keys()`) rather than relying on that alias, so this doesn't silently
+    break if a future feedparser version drops the alias. `guid` is kept as a fallback for
+    any parser/feed variant that doesn't expose `id`.
+    """
     published_at = None
     published_parsed = entry.get("published_parsed")
     if published_parsed:
         published_at = datetime(*published_parsed[:6], tzinfo=timezone.utc)
     return {
-        "source_item_id": entry.get("guid") or entry.get("link"),
+        "source_item_id": entry.get("id") or entry.get("guid") or entry.get("link"),
         "raw_text": entry.get("title", "") + (f" - {entry.get('summary', '')}" if entry.get("summary") else ""),
         "url": entry.get("link"),
-        "published_at": published_at,
-    }
-
-
-def normalize_reddit_item(post: dict) -> dict:
-    """Maps a reddit post's `data` payload to the common intermediate shape."""
-    published_at = None
-    if post.get("created_utc") is not None:
-        published_at = datetime.fromtimestamp(post["created_utc"], tz=timezone.utc)
-    raw_text = post.get("title", "")
-    if post.get("selftext"):
-        raw_text += f" - {post['selftext']}"
-    return {
-        "source_item_id": post.get("name"),
-        "raw_text": raw_text,
-        "url": f"https://reddit.com{post['permalink']}" if post.get("permalink") else post.get("url"),
         "published_at": published_at,
     }
 
@@ -118,13 +91,15 @@ def _sources():
     """
     Looks up the fetch/normalize functions by module-global name at call time (rather
     than binding them into a module-level constant at import time) so tests can
-    `patch("src.ingestion.sync_rumors.fetch_reddit_new", ...)` and have sync_rumors()
+    `patch("src.ingestion.sync_rumors.fetch_rotowire_rss", ...)` and have sync_rumors()
     actually see the patched version - a tuple of direct function references captured at
     import time would still hold the original, unpatched functions.
+
+    Only one source for now - see the module docstring for why r/fantasyfootball was
+    dropped (CORE-14, #38 tracks adding it back via OAuth).
     """
     return [
         ("rotowire_rss", fetch_rotowire_rss, normalize_rotowire_item),
-        ("reddit_fantasyfootball", fetch_reddit_new, normalize_reddit_item),
     ]
 
 
