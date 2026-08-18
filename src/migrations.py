@@ -17,6 +17,7 @@ from src.models import (
     CREATE_DRAFT_PICKS_TABLE,
     CREATE_DRAFT_CONFIG_TABLE,
     CREATE_DRAFT_SLOTS_TABLE,
+    CREATE_RAW_SIGNALS_TABLE,
     CREATE_INDICES
 )
 
@@ -82,6 +83,10 @@ def run_migrations():
             logger.info("Validating 'draft_config' and 'draft_slots' control plane tables...")
             cursor.execute(CREATE_DRAFT_CONFIG_TABLE)
             cursor.execute(CREATE_DRAFT_SLOTS_TABLE)
+
+            # 4d. Execute news/rumor ingestion ledger (CORE-13)
+            logger.info("Validating 'raw_signals' news/rumor ingestion ledger...")
+            cursor.execute(CREATE_RAW_SIGNALS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
