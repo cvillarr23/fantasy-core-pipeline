@@ -18,6 +18,7 @@ from src.models import (
     CREATE_DRAFT_CONFIG_TABLE,
     CREATE_DRAFT_SLOTS_TABLE,
     CREATE_RAW_SIGNALS_TABLE,
+    CREATE_LLM_CALL_METRICS_TABLE,
     CREATE_INDICES
 )
 
@@ -87,6 +88,10 @@ def run_migrations():
             # 4d. Execute news/rumor ingestion ledger (CORE-13)
             logger.info("Validating 'raw_signals' news/rumor ingestion ledger...")
             cursor.execute(CREATE_RAW_SIGNALS_TABLE)
+
+            # 4e. Execute LLM provider-call metrics ledger (WORKER-12)
+            logger.info("Validating 'llm_call_metrics' provider-call ledger...")
+            cursor.execute(CREATE_LLM_CALL_METRICS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
