@@ -231,6 +231,29 @@ CREATE TABLE IF NOT EXISTS draft_slots (
 );
 """
 
+# One row per polled news/rumor item (CORE-13), deliberately schema-free of any
+# sentiment/confidence interpretation - that's a downstream LLM concern (WORKER-13), not
+# this ingestion layer's job. player_id uses ON DELETE SET NULL (not CASCADE, unlike
+# draft_picks) because a signal row is ingestion history that must survive even if the
+# matched player row is later removed. Dedup is enforced via UNIQUE(source,
+# source_item_id) - the source's own native item ID (RSS guid, reddit fullname), not
+# content_hash, since that's kept only as a secondary audit field.
+CREATE_RAW_SIGNALS_TABLE = """
+CREATE TABLE IF NOT EXISTS raw_signals (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(30) NOT NULL,
+    source_item_id VARCHAR(255) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    raw_text TEXT NOT NULL,
+    url VARCHAR(500),
+    published_at TIMESTAMP,
+    player_id VARCHAR(50) REFERENCES players(player_id) ON DELETE SET NULL,
+    match_confidence REAL,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source, source_item_id)
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
@@ -240,5 +263,7 @@ CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
 CREATE INDEX IF NOT EXISTS idx_execution_log_executed_at ON execution_log(executed_at);
 CREATE INDEX IF NOT EXISTS idx_draft_picks_league_season ON draft_picks(league_id, season);
 CREATE INDEX IF NOT EXISTS idx_draft_slots_league_season ON draft_slots(league_id, season);
+CREATE INDEX IF NOT EXISTS idx_raw_signals_player_id ON raw_signals(player_id);
+CREATE INDEX IF NOT EXISTS idx_raw_signals_ingested_at ON raw_signals(ingested_at);
 """
 
