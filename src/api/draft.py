@@ -81,6 +81,8 @@ class DraftPickSummary(BaseModel):
     round: Optional[int]
     team_id: str
     player_id: str
+    name: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
+    position: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
 
 
 class DraftStatusResponse(BaseModel):
@@ -125,19 +127,34 @@ def _job_state(league_id: str) -> str:
 
 
 def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
-    return r_client.hgetall(f"draft:{league_id}:board") or {}
+    """top_candidates rides the board hash as a JSON string (redis hashes are flat
+    string->string) - decode it back into a real list here so API consumers get actual
+    JSON, not a JSON-encoded string inside JSON."""
+    board = r_client.hgetall(f"draft:{league_id}:board") or {}
+    if "top_candidates" in board:
+        try:
+            board["top_candidates"] = json.loads(board["top_candidates"])
+        except (TypeError, ValueError):
+            logger.error(f"Malformed top_candidates JSON on draft:{league_id}:board; dropping it.")
+            board["top_candidates"] = []
+    return board
 
 
 def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
+    """Left-joins players so the pick feed can render name/position without a separate
+    per-pick lookup - LEFT JOIN (not INNER) so a pick still shows up even if its player
+    row is somehow missing, just with name/position null rather than the whole pick
+    vanishing from the feed."""
     cursor.execute("""
-        SELECT pick_number, round, team_id, player_id
-        FROM draft_picks
-        WHERE league_id = %s AND season = %s
-        ORDER BY pick_number DESC
+        SELECT d.pick_number, d.round, d.team_id, d.player_id, p.name, p.position
+        FROM draft_picks d
+        LEFT JOIN players p ON d.player_id = p.player_id
+        WHERE d.league_id = %s AND d.season = %s
+        ORDER BY d.pick_number DESC
         LIMIT %s;
     """, (league_id, season, limit))
     return [
-        {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3]}
+        {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3], "name": row[4], "position": row[5]}
         for row in cursor.fetchall()
     ]
 

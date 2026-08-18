@@ -1,3 +1,4 @@
+import json
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -175,8 +176,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
     mock_cursor.execute.side_effect = _execute
 
     def _fetchall():
-        if "draft_picks" in mock_cursor.last_query and "SELECT pick_number" in mock_cursor.last_query:
-            return [(2, 1, "3", "p1"), (1, 1, "9", "p0")]
+        if "draft_picks" in mock_cursor.last_query and "SELECT d.pick_number" in mock_cursor.last_query:
+            return [(2, 1, "3", "p1", "Player One", "RB"), (1, 1, "9", "p0", "Player Zero", "WR")]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
         return []
@@ -205,7 +206,49 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert body["last_clicker_action"] is None
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert len(body["recent_picks"]) == 2
+    assert body["recent_picks"][0]["name"] == "Player One"
+    assert body["recent_picks"][0]["position"] == "RB"
     assert body["pipeline_health"] == "healthy"
+
+
+def test_get_draft_status_decodes_top_candidates_json(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    candidates = [{"player_id": "p2", "name": "Best Back", "position": "RB", "vorp_score": 10.0, "team": "KC"}]
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {
+        "recommended_player_id": "p2",
+        "recommended_name": "Best Back",
+        "pick_number": "3",
+        "top_candidates": json.dumps(candidates),
+    }
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._job_state", return_value="Active"):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["recommendation"]["top_candidates"] == candidates
+
+
+def test_get_draft_status_handles_malformed_top_candidates_json(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "top_candidates": "not-json"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._job_state", return_value="Active"):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["recommendation"]["top_candidates"] == []
 
 
 def test_get_draft_status_degraded_when_job_not_active(client):
