@@ -174,6 +174,18 @@ CREATE TABLE IF NOT EXISTS execution_log (
 );
 """
 
+# Backfills bot_name/trace_id on execution_log tables created before these columns existed.
+# bot_name gives fantasy-browser-worker's non-queue entrypoints (draft_sync, check_espn_session)
+# a real identity instead of a null/awkward transaction_type. trace_id lets a Grafana panel row
+# built from this table jump straight into the matching Tempo trace.
+ADD_EXECUTION_LOG_BOT_NAME_COLUMN = """
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS bot_name VARCHAR(50);
+"""
+
+ADD_EXECUTION_LOG_TRACE_ID_COLUMN = """
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32);
+"""
+
 # One row per live draft pick (CORE-08), sourced from fantasy-browser-worker's
 # draft_picks:{leagueId} Redis Stream. Durable local mirror of draft state so the
 # real-time listener can resume the undrafted pool after a restart mid-draft instead of
