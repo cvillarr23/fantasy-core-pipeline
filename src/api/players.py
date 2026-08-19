@@ -57,7 +57,7 @@ def _recent_news(cursor, player_id: str, limit: int) -> list:
         LIMIT %s;
     """, (player_id, limit))
     return [
-        {"source": row[0], "raw_text": row[1], "url": row[2], "published_at": row[3]}
+        {"source": row[0], "raw_text": row[1], "url": row[2], "published_at": row[3].isoformat() if row[3] else None}
         for row in cursor.fetchall()
     ]
 

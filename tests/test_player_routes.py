@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 
@@ -11,7 +12,7 @@ def test_get_player_summary_success(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", "Questionable")
     mock_cursor.fetchall.return_value = [
-        ("rotowire", "Some Back is questionable for Sunday.", "https://example.com/1", "2026-08-17T12:00:00"),
+        ("rotowire", "Some Back is questionable for Sunday.", "https://example.com/1", datetime(2026, 8, 17, 12, 0, 0)),
     ]
 
     with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
@@ -24,6 +25,23 @@ def test_get_player_summary_success(client):
     assert body["injury_status"] == "Questionable"
     assert len(body["recent_news"]) == 1
     assert body["recent_news"][0]["source"] == "rotowire"
+
+
+def test_get_player_summary_serializes_real_datetime_published_at(client):
+    """published_at comes back from psycopg2 as a real datetime for a TIMESTAMP column, not
+    a string - a raw datetime object passed straight through would fail FastAPI's Pydantic
+    response validation (str field) and turn this endpoint into a 500."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None)
+    mock_cursor.fetchall.return_value = [
+        ("rotowire", "Some Back looked good in practice.", None, datetime(2026, 8, 17, 12, 0, 0)),
+    ]
+
+    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        response = client.get("/v1/players/p1/summary")
+
+    assert response.status_code == 200
+    assert response.json()["recent_news"][0]["published_at"] == "2026-08-17T12:00:00"
 
 
 def test_get_player_summary_unknown_player_returns_404(client):

@@ -174,6 +174,19 @@ def test_rank_recommended_targets_empty_selection_returns_empty_list():
     assert dm.rank_recommended_targets([], starting_needs={}) == []
 
 
+def test_rank_recommended_targets_fills_remaining_slots_with_best_available():
+    """A single starter-needed candidate must not truncate the ranked list to just that one
+    player when limit=5 and other selected candidates exist - the comparison panel needs
+    real alternatives, not an artificially short list."""
+    selected = [
+        _player("rb1", "RB", 20.0), _player("wr1", "WR", 15.0), _player("wr2", "WR", 14.0),
+        _player("te1", "TE", 12.0), _player("qb1", "QB", 10.0),
+    ]
+    # Only RB is still an open starting need; everything else is already filled.
+    ranked = dm.rank_recommended_targets(selected, starting_needs={"RB": 1, "WR": 0, "TE": 0, "QB": 0}, limit=5)
+    assert [p["player_id"] for p in ranked] == ["rb1", "wr1", "wr2", "te1", "qb1"]
+
+
 # ---------------------------------------------------------------------------
 # load_undrafted_pool / load_team_position_counts / persist_draft_pick (query shape)
 # ---------------------------------------------------------------------------

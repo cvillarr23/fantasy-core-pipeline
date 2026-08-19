@@ -235,14 +235,27 @@ def build_and_solve_draft_pick(undrafted_pool: list, position_caps: dict, remain
 def rank_recommended_targets(selected: list, starting_needs: dict, limit: int = TOP_CANDIDATES_LIMIT) -> list:
     """Ranks the ILP's selected set the same way select_recommended_target picks its single
     winner - starting-need players first (a positional run making that tier disappear is
-    already captured by scarcity_multiplier), falling back to best-player-available across
-    the whole selected set once every starting need is filled - but returns up to `limit`
-    ranked candidates instead of only the top one, for CORE-14's web UI comparison panel."""
+    already captured by scarcity_multiplier) - but, unlike the single-winner case, does not
+    drop the rest of the selected set once at least one starter-needed candidate exists:
+    best-available fills out the remainder of `limit` behind them, so a comparison list of
+    fewer than `limit` starter-needed players still shows real alternatives instead of
+    truncating early. select_recommended_target's own single-winner behavior is unaffected -
+    it only ever looks at index 0, which is unchanged (still the top starter-needed pick, or
+    the single best-available if none are needed)."""
     if not selected:
         return []
-    starter_needed = [p for p in selected if starting_needs.get(p["position"], 0) > 0]
-    pool = starter_needed or selected
-    return sorted(pool, key=lambda p: p["vorp_score"], reverse=True)[:limit]
+    starter_needed = sorted(
+        (p for p in selected if starting_needs.get(p["position"], 0) > 0),
+        key=lambda p: p["vorp_score"], reverse=True,
+    )
+    if not starter_needed:
+        return sorted(selected, key=lambda p: p["vorp_score"], reverse=True)[:limit]
+    starter_needed_ids = {p["player_id"] for p in starter_needed}
+    best_available = sorted(
+        (p for p in selected if p["player_id"] not in starter_needed_ids),
+        key=lambda p: p["vorp_score"], reverse=True,
+    )
+    return (starter_needed + best_available)[:limit]
 
 
 def select_recommended_target(selected: list, starting_needs: dict) -> Optional[dict]:
