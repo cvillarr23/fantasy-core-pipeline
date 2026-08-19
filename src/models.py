@@ -254,6 +254,28 @@ CREATE TABLE IF NOT EXISTS raw_signals (
 );
 """
 
+# One row per LLM provider-call attempt (WORKER-12), not just the winning attempt -- a
+# fallback chain that tried and failed against groq before succeeding on gemini needs both
+# rows for CORE-14's success/failure-rate and fallback-frequency panels to mean anything.
+# error_type distinguishes a real/local rate limit from an ordinary request failure so those
+# can be charted separately; fallback_triggered is just attempt_number > 1, stored directly
+# rather than derived, so a panel can filter on it without a self-join back to attempt 1.
+CREATE_LLM_CALL_METRICS_TABLE = """
+CREATE TABLE IF NOT EXISTS llm_call_metrics (
+    id SERIAL PRIMARY KEY,
+    provider VARCHAR(30) NOT NULL,
+    model VARCHAR(100) NOT NULL,
+    call_site VARCHAR(50),
+    attempt_number INT NOT NULL,
+    success BOOLEAN NOT NULL,
+    latency_ms INTEGER,
+    error_type VARCHAR(50),
+    fallback_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+    trace_id VARCHAR(32),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
@@ -265,5 +287,7 @@ CREATE INDEX IF NOT EXISTS idx_draft_picks_league_season ON draft_picks(league_i
 CREATE INDEX IF NOT EXISTS idx_draft_slots_league_season ON draft_slots(league_id, season);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_player_id ON raw_signals(player_id);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_ingested_at ON raw_signals(ingested_at);
+CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_created_at ON llm_call_metrics(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_provider ON llm_call_metrics(provider, model);
 """
 
