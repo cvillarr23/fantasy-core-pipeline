@@ -16,6 +16,7 @@ undrafted pool for the rest of the draft, whereas a Stream can be resumed from t
 acked ID after a crash/restart.
 """
 import argparse
+import json
 import logging
 import os
 import threading
@@ -58,6 +59,9 @@ CONSUMER_GROUP = "draft_matrix"
 DEFAULT_ROSTER_SIZE = 16
 DEFAULT_AUTO_DRAFT_DELAY_SECONDS = 8
 PAUSE_POLL_INTERVAL_SECONDS = 1
+# CORE-14 web UI wants to show the system's top-N alternatives, not just the one it would
+# auto-draft - see rank_recommended_targets/compute_draft_recommendation_candidates.
+TOP_CANDIDATES_LIMIT = 5
 
 
 # ------------------------------------------------------------------------------
@@ -228,17 +232,37 @@ def build_and_solve_draft_pick(undrafted_pool: list, position_caps: dict, remain
     return [by_id[pid] for pid, var in player_vars.items() if var.varValue == 1.0]
 
 
-def select_recommended_target(selected: list, starting_needs: dict) -> Optional[dict]:
-    """The ILP's selected set is "the ideal remaining team from here" - the single actual
-    pick recommendation is the highest-vorp_score player in that set at a position where
-    we still have an open *starting* slot (a positional run making that tier disappear is
-    exactly what scarcity_multiplier already captures), falling back to best-player-
-    available across the whole selected set once every starting need is filled."""
+def rank_recommended_targets(selected: list, starting_needs: dict, limit: int = TOP_CANDIDATES_LIMIT) -> list:
+    """Ranks the ILP's selected set the same way select_recommended_target picks its single
+    winner - starting-need players first (a positional run making that tier disappear is
+    already captured by scarcity_multiplier) - but, unlike the single-winner case, does not
+    drop the rest of the selected set once at least one starter-needed candidate exists:
+    best-available fills out the remainder of `limit` behind them, so a comparison list of
+    fewer than `limit` starter-needed players still shows real alternatives instead of
+    truncating early. select_recommended_target's own single-winner behavior is unaffected -
+    it only ever looks at index 0, which is unchanged (still the top starter-needed pick, or
+    the single best-available if none are needed)."""
     if not selected:
-        return None
-    starter_needed = [p for p in selected if starting_needs.get(p["position"], 0) > 0]
-    pool = starter_needed or selected
-    return max(pool, key=lambda p: p["vorp_score"])
+        return []
+    starter_needed = sorted(
+        (p for p in selected if starting_needs.get(p["position"], 0) > 0),
+        key=lambda p: p["vorp_score"], reverse=True,
+    )
+    if not starter_needed:
+        return sorted(selected, key=lambda p: p["vorp_score"], reverse=True)[:limit]
+    starter_needed_ids = {p["player_id"] for p in starter_needed}
+    best_available = sorted(
+        (p for p in selected if p["player_id"] not in starter_needed_ids),
+        key=lambda p: p["vorp_score"], reverse=True,
+    )
+    return (starter_needed + best_available)[:limit]
+
+
+def select_recommended_target(selected: list, starting_needs: dict) -> Optional[dict]:
+    """The single actual pick recommendation: the top of rank_recommended_targets'
+    ranking, limited to just the winner."""
+    ranked = rank_recommended_targets(selected, starting_needs, limit=1)
+    return ranked[0] if ranked else None
 
 
 # ------------------------------------------------------------------------------
@@ -376,14 +400,15 @@ def hold_and_publish(
 # ------------------------------------------------------------------------------
 # Orchestration
 # ------------------------------------------------------------------------------
-def compute_draft_recommendation(cursor, league_id: str, season: int, week: int, team_id: str) -> Optional[dict]:
-    """One full recompute pass: undrafted pool -> scarcity VORP -> ILP -> recommended
-    target. Returns None if the pool is empty or no feasible selection exists."""
+def compute_draft_recommendation_candidates(cursor, league_id: str, season: int, week: int, team_id: str, limit: int = TOP_CANDIDATES_LIMIT) -> list:
+    """One full recompute pass: undrafted pool -> scarcity VORP -> ILP -> up to `limit`
+    ranked recommended targets. Returns [] if the pool is empty or no feasible selection
+    exists."""
     league_config = load_league_config(cursor)
     pool_df = load_undrafted_pool(cursor, league_id, season, week)
     pool_df = recompute_scarcity_vorp(pool_df, league_config)
     if pool_df.is_empty():
-        return None
+        return []
 
     drafted_by_us = load_team_position_counts(cursor, league_id, season, team_id)
     position_caps, starting_needs = compute_position_caps(league_config, drafted_by_us)
@@ -395,7 +420,14 @@ def compute_draft_recommendation(cursor, league_id: str, season: int, week: int,
         for r in pool_df.iter_rows(named=True)
     ]
     selected = build_and_solve_draft_pick(undrafted_pool, position_caps, remaining_picks)
-    return select_recommended_target(selected, starting_needs)
+    return rank_recommended_targets(selected, starting_needs, limit)
+
+
+def compute_draft_recommendation(cursor, league_id: str, season: int, week: int, team_id: str) -> Optional[dict]:
+    """Single-target convenience wrapper around compute_draft_recommendation_candidates,
+    used by callers (e.g. /v1/draft/resume) that only need the one winning pick."""
+    candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, team_id, limit=1)
+    return candidates[0] if candidates else None
 
 
 def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team_id: str, event: dict) -> Optional[tuple]:
@@ -442,17 +474,22 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
             with conn.cursor() as cursor:
-                target = compute_draft_recommendation(cursor, league_id, season, week, our_team_id)
+                candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, our_team_id)
 
-        if target is None:
+        if not candidates:
             logger.info("No feasible draft recommendation for the current undrafted pool.")
             return None
 
+        target = candidates[0]
         next_pick_number = int(event["pick_number"]) + 1
         r_client.hset(f"draft:{league_id}:board", mapping={
             "recommended_player_id": target["player_id"],
             "recommended_name": target["name"],
             "pick_number": next_pick_number,
+            # CORE-14 web UI's comparison panel wants the full ranked list, not just the
+            # winner - redis hashes are flat string->string, so the ranked candidates ride
+            # as a JSON-encoded field rather than their own set of hash keys.
+            "top_candidates": json.dumps(candidates),
         })
         return target, next_pick_number
 

@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -150,6 +151,40 @@ def test_select_recommended_target_falls_back_to_best_available():
 
 def test_select_recommended_target_empty_selection_returns_none():
     assert dm.select_recommended_target([], starting_needs={}) is None
+
+
+# ---------------------------------------------------------------------------
+# rank_recommended_targets
+# ---------------------------------------------------------------------------
+
+def test_rank_recommended_targets_orders_by_vorp_desc_within_starter_needed():
+    selected = [_player("rb1", "RB", 5.0), _player("te1", "TE", 20.0), _player("rb2", "RB", 12.0)]
+    ranked = dm.rank_recommended_targets(selected, starting_needs={"RB": 1, "TE": 1}, limit=5)
+    assert [p["player_id"] for p in ranked] == ["te1", "rb2", "rb1"]
+
+
+def test_rank_recommended_targets_respects_limit():
+    selected = [_player(f"p{i}", "RB", float(i)) for i in range(10)]
+    ranked = dm.rank_recommended_targets(selected, starting_needs={"RB": 1}, limit=3)
+    assert len(ranked) == 3
+    assert [p["player_id"] for p in ranked] == ["p9", "p8", "p7"]
+
+
+def test_rank_recommended_targets_empty_selection_returns_empty_list():
+    assert dm.rank_recommended_targets([], starting_needs={}) == []
+
+
+def test_rank_recommended_targets_fills_remaining_slots_with_best_available():
+    """A single starter-needed candidate must not truncate the ranked list to just that one
+    player when limit=5 and other selected candidates exist - the comparison panel needs
+    real alternatives, not an artificially short list."""
+    selected = [
+        _player("rb1", "RB", 20.0), _player("wr1", "WR", 15.0), _player("wr2", "WR", 14.0),
+        _player("te1", "TE", 12.0), _player("qb1", "QB", 10.0),
+    ]
+    # Only RB is still an open starting need; everything else is already filled.
+    ranked = dm.rank_recommended_targets(selected, starting_needs={"RB": 1, "WR": 0, "TE": 0, "QB": 0}, limit=5)
+    assert [p["player_id"] for p in ranked] == ["rb1", "wr1", "wr2", "te1", "qb1"]
 
 
 # ---------------------------------------------------------------------------
@@ -418,9 +453,10 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     mock_client = MagicMock()
     event = {"pick_number": "1", "round": "1", "team_id": "3", "player_id": "p1"}
     target = _player("p2", "RB", 10.0, name="Best Back")
+    runner_up = _player("p3", "WR", 8.0, name="Second Choice")
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.draft_matrix.compute_draft_recommendation", return_value=target):
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[target, runner_up]):
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
@@ -428,6 +464,8 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     mock_client.hset.assert_called_once()
     hset_kwargs = mock_client.hset.call_args.kwargs
     assert hset_kwargs["mapping"]["recommended_player_id"] == "p2"
+    top_candidates = json.loads(hset_kwargs["mapping"]["top_candidates"])
+    assert [c["player_id"] for c in top_candidates] == ["p2", "p3"]
 
 
 def test_handle_pick_event_records_draft_slot_on_round_one_pick():
@@ -452,7 +490,7 @@ def test_handle_pick_event_skips_slot_recording_outside_round_one():
     event = {"pick_number": "12", "round": "2", "team_id": "3", "player_id": "p1"}
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.draft_matrix.compute_draft_recommendation", return_value=None), \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]), \
          patch("src.optimization.draft_matrix.persist_draft_slot") as mock_persist_slot:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
