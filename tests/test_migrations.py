@@ -43,6 +43,28 @@ def test_run_migrations_executes_core05_ddl_in_order():
     assert espn_id_idx < vorp_cols_idx < league_settings_idx < indices_idx
 
 
+def test_run_migrations_executes_llm_call_metrics_ddl_before_indices():
+    """WORKER-12's llm_client.js inserts into llm_call_metrics on every provider-call
+    attempt. A MagicMock cursor would let this table's CREATE statement silently go
+    missing from run_migrations() and still report success, leaving those inserts to
+    fail at runtime with "relation does not exist". Lock in that the table is created,
+    and before CREATE_INDICES (which indexes it), same ordering convention as CORE-05's
+    test above."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    llm_metrics_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "CREATE TABLE IF NOT EXISTS llm_call_metrics" in s
+    )
+    indices_idx = next(i for i, s in enumerate(executed) if "CREATE INDEX" in s)
+    assert llm_metrics_idx < indices_idx
+
+
 def test_run_migrations_raises_when_weekly_stats_pk_migration_was_skipped():
     """
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (a Postgres NOTICE, not an error) if
