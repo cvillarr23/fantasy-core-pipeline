@@ -8,9 +8,11 @@ draft_matrix -> /trigger/draft-pick -> RabbitMQ -> click bot) as an out-of-band 
 observability layer, not part of it.
 
 Two known gaps, both flagged rather than guessed at:
-  - `last_clicker_action` in /status has no data source yet - fantasy-browser-worker's
-    click bot isn't wired to consume `draft_targets` yet (WORKER-06, unshipped elsewhere).
-    Always null here until that ships.
+  - `last_clicker_action` in /status has no data source yet. fantasy-browser-worker's
+    click bot (WORKER-06) has since shipped and does consume `draft_targets`, but nothing
+    in this repo reads back its confirmation (e.g. from `execution_log`) to populate this
+    field - always null here regardless. Tracked as a follow-up alongside #39's
+    execution_log surfacing work, not fixed in this pass.
   - /start's Job image and its DB/Redis/API env config come from required env vars with no
     defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
     this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
@@ -90,7 +92,7 @@ class DraftStatusResponse(BaseModel):
     season: int
     job_state: str = Field(..., description="Active/Succeeded/Failed/Unknown, from the k8s Job's own status")
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
-    last_clicker_action: Optional[str] = Field(None, description="Pending WORKER-06 - fantasy-browser-worker's click bot isn't wired to the draft_targets queue yet, so this is always null today")
+    last_clicker_action: Optional[str] = Field(None, description="Always null today - WORKER-06's click bot has shipped and consumes draft_targets, but nothing here reads its confirmation back yet")
     recent_picks: List[DraftPickSummary]
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known")
     pipeline_health: str = Field(..., description="'healthy' iff the draft-sync Job is Active and Postgres/Redis both respond, else 'degraded'")

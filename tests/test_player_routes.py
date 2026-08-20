@@ -77,3 +77,41 @@ def test_get_player_summary_no_news_returns_empty_list(client):
     assert response.status_code == 200
     assert response.json()["recent_news"] == []
     assert response.json()["injury_status"] is None
+
+
+def test_search_players_success(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [
+        ("p1", "Some Back", "RB", "KC"),
+        ("p2", "Some Backup", "RB", "SF"),
+    ]
+
+    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        response = client.get("/v1/players/search?q=Some")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 2
+    assert body[0]["player_id"] == "p1"
+    assert body[0]["team"] == "KC"
+
+
+def test_search_players_short_query_returns_empty_without_hitting_db(client):
+    with patch("src.api.players.get_db_cursor") as mock_get_cursor:
+        response = client.get("/v1/players/search?q=a")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    mock_get_cursor.assert_not_called()
+
+
+def test_search_players_db_error_returns_500(client):
+    @contextmanager
+    def _broken_cursor():
+        raise Exception("connection refused")
+        yield  # pragma: no cover
+
+    with patch("src.api.players.get_db_cursor", _broken_cursor):
+        response = client.get("/v1/players/search?q=Some")
+
+    assert response.status_code == 500
