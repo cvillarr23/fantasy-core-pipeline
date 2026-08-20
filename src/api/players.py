@@ -44,6 +44,9 @@ class PlayerSearchResult(BaseModel):
     name: str
     position: str
     team: str
+    injury_status: Optional[str] = None
+    vorp_score: Optional[float] = None
+    projected_points: Optional[float] = None
 
 
 SEARCH_RESULT_LIMIT = 20
@@ -82,11 +85,23 @@ def search_players(q: str):
         return []
     try:
         with get_db_cursor() as cursor:
+            # LATERAL pulls each player's single most-recent weekly_stats row (whatever
+            # season/week that happens to be) rather than requiring the caller to know which
+            # season/week is "current" - vorp_score/projected_points are simply null pre-draft
+            # for anyone CORE-05/sync_projections hasn't touched yet, not an error.
             cursor.execute("""
-                SELECT player_id, name, position, team
-                FROM players
-                WHERE name ILIKE %s
-                ORDER BY name
+                SELECT p.player_id, p.name, p.position, p.team, p.injury_status,
+                       w.vorp_score, w.projected_points
+                FROM players p
+                LEFT JOIN LATERAL (
+                    SELECT vorp_score, projected_points
+                    FROM weekly_stats
+                    WHERE player_id = p.player_id
+                    ORDER BY season DESC, week DESC
+                    LIMIT 1
+                ) w ON true
+                WHERE p.name ILIKE %s
+                ORDER BY p.name
                 LIMIT %s;
             """, (f"%{query}%", SEARCH_RESULT_LIMIT))
             rows = cursor.fetchall()
@@ -95,7 +110,10 @@ def search_players(q: str):
         raise HTTPException(status_code=500, detail=f"Failed to search players: {str(e)}")
 
     return [
-        {"player_id": row[0], "name": row[1], "position": row[2], "team": row[3]}
+        {
+            "player_id": row[0], "name": row[1], "position": row[2], "team": row[3],
+            "injury_status": row[4], "vorp_score": row[5], "projected_points": row[6],
+        }
         for row in rows
     ]
 

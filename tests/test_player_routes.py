@@ -82,8 +82,8 @@ def test_get_player_summary_no_news_returns_empty_list(client):
 def test_search_players_success(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("p1", "Some Back", "RB", "KC"),
-        ("p2", "Some Backup", "RB", "SF"),
+        ("p1", "Some Back", "RB", "KC", "Questionable", 12.5, 15.2),
+        ("p2", "Some Backup", "RB", "SF", None, None, None),
     ]
 
     with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
@@ -94,6 +94,10 @@ def test_search_players_success(client):
     assert len(body) == 2
     assert body[0]["player_id"] == "p1"
     assert body[0]["team"] == "KC"
+    assert body[0]["injury_status"] == "Questionable"
+    assert body[0]["vorp_score"] == 12.5
+    assert body[0]["projected_points"] == 15.2
+    assert body[1]["vorp_score"] is None
 
 
 def test_search_players_short_query_returns_empty_without_hitting_db(client):
