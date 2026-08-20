@@ -39,6 +39,16 @@ class PlayerSummaryResponse(BaseModel):
     recent_news: List[RecentNewsItem]
 
 
+class PlayerSearchResult(BaseModel):
+    player_id: str
+    name: str
+    position: str
+    team: str
+
+
+SEARCH_RESULT_LIMIT = 20
+
+
 def _player_row(cursor, player_id: str):
     cursor.execute("""
         SELECT player_id, name, position, team, status, injury_status
@@ -59,6 +69,34 @@ def _recent_news(cursor, player_id: str, limit: int) -> list:
     return [
         {"source": row[0], "raw_text": row[1], "url": row[2], "published_at": row[3].isoformat() if row[3] else None}
         for row in cursor.fetchall()
+    ]
+
+
+@player_router.get("/search", response_model=List[PlayerSearchResult])
+def search_players(q: str):
+    """Name lookup for the web UI's manual-pick picker, so a draft-day override can be typed
+    as a player name instead of the raw Sleeper-namespaced player_id trigger-draft-pick
+    actually expects (see CORE-08 notes: player_id here is Sleeper's, not players.espn_id)."""
+    query = q.strip()
+    if len(query) < 2:
+        return []
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                SELECT player_id, name, position, team
+                FROM players
+                WHERE name ILIKE %s
+                ORDER BY name
+                LIMIT %s;
+            """, (f"%{query}%", SEARCH_RESULT_LIMIT))
+            rows = cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to search players for '{query}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to search players: {str(e)}")
+
+    return [
+        {"player_id": row[0], "name": row[1], "position": row[2], "team": row[3]}
+        for row in rows
     ]
 
 
