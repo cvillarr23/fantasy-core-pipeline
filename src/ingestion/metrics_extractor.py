@@ -680,9 +680,34 @@ def extract_weekly_metrics(year: int, week: int) -> int:
     return written
 
 
+def resolve_default_year_week() -> tuple[int, int]:
+    """Resolves safe CLI defaults without letting nflreadpy "current" helpers crash startup."""
+    fallback_year = datetime.now().year
+    fallback_week = 1
+
+    try:
+        year = int(nfl.get_current_season())
+    except Exception as exc:
+        logger.warning(
+            f"Failed to resolve current NFL season via nflreadpy ({exc}); defaulting --year to {fallback_year}."
+        )
+        year = fallback_year
+
+    try:
+        week = int(nfl.get_current_week())
+    except Exception as exc:
+        logger.warning(
+            f"Failed to resolve current NFL week via nflreadpy ({exc}); defaulting --week to {fallback_week}."
+        )
+        week = fallback_week
+
+    return year, week
+
+
 if __name__ == "__main__":
+    default_year, default_week = resolve_default_year_week()
     parser = argparse.ArgumentParser(description="Extract nflverse advanced weekly metrics into weekly_stats.")
-    parser.add_argument("--year", type=int, default=nfl.get_current_season())
-    parser.add_argument("--week", type=int, default=nfl.get_current_week())
+    parser.add_argument("--year", type=int, default=default_year)
+    parser.add_argument("--week", type=int, default=default_week)
     args = parser.parse_args()
     extract_weekly_metrics(year=args.year, week=args.week)
