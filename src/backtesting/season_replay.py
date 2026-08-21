@@ -13,6 +13,7 @@ happens to exist in the database. Getting this backwards would silently let the 
 """
 import argparse
 import logging
+from typing import Optional
 
 import polars as pl
 
@@ -175,7 +176,7 @@ def run_week(conn, season: int, week: int, actuals_for_week: dict, naive_starter
     return {"lineup": lineup_record, "our_waiver_points": our_waiver_points, "static_points": static_points}
 
 
-def run_season_replay(season: int, weeks=None, rounds: int = None, out_dir: str = report.DEFAULT_OUTPUT_ROOT) -> dict:
+def run_season_replay(season: int, weeks=None, rounds: Optional[int] = None, out_dir: str = report.DEFAULT_OUTPUT_ROOT) -> dict:
     weeks = list(weeks) if weeks is not None else list(default_weeks(season))
     rounds = rounds if rounds is not None else draft_simulator.DEFAULT_ROUNDS
 
