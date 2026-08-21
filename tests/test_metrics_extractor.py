@@ -564,3 +564,19 @@ def test_extract_weekly_metrics_no_plays_for_week_writes_nothing():
 
     assert written == 0
     mock_cursor.executemany.assert_not_called()
+
+
+def test_resolve_default_year_week_uses_nflreadpy_when_available():
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2025), \
+         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=22):
+        year, week = me.resolve_default_year_week()
+    assert year == 2025
+    assert week == 22
+
+
+def test_resolve_default_year_week_falls_back_when_nflreadpy_raises():
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", side_effect=RuntimeError("boom")), \
+         patch("src.ingestion.metrics_extractor.nfl.get_current_week", side_effect=RuntimeError("boom")):
+        year, week = me.resolve_default_year_week()
+    assert year == me.datetime.now().year
+    assert week == 1
