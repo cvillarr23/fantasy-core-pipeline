@@ -7,18 +7,24 @@ internationally on the actual draft day. Sits alongside the hot path (browser-wo
 draft_matrix -> /trigger/draft-pick -> RabbitMQ -> click bot) as an out-of-band control/
 observability layer, not part of it.
 
-One known gap, flagged rather than guessed at:
+Two known gaps, both flagged rather than guessed at:
   - /start's Job image and its DB/Redis/API env config come from required env vars with no
     defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
     this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
     CORE_API_BASE_URL.
+  - execution_log has no `mode` column, but `_recent_execution_errors`/`_last_clicker_action`
+    are both scoped by `league_id` (and `_last_clicker_action` by `season` too) - since
+    practice/live configs always live under distinct league_ids (see CORE-18), a practice
+    run's rows are naturally excluded from a live league's /status the same way its k8s Job
+    and Redis keys already are, without needing a dedicated column.
 """
 import asyncio
 import json
 import logging
 import os
+import re
 import time
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import redis
 from fastapi import APIRouter, HTTPException, Request, status
@@ -44,6 +50,10 @@ DRAFT_SYNC_IMAGE = os.getenv("DRAFT_SYNC_IMAGE")
 # actual Secret/ConfigMap names are fantasy-infra's to define, not this repo's to guess.
 DRAFT_SYNC_ENV_SECRET = os.getenv("DRAFT_SYNC_ENV_SECRET")
 DRAFT_SYNC_ENV_CONFIGMAP = os.getenv("DRAFT_SYNC_ENV_CONFIGMAP")
+# The real ESPN league (sync_league.py's ESPN_LEAGUE_ID) that practice/mock-draft-room
+# configs must never collide with. Optional: if unset, practice-mode validation is skipped
+# with a logged warning rather than guessed at - same idiom as DRAFT_SYNC_IMAGE above.
+ESPN_LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
 # Draft-sync listener defaults to week 1 preseason projections (matches draft_matrix.py's
 # own --week CLI default) - draft config doesn't track a week, since a draft has none.
 DRAFT_SYNC_WEEK = 1
@@ -55,6 +65,15 @@ RECENT_ERRORS_LIMIT = 5
 
 def _redis_client() -> redis.Redis:
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+
+def _dns1123_slug(value: str) -> str:
+    """Job `metadata.name` must be a lowercase RFC 1123 DNS subdomain - league_id itself
+    doesn't have to be (it's an opaque ESPN identifier, and practice-room IDs aren't under
+    our control), so this only sanitizes the Job *name*, never the `league-id` label value
+    (labels allow uppercase/mixed case) or the CLI arg passed to draft_matrix.py."""
+    slug = re.sub(r"[^a-z0-9-]", "-", value.lower()).strip("-")
+    return slug or "league"
 
 
 def _batch_v1_api() -> client.BatchV1Api:
@@ -73,6 +92,7 @@ class DraftConfigPayload(BaseModel):
     league_id: str = Field(..., description="ESPN league identifier the draft-sync Job should target")
     team_id: str = Field(..., description="Our own team_id within that league")
     season: int = Field(..., description="Season year, e.g. 2026")
+    mode: Literal["live", "practice"] = Field("live", description="'practice' for ESPN mock draft rooms; tags the Job/status so a practice run is never mistaken for the real Draft Day")
 
 
 class DraftPickSummary(BaseModel):
@@ -87,6 +107,7 @@ class DraftPickSummary(BaseModel):
 class DraftStatusResponse(BaseModel):
     league_id: str
     season: int
+    mode: str = Field(..., description="'live' or 'practice', sourced from the draft_config row for this league")
     job_state: str = Field(..., description="Active/Succeeded/Failed/Unknown, from the k8s Job's own status")
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
     last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
@@ -177,16 +198,21 @@ def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
     return compute_on_the_clock_team(latest_pick_number + 1, team_count, slot_map)
 
 
-def _recent_execution_errors(cursor, limit: int) -> list:
+def _recent_execution_errors(cursor, league_id: str, limit: int) -> list:
+    """Scoped by league_id so a practice room's failures never surface in a live league's
+    /status - execution_log has no dedicated mode column (see the module docstring), but
+    practice/live configs always use distinct league_ids, so this filter alone keeps the
+    two from ever mixing here."""
     cursor.execute("""
         SELECT transaction_type, bot_name, error_message, executed_at
         FROM execution_log
         WHERE status <> 'success'
           AND error_message IS NOT NULL
+          AND league_id = %s
           AND (transaction_type ILIKE 'draft%%' OR COALESCE(bot_name, '') ILIKE 'draft%%')
         ORDER BY executed_at DESC
         LIMIT %s;
-    """, (limit,))
+    """, (league_id, limit))
     return [
         {
             "transaction_type": row[0],
@@ -255,14 +281,23 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     on_the_clock_team_id = None
     recent_errors: list = []
     last_clicker_action = None
+    # "unknown" (not "live") is the pre-query default: a Postgres outage must not let a
+    # practice run get silently reported as mode="live" just because the mode SELECT never
+    # ran - that would route a practice run into live monitoring precisely when db_ok is
+    # already about to go false. Only a successful query that finds no draft_config row
+    # falls back to "live" (today's pre-CORE-18 default for an unconfigured league).
+    mode = "unknown"
     try:
         with get_db_cursor() as cursor:
+            cursor.execute("SELECT mode FROM draft_config WHERE league_id = %s;", (league_id,))
+            mode_row = cursor.fetchone()
+            mode = mode_row[0] if mode_row is not None else "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
-            recent_errors = _recent_execution_errors(cursor, RECENT_ERRORS_LIMIT)
+            recent_errors = _recent_execution_errors(cursor, league_id, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
     except Exception as e:
-        logger.error(f"Failed to read draft picks/slots for league {league_id}: {e}")
+        logger.error(f"Failed to read draft picks/slots/mode for league {league_id}: {e}")
         db_ok = False
 
     pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
@@ -270,6 +305,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     return {
         "league_id": league_id,
         "season": season,
+        "mode": mode,
         "job_state": job_state,
         "recommendation": recommendation,
         "last_clicker_action": last_clicker_action,
@@ -285,26 +321,35 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
 # ------------------------------------------------------------------------------
 @draft_router.post("/config", status_code=status.HTTP_200_OK)
 def set_draft_config(payload: DraftConfigPayload):
-    """Stores league_id/team_id/season so /start's draft-sync Job can read it at launch."""
+    """Stores league_id/team_id/season/mode so /start's draft-sync Job can read it at launch."""
+    if payload.mode == "practice":
+        if ESPN_LEAGUE_ID is None:
+            logger.warning(f"ESPN_LEAGUE_ID is not configured - skipping the real-league collision check for practice config league_id={payload.league_id}.")
+        elif payload.league_id == ESPN_LEAGUE_ID:
+            raise HTTPException(status_code=400, detail=f"league_id {payload.league_id} matches the real ESPN_LEAGUE_ID - a practice/mock-draft-room config must use the mock room's own league_id.")
+
     try:
         with get_db_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO draft_config (league_id, team_id, season)
-                VALUES (%s, %s, %s)
+                INSERT INTO draft_config (league_id, team_id, season, mode)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (league_id) DO UPDATE
-                SET team_id = EXCLUDED.team_id, season = EXCLUDED.season, updated_at = CURRENT_TIMESTAMP;
-            """, (payload.league_id, payload.team_id, payload.season))
+                SET team_id = EXCLUDED.team_id, season = EXCLUDED.season, mode = EXCLUDED.mode, updated_at = CURRENT_TIMESTAMP;
+            """, (payload.league_id, payload.team_id, payload.season, payload.mode))
     except Exception as e:
         logger.error(f"Failed to persist draft config for league {payload.league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to store draft config: {str(e)}")
 
-    return {"status": "stored", "league_id": payload.league_id, "team_id": payload.team_id, "season": payload.season}
+    return {"status": "stored", "league_id": payload.league_id, "team_id": payload.team_id, "season": payload.season, "mode": payload.mode}
 
 
 @draft_router.post("/start", status_code=status.HTTP_202_ACCEPTED)
-def start_draft_sync():
-    """Creates the draft-sync Job (a wrapper around draft_matrix.py's listener) from the
-    most recently stored /config, replacing the manual `kubectl apply` step."""
+def start_draft_sync(league_id: Optional[str] = None):
+    """Creates the draft-sync Job (a wrapper around draft_matrix.py's listener) from a
+    stored /config, replacing the manual `kubectl apply` step. If `league_id` is omitted,
+    falls back to the most recently stored config (today's behavior, unchanged) - pass it
+    explicitly to pick a specific stored config, e.g. to launch a practice room without
+    disturbing whichever config was updated last."""
     if not DRAFT_SYNC_IMAGE:
         raise HTTPException(status_code=500, detail="DRAFT_SYNC_IMAGE is not configured - the draft-sync container image ref must be supplied via env var.")
     if not DRAFT_SYNC_ENV_SECRET or not DRAFT_SYNC_ENV_CONFIGMAP:
@@ -312,7 +357,10 @@ def start_draft_sync():
 
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT league_id, team_id, season FROM draft_config ORDER BY updated_at DESC LIMIT 1;")
+            if league_id is not None:
+                cursor.execute("SELECT league_id, team_id, season, mode FROM draft_config WHERE league_id = %s;", (league_id,))
+            else:
+                cursor.execute("SELECT league_id, team_id, season, mode FROM draft_config ORDER BY updated_at DESC LIMIT 1;")
             row = cursor.fetchone()
     except Exception as e:
         logger.error(f"Failed to read draft config before starting draft-sync Job: {e}")
@@ -320,7 +368,7 @@ def start_draft_sync():
 
     if row is None:
         raise HTTPException(status_code=400, detail="No draft config stored yet - POST /v1/draft/config first.")
-    league_id, team_id, season = row
+    league_id, team_id, season, mode = row
 
     # A second listener for the same league would share the browser-worker's Redis Stream
     # consumer name (draft-matrix-{team_id}) but keep an entirely separate in-process
@@ -331,13 +379,15 @@ def start_draft_sync():
     if existing_state == "Active":
         raise HTTPException(status_code=409, detail=f"A draft-sync Job for league {league_id} is already Active - stop it before starting another.")
 
-    job_name = f"draft-sync-{league_id}-{int(time.time())}"
+    job_prefix = "draft-sync-practice" if mode == "practice" else "draft-sync"
+    job_name = f"{job_prefix}-{_dns1123_slug(league_id)}-{int(time.time())}"
+    job_labels = {"app": "draft-sync", "league-id": league_id, "mode": mode}
     job = client.V1Job(
-        metadata=client.V1ObjectMeta(name=job_name, labels={"app": "draft-sync", "league-id": league_id}),
+        metadata=client.V1ObjectMeta(name=job_name, labels=job_labels),
         spec=client.V1JobSpec(
             backoff_limit=0,
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels={"app": "draft-sync", "league-id": league_id}),
+                metadata=client.V1ObjectMeta(labels=job_labels),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
                     containers=[
@@ -368,7 +418,77 @@ def start_draft_sync():
         logger.error(f"Failed to create draft-sync Job for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create draft-sync Job: {str(e)}")
 
-    return {"status": "accepted", "job_name": job_name, "league_id": league_id, "team_id": team_id, "season": season}
+    return {"status": "accepted", "job_name": job_name, "league_id": league_id, "team_id": team_id, "season": season, "mode": mode}
+
+
+STOP_JOB_TERMINATION_MAX_POLLS = 15
+STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS = 2
+
+
+def _wait_for_job_termination(batch_api: client.BatchV1Api, label_selector: str) -> bool:
+    """Foreground-propagation deletion doesn't complete synchronously - the Job object (and
+    its dependent Pods) can still be terminating for a few seconds after delete_namespaced_job
+    returns. Poll until it's actually gone, bounded so a wedged finalizer/apiserver hiccup
+    can't hang this request forever. Returns False on timeout - callers must not treat that
+    as a successful stop."""
+    for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        if not jobs.items:
+            return True
+        time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    return False
+
+
+@draft_router.post("/stop", status_code=status.HTTP_200_OK)
+def stop_draft(league_id: str):
+    """Tears down a draft-sync Job and its Redis state for one league - mode-agnostic
+    (works for both live and practice). Does NOT delete the draft_config row: /status and
+    a later /start re-launch both still need it, and there is no other stored copy of
+    team_id/season/mode for that league once it's gone.
+
+    Scoped to app=draft-sync (not just league-id) so this can never delete some other
+    workload that happens to share the league-id label. Waits for the Job's Pods to fully
+    terminate (Foreground propagation + polling) before clearing Redis - a still-running
+    listener could otherwise recreate the recommendation board or publish a target after
+    this endpoint has already reported "stopped"."""
+    label_selector = f"app=draft-sync,league-id={league_id}"
+    deleted_job = False
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        for job in jobs.items:
+            batch_api.delete_namespaced_job(
+                name=job.metadata.name,
+                namespace=K8S_NAMESPACE,
+                propagation_policy="Foreground",  # blocks the Job's own deletion until its Pods are gone
+            )
+            deleted_job = True
+
+        if deleted_job and not _wait_for_job_termination(batch_api, label_selector):
+            raise HTTPException(
+                status_code=504,
+                detail=f"draft-sync Job for league {league_id} did not terminate within "
+                       f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s - "
+                       "Redis state was NOT cleared; retry /stop or check the Job manually.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete draft-sync Job(s) for league {league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete draft-sync Job: {str(e)}")
+
+    cleared_keys = 0
+    try:
+        r_client = _redis_client()
+        keys_to_delete = [f"draft:{league_id}:board"]
+        keys_to_delete.extend(r_client.scan_iter(match=f"draft:{league_id}:pause:*"))
+        if keys_to_delete:
+            cleared_keys = r_client.delete(*keys_to_delete)
+    except Exception as e:
+        logger.error(f"Failed to clear Redis draft state for league {league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear Redis draft state: {str(e)}")
+
+    return {"status": "stopped", "league_id": league_id, "job_deleted": deleted_job, "redis_keys_cleared": cleared_keys}
 
 
 @draft_router.get("/status", response_model=DraftStatusResponse)
