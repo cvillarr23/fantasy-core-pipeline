@@ -17,6 +17,7 @@ from src.models import (
     ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS,
     CREATE_DRAFT_PICKS_TABLE,
     CREATE_DRAFT_CONFIG_TABLE,
+    ADD_DRAFT_CONFIG_MODE_COLUMN,
     CREATE_DRAFT_SLOTS_TABLE,
     CREATE_RAW_SIGNALS_TABLE,
     CREATE_LLM_CALL_METRICS_TABLE,
@@ -83,9 +84,10 @@ def run_migrations():
             logger.info("Validating 'draft_picks' live draft ledger...")
             cursor.execute(CREATE_DRAFT_PICKS_TABLE)
 
-            # 4c. Execute draft-day control plane tables (CORE-10)
+            # 4c. Execute draft-day control plane tables (CORE-10/CORE-18)
             logger.info("Validating 'draft_config' and 'draft_slots' control plane tables...")
             cursor.execute(CREATE_DRAFT_CONFIG_TABLE)
+            cursor.execute(ADD_DRAFT_CONFIG_MODE_COLUMN)
             cursor.execute(CREATE_DRAFT_SLOTS_TABLE)
 
             # 4d. Execute news/rumor ingestion ledger (CORE-13)

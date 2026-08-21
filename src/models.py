@@ -232,6 +232,14 @@ CREATE TABLE IF NOT EXISTS draft_config (
 );
 """
 
+# Practice-mode tagging for the draft-day control plane (CORE-18) - lets a mock-draft-room
+# config/Job/status be distinguished from a real "Draft Day 2026" run without a parallel
+# table or route tree. Defaults every pre-existing row to 'live' so CORE-10 behavior is
+# unchanged for configs stored before this migration ran.
+ADD_DRAFT_CONFIG_MODE_COLUMN = """
+ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS mode VARCHAR(10) NOT NULL DEFAULT 'live';
+"""
+
 # Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in
 # draft_matrix.py's handle_pick_event - ESPN's API cannot supply draft-slot assignment
 # pre-draft (league.draft stays empty until ESPN marks the draft fully complete), so this

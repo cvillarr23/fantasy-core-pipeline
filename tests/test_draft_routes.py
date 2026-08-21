@@ -32,15 +32,56 @@ def test_set_draft_config_upserts(client):
         response = client.post("/v1/draft/config", json=payload)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "stored", "league_id": "L1", "team_id": "7", "season": 2026}
+    assert response.json() == {"status": "stored", "league_id": "L1", "team_id": "7", "season": 2026, "mode": "live"}
     query, params = mock_cursor.execute.call_args[0]
     assert "ON CONFLICT (league_id) DO UPDATE" in query
-    assert params == ("L1", "7", 2026)
+    assert params == ("L1", "7", 2026, "live")
 
 
 def test_set_draft_config_validates_payload(client):
     response = client.post("/v1/draft/config", json={"league_id": "L1"})
     assert response.status_code == 422
+
+
+def test_set_draft_config_practice_mode_rejects_real_league_id(client):
+    mock_cursor = MagicMock()
+    payload = {"league_id": "L1", "team_id": "7", "season": 2026, "mode": "practice"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft.ESPN_LEAGUE_ID", "L1"):
+        response = client.post("/v1/draft/config", json=payload)
+
+    assert response.status_code == 400
+    assert "L1" in response.json()["detail"]
+    mock_cursor.execute.assert_not_called()
+
+
+def test_set_draft_config_practice_mode_allows_distinct_league_id(client):
+    mock_cursor = MagicMock()
+    payload = {"league_id": "MOCK123", "team_id": "8", "season": 2026, "mode": "practice"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft.ESPN_LEAGUE_ID", "L1"):
+        response = client.post("/v1/draft/config", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "practice"
+    assert body["league_id"] == "MOCK123"
+    query, params = mock_cursor.execute.call_args[0]
+    assert params == ("MOCK123", "8", 2026, "practice")
+
+
+def test_set_draft_config_practice_mode_skips_check_when_espn_league_id_unset(client):
+    mock_cursor = MagicMock()
+    payload = {"league_id": "MOCK123", "team_id": "8", "season": 2026, "mode": "practice"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft.ESPN_LEAGUE_ID", None):
+        response = client.post("/v1/draft/config", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "practice"
 
 
 def test_set_draft_config_db_failure(client):
@@ -68,7 +109,7 @@ def _env_config_patches():
 
 def test_start_draft_sync_creates_job(client):
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026)
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
     mock_batch_api = MagicMock()
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
@@ -86,9 +127,12 @@ def test_start_draft_sync_creates_job(client):
     assert body["league_id"] == "L1"
     assert body["team_id"] == "7"
     assert body["season"] == 2026
+    assert body["mode"] == "live"
 
     mock_batch_api.create_namespaced_job.assert_called_once()
     namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
+    assert job.metadata.name.startswith("draft-sync-l1-")
+    assert job.metadata.labels["mode"] == "live"
     container = job.spec.template.spec.containers[0]
     assert container.command == [
         "python", "-m", "src.optimization.draft_matrix",
@@ -96,6 +140,73 @@ def test_start_draft_sync_creates_job(client):
     ]
     assert container.env_from[0].config_map_ref.name == "draft-sync-config"
     assert container.env_from[1].secret_ref.name == "draft-sync-secrets"
+
+
+def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 202
+    assert response.json()["mode"] == "practice"
+
+    namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
+    # Job *names* must be lowercase RFC 1123 DNS subdomains; the league-id label and the
+    # CLI arg passed to draft_matrix.py keep the original, unsanitized league_id.
+    assert job.metadata.name.startswith("draft-sync-practice-mock123-")
+    assert job.metadata.labels["mode"] == "practice"
+    assert job.metadata.labels["league-id"] == "MOCK123"
+    assert job.spec.template.metadata.labels["mode"] == "practice"
+    container = job.spec.template.spec.containers[0]
+    assert "MOCK123" in container.command
+
+
+def test_start_draft_sync_selector_picks_named_league(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start", params={"league_id": "MOCK123"})
+
+    assert response.status_code == 202
+    query, params = mock_cursor.execute.call_args[0]
+    assert "WHERE league_id = %s" in query
+    assert params == ("MOCK123",)
+
+
+def test_start_draft_sync_no_selector_falls_back_to_most_recent(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 202
+    query = mock_cursor.execute.call_args[0][0]
+    assert "ORDER BY updated_at DESC LIMIT 1" in query
 
 
 def test_start_draft_sync_requires_image_env_var(client):
@@ -135,7 +246,7 @@ def test_start_draft_sync_requires_config_stored_first(client):
 
 def test_start_draft_sync_rejects_when_job_already_active(client):
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026)
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
 
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
@@ -149,7 +260,7 @@ def test_start_draft_sync_rejects_when_job_already_active(client):
 
 def test_start_draft_sync_k8s_failure(client):
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026)
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
     mock_batch_api = MagicMock()
     mock_batch_api.create_namespaced_job.side_effect = Exception("apiserver unreachable")
 
@@ -163,6 +274,129 @@ def test_start_draft_sync_k8s_failure(client):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/draft/stop
+# ---------------------------------------------------------------------------
+def test_stop_draft_deletes_job_and_clears_redis(client):
+    mock_batch_api = MagicMock()
+    fake_job = MagicMock()
+    fake_job.metadata.name = "draft-sync-L1-1234"
+    # First call (the initial listing) finds the Job; the termination-poll call after
+    # deletion finds it gone.
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[fake_job]),
+        MagicMock(items=[]),
+    ]
+
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = ["draft:L1:pause:3"]
+    mock_redis.delete.return_value = 2
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.time.sleep"):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"status": "stopped", "league_id": "L1", "job_deleted": True, "redis_keys_cleared": 2}
+
+    mock_batch_api.delete_namespaced_job.assert_called_once_with(
+        name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
+    )
+    for call in mock_batch_api.list_namespaced_job.call_args_list:
+        assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
+    mock_redis.delete.assert_called_once_with("draft:L1:board", "draft:L1:pause:3")
+
+
+def test_stop_draft_no_job_still_clears_redis_and_returns_200(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = []
+
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    mock_redis.delete.return_value = 1
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_deleted"] is False
+    mock_batch_api.delete_namespaced_job.assert_not_called()
+
+
+def test_stop_draft_times_out_waiting_for_termination(client):
+    """A Job that never disappears (wedged finalizer, apiserver hiccup) must not be treated
+    as a successful stop - Redis must stay untouched so a later /stop retry can still find
+    and clear it."""
+    mock_batch_api = MagicMock()
+    fake_job = MagicMock()
+    fake_job.metadata.name = "draft-sync-L1-1234"
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[fake_job])
+
+    mock_redis = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.time.sleep"):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 504
+    mock_redis.delete.assert_not_called()
+
+
+def test_stop_draft_k8s_failure_returns_500(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.side_effect = Exception("apiserver unreachable")
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 500
+
+
+def test_stop_draft_redis_failure_returns_500(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = []
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 500
+
+
+def test_stop_draft_does_not_touch_draft_config(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = []
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+
+    def _raising_db_cursor():
+        raise AssertionError("stop_draft must not touch draft_config")
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.get_db_cursor", _raising_db_cursor):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +420,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
         return []
 
     def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
         if "team_count" in mock_cursor.last_query:
             return (10,)
         if "MAX(pick_number)" in mock_cursor.last_query:
@@ -214,6 +450,7 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert response.status_code == 200
     body = response.json()
     assert body["job_state"] == "Active"
+    assert body["mode"] == "practice"
     assert body["last_clicker_action"] == "Drafted Breece Hall at 14:32:05"
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert len(body["recent_picks"]) == 2
@@ -253,6 +490,22 @@ def test_get_draft_status_reports_failed_clicker_action(client):
 
     assert response.status_code == 200
     assert response.json()["last_clicker_action"] == "Failed to draft Breece Hall: confirmation timed out"
+
+
+def test_get_draft_status_defaults_mode_to_live_when_config_row_missing(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._job_state", return_value="Active"):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "live"
 
 
 def test_get_draft_status_decodes_top_candidates_json(client):
@@ -340,6 +593,9 @@ def test_get_draft_status_returns_200_degraded_when_db_unavailable(client):
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert body["recent_errors"] == []
     assert body["last_clicker_action"] is None
+    # Must NOT default to "live" on a DB outage - that could mask a practice run as live
+    # in monitoring precisely when the mode lookup itself never ran.
+    assert body["mode"] == "unknown"
 
 
 def test_get_draft_status_returns_200_degraded_when_redis_unavailable(client):
@@ -475,7 +731,7 @@ def test_stream_draft_status_emits_first_event_then_stops_on_disconnect():
     import json as json_module
 
     payload = {
-        "league_id": "L1", "season": 2026, "job_state": "Active", "recommendation": {},
+        "league_id": "L1", "season": 2026, "mode": "live", "job_state": "Active", "recommendation": {},
         "last_clicker_action": None, "recent_picks": [], "on_the_clock_team_id": None,
         "pipeline_health": "healthy",
     }
