@@ -14,6 +14,7 @@ from src.models import (
     CREATE_EXECUTION_LOG_TABLE,
     ADD_EXECUTION_LOG_BOT_NAME_COLUMN,
     ADD_EXECUTION_LOG_TRACE_ID_COLUMN,
+    ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS,
     CREATE_DRAFT_PICKS_TABLE,
     CREATE_DRAFT_CONFIG_TABLE,
     CREATE_DRAFT_SLOTS_TABLE,
@@ -76,6 +77,7 @@ def run_migrations():
             cursor.execute(CREATE_EXECUTION_LOG_TABLE)
             cursor.execute(ADD_EXECUTION_LOG_BOT_NAME_COLUMN)
             cursor.execute(ADD_EXECUTION_LOG_TRACE_ID_COLUMN)
+            cursor.execute(ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS)
 
             # 4b. Execute live draft-day pick ledger (CORE-08)
             logger.info("Validating 'draft_picks' live draft ledger...")

@@ -7,10 +7,7 @@ internationally on the actual draft day. Sits alongside the hot path (browser-wo
 draft_matrix -> /trigger/draft-pick -> RabbitMQ -> click bot) as an out-of-band control/
 observability layer, not part of it.
 
-Two known gaps, both flagged rather than guessed at:
-  - `last_clicker_action` in /status has no data source yet. fantasy-browser-worker's
-    click bot (WORKER-06) has since shipped and does consume `draft_targets`, but nothing
-    in this repo reads back its per-pick confirmation yet - always null here regardless.
+One known gap, flagged rather than guessed at:
   - /start's Job image and its DB/Redis/API env config come from required env vars with no
     defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
     this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
@@ -92,7 +89,7 @@ class DraftStatusResponse(BaseModel):
     season: int
     job_state: str = Field(..., description="Active/Succeeded/Failed/Unknown, from the k8s Job's own status")
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
-    last_clicker_action: Optional[str] = Field(None, description="Always null today - WORKER-06's click bot has shipped and consumes draft_targets, but nothing here reads its confirmation back yet")
+    last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
     recent_picks: List[DraftPickSummary]
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known")
     pipeline_health: str = Field(..., description="'healthy' iff the draft-sync Job is Active, Postgres/Redis both respond, and the listener's last-processed timestamp is fresh, else 'degraded'")
@@ -201,6 +198,26 @@ def _recent_execution_errors(cursor, limit: int) -> list:
     ]
 
 
+def _last_clicker_action(cursor, league_id: str) -> Optional[str]:
+    """Most recent draft_pick_click confirmation from fantasy-browser-worker's click bot
+    (WORKER-06) for this league, formatted for direct display - not the raw row, since the
+    dashboard has no other use for execution_log's internal shape here."""
+    cursor.execute("""
+        SELECT player_name, status, error_message, executed_at
+        FROM execution_log
+        WHERE transaction_type = 'draft_pick_click' AND league_id = %s
+        ORDER BY executed_at DESC
+        LIMIT 1;
+    """, (league_id,))
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    player_name, row_status, error_message, executed_at = row
+    if row_status == "success":
+        return f"Drafted {player_name} at {executed_at:%H:%M:%S}"
+    return f"Failed to draft {player_name}: {error_message}"
+
+
 def _is_stale(job_state: str, recommendation: dict) -> bool:
     if job_state != "Active":
         return False
@@ -232,11 +249,13 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     recent_picks: list = []
     on_the_clock_team_id = None
     recent_errors: list = []
+    last_clicker_action = None
     try:
         with get_db_cursor() as cursor:
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
             recent_errors = _recent_execution_errors(cursor, RECENT_ERRORS_LIMIT)
+            last_clicker_action = _last_clicker_action(cursor, league_id)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots for league {league_id}: {e}")
         db_ok = False
@@ -248,7 +267,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "season": season,
         "job_state": job_state,
         "recommendation": recommendation,
-        "last_clicker_action": None,
+        "last_clicker_action": last_clicker_action,
         "recent_picks": recent_picks,
         "on_the_clock_team_id": on_the_clock_team_id,
         "pipeline_health": pipeline_health,

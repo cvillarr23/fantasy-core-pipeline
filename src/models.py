@@ -186,6 +186,16 @@ ADD_EXECUTION_LOG_TRACE_ID_COLUMN = """
 ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32);
 """
 
+# Backfills per-pick context columns for draft_pick_click rows (#43), so a click bot
+# confirmation can be correlated back to a specific league/player instead of just
+# recording that some draft_targets message succeeded or failed.
+ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS = """
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS league_id VARCHAR(50);
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS player_id VARCHAR(50);
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS player_name VARCHAR(100);
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS pick_number INTEGER;
+"""
+
 # One row per live draft pick (CORE-08), sourced from fantasy-browser-worker's
 # draft_picks:{leagueId} Redis Stream. Durable local mirror of draft state so the
 # real-time listener can resume the undrafted pool after a restart mid-draft instead of

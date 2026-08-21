@@ -1,5 +1,6 @@
 import json
 from contextlib import contextmanager
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -180,7 +181,7 @@ def test_get_draft_status_aggregates_expected_shape(client):
             return [(2, 1, "3", "p1", "Player One", "RB"), (1, 1, "9", "p0", "Player Zero", "WR")]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
-        if "execution_log" in mock_cursor.last_query:
+        if "SELECT transaction_type" in mock_cursor.last_query:
             return [("draft_sync", "draft_sync", "click failed", "2026-08-21T00:00:00Z")]
         return []
 
@@ -189,6 +190,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
             return (10,)
         if "MAX(pick_number)" in mock_cursor.last_query:
             return (2,)
+        if "SELECT player_name" in mock_cursor.last_query:
+            return ("Breece Hall", "success", None, datetime(2026, 8, 21, 14, 32, 5))
         return None
 
     mock_cursor.fetchall.side_effect = _fetchall
@@ -211,13 +214,45 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert response.status_code == 200
     body = response.json()
     assert body["job_state"] == "Active"
-    assert body["last_clicker_action"] is None
+    assert body["last_clicker_action"] == "Drafted Breece Hall at 14:32:05"
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert len(body["recent_picks"]) == 2
     assert body["recent_picks"][0]["name"] == "Player One"
     assert body["recent_picks"][0]["position"] == "RB"
     assert body["pipeline_health"] == "healthy"
     assert body["recent_errors"][0]["transaction_type"] == "draft_sync"
+
+
+def test_get_draft_status_reports_failed_clicker_action(client):
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        return []
+
+    def _fetchone():
+        if "SELECT player_name" in mock_cursor.last_query:
+            return ("Breece Hall", "failure", "confirmation timed out", datetime(2026, 8, 21, 14, 32, 5))
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._job_state", return_value="Active"), \
+         patch("src.api.draft.time.time", return_value=1005):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["last_clicker_action"] == "Failed to draft Breece Hall: confirmation timed out"
 
 
 def test_get_draft_status_decodes_top_candidates_json(client):
@@ -304,6 +339,7 @@ def test_get_draft_status_returns_200_degraded_when_db_unavailable(client):
     assert body["recent_picks"] == []
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert body["recent_errors"] == []
+    assert body["last_clicker_action"] is None
 
 
 def test_get_draft_status_returns_200_degraded_when_redis_unavailable(client):
