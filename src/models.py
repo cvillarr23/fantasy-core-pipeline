@@ -186,6 +186,22 @@ ADD_EXECUTION_LOG_TRACE_ID_COLUMN = """
 ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32);
 """
 
+# Backfills per-pick context columns for draft_pick_click rows (#43), so a click bot
+# confirmation can be correlated back to a specific league/season/player instead of just
+# recording that some draft_targets message succeeded or failed. season is required
+# alongside league_id because a reactivated league keeps the same league_id across
+# seasons - draft_picks/draft_slots are already keyed the same way. round_number (not
+# pick_number) because the click bot's WS confirmation only carries the SELECTED frame's
+# round, never an overall pick index - naming it pick_number would misleadingly imply
+# the latter.
+ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS = """
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS league_id VARCHAR(50);
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS season INTEGER;
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS player_id VARCHAR(50);
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS player_name VARCHAR(100);
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS round_number INTEGER;
+"""
+
 # One row per live draft pick (CORE-08), sourced from fantasy-browser-worker's
 # draft_picks:{leagueId} Redis Stream. Durable local mirror of draft state so the
 # real-time listener can resume the undrafted pool after a restart mid-draft instead of
@@ -303,6 +319,7 @@ CREATE INDEX IF NOT EXISTS idx_weekly_stats_lookup ON weekly_stats(week);
 CREATE INDEX IF NOT EXISTS idx_players_gsis_id ON players(gsis_id);
 CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
 CREATE INDEX IF NOT EXISTS idx_execution_log_executed_at ON execution_log(executed_at);
+CREATE INDEX IF NOT EXISTS idx_execution_log_draft_pick_click ON execution_log(league_id, season, executed_at DESC) WHERE transaction_type = 'draft_pick_click';
 CREATE INDEX IF NOT EXISTS idx_draft_picks_league_season ON draft_picks(league_id, season);
 CREATE INDEX IF NOT EXISTS idx_draft_slots_league_season ON draft_slots(league_id, season);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_player_id ON raw_signals(player_id);
