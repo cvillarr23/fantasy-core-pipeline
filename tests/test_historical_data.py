@@ -126,3 +126,90 @@ def test_seed_league_settings_upserts_hardcoded_config():
     params = args[1]
     assert params[0] == historical_data.SYNTHETIC_LEAGUE_ID
     assert params[3] == historical_data.HARDCODED_LEAGUE_CONFIG["team_count"]
+
+
+def _schedule(rows):
+    return pl.DataFrame({
+        "week": [r[0] for r in rows],
+        "game_type": [r[1] for r in rows],
+        "gameday": [r[2] for r in rows],
+        "home_team": [r[3] for r in rows],
+        "away_team": [r[4] for r in rows],
+    })
+
+
+def test_load_week1_kickoff_date_returns_earliest_week1_reg_game():
+    schedule = _schedule([
+        (1, "REG", "2023-09-10", "BBB", "AAA"),
+        (1, "REG", "2023-09-07", "CCC", "DDD"),
+        (1, "POST", "2023-09-01", "EEE", "FFF"),
+    ])
+    with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=schedule):
+        result = historical_data.load_week1_kickoff_date(2023)
+    assert result == "2023-09-07"
+
+
+def test_load_week1_kickoff_date_empty_schedule_returns_none():
+    with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=pl.DataFrame()):
+        assert historical_data.load_week1_kickoff_date(2023) is None
+
+
+def test_load_redraft_rankings_excludes_scrapes_at_or_after_kickoff():
+    rankings = pl.DataFrame({
+        "page_type": ["redraft-overall", "redraft-overall", "redraft-overall"],
+        "scrape_date": ["2023-08-31", "2023-09-07", "2023-09-14"],
+        "id": ["1", "2", "3"],
+        "player": ["A", "B", "C"],
+        "pos": ["RB", "WR", "QB"],
+        "ecr": [1.0, 2.0, 3.0],
+    })
+    with patch("src.backtesting.historical_data.nfl.load_ff_rankings", return_value=rankings), \
+         patch("src.backtesting.historical_data.load_week1_kickoff_date", return_value="2023-09-07"):
+        result = historical_data.load_redraft_rankings(2023)
+    # only 2023-08-31 is strictly before kickoff; 09-07 and 09-14 are excluded
+    assert result["id"].to_list() == ["1"]
+
+
+def test_load_redraft_rankings_falls_back_to_conservative_cutoff_without_schedule():
+    rankings = pl.DataFrame({
+        "page_type": ["redraft-overall", "redraft-overall"],
+        "scrape_date": ["2023-08-20", "2023-09-01"],
+        "id": ["1", "2"],
+        "player": ["A", "B"],
+        "pos": ["RB", "WR"],
+        "ecr": [1.0, 2.0],
+    })
+    with patch("src.backtesting.historical_data.nfl.load_ff_rankings", return_value=rankings), \
+         patch("src.backtesting.historical_data.load_week1_kickoff_date", return_value=None):
+        result = historical_data.load_redraft_rankings(2023)
+    assert result["id"].to_list() == ["1"]
+
+
+def test_load_regular_season_week_count_derives_from_schedule():
+    schedule = _schedule([(w, "REG", "2023-09-07", "AAA", "BBB") for w in range(1, 19)])
+    with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=schedule):
+        assert historical_data.load_regular_season_week_count(2023) == 18
+
+
+def test_load_regular_season_week_count_falls_back_when_no_schedule():
+    with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=pl.DataFrame()):
+        assert historical_data.load_regular_season_week_count(2023, default=17) == 17
+
+
+def test_load_teams_playing_by_week_excludes_bye_teams():
+    schedule = _schedule([
+        (1, "REG", "2023-09-07", "AAA", "BBB"),
+        (1, "REG", "2023-09-10", "CCC", "DDD"),
+        (2, "REG", "2023-09-17", "AAA", "CCC"),
+    ])
+    with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=schedule):
+        result = historical_data.load_teams_playing_by_week(2023, [1, 2])
+    assert result[1] == {"AAA", "BBB", "CCC", "DDD"}
+    assert result[2] == {"AAA", "CCC"}
+    assert "BBB" not in result[2]  # BBB is on bye in week 2
+
+
+def test_load_teams_playing_by_week_no_schedule_returns_empty_sets():
+    with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=pl.DataFrame()):
+        result = historical_data.load_teams_playing_by_week(2023, [1, 2])
+    assert result == {1: set(), 2: set()}

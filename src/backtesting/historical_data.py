@@ -85,20 +85,41 @@ def build_player_pool(season: int) -> pl.DataFrame:
     )
 
 
+def load_week1_kickoff_date(season: int) -> str | None:
+    """The real date of that season's first regular-season game, as an ISO string - the
+    hard no-lookahead boundary for any preseason ranking/ADP scrape. None if nflreadpy has
+    no schedule for the season."""
+    schedules = nfl.load_schedules(seasons=[season])
+    if schedules.is_empty():
+        return None
+    week1 = schedules.filter((pl.col("week") == 1) & (pl.col("game_type") == "REG"))
+    if week1.is_empty():
+        return None
+    return week1["gameday"].min()
+
+
 def load_redraft_rankings(season: int) -> pl.DataFrame:
-    """FantasyPros redraft-overall ECR nearest (but not after) that season's kickoff, as
+    """FantasyPros redraft-overall ECR strictly before that season's real week-1 kickoff, as
     the ADP proxy for the draft simulator - a real, per-season, independent external
     ranking signal, not literal pick-position ADP, but a legitimate stand-in per the
-    approved design. Empty if no scrape exists for/before that season (older seasons or an
-    nflreadpy hiccup) - callers must treat that as the degraded-fallback trigger."""
+    approved design. Strictly-before (not <=) matters: a scrape date at or after kickoff can
+    already reflect week-1 performance, which would leak lookahead into the draft itself.
+    Falls back to a fixed conservative late-August cutoff if the schedule itself isn't
+    available. Empty if no scrape exists before that cutoff (older seasons or an nflreadpy
+    hiccup) - callers must treat that as the degraded-fallback trigger."""
     df = nfl.load_ff_rankings(type="all")
     if df.is_empty():
         return df
-    kickoff_cutoff = f"{season}-09-15"
+    # scrape_date is a plain string column as of this nflreadpy version, not a native Date -
+    # cast defensively so a lexicographic ISO-8601 comparison stays correct even if a future
+    # nflreadpy release changes that.
+    df = df.with_columns(pl.col("scrape_date").cast(pl.Utf8))
+    kickoff_date = load_week1_kickoff_date(season)
+    kickoff_cutoff = kickoff_date if kickoff_date is not None else f"{season}-08-25"
     candidates = (
         df.filter(
             (pl.col("page_type") == "redraft-overall")
-            & (pl.col("scrape_date") <= kickoff_cutoff)
+            & (pl.col("scrape_date") < kickoff_cutoff)
             & (pl.col("scrape_date") >= f"{season}-01-01")
         )
     )
@@ -106,6 +127,38 @@ def load_redraft_rankings(season: int) -> pl.DataFrame:
         return candidates
     latest_date = candidates["scrape_date"].max()
     return candidates.filter(pl.col("scrape_date") == latest_date).select(["id", "player", "pos", "ecr"])
+
+
+def load_regular_season_week_count(season: int, default: int = 17) -> int:
+    """The real number of regular-season weeks for a season (18 since 2021, 17 before),
+    derived from the schedule itself rather than a hardcoded year cutoff. Falls back to
+    `default` if no schedule is available."""
+    schedules = nfl.load_schedules(seasons=[season])
+    if schedules.is_empty():
+        return default
+    reg = schedules.filter(pl.col("game_type") == "REG")
+    if reg.is_empty():
+        return default
+    return int(reg["week"].max())
+
+
+def load_teams_playing_by_week(season: int, weeks) -> dict:
+    """{week: {team abbreviations with a game that week}}, from the real regular-season
+    schedule - the only reliable source of which teams are on a bye. Needed so the backtest
+    doesn't hand a bye-week player a weekly_stats row (see seed_weekly_stats_shell): without
+    this, lineup_solver would treat them as available, since it uses "no weekly_stats row"
+    as its only bye-week signal (matches production's real semantics - see CLAUDE.md's
+    CORE-06 notes)."""
+    schedules = nfl.load_schedules(seasons=[season])
+    if schedules.is_empty():
+        logger.warning(f"No schedule data for season {season}; cannot determine bye weeks - no player will be seeded for any week.")
+        return {week: set() for week in weeks}
+    reg = schedules.filter(pl.col("game_type") == "REG")
+    result = {}
+    for week in weeks:
+        week_games = reg.filter(pl.col("week") == week)
+        result[week] = set(week_games["home_team"].to_list()) | set(week_games["away_team"].to_list())
+    return result
 
 
 def resolve_adp(season: int, player_pool: pl.DataFrame, prior_season_actuals: pl.DataFrame | None = None) -> pl.DataFrame:

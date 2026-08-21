@@ -22,8 +22,12 @@ from src.optimization import lineup_solver, vorp_matrix
 
 logger = logging.getLogger("BacktestSeasonReplay")
 
-DEFAULT_WEEKS = range(1, 18)
-DEFAULT_ROUNDS = 16
+
+def default_weeks(season: int) -> range:
+    """1..N regular-season weeks for this season (18 since 2021, 17 before), derived from
+    the real schedule rather than a hardcoded year cutoff - modern seasons have a week 18
+    that a fixed range(1, 18) would silently drop."""
+    return range(1, historical_data.load_regular_season_week_count(season) + 1)
 
 
 def build_player_id_actuals(actuals: pl.DataFrame, player_pool: pl.DataFrame) -> dict:
@@ -38,17 +42,25 @@ def build_player_id_actuals(actuals: pl.DataFrame, player_pool: pl.DataFrame) ->
     return by_week
 
 
-def seed_weekly_stats_shell(conn, player_pool: pl.DataFrame, projected_points_by_player: dict, season: int, weeks) -> int:
-    """One weekly_stats row per player per week, all weeks, with the fixed preseason
-    projected_points (0.0 for anyone outside the ADP-ranked pool) - vorp_matrix and the
-    waiver free-agent lookup both need a row to exist for every player/week to consider
-    them at all, matching production's players-JOIN-weekly_stats query shape."""
+def seed_weekly_stats_shell(
+    conn, player_pool: pl.DataFrame, projected_points_by_player: dict, season: int, weeks,
+    teams_playing_by_week: dict,
+) -> int:
+    """One weekly_stats row per player per week, for every week that player's team actually
+    plays, with the fixed preseason projected_points (0.0 for anyone outside the ADP-ranked
+    pool). Restricted by teams_playing_by_week (see historical_data.load_teams_playing_by_week)
+    because lineup_solver treats the *absence* of a weekly_stats row as its only bye-week
+    signal (see CLAUDE.md's CORE-06 notes) - seeding every player every week regardless of
+    bye would make lineup_solver start players whose team isn't even playing that week."""
     rows = []
     for player in player_pool.iter_rows(named=True):
         pid = player["sleeper_id"]
+        team = player["team"]
         projected = projected_points_by_player.get(pid, 0.0)
         for week in weeks:
-            rows.append((pid, season, week, projected, player["team"]))
+            if team not in teams_playing_by_week.get(week, set()):
+                continue
+            rows.append((pid, season, week, projected, team))
     if not rows:
         return 0
     with conn.cursor() as cursor:
@@ -86,6 +98,39 @@ def load_current_roster_ids(cursor, team_id: str) -> set:
     return {row[0] for row in cursor.fetchall()}
 
 
+def persist_starters(conn, team_id: str, starter_ids: set, roster_player_ids: list) -> None:
+    """Marks exactly `starter_ids` as is_starter=TRUE (rest of the team's roster FALSE).
+    Without this, every drafted player stays is_starter=FALSE forever: vorp_matrix's
+    rosters_populated branch (see calculate_replacement_baselines) uses is_starter to
+    separate real starters from bench/free-agent replacement candidates, and
+    waiver_strategy's bench query treats is_starter IS NOT TRUE as droppable - both would
+    silently misbehave (a below-replacement free agent looks like the baseline; a locked-in
+    starter looks droppable) if nobody's is_starter is ever actually set."""
+    if not roster_player_ids:
+        return
+    rows = [(pid in starter_ids, team_id, pid) for pid in roster_player_ids]
+    with conn.cursor() as cursor:
+        cursor.executemany(
+            "UPDATE league_rosters SET is_starter = %s WHERE team_id = %s AND player_id = %s;",
+            rows,
+        )
+
+
+def assign_initial_starters_all_teams(conn, season: int) -> None:
+    """Sets is_starter for every team's drafted roster (by projected_points, the only signal
+    available before any actual/VORP data exists) immediately after the draft and before the
+    first VORP run - vorp_matrix's replacement-baseline math depends on is_starter being
+    meaningful league-wide, not just for our own team."""
+    for team_id in draft_simulator.ALL_TEAM_IDS:
+        with conn.cursor() as cursor:
+            roster = load_roster_with_projected(cursor, team_id, season)
+        if not roster:
+            continue
+        starters = scoring.compute_naive_starters(roster)
+        starter_ids = {p["player_id"] for p in starters}
+        persist_starters(conn, team_id, starter_ids, [p["player_id"] for p in roster])
+
+
 def reveal_week_actuals(conn, season: int, week: int, actuals_for_week: dict) -> None:
     """Writes week N's real actual_points into weekly_stats. MUST be called only after
     week N's decision phase has already run - see module docstring."""
@@ -108,6 +153,10 @@ def run_week(conn, season: int, week: int, actuals_for_week: dict, naive_starter
     with conn.cursor() as cursor:
         roster_pool = lineup_solver.load_roster_pool(cursor, draft_simulator.OUR_TEAM_ID, season, week)
     our_starters = lineup_solver.build_and_solve_lineup(roster_pool)
+    persist_starters(
+        conn, draft_simulator.OUR_TEAM_ID,
+        {p["player_id"] for p in our_starters}, [p["player_id"] for p in roster_pool],
+    )
 
     waiver_strategy.run_weekly_waivers(conn, draft_simulator.OUR_TEAM_ID, season, week)
 
@@ -126,7 +175,10 @@ def run_week(conn, season: int, week: int, actuals_for_week: dict, naive_starter
     return {"lineup": lineup_record, "our_waiver_points": our_waiver_points, "static_points": static_points}
 
 
-def run_season_replay(season: int, weeks=DEFAULT_WEEKS, rounds: int = DEFAULT_ROUNDS, out_dir: str = report.DEFAULT_OUTPUT_ROOT) -> dict:
+def run_season_replay(season: int, weeks=None, rounds: int = None, out_dir: str = report.DEFAULT_OUTPUT_ROOT) -> dict:
+    weeks = list(weeks) if weeks is not None else list(default_weeks(season))
+    rounds = rounds if rounds is not None else draft_simulator.DEFAULT_ROUNDS
+
     schema = backtest_schema.schema_name(season)
     backtest_schema.provision_schema(schema, wipe=True)
 
@@ -138,15 +190,17 @@ def run_season_replay(season: int, weeks=DEFAULT_WEEKS, rounds: int = DEFAULT_RO
         projected_points_by_player = {
             pid: historical_data.rank_to_synthetic_points(rank) for pid, rank in adp.items()
         }
+        teams_playing_by_week = historical_data.load_teams_playing_by_week(season, weeks)
 
         with get_db_connection() as conn:
             historical_data.seed_players(conn, player_pool)
             historical_data.seed_league_settings(conn, season)
-            seed_weekly_stats_shell(conn, player_pool, projected_points_by_player, season, weeks)
+            seed_weekly_stats_shell(conn, player_pool, projected_points_by_player, season, weeks, teams_playing_by_week)
 
         with get_db_connection() as conn:
             picks = draft_simulator.run_draft(conn, adp, season, rounds=rounds, week=1)
             draft_simulator.seed_rosters_from_draft(conn, picks)
+            assign_initial_starters_all_teams(conn, season)
 
         our_player_ids = [p["player_id"] for p in picks if p["team_id"] == draft_simulator.OUR_TEAM_ID]
         adp_rosters = draft_simulator.simulate_pure_adp_draft(adp, team_count=len(draft_simulator.ALL_TEAM_IDS), rounds=rounds)
@@ -154,9 +208,12 @@ def run_season_replay(season: int, weeks=DEFAULT_WEEKS, rounds: int = DEFAULT_RO
 
         actuals_df = historical_data.load_actual_weekly_stats(season)
         actuals_by_week = build_player_id_actuals(actuals_df, player_pool)
+        # Restricted to the weeks actually replayed - draft scoring must cover the same
+        # period as lineup/waiver scoring, or a comparator with more weeks of data always
+        # looks artificially better/worse regardless of decision quality.
         season_actual_totals: dict = {}
-        for week_actuals in actuals_by_week.values():
-            for pid, pts in week_actuals.items():
+        for week in weeks:
+            for pid, pts in actuals_by_week.get(week, {}).items():
                 season_actual_totals[pid] = season_actual_totals.get(pid, 0.0) + pts
 
         with get_db_connection() as conn:
@@ -179,10 +236,16 @@ def run_season_replay(season: int, weeks=DEFAULT_WEEKS, rounds: int = DEFAULT_RO
         draft_summary = scoring.score_draft(our_player_ids, adp_our_player_ids, season_actual_totals)
         summary = scoring.summarize_season(weekly_lineup_records, waiver_summary, draft_summary)
 
-        report.write_json(summary, season, out_dir=out_dir)
-        report.write_csv(weekly_lineup_records, season, out_dir=out_dir)
-        with get_db_connection() as conn:
-            report.persist_backtest_results(conn, season, summary)
+    # Outside backtest_db(schema): src.database.db_pool has been restored to the real
+    # (public-schema) pool. persist_backtest_results MUST run out here - the isolated
+    # backtest_<season> schema also has its own backtest_results table (created by the same
+    # run_migrations() call provision_schema uses), and that schema gets DROPPED on the next
+    # run, so writing to it instead of public.backtest_results would silently lose every
+    # run's result the moment someone re-runs the harness.
+    report.write_json(summary, season, out_dir=out_dir)
+    report.write_csv(weekly_lineup_records, season, out_dir=out_dir)
+    with get_db_connection() as conn:
+        report.persist_backtest_results(conn, season, summary)
 
     return summary
 

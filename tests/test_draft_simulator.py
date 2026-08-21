@@ -3,6 +3,12 @@ from unittest.mock import MagicMock, patch
 from src.backtesting import draft_simulator
 
 
+def test_compute_default_rounds_matches_hardcoded_roster_capacity():
+    # HARDCODED_LEAGUE_CONFIG: 7 starting slots (QB1/RB2/WR2/TE1/FLEX1) + 7 bench = 14
+    assert draft_simulator.compute_default_rounds() == 14
+    assert draft_simulator.DEFAULT_ROUNDS == 14
+
+
 def test_compute_snake_order_reverses_each_round():
     order = draft_simulator.compute_snake_order(team_count=3, total_rounds=2)
     assert order == [

@@ -9,7 +9,7 @@ need) in a simulation where the full turn order is known up front.
 """
 import logging
 
-from src.backtesting.historical_data import SYNTHETIC_LEAGUE_ID
+from src.backtesting.historical_data import HARDCODED_LEAGUE_CONFIG, SYNTHETIC_LEAGUE_ID
 from src.optimization import draft_matrix
 
 logger = logging.getLogger("BacktestDraftSimulator")
@@ -17,6 +17,19 @@ logger = logging.getLogger("BacktestDraftSimulator")
 OUR_TEAM_ID = "backtest-team-1"
 OPPONENT_TEAM_IDS = [f"backtest-team-{n}" for n in range(2, 11)]
 ALL_TEAM_IDS = [OUR_TEAM_ID] + OPPONENT_TEAM_IDS
+
+
+def compute_default_rounds() -> int:
+    """Total draftable roster size (starters + bench), derived from the same hardcoded
+    league config vorp_matrix/draft_matrix use via draft_matrix.compute_draftable_roster_size
+    - a round count that doesn't match this exactly makes our solver's real pick budget
+    (bounded by compute_position_caps) diverge from how many players the ADP control-arm
+    drafts, so score_draft would compare unequal roster sizes."""
+    starting_total, bench_total = draft_matrix.compute_draftable_roster_size(HARDCODED_LEAGUE_CONFIG)
+    return starting_total + bench_total
+
+
+DEFAULT_ROUNDS = compute_default_rounds()
 
 
 def compute_snake_order(team_count: int, total_rounds: int) -> list:
@@ -53,7 +66,7 @@ def pick_best_available_by_adp(cursor, adp: dict, league_id: str, season: int) -
     return {"player_id": best_player_id, "name": name, "position": position, "team": team}
 
 
-def run_draft(conn, adp: dict, season: int, rounds: int = 16, week: int = 1) -> list:
+def run_draft(conn, adp: dict, season: int, rounds: int = DEFAULT_ROUNDS, week: int = 1) -> list:
     """Runs the full simulated snake draft. Every pick (ours and opponents') is persisted
     immediately before the next turn - compute_draft_recommendation_candidates needs
     draft_picks to reflect all earlier picks to correctly compute the undrafted pool."""
@@ -84,7 +97,7 @@ def run_draft(conn, adp: dict, season: int, rounds: int = 16, week: int = 1) -> 
     return picks
 
 
-def simulate_pure_adp_draft(adp: dict, team_count: int = 10, rounds: int = 16) -> dict:
+def simulate_pure_adp_draft(adp: dict, team_count: int = 10, rounds: int = DEFAULT_ROUNDS) -> dict:
     """Pure, in-memory-only control-arm draft: every team (including ours) always takes
     best-available-by-ADP. Not persisted to draft_picks - this exists purely to score our
     system's real draft picks against "what if we'd drafted by ADP too", independent of the
