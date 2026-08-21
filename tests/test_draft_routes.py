@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kubernetes import client as k8s_client
 from kubernetes.config.config_exception import ConfigException
 
 
@@ -793,6 +794,11 @@ def test_start_practice_sync_job_creates_job(client):
     assert env_by_name["ESPN_S2"].value_from.secret_key_ref.name == "espn-session-secrets"
     assert env_by_name["ESPN_S2"].value_from.secret_key_ref.key == "espn_s2"
     assert env_by_name["SWID"].value_from.secret_key_ref.key == "swid"
+    # Without this the kubelet 401s pulling the private GHCR image and the Pod sits in
+    # ImagePullBackOff forever - job_state still reports "Active" the whole time (the Job
+    # controller considers it pending, not failed), so this silently looks like it's
+    # working from /status alone. Regression coverage for that exact incident.
+    assert job.spec.template.spec.image_pull_secrets == [k8s_client.V1LocalObjectReference(name="ghcr-pull-secret")]
 
 
 def test_start_practice_sync_job_rejects_non_https_url(client):

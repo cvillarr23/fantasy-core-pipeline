@@ -661,6 +661,7 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest):
                 metadata=client.V1ObjectMeta(labels={"app": PRACTICE_SYNC_APP_LABEL}),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
+                    image_pull_secrets=[client.V1LocalObjectReference(name="ghcr-pull-secret")],
                     containers=[
                         client.V1Container(
                             name="draft-sync",
