@@ -276,6 +276,26 @@ CREATE TABLE IF NOT EXISTS llm_call_metrics (
 );
 """
 
+# One row per historical-season backtest run (CORE-15): our system's decisions vs. a
+# true-optimal-in-hindsight lineup, a static no-waiver-moves roster, and a pure-ADP-drafted
+# roster, so a future Grafana panel can chart strategy performance over time without this
+# package needing any Grafana-specific code itself.
+CREATE_BACKTEST_RESULTS_TABLE = """
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id SERIAL PRIMARY KEY,
+    season INT NOT NULL,
+    run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    our_lineup_points REAL,
+    optimal_lineup_points REAL,
+    naive_baseline_points REAL,
+    our_waiver_points REAL,
+    no_moves_points REAL,
+    our_draft_points REAL,
+    pure_adp_draft_points REAL,
+    summary_json JSONB
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
