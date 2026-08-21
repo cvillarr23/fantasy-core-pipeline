@@ -19,6 +19,7 @@ from src.models import (
     CREATE_DRAFT_SLOTS_TABLE,
     CREATE_RAW_SIGNALS_TABLE,
     CREATE_LLM_CALL_METRICS_TABLE,
+    CREATE_BACKTEST_RESULTS_TABLE,
     CREATE_INDICES
 )
 
@@ -92,6 +93,10 @@ def run_migrations():
             # 4e. Execute LLM provider-call metrics ledger (WORKER-12)
             logger.info("Validating 'llm_call_metrics' provider-call ledger...")
             cursor.execute(CREATE_LLM_CALL_METRICS_TABLE)
+
+            # 4f. Execute historical backtest results ledger (CORE-15)
+            logger.info("Validating 'backtest_results' ledger...")
+            cursor.execute(CREATE_BACKTEST_RESULTS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
