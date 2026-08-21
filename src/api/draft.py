@@ -198,17 +198,22 @@ def _recent_execution_errors(cursor, limit: int) -> list:
     ]
 
 
-def _last_clicker_action(cursor, league_id: str) -> Optional[str]:
+def _last_clicker_action(cursor, league_id: str, season: int) -> Optional[str]:
     """Most recent draft_pick_click confirmation from fantasy-browser-worker's click bot
-    (WORKER-06) for this league, formatted for direct display - not the raw row, since the
-    dashboard has no other use for execution_log's internal shape here."""
+    (WORKER-06) for this league/season, formatted for direct display - not the raw row,
+    since the dashboard has no other use for execution_log's internal shape here.
+
+    Scoped by season, not just league_id: draft_picks/draft_slots are both keyed by
+    (league_id, season) because a reactivated league keeps the same league_id year over
+    year - without this, a new season's /status would show last season's final click
+    until the first confirmation of the new draft comes in."""
     cursor.execute("""
         SELECT player_name, status, error_message, executed_at
         FROM execution_log
-        WHERE transaction_type = 'draft_pick_click' AND league_id = %s
+        WHERE transaction_type = 'draft_pick_click' AND league_id = %s AND season = %s
         ORDER BY executed_at DESC
         LIMIT 1;
-    """, (league_id,))
+    """, (league_id, season))
     row = cursor.fetchone()
     if row is None:
         return None
@@ -255,7 +260,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
             recent_errors = _recent_execution_errors(cursor, RECENT_ERRORS_LIMIT)
-            last_clicker_action = _last_clicker_action(cursor, league_id)
+            last_clicker_action = _last_clicker_action(cursor, league_id, season)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots for league {league_id}: {e}")
         db_ok = False
