@@ -17,6 +17,14 @@ Two known gaps, both flagged rather than guessed at:
     practice/live configs always live under distinct league_ids (see CORE-18), a practice
     run's rows are naturally excluded from a live league's /status the same way its k8s Job
     and Redis keys already are, without needing a dedicated column.
+
+Also hosts /practice/sync-job (cvillarr23/fantasy-web-ui#9): creates fantasy-browser-worker's
+draft_sync.js Job (the actual ESPN draft-room connector) against a practice/mock room URL a
+human joined by hand - replacing the manual `kubectl apply` of
+fantasy-browser-worker/k8s/test-draft-sync-job.yaml. This is a *different* Job than /start's
+own draft_matrix.py listener above, and is independent of CORE-18's practice-mode work on
+/start (cvillarr23/fantasy-core-pipeline#47) - it reuses the same BatchV1Api Job-creation
+pattern rather than depending on that ticket landing first.
 """
 import asyncio
 import json
@@ -31,7 +39,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.database import get_db_cursor
 from src.optimization.draft_matrix import compute_draft_recommendation, compute_on_the_clock_team, publish_draft_target
@@ -61,6 +69,15 @@ DRAFT_SYNC_WEEK = 1
 SSE_POLL_INTERVAL_SECONDS = 2
 DRAFT_STATUS_STALENESS_SECONDS = int(os.getenv("DRAFT_STATUS_STALENESS_SECONDS", "15"))
 RECENT_ERRORS_LIMIT = 5
+
+# fantasy-browser-worker's draft_sync.js image ref - no default, same "fail fast on
+# missing infra-owned config" pattern as DRAFT_SYNC_IMAGE above.
+BROWSER_WORKER_IMAGE = os.getenv("BROWSER_WORKER_IMAGE")
+# Real Secret name, not env-configurable: fantasy-browser-worker/k8s/test-draft-sync-job.yaml
+# already references this exact name directly (not via an env-configurable Secret ref), so
+# there's nothing to guess here the way there is for DRAFT_SYNC_ENV_SECRET/CONFIGMAP.
+ESPN_SESSION_SECRET_NAME = "espn-session-secrets"
+PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 
 
 def _redis_client() -> redis.Redis:
@@ -122,9 +139,30 @@ class DraftPauseRequest(BaseModel):
     pick_number: Optional[int] = Field(None, description="Pick to pause; defaults to the next pick currently on the recommendation board")
 
 
+class PracticeSyncJobRequest(BaseModel):
+    room_url: str = Field(..., description="ESPN mock/practice draft room URL, obtained by manually joining the room in a real browser first (auto-join is blocked by ESPN's reCAPTCHA)")
+
+    @field_validator("room_url")
+    @classmethod
+    def _room_url_must_be_https(cls, v: str) -> str:
+        if not v.startswith("https://"):
+            raise ValueError("room_url must be an https:// URL")
+        return v
+
+
 # ------------------------------------------------------------------------------
 # Status aggregation (shared by GET /status and GET /stream)
 # ------------------------------------------------------------------------------
+def _job_phase(job_status) -> str:
+    if job_status.active:
+        return "Active"
+    if job_status.succeeded:
+        return "Succeeded"
+    if job_status.failed:
+        return "Failed"
+    return "Unknown"
+
+
 def _job_state(league_id: str) -> str:
     try:
         batch_api = _batch_v1_api()
@@ -137,14 +175,21 @@ def _job_state(league_id: str) -> str:
         return "Unknown"
     # Most recently created Job for this league is the one we care about.
     latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-    job_status = latest.status
-    if job_status.active:
-        return "Active"
-    if job_status.succeeded:
-        return "Succeeded"
-    if job_status.failed:
-        return "Failed"
-    return "Unknown"
+    return _job_phase(latest.status)
+
+
+def _practice_sync_job_state() -> str:
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+    except Exception as e:
+        logger.error(f"Failed to query practice draft-sync Job status: {e}")
+        return "Unknown"
+
+    if not jobs.items:
+        return "Unknown"
+    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
+    return _job_phase(latest.status)
 
 
 def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
@@ -589,3 +634,96 @@ def resume_draft(payload: DraftPauseRequest):
         raise HTTPException(status_code=500, detail=f"Failed to publish resumed draft target: {str(e)}")
 
     return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number, "published": True, "player_id": target["player_id"], "name": target["name"]}
+
+
+# ------------------------------------------------------------------------------
+# POST/GET/DELETE /v1/draft/practice/sync-job (cvillarr23/fantasy-web-ui#9)
+# ------------------------------------------------------------------------------
+@draft_router.post("/practice/sync-job", status_code=status.HTTP_202_ACCEPTED)
+def start_practice_sync_job(payload: PracticeSyncJobRequest):
+    """Creates fantasy-browser-worker's draft_sync.js Job pointed at a manually-joined
+    ESPN mock/practice draft room - replacing the manual `kubectl apply` of
+    k8s/test-draft-sync-job.yaml. Distinct from /start's own draft-sync Job; see module
+    docstring."""
+    if not BROWSER_WORKER_IMAGE:
+        raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
+
+    if _practice_sync_job_state() == "Active":
+        raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another.")
+
+    job_name = f"practice-draft-sync-{int(time.time())}"
+    job = client.V1Job(
+        metadata=client.V1ObjectMeta(name=job_name, labels={"app": PRACTICE_SYNC_APP_LABEL}),
+        spec=client.V1JobSpec(
+            backoff_limit=0,
+            ttl_seconds_after_finished=3600,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(labels={"app": PRACTICE_SYNC_APP_LABEL}),
+                spec=client.V1PodSpec(
+                    restart_policy="Never",
+                    containers=[
+                        client.V1Container(
+                            name="draft-sync",
+                            image=BROWSER_WORKER_IMAGE,
+                            command=["node", "src/bots/draft_sync.js"],
+                            env=[
+                                client.V1EnvVar(name="DRAFT_ROOM_URL", value=payload.room_url),
+                                client.V1EnvVar(name="REDIS_HOST", value=REDIS_HOST),
+                                client.V1EnvVar(name="REDIS_PORT", value=str(REDIS_PORT)),
+                                client.V1EnvVar(
+                                    name="ESPN_S2",
+                                    value_from=client.V1EnvVarSource(
+                                        secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="espn_s2")
+                                    ),
+                                ),
+                                client.V1EnvVar(
+                                    name="SWID",
+                                    value_from=client.V1EnvVarSource(
+                                        secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="swid")
+                                    ),
+                                ),
+                            ],
+                        )
+                    ],
+                ),
+            ),
+        ),
+    )
+
+    try:
+        batch_api = _batch_v1_api()
+        batch_api.create_namespaced_job(K8S_NAMESPACE, job)
+    except Exception as e:
+        logger.error(f"Failed to create practice draft-sync Job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create practice draft-sync Job: {str(e)}")
+
+    return {"status": "accepted", "job_name": job_name}
+
+
+@draft_router.get("/practice/sync-job/status")
+def get_practice_sync_job_status():
+    return {"job_state": _practice_sync_job_state()}
+
+
+@draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
+def end_practice_sync_job():
+    """Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere
+    with a later run - the cleanup concern the issue explicitly calls out."""
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+    except Exception as e:
+        logger.error(f"Failed to list practice draft-sync Jobs for teardown: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list practice draft-sync Jobs: {str(e)}")
+
+    if not jobs.items:
+        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+
+    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
+    try:
+        batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
+    except Exception as e:
+        logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
+
+    return {"status": "deleted", "job_name": latest.metadata.name}

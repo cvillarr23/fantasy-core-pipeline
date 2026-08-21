@@ -761,3 +761,124 @@ def test_stream_draft_status_skips_duplicate_payloads():
         events = asyncio_module.run(_collect_events(mock_request, "L1", 2026, 10))
 
     assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST/GET/DELETE /v1/draft/practice/sync-job
+# ---------------------------------------------------------------------------
+def test_start_practice_sync_job_creates_job(client):
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft?leagueId=123"})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["job_name"].startswith("practice-draft-sync-")
+
+    mock_batch_api.create_namespaced_job.assert_called_once()
+    namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
+    assert namespace == "default"
+    assert job.metadata.labels == {"app": "practice-draft-sync"}
+    container = job.spec.template.spec.containers[0]
+    assert container.image == "ghcr.io/example/fantasy-browser-worker:test"
+    assert container.command == ["node", "src/bots/draft_sync.js"]
+    env_by_name = {e.name: e for e in container.env}
+    assert env_by_name["DRAFT_ROOM_URL"].value == "https://fantasy.espn.com/football/draft?leagueId=123"
+    assert env_by_name["ESPN_S2"].value_from.secret_key_ref.name == "espn-session-secrets"
+    assert env_by_name["ESPN_S2"].value_from.secret_key_ref.key == "espn_s2"
+    assert env_by_name["SWID"].value_from.secret_key_ref.key == "swid"
+
+
+def test_start_practice_sync_job_rejects_non_https_url(client):
+    response = client.post("/v1/draft/practice/sync-job", json={"room_url": "http://fantasy.espn.com/football/draft"})
+    assert response.status_code == 422
+
+
+def test_start_practice_sync_job_requires_image_env_var(client):
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", None):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 500
+    assert "BROWSER_WORKER_IMAGE" in response.json()["detail"]
+
+
+def test_start_practice_sync_job_rejects_when_already_active(client):
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Active"):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    assert "already Active" in response.json()["detail"]
+
+
+def test_start_practice_sync_job_k8s_failure(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.create_namespaced_job.side_effect = Exception("apiserver unreachable")
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 500
+
+
+def test_get_practice_sync_job_status(client):
+    with patch("src.api.draft._practice_sync_job_state", return_value="Active"):
+        response = client.get("/v1/draft/practice/sync-job/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_state": "Active"}
+
+
+def test_end_practice_sync_job_deletes_latest(client):
+    older = MagicMock()
+    older.metadata.name = "practice-draft-sync-100"
+    older.metadata.creation_timestamp = datetime(2026, 8, 21, 10, 0, 0)
+    newer = MagicMock()
+    newer.metadata.name = "practice-draft-sync-200"
+    newer.metadata.creation_timestamp = datetime(2026, 8, 21, 11, 0, 0)
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = [older, newer]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "deleted", "job_name": "practice-draft-sync-200"}
+    mock_batch_api.delete_namespaced_job.assert_called_once_with("practice-draft-sync-200", "default", propagation_policy="Background")
+
+
+def test_end_practice_sync_job_no_job_exists(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = []
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 404
+
+
+def test_end_practice_sync_job_k8s_failure(client):
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.side_effect = Exception("apiserver unreachable")
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 500
