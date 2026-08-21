@@ -445,7 +445,9 @@ def test_handle_pick_event_skips_recommendation_when_we_just_picked():
         result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
     assert result is None
-    mock_client.hset.assert_not_called()
+    mock_client.hset.assert_called_once()
+    mapping = mock_client.hset.call_args.kwargs["mapping"]
+    assert mapping["last_processed_pick_number"] == 1
 
 
 def test_handle_pick_event_returns_recommendation_after_opponent_pick():
@@ -461,9 +463,10 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
         result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
     assert result == (target, 2)
-    mock_client.hset.assert_called_once()
-    hset_kwargs = mock_client.hset.call_args.kwargs
+    assert mock_client.hset.call_count == 2
+    hset_kwargs = mock_client.hset.call_args_list[-1].kwargs
     assert hset_kwargs["mapping"]["recommended_player_id"] == "p2"
+    assert hset_kwargs["mapping"]["last_processed_pick_number"] == 1
     top_candidates = json.loads(hset_kwargs["mapping"]["top_candidates"])
     assert [c["player_id"] for c in top_candidates] == ["p2", "p3"]
 
