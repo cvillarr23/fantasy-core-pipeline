@@ -180,6 +180,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
             return [(2, 1, "3", "p1", "Player One", "RB"), (1, 1, "9", "p0", "Player Zero", "WR")]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
+        if "execution_log" in mock_cursor.last_query:
+            return [("draft_sync", "draft_sync", "click failed", "2026-08-21T00:00:00Z")]
         return []
 
     def _fetchone():
@@ -193,11 +195,17 @@ def test_get_draft_status_aggregates_expected_shape(client):
     mock_cursor.fetchone.side_effect = _fetchone
 
     mock_redis = MagicMock()
-    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "recommended_name": "Best Back", "pick_number": "3"}
+    mock_redis.hgetall.return_value = {
+        "recommended_player_id": "p2",
+        "recommended_name": "Best Back",
+        "pick_number": "3",
+        "last_processed_pick_at": "1000",
+    }
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._job_state", return_value="Active"):
+         patch("src.api.draft._job_state", return_value="Active"), \
+         patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -209,6 +217,7 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert body["recent_picks"][0]["name"] == "Player One"
     assert body["recent_picks"][0]["position"] == "RB"
     assert body["pipeline_health"] == "healthy"
+    assert body["recent_errors"][0]["transaction_type"] == "draft_sync"
 
 
 def test_get_draft_status_decodes_top_candidates_json(client):
@@ -222,12 +231,14 @@ def test_get_draft_status_decodes_top_candidates_json(client):
         "recommended_player_id": "p2",
         "recommended_name": "Best Back",
         "pick_number": "3",
+        "last_processed_pick_at": "1000",
         "top_candidates": json.dumps(candidates),
     }
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._job_state", return_value="Active"):
+         patch("src.api.draft._job_state", return_value="Active"), \
+         patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -240,11 +251,12 @@ def test_get_draft_status_handles_malformed_top_candidates_json(client):
     mock_cursor.fetchone.return_value = None
 
     mock_redis = MagicMock()
-    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "top_candidates": "not-json"}
+    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "top_candidates": "not-json", "last_processed_pick_at": "1000"}
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._job_state", return_value="Active"):
+         patch("src.api.draft._job_state", return_value="Active"), \
+         patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -278,11 +290,12 @@ def test_get_draft_status_returns_200_degraded_when_db_unavailable(client):
         yield  # pragma: no cover
 
     mock_redis = MagicMock()
-    mock_redis.hgetall.return_value = {"recommended_player_id": "p2"}
+    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "last_processed_pick_at": "1000"}
 
     with patch("src.api.draft.get_db_cursor", _broken_cursor), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._job_state", return_value="Active"):
+         patch("src.api.draft._job_state", return_value="Active"), \
+         patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -290,6 +303,7 @@ def test_get_draft_status_returns_200_degraded_when_db_unavailable(client):
     assert body["pipeline_health"] == "degraded"
     assert body["recent_picks"] == []
     assert body["recommendation"]["recommended_player_id"] == "p2"
+    assert body["recent_errors"] == []
 
 
 def test_get_draft_status_returns_200_degraded_when_redis_unavailable(client):
@@ -306,6 +320,23 @@ def test_get_draft_status_returns_200_degraded_when_redis_unavailable(client):
     body = response.json()
     assert body["pipeline_health"] == "degraded"
     assert body["recommendation"] == {}
+
+
+def test_get_draft_status_degraded_when_listener_stale_while_active(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"last_processed_pick_at": "1000"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._job_state", return_value="Active"), \
+         patch("src.api.draft.time.time", return_value=2000):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["pipeline_health"] == "degraded"
 
 
 # ---------------------------------------------------------------------------

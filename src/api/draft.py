@@ -10,9 +10,7 @@ observability layer, not part of it.
 Two known gaps, both flagged rather than guessed at:
   - `last_clicker_action` in /status has no data source yet. fantasy-browser-worker's
     click bot (WORKER-06) has since shipped and does consume `draft_targets`, but nothing
-    in this repo reads back its confirmation (e.g. from `execution_log`) to populate this
-    field - always null here regardless. Tracked as a follow-up alongside #39's
-    execution_log surfacing work, not fixed in this pass.
+    in this repo reads back its per-pick confirmation yet - always null here regardless.
   - /start's Job image and its DB/Redis/API env config come from required env vars with no
     defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
     this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
@@ -54,6 +52,8 @@ DRAFT_SYNC_ENV_CONFIGMAP = os.getenv("DRAFT_SYNC_ENV_CONFIGMAP")
 DRAFT_SYNC_WEEK = 1
 
 SSE_POLL_INTERVAL_SECONDS = 2
+DRAFT_STATUS_STALENESS_SECONDS = int(os.getenv("DRAFT_STATUS_STALENESS_SECONDS", "15"))
+RECENT_ERRORS_LIMIT = 5
 
 
 def _redis_client() -> redis.Redis:
@@ -95,7 +95,8 @@ class DraftStatusResponse(BaseModel):
     last_clicker_action: Optional[str] = Field(None, description="Always null today - WORKER-06's click bot has shipped and consumes draft_targets, but nothing here reads its confirmation back yet")
     recent_picks: List[DraftPickSummary]
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known")
-    pipeline_health: str = Field(..., description="'healthy' iff the draft-sync Job is Active and Postgres/Redis both respond, else 'degraded'")
+    pipeline_health: str = Field(..., description="'healthy' iff the draft-sync Job is Active, Postgres/Redis both respond, and the listener's last-processed timestamp is fresh, else 'degraded'")
+    recent_errors: List[dict] = Field(default_factory=list, description=f"Most recent draft-related error rows from execution_log (limit {RECENT_ERRORS_LIMIT})")
 
 
 class DraftPauseRequest(BaseModel):
@@ -179,6 +180,39 @@ def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
     return compute_on_the_clock_team(latest_pick_number + 1, team_count, slot_map)
 
 
+def _recent_execution_errors(cursor, limit: int) -> list:
+    cursor.execute("""
+        SELECT transaction_type, bot_name, error_message, executed_at
+        FROM execution_log
+        WHERE status <> 'success'
+          AND error_message IS NOT NULL
+          AND (transaction_type ILIKE 'draft%%' OR COALESCE(bot_name, '') ILIKE 'draft%%')
+        ORDER BY executed_at DESC
+        LIMIT %s;
+    """, (limit,))
+    return [
+        {
+            "transaction_type": row[0],
+            "bot_name": row[1],
+            "error_message": row[2],
+            "executed_at": row[3],
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def _is_stale(job_state: str, recommendation: dict) -> bool:
+    if job_state != "Active":
+        return False
+    last_processed_pick_at = recommendation.get("last_processed_pick_at")
+    if last_processed_pick_at is None:
+        return True
+    try:
+        return (time.time() - float(last_processed_pick_at)) > DRAFT_STATUS_STALENESS_SECONDS
+    except (TypeError, ValueError):
+        return True
+
+
 def _build_status(league_id: str, season: int, limit: int) -> dict:
     """Every datastore read is isolated in its own try/except: a Postgres or Redis outage
     must surface as pipeline_health="degraded" in a normal 200 response (so the browser can
@@ -197,15 +231,17 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     db_ok = True
     recent_picks: list = []
     on_the_clock_team_id = None
+    recent_errors: list = []
     try:
         with get_db_cursor() as cursor:
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
+            recent_errors = _recent_execution_errors(cursor, RECENT_ERRORS_LIMIT)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots for league {league_id}: {e}")
         db_ok = False
 
-    pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok else "degraded"
+    pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
 
     return {
         "league_id": league_id,
@@ -216,6 +252,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "recent_picks": recent_picks,
         "on_the_clock_team_id": on_the_clock_team_id,
         "pipeline_health": pipeline_health,
+        "recent_errors": recent_errors,
     }
 
 

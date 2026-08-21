@@ -470,6 +470,13 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 # than guessing - a missing slot just means on_the_clock_team_id can't be
                 # computed yet, not a wrong recommendation.
                 persist_draft_slot(conn, league_id, season, event["team_id"], pick_number)
+            r_client.hset(
+                f"draft:{league_id}:board",
+                mapping={
+                    "last_processed_pick_at": int(time.time()),
+                    "last_processed_pick_number": pick_number,
+                },
+            )
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
@@ -486,6 +493,8 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             "recommended_player_id": target["player_id"],
             "recommended_name": target["name"],
             "pick_number": next_pick_number,
+            "last_processed_pick_at": int(time.time()),
+            "last_processed_pick_number": pick_number,
             # CORE-14 web UI's comparison panel wants the full ranked list, not just the
             # winner - redis hashes are flat string->string, so the ranked candidates ride
             # as a JSON-encoded field rather than their own set of hash keys.
