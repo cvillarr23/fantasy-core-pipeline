@@ -25,6 +25,8 @@ def test_build_and_solve_lineup_selects_optimal_by_vorp_score():
         _player("wr1", "WR", 6.0),
         _player("wr2", "WR", 5.0),
         _player("te1", "TE", 4.0),
+        _player("dst1", "D/ST", 3.0),
+        _player("k1", "K", 2.0),
         _player("wr_high", "WR", 9.0),
         _player("wr_low", "WR", 1.0),
     ]
@@ -41,10 +43,12 @@ def test_build_and_solve_lineup_respects_position_minimums():
         _player("wr1", "WR", 6.0),
         _player("wr2", "WR", 5.0),
         _player("te1", "TE", 4.0),
+        _player("dst1", "D/ST", 3.0),
+        _player("k1", "K", 2.0),
         _player("rb3", "RB", 3.0),
     ]
     starters = ls.build_and_solve_lineup(pool)
-    assert len(starters) == 7
+    assert len(starters) == 9
     counts = {}
     for p in starters:
         counts[p["position"]] = counts.get(p["position"], 0) + 1
@@ -52,6 +56,8 @@ def test_build_and_solve_lineup_respects_position_minimums():
     assert counts["RB"] >= 2
     assert counts["WR"] >= 2
     assert counts["TE"] >= 1
+    assert counts["D/ST"] == 1
+    assert counts["K"] == 1
 
 
 def test_build_and_solve_lineup_allows_flex_at_any_eligible_position():
@@ -61,6 +67,8 @@ def test_build_and_solve_lineup_allows_flex_at_any_eligible_position():
         _player("rb1", "RB", 8.0),
         _player("rb2", "RB", 7.0),
         _player("te1", "TE", 1.0),
+        _player("dst1", "D/ST", 3.0),
+        _player("k1", "K", 2.0),
         _player("wr1", "WR", 9.0),
         _player("wr2", "WR", 8.5),
         _player("wr3", "WR", 8.0),
@@ -78,6 +86,8 @@ def test_build_and_solve_lineup_infeasible_roster_returns_empty():
         _player("wr1", "WR", 6.0),
         _player("wr2", "WR", 5.0),
         _player("te1", "TE", 4.0),
+        _player("dst1", "D/ST", 3.0),
+        _player("k1", "K", 2.0),
     ]
     assert ls.build_and_solve_lineup(pool) == []
 
@@ -122,6 +132,27 @@ def test_load_roster_pool_coalesces_null_vorp_score():
 
     query = mock_cursor.execute.call_args[0][0]
     assert "COALESCE(s.vorp_score, 0.0)" in query
+
+
+def test_load_lineup_slot_counts_reads_league_settings():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ({"QB": 1, "RB": 2, "WR": 2, "TE": 1, "D/ST": 1, "K": 1, "RB/WR/TE": 1},)
+
+    counts = ls.load_lineup_slot_counts(mock_cursor, season=2026)
+
+    assert counts["D/ST"] == 1
+    query, params = mock_cursor.execute.call_args[0]
+    assert "FROM league_settings" in query
+    assert params == (2026,)
+
+
+def test_load_lineup_slot_counts_falls_back_when_missing():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+
+    counts = ls.load_lineup_slot_counts(mock_cursor, season=2026)
+
+    assert counts == ls.DEFAULT_LINEUP_SLOT_COUNTS
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +224,15 @@ def test_optimize_weekly_lineup_skips_publish_when_no_delta():
     mock_cursor = MagicMock()
     mock_cursor.fetchall.side_effect = [
         [("qb1", "QB One", "QB", 10.0), ("rb1", "RB One", "RB", 8.0), ("rb2", "RB Two", "RB", 7.0),
-         ("wr1", "WR One", "WR", 6.0), ("wr2", "WR Two", "WR", 5.0), ("te1", "TE One", "TE", 4.0)],
+         ("wr1", "WR One", "WR", 6.0), ("wr2", "WR Two", "WR", 5.0), ("te1", "TE One", "TE", 4.0),
+         ("dst1", "DST One", "D/ST", 3.0), ("k1", "K One", "K", 2.0), ("wr3", "WR Three", "WR", 1.0)],
         [("qb1", "QB", "QB"), ("rb1", "RB", "RB1"), ("rb2", "RB", "RB2"), ("wr1", "WR", "WR1"),
-         ("wr2", "WR", "WR2"), ("te1", "TE", "TE")],
+         ("wr2", "WR", "WR2"), ("te1", "TE", "TE"), ("dst1", "D/ST", "D/ST"), ("k1", "K", "K"),
+         ("wr3", "WR", "FLEX")],
     ]
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          patch("src.optimization.lineup_solver.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
@@ -212,12 +246,15 @@ def test_optimize_weekly_lineup_end_to_end_with_swaps():
     mock_cursor.fetchall.side_effect = [
         [("qb1", "QB One", "QB", 10.0), ("rb1", "RB One", "RB", 8.0), ("rb2", "RB Two", "RB", 7.0),
          ("wr1", "WR One", "WR", 6.0), ("wr2", "WR Two", "WR", 5.0), ("te1", "TE One", "TE", 4.0),
+         ("dst1", "DST One", "D/ST", 3.0), ("k1", "K One", "K", 2.0),
          ("wr_old", "Old WR", "WR", 1.0), ("wr_bench", "Bench WR", "WR", 20.0)],
         [("qb1", "QB", "QB"), ("rb1", "RB", "RB1"), ("rb2", "RB", "RB2"), ("wr1", "WR", "WR1"),
-         ("wr2", "WR", "WR2"), ("te1", "TE", "TE"), ("wr_old", "WR", "FLEX")],
+         ("wr2", "WR", "WR2"), ("te1", "TE", "TE"), ("dst1", "D/ST", "D/ST"), ("k1", "K", "K"),
+         ("wr_old", "WR", "FLEX")],
     ]
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          patch("src.optimization.lineup_solver.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         mock_post.return_value = MagicMock(status_code=202)
@@ -238,6 +275,7 @@ def test_optimize_weekly_lineup_no_roster_returns_zero():
     mock_cursor.fetchall.return_value = []
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          patch("src.optimization.lineup_solver.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
