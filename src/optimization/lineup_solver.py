@@ -6,6 +6,7 @@ diff against current ESPN-synced starters -> publish swaps via the FastAPI
 /trigger/lineup endpoint (optimization -> api -> mq, per ARCHITECTURE.md).
 """
 import argparse
+import json
 import logging
 import os
 
@@ -21,9 +22,21 @@ logger = logging.getLogger("LineupSolver")
 tracer = trace.get_tracer("lineup_solver")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-api.core.svc.cluster.local:8000")
-TOTAL_STARTERS = 7
-POSITION_MINIMUMS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1}
-QB_MAXIMUM = 1
+BENCH_AND_IR_SLOT_NAMES = {"BE", "Bench", "IR"}
+FLEX_SLOT_ELIGIBLE_POSITIONS = {
+    "RB/WR/TE": ("RB", "WR", "TE"),
+    "RB/WR": ("RB", "WR"),
+    "WR/TE": ("WR", "TE"),
+}
+DEFAULT_LINEUP_SLOT_COUNTS = {
+    "QB": 1,
+    "RB": 2,
+    "WR": 2,
+    "TE": 1,
+    "D/ST": 1,
+    "K": 1,
+    "RB/WR/TE": 1,
+}
 
 
 def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
@@ -48,30 +61,90 @@ def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
     ]
 
 
-def build_and_solve_lineup(roster_pool: list) -> list:
-    """Pure ILP solve: pick TOTAL_STARTERS players maximizing total vorp_score subject to
-    position minimums. QB pinned at exactly 1 and RB/WR/TE floors summing to 5 leave
-    exactly one open slot in the ==7 total - the FLEX slot - without a separate variable."""
+def load_lineup_slot_counts(cursor, season: int) -> dict:
+    """Reads lineup slot shape synced from ESPN (sync_league); falls back to default
+    9-starter shape if no league_settings row exists yet."""
+    cursor.execute(
+        """
+        SELECT lineup_slot_counts
+        FROM league_settings
+        WHERE season = %s
+        ORDER BY updated_at DESC
+        LIMIT 1;
+        """,
+        (season,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        logger.warning("No league_settings lineup_slot_counts found; using default lineup shape.")
+        return dict(DEFAULT_LINEUP_SLOT_COUNTS)
+    counts = row[0]
+    if isinstance(counts, str):
+        counts = json.loads(counts)
+    return counts or dict(DEFAULT_LINEUP_SLOT_COUNTS)
+
+
+def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = None) -> list:
+    """Pure ILP solve: assign players to configured starter slots (including FLEX and
+    non-skill slots like D/ST and K) maximizing total vorp_score."""
     if not roster_pool:
         return []
+    slot_counts = lineup_slot_counts or DEFAULT_LINEUP_SLOT_COUNTS
 
     prob = pulp.LpProblem("Lineup_Optimization", pulp.LpMaximize)
-    player_vars = {p["player_id"]: pulp.LpVariable(f"start_{p['player_id']}", cat="Binary") for p in roster_pool}
+    slots = []
+    for slot_name, raw_count in slot_counts.items():
+        if slot_name in BENCH_AND_IR_SLOT_NAMES:
+            continue
+        count = int(raw_count)
+        if count <= 0:
+            continue
+        eligible_positions = FLEX_SLOT_ELIGIBLE_POSITIONS.get(slot_name, (slot_name,))
+        for i in range(count):
+            slots.append({
+                "name": slot_name,
+                "index": i,
+                "eligible_positions": set(eligible_positions),
+            })
+
+    if not slots:
+        return []
+
+    player_vars = {}
+    for player in roster_pool:
+        for slot in slots:
+            if player["position"] in slot["eligible_positions"]:
+                slot_slug = slot["name"].replace("/", "_").replace(" ", "_").replace("-", "_")
+                player_vars[(player["player_id"], slot["name"], slot["index"])] = pulp.LpVariable(
+                    f"start_{player['player_id']}_{slot_slug}_{slot['index']}",
+                    cat="Binary",
+                )
     by_id = {p["player_id"]: p for p in roster_pool}
 
-    prob += pulp.lpSum(player_vars[pid] * by_id[pid]["vorp_score"] for pid in player_vars), "Total_VORP"
+    prob += pulp.lpSum(
+        var * by_id[pid]["vorp_score"]
+        for (pid, _, _), var in player_vars.items()
+    ), "Total_VORP"
 
-    prob += pulp.lpSum(player_vars.values()) == TOTAL_STARTERS, "Total_Starters"
-    prob += (
-        pulp.lpSum(var for pid, var in player_vars.items() if by_id[pid]["position"] == "QB") == QB_MAXIMUM,
-        "QB_Exact",
-    )
-    for pos, minimum in POSITION_MINIMUMS.items():
-        if pos == "QB":
-            continue
+    for slot in slots:
+        slot_slug = slot["name"].replace("/", "_").replace(" ", "_").replace("-", "_")
+        slot_vars = [
+            var
+            for (pid, slot_name, slot_index), var in player_vars.items()
+            if slot_name == slot["name"] and slot_index == slot["index"]
+        ]
         prob += (
-            pulp.lpSum(var for pid, var in player_vars.items() if by_id[pid]["position"] == pos) >= minimum,
-            f"Min_{pos}",
+            pulp.lpSum(slot_vars) == 1,
+            f"Fill_{slot_slug}_{slot['index']}",
+        )
+    for player in roster_pool:
+        prob += (
+            pulp.lpSum(
+                var
+                for (pid, _, _), var in player_vars.items()
+                if pid == player["player_id"]
+            ) <= 1,
+            f"One_Slot_Per_Player_{player['player_id']}",
         )
 
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
@@ -82,8 +155,12 @@ def build_and_solve_lineup(roster_pool: list) -> list:
 
     return [
         {"player_id": pid, "name": by_id[pid]["name"], "position": by_id[pid]["position"]}
-        for pid, var in player_vars.items()
-        if var.varValue == 1.0
+        for pid in by_id
+        if any(
+            var.varValue == 1.0
+            for (var_pid, _, _), var in player_vars.items()
+            if var_pid == pid
+        )
     ]
 
 
@@ -169,9 +246,10 @@ def optimize_weekly_lineup(team_id: str, season: int, week: int) -> int:
                     if not roster_pool:
                         logger.error(f"No active roster metrics found for Team {team_id} Season {season} Week {week}.")
                         return 0
+                    lineup_slot_counts = load_lineup_slot_counts(cursor, season)
 
                 with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
-                    optimal_starters = build_and_solve_lineup(roster_pool)
+                    optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
                     if not optimal_starters:
                         return 0
 
