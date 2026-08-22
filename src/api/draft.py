@@ -33,6 +33,7 @@ import os
 import re
 import time
 from typing import List, Literal, Optional
+from urllib.parse import parse_qs, urlparse
 
 import redis
 from fastapi import APIRouter, HTTPException, Request, status
@@ -190,6 +191,31 @@ def _practice_sync_job_state() -> str:
         return "Unknown"
     latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
     return _job_phase(latest.status)
+
+
+def _practice_sync_job_league_id() -> Optional[str]:
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+    except Exception as e:
+        logger.error(f"Failed to query practice draft-sync Job labels: {e}")
+        return None
+
+    if not jobs.items:
+        return None
+
+    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
+    return (latest.metadata.labels or {}).get("league-id")
+
+
+def _room_connected(league_id: Optional[str]) -> bool:
+    if league_id is None:
+        return False
+    try:
+        return bool(_redis_client().exists(f"draft:{league_id}:connected"))
+    except Exception as e:
+        logger.error(f"Failed to check draft room heartbeat for league {league_id}: {e}")
+        return False
 
 
 def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
@@ -651,14 +677,19 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest):
     if _practice_sync_job_state() == "Active":
         raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another.")
 
+    parsed_room_url = urlparse(payload.room_url)
+    room_league_id = parse_qs(parsed_room_url.query).get("leagueId", [None])[0]
     job_name = f"practice-draft-sync-{int(time.time())}"
+    job_labels = {"app": PRACTICE_SYNC_APP_LABEL}
+    if room_league_id is not None:
+        job_labels["league-id"] = room_league_id
     job = client.V1Job(
-        metadata=client.V1ObjectMeta(name=job_name, labels={"app": PRACTICE_SYNC_APP_LABEL}),
+        metadata=client.V1ObjectMeta(name=job_name, labels=job_labels),
         spec=client.V1JobSpec(
             backoff_limit=0,
             ttl_seconds_after_finished=3600,
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels={"app": PRACTICE_SYNC_APP_LABEL}),
+                metadata=client.V1ObjectMeta(labels=job_labels),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
                     image_pull_secrets=[client.V1LocalObjectReference(name="ghcr-pull-secret")],
@@ -703,7 +734,11 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest):
 
 @draft_router.get("/practice/sync-job/status")
 def get_practice_sync_job_status():
-    return {"job_state": _practice_sync_job_state()}
+    job_state = _practice_sync_job_state()
+    room_connected = False
+    if job_state == "Active":
+        room_connected = _room_connected(_practice_sync_job_league_id())
+    return {"job_state": job_state, "room_connected": room_connected}
 
 
 @draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
