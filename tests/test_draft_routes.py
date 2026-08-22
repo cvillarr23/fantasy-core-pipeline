@@ -785,7 +785,8 @@ def test_start_practice_sync_job_creates_job(client):
     mock_batch_api.create_namespaced_job.assert_called_once()
     namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
     assert namespace == "default"
-    assert job.metadata.labels == {"app": "practice-draft-sync"}
+    assert job.metadata.labels == {"app": "practice-draft-sync", "league-id": "123"}
+    assert job.spec.template.metadata.labels == {"app": "practice-draft-sync", "league-id": "123"}
     container = job.spec.template.spec.containers[0]
     assert container.image == "ghcr.io/example/fantasy-browser-worker:test"
     assert container.command == ["node", "src/bots/draft_sync.js"]
@@ -799,6 +800,22 @@ def test_start_practice_sync_job_creates_job(client):
     # controller considers it pending, not failed), so this silently looks like it's
     # working from /status alone. Regression coverage for that exact incident.
     assert job.spec.template.spec.image_pull_secrets == [k8s_client.V1LocalObjectReference(name="ghcr-pull-secret")]
+
+
+def test_start_practice_sync_job_omits_league_label_when_missing(client):
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 202
+    _, job = mock_batch_api.create_namespaced_job.call_args[0]
+    assert job.metadata.labels == {"app": "practice-draft-sync"}
+    assert job.spec.template.metadata.labels == {"app": "practice-draft-sync"}
 
 
 def test_start_practice_sync_job_rejects_non_https_url(client):
@@ -838,11 +855,38 @@ def test_start_practice_sync_job_k8s_failure(client):
 
 
 def test_get_practice_sync_job_status(client):
-    with patch("src.api.draft._practice_sync_job_state", return_value="Active"):
+    mock_redis = MagicMock()
+    mock_redis.exists.return_value = 1
+    with patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
+         patch("src.api.draft._practice_sync_job_league_id", return_value="123"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.get("/v1/draft/practice/sync-job/status")
 
     assert response.status_code == 200
-    assert response.json() == {"job_state": "Active"}
+    assert response.json() == {"job_state": "Active", "room_connected": True}
+
+
+def test_get_practice_sync_job_status_room_not_connected(client):
+    mock_redis = MagicMock()
+    mock_redis.exists.return_value = 0
+    with patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
+         patch("src.api.draft._practice_sync_job_league_id", return_value="123"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.get("/v1/draft/practice/sync-job/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_state": "Active", "room_connected": False}
+
+
+def test_get_practice_sync_job_status_not_active_skips_redis(client):
+    mock_redis = MagicMock()
+    with patch("src.api.draft._practice_sync_job_state", return_value="Succeeded"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.get("/v1/draft/practice/sync-job/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_state": "Succeeded", "room_connected": False}
+    mock_redis.exists.assert_not_called()
 
 
 def test_end_practice_sync_job_deletes_latest(client):
