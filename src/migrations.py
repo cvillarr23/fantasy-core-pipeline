@@ -19,7 +19,7 @@ from src.models import (
     CREATE_DRAFT_CONFIG_TABLE,
     ADD_DRAFT_CONFIG_MODE_COLUMN,
     ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN,
-    DROP_DRAFT_PICKS_PLAYER_FK,
+    ADD_DRAFT_PICKS_ESPN_PLAYER_ID_COLUMN,
     CREATE_DRAFT_SLOTS_TABLE,
     CREATE_RAW_SIGNALS_TABLE,
     CREATE_LLM_CALL_METRICS_TABLE,
@@ -92,7 +92,7 @@ def run_migrations():
             cursor.execute(ADD_DRAFT_CONFIG_MODE_COLUMN)
             cursor.execute(ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN)
             cursor.execute(CREATE_DRAFT_SLOTS_TABLE)
-            cursor.execute(DROP_DRAFT_PICKS_PLAYER_FK)
+            cursor.execute(ADD_DRAFT_PICKS_ESPN_PLAYER_ID_COLUMN)
 
             # 4d. Execute news/rumor ingestion ledger (CORE-13)
             logger.info("Validating 'raw_signals' news/rumor ingestion ledger...")

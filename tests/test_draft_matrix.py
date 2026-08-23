@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import pytest
 from unittest.mock import MagicMock, patch
 
 from opentelemetry import trace
@@ -17,8 +18,9 @@ LEAGUE_CONFIG = {
 }
 
 
-def _player(pid, position, vorp_score, name=None, team="KC"):
-    return {"player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score, "team": team}
+def _player(pid, position, vorp_score, name=None, team="KC", espn_id="e-1"):
+    return {"player_id": pid, "espn_id": espn_id, "name": name or pid, "position": position,
+            "vorp_score": vorp_score, "team": team}
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +230,7 @@ def test_persist_draft_pick_returns_true_when_inserted():
     assert "ON CONFLICT" in query
     assert "DO NOTHING" in query
     assert "RETURNING" in query
-    assert params == ("L1", 2026, 5, 1, "7", "p1")
+    assert params == ("L1", 2026, 5, 1, "7", "p1", None)
 
 
 def test_persist_draft_pick_returns_false_when_already_recorded():
@@ -312,11 +314,25 @@ def test_publish_draft_target_posts_expected_payload():
     assert url[0] == f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
     assert kwargs["json"] == {
         "team_id": "7",
-        "player_id": "p1",
+        # ESPN's id, not the internal one: the worker clicks data-player-id in the draft room.
+        "player_id": "e-1",
+        "internal_player_id": "p1",
         "name": "Some Back",
         "position": "RB",
         "pro_team": "KC",
     }
+
+
+def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
+    """182 of 1027 players have no espn_id. Posting a null id would either time out in the
+    draft room or be coerced into clicking a different player - never silently proceed."""
+    target = _player("p1", "RB", 12.0, name="Some Back", espn_id=None)
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        with pytest.raises(ValueError, match="no espn_id"):
+            dm.publish_draft_target("7", target)
+
+    mock_post.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -883,6 +899,7 @@ def test_handle_pick_event_maps_espn_player_id_to_internal_id():
     mock_resolve.assert_called_once()
     assert mock_resolve.call_args.args[1] == "4685526"
     assert mock_pick.call_args.kwargs["player_id"] == "13302"
+    assert mock_pick.call_args.kwargs["espn_player_id"] == "4685526"
 
 
 def test_handle_pick_event_still_records_unresolvable_players():
@@ -900,7 +917,8 @@ def test_handle_pick_event_still_records_unresolvable_players():
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
-    assert mock_pick.call_args.kwargs["player_id"] == "-16033"
+    assert mock_pick.call_args.kwargs["player_id"] is None
+    assert mock_pick.call_args.kwargs["espn_player_id"] == "-16033"
 
 
 def test_resolve_player_id_looks_up_espn_id_only():

@@ -594,7 +594,7 @@ def test_get_draft_status_aggregates_expected_shape(client):
 
     def _fetchall():
         if "draft_picks" in mock_cursor.last_query and "SELECT d.pick_number" in mock_cursor.last_query:
-            return [(2, 1, "3", "p1", "Player One", "RB"), (1, 1, "9", "p0", "Player Zero", "WR")]
+            return [(2, 1, "3", "p1", "e1", "Player One", "RB"), (1, 1, "9", "p0", "e0", "Player Zero", "WR")]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
         if "SELECT transaction_type" in mock_cursor.last_query:

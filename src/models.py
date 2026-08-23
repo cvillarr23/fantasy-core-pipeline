@@ -252,21 +252,25 @@ ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN = """
 ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS team_count INT;
 """
 
-# Drops the players FK on draft_picks.
+# The raw ESPN player id every draft pick arrives with.
 #
-# The draft stream carries ESPN's own player ids, while every other table in this schema keys
-# players by the internal players.player_id. draft_matrix resolves one to the other before
-# inserting, but two kinds of pick can never be resolved: D/ST and K, which the players table
-# does not carry at all, and any player missing from a stale roster sync.
+# players.player_id is Sleeper's id - it is the PK four other tables reference, and the whole
+# projection/VORP/optimizer stack joins on it - so draft_picks has to key off it too, or the
+# "already drafted" anti-join silently stops excluding drafted players. But the draft stream
+# only ever carries ESPN's id, and the espn_id crosswalk that bridges them covers 845 of 1027
+# players and no K or D/ST at all.
 #
-# With the FK in place those picks didn't degrade - they were rejected outright, taking the
-# whole pick with them. That is far worse than an unnamed pick: a missing pick_number breaks
-# the gapless run team-count derivation depends on, mis-sizes every subsequent round, and
-# leaves a hole in the feed the user is reading to follow their draft. _recent_picks already
-# LEFT JOINs players precisely so a pick with no player row still renders, just without a
-# name; this constraint was the one thing preventing that from ever happening.
-DROP_DRAFT_PICKS_PLAYER_FK = """
-ALTER TABLE draft_picks DROP CONSTRAINT IF EXISTS draft_picks_player_id_fkey;
+# Storing only the resolved id therefore loses every unresolvable pick, and a gap in
+# pick_number breaks the gapless run team-count derivation needs and mis-sizes every later
+# round. Storing the ESPN id *in* player_id is worse still: the two id spaces overlap
+# numerically, so a pick lands on a real but entirely different player (ESPN 12483 is Matthew
+# Stafford; internal 12483 is Jack Bech) and nothing downstream can tell it apart.
+#
+# So keep both. player_id stays nullable and FK-checked, holding the internal id when the
+# crosswalk resolves it; espn_player_id always holds the stream's own id, so no pick is ever
+# lost and unresolved ones can be backfilled as crosswalk coverage improves.
+ADD_DRAFT_PICKS_ESPN_PLAYER_ID_COLUMN = """
+ALTER TABLE draft_picks ADD COLUMN IF NOT EXISTS espn_player_id VARCHAR(20);
 """
 
 # Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in

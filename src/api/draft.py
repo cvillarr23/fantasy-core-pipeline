@@ -408,9 +408,11 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     """Left-joins players so the pick feed can render name/position without a separate
     per-pick lookup - LEFT JOIN (not INNER) so a pick still shows up even if its player
     row is somehow missing, just with name/position null rather than the whole pick
-    vanishing from the feed."""
+    vanishing from the feed. That is the normal case for K and D/ST, which the players
+    table doesn't carry at all: espn_player_id is returned alongside so the feed can still
+    identify the pick when the crosswalk has nothing to join to."""
     cursor.execute("""
-        SELECT d.pick_number, d.round, d.team_id, d.player_id, p.name, p.position
+        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position
         FROM draft_picks d
         LEFT JOIN players p ON d.player_id = p.player_id
         WHERE d.league_id = %s AND d.season = %s
@@ -418,7 +420,8 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
         LIMIT %s;
     """, (league_id, season, limit))
     return [
-        {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3], "name": row[4], "position": row[5]}
+        {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3],
+         "espn_player_id": row[4], "name": row[5], "position": row[6]}
         for row in cursor.fetchall()
     ]
 

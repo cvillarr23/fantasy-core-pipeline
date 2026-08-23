@@ -87,7 +87,7 @@ def load_undrafted_pool(cursor, league_id: str, season: int, week: int) -> pl.Da
     predraft pool has no league_rosters rows, so every remaining player is a free agent
     by definition, exactly vorp_matrix's pre-draft branch."""
     cursor.execute("""
-        SELECT p.player_id, p.name, p.position, s.projected_points, s.team_implied_total,
+        SELECT p.player_id, p.espn_id, p.name, p.position, s.projected_points, s.team_implied_total,
                s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team
         FROM players p
         JOIN weekly_stats s ON p.player_id = s.player_id
@@ -99,7 +99,7 @@ def load_undrafted_pool(cursor, league_id: str, season: int, week: int) -> pl.Da
     """, (season, week, league_id, season))
     rows = cursor.fetchall()
     schema = {
-        "player_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8, "projected_points": pl.Float64,
+        "player_id": pl.Utf8, "espn_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8, "projected_points": pl.Float64,
         "team_implied_total": pl.Float64, "avg_separation": pl.Float64,
         "pressure_rate_allowed": pl.Float64, "depth_chart_delta": pl.Int64, "team": pl.Utf8,
     }
@@ -444,7 +444,7 @@ def resolve_player_id(conn, espn_player_id: str) -> Optional[str]:
     return row[0] if row else None
 
 
-def persist_draft_pick(conn, league_id: str, season: int, pick_number: int, round_: Optional[int], team_id: str, player_id: str) -> bool:
+def persist_draft_pick(conn, league_id: str, season: int, pick_number: int, round_: Optional[int], team_id: str, player_id: Optional[str], espn_player_id: Optional[str] = None) -> bool:
     """ON CONFLICT DO NOTHING keyed on (league_id, season, pick_number) - a Stream
     consumer group redelivers an entry if it crashes before XACK, and reprocessing an
     already-recorded pick must be a no-op, not a duplicate. RETURNING tells the caller
@@ -453,11 +453,11 @@ def persist_draft_pick(conn, league_id: str, season: int, pick_number: int, roun
     second RabbitMQ draft command for a pick that already happened."""
     with conn.cursor() as cursor:
         cursor.execute("""
-            INSERT INTO draft_picks (league_id, season, pick_number, round, team_id, player_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO draft_picks (league_id, season, pick_number, round, team_id, player_id, espn_player_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (league_id, season, pick_number) DO NOTHING
             RETURNING pick_number;
-        """, (league_id, season, pick_number, round_, team_id, player_id))
+        """, (league_id, season, pick_number, round_, team_id, player_id, espn_player_id))
         return cursor.fetchone() is not None
 
 
@@ -498,6 +498,15 @@ def wait_for_pause_or_timeout(
 
 
 def publish_draft_target(team_id: str, target: dict) -> None:
+    # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
+    # without one. Fail loudly here rather than posting a null id: the trigger would either
+    # time out in the draft room or, worse, be coerced into matching someone else.
+    if not target.get("espn_id"):
+        raise ValueError(
+            f"Cannot auto-draft {target.get('name')} ({target.get('player_id')}): no espn_id in the crosswalk, "
+            "so the browser worker has no data-player-id to click. Pick this player manually."
+        )
+
     headers: dict = {}
     propagate.inject(headers)
 
@@ -505,7 +514,12 @@ def publish_draft_target(team_id: str, target: dict) -> None:
         f"{CORE_API_BASE_URL}/v1/trigger/draft-pick",
         json={
             "team_id": team_id,
-            "player_id": target["player_id"],
+            # The browser worker clicks button.Button--draft[data-player-id="..."], which is
+            # ESPN's id. target["player_id"] is Sleeper's - sending it means the selector
+            # never matches (a 15s timeout, no pick) or, where the id spaces collide,
+            # matches a real but entirely different player.
+            "player_id": target["espn_id"],
+            "internal_player_id": target["player_id"],
             "name": target["name"],
             "position": target["position"],
             "pro_team": target["team"],
@@ -560,7 +574,7 @@ def compute_draft_recommendation_candidates(cursor, league_id: str, season: int,
     remaining_picks = max(0, starting_total + bench_total - sum(drafted_by_us.values()))
 
     undrafted_pool = [
-        {"player_id": r["player_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"], "team": r["team"]}
+        {"player_id": r["player_id"], "espn_id": r["espn_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"], "team": r["team"]}
         for r in pool_df.iter_rows(named=True)
     ]
     selected = build_and_solve_draft_pick(undrafted_pool, position_caps, remaining_picks)
@@ -608,24 +622,24 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 # from fixing them. Repair them the moment it becomes readable.
                 backfill_missing_rounds(conn, league_id, season, team_count)
             # The stream carries ESPN's player id; draft_picks, VORP and the pick feed's
-            # player join all key off the internal players.player_id. Unresolvable ids (D/ST,
-            # K, or a stale roster sync) are still recorded under the raw ESPN id: dropping
-            # the pick would leave a gap in pick_number, which breaks the gapless run that
-            # team-count derivation requires and mis-sizes every round after it.
+            # player join all key off the internal players.player_id. Both are recorded:
+            # dropping an unresolvable pick would leave a gap in pick_number, which breaks the
+            # gapless run team-count derivation requires and mis-sizes every round after it.
             espn_player_id = str(event["player_id"])
             resolved_player_id = resolve_player_id(conn, espn_player_id)
             if resolved_player_id is None:
                 logger.warning(
-                    f"No players row for ESPN player id {espn_player_id} (pick {pick_number}); recording the "
-                    "pick under the raw ESPN id. It will show in the feed without a name until the roster sync "
-                    "covers this player - expected for D/ST and K, which the players table does not carry."
+                    f"No players row for ESPN player id {espn_player_id} (pick {pick_number}); recording the pick "
+                    "with player_id NULL so draft order stays intact. It shows in the feed without a name until "
+                    "the crosswalk covers this player - always the case for K and D/ST."
                 )
             inserted = persist_draft_pick(
                 conn, league_id, season,
                 pick_number=pick_number,
                 round_=round_,
                 team_id=event["team_id"],
-                player_id=resolved_player_id or espn_player_id,
+                player_id=resolved_player_id,
+                espn_player_id=espn_player_id,
             )
             if not inserted:
                 logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
