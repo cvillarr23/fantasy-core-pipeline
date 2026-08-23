@@ -125,10 +125,22 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
+NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
 def _normalized_name(value: str) -> str:
     """Collapse to comparable form: ESPN, Sleeper and DynastyProcess disagree on punctuation
-    and suffixes ("A.J. Brown" / "AJ Brown", "Kenneth Walker III" / "Kenneth Walker")."""
-    return "".join(ch for ch in value.casefold() if ch.isalnum())
+    and generational suffixes ("A.J. Brown" / "AJ Brown", "Kenneth Walker III" / "Kenneth
+    Walker"). Trailing suffix tokens are dropped, but never the only token left - "V" alone
+    is somebody's whole name somewhere, and an empty string would match everything."""
+    tokens = [
+        "".join(ch for ch in token.casefold() if ch.isalnum())
+        for token in value.split()
+    ]
+    tokens = [t for t in tokens if t]
+    while len(tokens) > 1 and tokens[-1] in NAME_SUFFIXES:
+        tokens.pop()
+    return "".join(tokens)
 
 
 def _reject_internal_player_id(player_id: str, name: str) -> None:
@@ -141,12 +153,13 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     through an existence check and draft Stafford. The payload's own name is the tiebreaker -
     the caller states who it believes it is drafting, so the two can be cross-checked.
 
-    Rejected: the id maps to a different player than the payload names, and the payload's player
-    is the one holding it as an internal player_id. That is decidably the wrong namespace.
+    Rejected: an id that is not an espn_id at all but is a known internal player_id - decidably
+    the wrong namespace whatever the payload calls it - and an id that is both, where the payload
+    names the internal owner rather than the ESPN one.
 
-    Allowed: an exact identity match; an id in neither column (the crosswalk covers ~82% of
-    players and no K or D/ST, so a legitimate ESPN id for an uncovered player must stay
-    draftable); and any case too ambiguous to call, which is logged instead.
+    Allowed: an identity match; an id in neither column (the crosswalk covers ~82% of players and
+    no K or D/ST, so a legitimate ESPN id for an uncovered player must stay draftable); and the
+    genuinely ambiguous case, which is logged instead.
     """
     submitted = _normalized_name(name)
     try:
@@ -166,9 +179,13 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     if espn_match and _normalized_name(espn_match[0]) == submitted:
         return
 
-    if internal_match and _normalized_name(internal_match[0]) == submitted:
+    # An id absent from players.espn_id but present as a players.player_id is the wrong namespace
+    # regardless of the name attached to it: a typo in the payload does not make a Sleeper id an
+    # ESPN one. Only when the id lives in BOTH namespaces does the name decide which was meant.
+    if internal_match and (not espn_match or _normalized_name(internal_match[0]) == submitted):
+        owner = internal_match[0]
         detail = (
-            f"player_id '{player_id}' is {name}'s internal Sleeper id, not an ESPN id. "
+            f"player_id '{player_id}' is {owner}'s internal Sleeper id, not an ESPN id. "
             f"The browser worker clicks button.Button--draft[data-player-id=...] in the ESPN "
             f"draft room, so it needs players.espn_id."
         )
@@ -180,9 +197,9 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
         raise HTTPException(status_code=422, detail=detail)
 
     if espn_match:
-        # The id is a real espn_id but names disagree and the payload's player does not hold it
-        # internally either. Most likely a crosswalk/name-format drift rather than a namespace
-        # error, and blocking a draft-day pick on a name mismatch is worse than allowing it.
+        # The id is a real espn_id, the names disagree, and no internal row claims the id at all.
+        # Most likely crosswalk or name-format drift rather than a namespace error, and blocking
+        # a draft-day pick on a name mismatch is worse than allowing it.
         logger.warning(
             f"Draft-pick payload names '{name}' but espn_id {player_id} maps to "
             f"'{espn_match[0]}'. Allowing - verify the pick landed on the intended player."

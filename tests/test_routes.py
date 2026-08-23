@@ -277,3 +277,48 @@ def test_trigger_draft_pick_fails_open_when_the_guard_lookup_errors(client):
 
     assert response.status_code == 202
     mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_rejects_a_known_internal_id_even_when_the_name_disagrees(client):
+    """A typo or alternate spelling does not turn a Sleeper id into an ESPN one. When the id is
+    absent from players.espn_id entirely, the namespace is decidable without the name."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [None, ("Some Back",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/draft-pick", json={
+            "team_id": "7", "player_id": "4046", "name": "Sum Bakc",
+            "position": "RB", "pro_team": "KC",
+        })
+
+    assert response.status_code == 422
+    assert "Some Back" in response.json()["detail"], "must name the id's actual owner, not the typo"
+    mock_connection.assert_not_called()
+
+
+def test_trigger_draft_pick_rejects_a_colliding_id_named_by_its_generational_suffix(client):
+    """Suffix drift must not let the dangerous case slip through: a caller sending Jack Bech's
+    internal id while writing his name without a suffix still has to be rejected."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Matthew Stafford",), ("Jack Bech III",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/draft-pick", json={
+            "team_id": "7", "player_id": "12483", "name": "Jack Bech",
+            "position": "WR", "pro_team": "NO",
+        })
+
+    assert response.status_code == 422
+    mock_connection.assert_not_called()
+
+
+def test_normalized_name_drops_generational_suffixes_but_never_the_last_token():
+    from src.api.routes import _normalized_name
+
+    assert _normalized_name("Kenneth Walker III") == _normalized_name("Kenneth Walker")
+    assert _normalized_name("A.J. Brown") == _normalized_name("AJ Brown")
+    assert _normalized_name("Michael Pittman Jr.") == _normalized_name("Michael Pittman")
+    # A bare suffix token is somebody's whole name; emptying it would match everything.
+    assert _normalized_name("V") == "v"
