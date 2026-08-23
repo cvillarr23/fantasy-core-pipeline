@@ -418,6 +418,8 @@ def _mock_conn_returning(inserted: bool, team_count: int = 10):
     mock_cursor = MagicMock()
     # handle_pick_event reads team_count first, then persist_draft_pick's RETURNING.
     mock_cursor.fetchone.side_effect = [(team_count,), (1,) if inserted else None] + [None] * 8
+    # backfill_missing_rounds' UPDATE ... RETURNING; nothing to repair by default.
+    mock_cursor.fetchall.return_value = []
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
     return mock_conn, mock_cursor
@@ -487,6 +489,55 @@ def test_handle_pick_event_leaves_round_unknown_without_league_settings():
 
     assert mock_pick.call_args.kwargs["round_"] is None
     mock_slot.assert_not_called()
+
+
+def test_backfill_missing_rounds_repairs_null_rounds_and_claims_round_one_slots():
+    """Picks recorded before league_settings existed keep round NULL forever - ON CONFLICT
+    DO NOTHING stops any Stream replay from filling them - so without this repair a league
+    configured one pick late would never get a complete draft_slots map."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [(3, "t3", 1), (14, "t7", 2)]
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.persist_draft_slot") as mock_slot:
+        repaired = dm.backfill_missing_rounds(mock_conn, "L1", 2026, team_count=10)
+
+    assert repaired == 2
+    # Only the round-1 pick claims a slot; pick 14 is round 2 and must not.
+    mock_slot.assert_called_once_with(mock_conn, "L1", 2026, "t3", 3)
+
+
+def test_handle_pick_event_backfills_once_league_settings_appear():
+    """The first pick that can read a team_count must repair everything recorded before it,
+    otherwise turn-order tracking stays permanently broken for that draft."""
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=10)
+    mock_client = MagicMock()
+    event = {"pick_number": "11", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.backfill_missing_rounds", return_value=0) as mock_backfill, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True), \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_backfill.assert_called_once_with(mock_conn, "L1", 2026, 10)
+
+
+def test_handle_pick_event_skips_backfill_when_team_count_unknown():
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=None)
+    mock_client = MagicMock()
+    event = {"pick_number": "3", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.backfill_missing_rounds") as mock_backfill, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True), \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_backfill.assert_not_called()
 
 
 def test_decode_pick_event_unwraps_worker_payload_envelope():

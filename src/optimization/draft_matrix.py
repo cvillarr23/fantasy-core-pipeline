@@ -292,6 +292,29 @@ def league_team_count(conn, league_id: str) -> Optional[int]:
     return int(row[0]) if row and row[0] else None
 
 
+def backfill_missing_rounds(conn, league_id: str, season: int, team_count: int) -> int:
+    """Repairs picks recorded while league_settings had no team_count. Those rows were stored
+    with round NULL, and persist_draft_pick's ON CONFLICT DO NOTHING means a Stream replay can
+    never fill them in - so without this, a league configured even one pick late would have a
+    permanently incomplete draft_slots map and therefore no on_the_clock_team for the whole
+    draft. Recomputes the round for every NULL row and claims a draft slot for any that turn
+    out to be round 1. Returns the number of rows repaired."""
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            UPDATE draft_picks
+               SET round = div(pick_number - 1, %s) + 1
+             WHERE league_id = %s AND season = %s AND round IS NULL
+            RETURNING pick_number, team_id, round;
+        """, (team_count, league_id, season))
+        repaired = cursor.fetchall()
+    for pick_number, team_id, round_ in repaired:
+        if round_ == 1:
+            persist_draft_slot(conn, league_id, season, str(team_id), int(pick_number))
+    if repaired:
+        logger.info(f"Backfilled round for {len(repaired)} pick(s) in league {league_id} recorded before league_settings existed.")
+    return len(repaired)
+
+
 def persist_draft_slot(conn, league_id: str, season: int, team_id: str, slot_number: int) -> None:
     """Records a team's round-1 pick_number as its permanent draft slot. ON CONFLICT DO
     NOTHING keyed on (league_id, season, team_id) - a team's slot is fixed the moment they
@@ -463,14 +486,13 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
     loop is never blocked by the auto-draft delay window.
 
     KNOWN LIMITATION: this always recomputes after any *other* team's pick, not
-    specifically "the pick right before our turn" - the worker's event schema
-    (player_id/pick_number/team_id) carries no snake-draft turn order, and deriving
-    one needs each team's draft-slot assignment, which isn't modeled anywhere yet. In
-    practice this means the recommendation stays continuously fresh (harmless), but a
-    hold-and-publish job gets scheduled once per opponent pick rather than only once,
-    right before we're actually on the clock - each new one supersedes the last via
-    _schedule_publish's cancel_event, so only the freshest ever actually publishes.
-    Tracking real turn order is a follow-up, not solved here."""
+    specifically "the pick right before our turn". Draft slots are modeled (see
+    persist_draft_slot) and the API uses them for turn order, but this handler does not
+    consult them before scheduling, so a hold-and-publish job gets scheduled once per
+    opponent pick rather than only once, right before we're actually on the clock. In
+    practice this is harmless: the recommendation stays continuously fresh, and each new
+    job supersedes the last via _schedule_publish's cancel_event, so only the freshest ever
+    actually publishes. Gating on the persisted slot map is a follow-up, not solved here."""
     with tracer.start_as_current_span("draft_pick.handle_event", attributes={"league_id": league_id, "team_id": our_team_id}):
         with get_db_connection() as conn:
             pick_number = int(event["pick_number"])
@@ -483,6 +505,17 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             # thing needed, given team count.
             team_count = league_team_count(conn, league_id)
             round_ = (pick_number - 1) // team_count + 1 if team_count else None
+            if team_count:
+                # A league configured after its draft started leaves earlier picks with round
+                # NULL and no draft slot, and ON CONFLICT DO NOTHING blocks any replay from
+                # fixing them. Repair them the moment team_count becomes readable.
+                backfill_missing_rounds(conn, league_id, season, team_count)
+            else:
+                logger.warning(
+                    f"League {league_id} has no team_count in league_settings; recording pick "
+                    f"{pick_number} with round unknown. Rounds and draft slots will be backfilled "
+                    "once the league is configured."
+                )
             inserted = persist_draft_pick(
                 conn, league_id, season,
                 pick_number=pick_number,
