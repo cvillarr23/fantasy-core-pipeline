@@ -286,15 +286,18 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
 
     More than one can exist: every practice run before this fix left its listener behind, so
     a long-lived cluster accumulates them."""
+    # Never fails open. An unreadable listener state is not "no conflicts" - treating it as
+    # such lets a transient apiserver blip slip a second listener past the duplicate guard,
+    # and two consumers on one Redis group split the pick stream between them.
+    batch_api = _batch_v1_api()
     try:
-        batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync")
     except Exception as e:
         logger.error(f"Failed to query active draft-sync listeners: {e}")
-        return []
+        raise
     items = getattr(jobs, "items", []) or []
     if not isinstance(items, list):
-        return []
+        raise RuntimeError(f"Unexpected response listing draft-sync Jobs: items was {type(items).__name__}, not a list.")
     conflicting = []
     for job in items:
         if _job_phase(job.status) != "Active":
@@ -303,14 +306,6 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
         if job_league_id and job_league_id != target_league_id:
             conflicting.append(job)
     return conflicting
-
-
-def _active_listener_on_other_league(target_league_id: str) -> Optional[str]:
-    """Returns the conflicting active league_id if another draft-sync listener is active."""
-    conflicting = _active_listeners_on_other_leagues(target_league_id)
-    if not conflicting:
-        return None
-    return (conflicting[0].metadata.labels or {}).get("league-id")
 
 
 def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> list:
@@ -334,7 +329,15 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
         if except_league_id is not None and labels.get("league-id") == except_league_id:
             continue
         try:
-            batch_api.delete_namespaced_job(job.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
+            batch_api.delete_namespaced_job(
+                job.metadata.name,
+                K8S_NAMESPACE,
+                # Foreground, matching /stop: Background returns before the Pod is gone, and
+                # /start creates the replacement the moment this returns. The old and new
+                # listeners would then briefly share a Redis consumer group and split the
+                # pick stream between them - the very overlap this reclaim exists to avoid.
+                propagation_policy="Foreground",
+            )
             deleted.append(job.metadata.name)
         except Exception as e:
             # Never swallow this. A caller that treats failed cleanup as success either
@@ -342,6 +345,12 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
             # 200 teardown while the listener is still consuming.
             logger.error(f"Failed to delete practice draft-sync listener Job {job.metadata.name}: {e}")
             raise
+
+    if deleted and not _wait_for_job_termination(batch_api, "app=draft-sync,mode=practice"):
+        raise RuntimeError(
+            f"Practice draft-sync listener Job(s) {', '.join(deleted)} did not terminate within "
+            f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s."
+        )
     if deleted:
         logger.info(f"Deleted stale practice draft-sync listener Jobs: {', '.join(deleted)}")
     return deleted
@@ -665,7 +674,16 @@ def start_draft_sync(league_id: Optional[str] = None):
             "mode": mode,
         }
 
-    conflicting = _active_listeners_on_other_leagues(league_id)
+    try:
+        conflicting = _active_listeners_on_other_leagues(league_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not determine whether another draft-sync listener is active: {e}. Refusing to start "
+                f"league {league_id} rather than risk a second listener splitting the pick stream."
+            ),
+        )
     if conflicting:
         # A practice run starting while stale *practice* listeners linger is the normal case,
         # not a conflict: the user has simply opened a new practice room, and practice is a
