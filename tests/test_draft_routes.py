@@ -1094,3 +1094,69 @@ def test_end_practice_sync_job_k8s_failure(client):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# _on_the_clock_team_id (practice-mode team_count fallback)
+# ---------------------------------------------------------------------------
+
+def _on_the_clock_cursor(league_settings_row, draft_config_row, slot_rows, latest_pick):
+    """Feeds the helper's four queries in order: league_settings, draft_config (only when the
+    first came back empty), the slot map, then MAX(pick_number)."""
+    cursor = MagicMock()
+    fetchones = [league_settings_row]
+    if league_settings_row is None or not league_settings_row[0]:
+        fetchones.append(draft_config_row)
+    fetchones.append((latest_pick,))
+    cursor.fetchone.side_effect = fetchones
+    cursor.fetchall.return_value = slot_rows
+    return cursor
+
+
+def test_on_the_clock_team_id_uses_draft_config_when_league_settings_is_empty():
+    """Practice rooms are never synced into league_settings, so without this fallback every
+    practice draft reports nobody on the clock no matter how well the listener is working."""
+    from src.api.draft import _on_the_clock_team_id
+
+    cursor = _on_the_clock_cursor(
+        league_settings_row=None,
+        draft_config_row=(3,),
+        slot_rows=[("a", 1), ("b", 2), ("c", 3)],
+        latest_pick=1,
+    )
+
+    # Pick 2 of a 3-team draft is still round 1, so slot 2 is up.
+    assert _on_the_clock_team_id(cursor, "L1", 2026) == "b"
+    # The draft_config lookup must be season-scoped; that row is keyed by league_id alone.
+    assert cursor.execute.call_args_list[1][0][1] == ("L1", 2026)
+
+
+def test_on_the_clock_team_id_prefers_league_settings_over_draft_config():
+    """The synced ESPN value wins over a count derived from pick arrivals, and the derived
+    fallback must not even be queried when it does."""
+    from src.api.draft import _on_the_clock_team_id
+
+    cursor = _on_the_clock_cursor(
+        league_settings_row=(3,),
+        draft_config_row=(99,),
+        slot_rows=[("a", 1), ("b", 2), ("c", 3)],
+        latest_pick=3,
+    )
+
+    # Pick 4 wraps into round 2, which reverses: slot 3 picks again.
+    assert _on_the_clock_team_id(cursor, "L1", 2026) == "c"
+    queried = [call[0][0] for call in cursor.execute.call_args_list]
+    assert not any("draft_config" in sql for sql in queried)
+
+
+def test_on_the_clock_team_id_is_none_when_no_source_has_a_team_count():
+    from src.api.draft import _on_the_clock_team_id
+
+    cursor = _on_the_clock_cursor(
+        league_settings_row=None,
+        draft_config_row=None,
+        slot_rows=[("a", 1)],
+        latest_pick=0,
+    )
+
+    assert _on_the_clock_team_id(cursor, "L1", 2026) is None

@@ -596,7 +596,7 @@ def test_handle_pick_event_derives_and_persists_team_count_for_unsynced_league()
         dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
     mock_derive.assert_called_once_with(mock_conn, "L1", 2026)
-    mock_persist_count.assert_called_once_with(mock_conn, "L1", 4)
+    mock_persist_count.assert_called_once_with(mock_conn, "L1", 2026, 4)
     # Repairs every round left NULL while the count was unknown, this pick included.
     mock_backfill.assert_called_once_with(mock_conn, "L1", 2026, 4)
     # Pick 5 in a 4-team league is round 2, so it must not claim a draft slot.
@@ -631,7 +631,9 @@ def test_league_team_count_falls_back_to_draft_config():
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    assert dm.league_team_count(mock_conn, "L1") == 12
+    assert dm.league_team_count(mock_conn, "L1", 2026) == 12
+    # The draft_config fallback must be season-scoped; the row is keyed by league_id only.
+    assert mock_cursor.execute.call_args_list[1][0][1] == ("L1", 2026)
 
 
 def test_league_team_count_prefers_league_settings():
@@ -640,7 +642,28 @@ def test_league_team_count_prefers_league_settings():
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    assert dm.league_team_count(mock_conn, "L1") == 10
+    assert dm.league_team_count(mock_conn, "L1", 2026) == 10
+
+
+def test_league_team_count_ignores_a_draft_config_count_from_another_season():
+    """draft_config is keyed by league_id alone, so a room reused in a later season keeps its
+    old row. Inheriting that count would block re-derivation and size every round wrongly."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.side_effect = [None, None]
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    assert dm.league_team_count(mock_conn, "L1", 2027) is None
+
+
+def test_persist_derived_team_count_is_scoped_to_league_and_season():
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    dm.persist_derived_team_count(mock_conn, "L1", 2026, 8)
+
+    assert mock_cursor.execute.call_args[0][1] == (8, "L1", 2026)
 
 
 def test_decode_pick_event_unwraps_worker_payload_envelope():

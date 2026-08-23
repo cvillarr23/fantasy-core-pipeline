@@ -386,11 +386,13 @@ def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
     # league_settings alone: that table only ever holds the one real ESPN_LEAGUE_ID, so for a
     # practice/mock room the count derived from pick arrivals is the only one there is, and
     # reading only league_settings here would report "nobody on the clock" for every practice
-    # draft no matter how well the listener was working.
+    # draft no matter how well the listener was working. The draft_config read is scoped to
+    # the season for the same reason as in draft_matrix: that table is keyed by league_id
+    # alone, so a room reused next season would otherwise inherit the old count.
     cursor.execute("SELECT team_count FROM league_settings WHERE league_id = %s;", (league_id,))
     row = cursor.fetchone()
     if row is None or not row[0]:
-        cursor.execute("SELECT team_count FROM draft_config WHERE league_id = %s;", (league_id,))
+        cursor.execute("SELECT team_count FROM draft_config WHERE league_id = %s AND season = %s;", (league_id, season))
         row = cursor.fetchone()
     if row is None or not row[0]:
         return None
@@ -547,7 +549,12 @@ def set_draft_config(payload: DraftConfigPayload):
                 INSERT INTO draft_config (league_id, team_id, season, mode)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (league_id) DO UPDATE
-                SET team_id = EXCLUDED.team_id, season = EXCLUDED.season, mode = EXCLUDED.mode, updated_at = CURRENT_TIMESTAMP;
+                SET team_id = EXCLUDED.team_id, season = EXCLUDED.season, mode = EXCLUDED.mode,
+                    -- A derived team count belongs to the season it was derived from. Reusing
+                    -- a room for a new season must start over rather than inherit it.
+                    team_count = CASE WHEN draft_config.season IS DISTINCT FROM EXCLUDED.season
+                                      THEN NULL ELSE draft_config.team_count END,
+                    updated_at = CURRENT_TIMESTAMP;
             """, (payload.league_id, payload.team_id, payload.season, payload.mode))
     except Exception as e:
         logger.error(f"Failed to persist draft config for league {payload.league_id}: {e}")

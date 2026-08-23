@@ -281,7 +281,7 @@ def select_recommended_target(selected: list, starting_needs: dict) -> Optional[
 # ------------------------------------------------------------------------------
 # Snake-draft turn order (CORE-10)
 # ------------------------------------------------------------------------------
-def league_team_count(conn, league_id: str) -> Optional[int]:
+def league_team_count(conn, league_id: str, season: int) -> Optional[int]:
     """Team count for snake-draft math. Returns None when it isn't known yet, which callers
     must treat as "round unknown" rather than guessing a default - a wrong team count silently
     produces a wrong draft slot map and therefore a wrong on_the_clock_team for the rest of
@@ -289,13 +289,21 @@ def league_team_count(conn, league_id: str) -> Optional[int]:
 
     Prefers league_settings (synced from ESPN by sync_league.py), falling back to the count
     derived from pick arrivals and cached on draft_config. Only the one real ESPN_LEAGUE_ID is
-    ever synced, so for practice/mock rooms that fallback is the only source there is."""
+    ever synced, so for practice/mock rooms that fallback is the only source there is.
+
+    The draft_config fallback is scoped to the season. draft_config is keyed by league_id
+    alone, so a room reused in a later season keeps the same row; without the season match a
+    stale count would apply immediately, block re-derivation, and compute every round and slot
+    at the wrong size."""
     with conn.cursor() as cursor:
         cursor.execute("SELECT team_count FROM league_settings WHERE league_id = %s;", (league_id,))
         row = cursor.fetchone()
         if row and row[0]:
             return int(row[0])
-        cursor.execute("SELECT team_count FROM draft_config WHERE league_id = %s;", (league_id,))
+        cursor.execute(
+            "SELECT team_count FROM draft_config WHERE league_id = %s AND season = %s;",
+            (league_id, season),
+        )
         row = cursor.fetchone()
     return int(row[0]) if row and row[0] else None
 
@@ -327,15 +335,16 @@ def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
     return None
 
 
-def persist_derived_team_count(conn, league_id: str, team_count: int) -> None:
+def persist_derived_team_count(conn, league_id: str, season: int, team_count: int) -> None:
     """Caches a derived team count on the league's draft_config row. Never overwrites an
     existing value: the count is fixed for the life of a draft, and a later re-derivation off
-    a partial pick set must not be able to move it."""
+    a partial pick set must not be able to move it. Scoped to the season so the cache can
+    never be written against, or read back for, a different season's draft."""
     with conn.cursor() as cursor:
         cursor.execute("""
             UPDATE draft_config SET team_count = %s
-             WHERE league_id = %s AND team_count IS NULL;
-        """, (team_count, league_id))
+             WHERE league_id = %s AND season = %s AND team_count IS NULL;
+        """, (team_count, league_id, season))
 
 
 def backfill_missing_rounds(conn, league_id: str, season: int, team_count: int) -> int:
@@ -549,7 +558,7 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             # from a round's - a 10-team/16-slot league yields ten of each either way - so it
             # has to be derived rather than read. Snake order makes pick_number the only
             # thing needed, given team count.
-            team_count = league_team_count(conn, league_id)
+            team_count = league_team_count(conn, league_id, season)
             round_ = (pick_number - 1) // team_count + 1 if team_count else None
             if team_count:
                 # A team count that only became known partway through leaves earlier picks with
@@ -574,7 +583,7 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 team_count = derive_team_count(conn, league_id, season)
                 if team_count:
                     logger.info(f"Derived team_count={team_count} for league {league_id} from round-1 pick arrivals.")
-                    persist_derived_team_count(conn, league_id, team_count)
+                    persist_derived_team_count(conn, league_id, season, team_count)
                     # Repairs every round left NULL up to now, this pick included, and claims
                     # the round-1 draft slots that could not be recorded without a count.
                     backfill_missing_rounds(conn, league_id, season, team_count)
