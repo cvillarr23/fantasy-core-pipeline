@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -133,6 +134,18 @@ class DraftStatusResponse(BaseModel):
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known")
     pipeline_health: str = Field(..., description="'healthy' iff the draft-sync Job is Active, Postgres/Redis both respond, and the listener's last-processed timestamp is fresh, else 'degraded'")
     recent_errors: List[dict] = Field(default_factory=list, description=f"Most recent draft-related error rows from execution_log (limit {RECENT_ERRORS_LIMIT})")
+    listener_state: Literal["Active", "Starting", "Failed", "Unknown"] = Field(
+        ...,
+        description="League-scoped listener lifecycle state derived from the draft board hash and Job status.",
+    )
+    listener_last_event_at: Optional[str] = Field(
+        None,
+        description="Most recent listener event timestamp as ISO-8601 UTC string.",
+    )
+    listener_error: Optional[str] = Field(
+        None,
+        description="Most recent listener error text, if one was reported by the draft listener runtime.",
+    )
 
 
 class DraftPauseRequest(BaseModel):
@@ -193,19 +206,91 @@ def _practice_sync_job_state() -> str:
     return _job_phase(latest.status)
 
 
-def _practice_sync_job_league_id() -> Optional[str]:
+def _latest_practice_sync_job():
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
     except Exception as e:
-        logger.error(f"Failed to query practice draft-sync Job labels: {e}")
+        logger.error(f"Failed to query practice draft-sync Job status: {e}")
         return None
-
-    if not jobs.items:
+    items = getattr(jobs, "items", []) or []
+    if not isinstance(items, list) or not items:
         return None
+    return max(items, key=lambda j: j.metadata.creation_timestamp)
 
-    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
+
+def _practice_sync_job_league_id() -> Optional[str]:
+    latest = _latest_practice_sync_job()
+    if latest is None:
+        return None
     return (latest.metadata.labels or {}).get("league-id")
+
+
+def _active_listener_on_other_league(target_league_id: str) -> Optional[str]:
+    """Returns the conflicting active league_id if another draft-sync listener is active."""
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync")
+    except Exception as e:
+        logger.error(f"Failed to query active draft-sync listeners: {e}")
+        return None
+    items = getattr(jobs, "items", []) or []
+    if not isinstance(items, list):
+        return None
+    for job in items:
+        if _job_phase(job.status) != "Active":
+            continue
+        job_league_id = (job.metadata.labels or {}).get("league-id")
+        if job_league_id and job_league_id != target_league_id:
+            return job_league_id
+    return None
+
+
+def _to_iso_timestamp(value) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _listener_status(job_state: str, recommendation: dict) -> tuple:
+    explicit_state = recommendation.get("listener_state")
+    valid_states = {"Active", "Starting", "Failed", "Unknown"}
+    listener_state = explicit_state if explicit_state in valid_states else None
+
+    listener_last_event_at = _to_iso_timestamp(
+        recommendation.get("listener_last_event_at", recommendation.get("last_processed_pick_at"))
+    )
+    listener_error = recommendation.get("listener_error") or None
+
+    if listener_state is None:
+        if job_state == "Failed":
+            listener_state = "Failed"
+        elif job_state == "Active":
+            listener_state = "Active" if listener_last_event_at is not None else "Starting"
+        else:
+            listener_state = "Unknown"
+
+    return listener_state, listener_last_event_at, listener_error
+
+
+def _practice_room_identifier(job) -> Optional[str]:
+    containers = getattr(getattr(getattr(job, "spec", None), "template", None), "spec", None)
+    if containers is None:
+        return None
+    for container in getattr(containers, "containers", []) or []:
+        for env_var in getattr(container, "env", []) or []:
+            if env_var.name != "DRAFT_ROOM_URL" or env_var.value is None:
+                continue
+            parsed = urlparse(env_var.value)
+            if parsed.fragment:
+                return parsed.fragment
+            draft_room_id = parse_qs(parsed.query).get("draftRoomId", [None])[0]
+            if draft_room_id:
+                return draft_room_id
+    return None
 
 
 def _room_connected(league_id: Optional[str]) -> bool:
@@ -372,6 +457,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         db_ok = False
 
     pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
+    listener_state, listener_last_event_at, listener_error = _listener_status(job_state, recommendation)
 
     return {
         "league_id": league_id,
@@ -384,6 +470,9 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "on_the_clock_team_id": on_the_clock_team_id,
         "pipeline_health": pipeline_health,
         "recent_errors": recent_errors,
+        "listener_state": listener_state,
+        "listener_last_event_at": listener_last_event_at,
+        "listener_error": listener_error,
     }
 
 
@@ -448,7 +537,24 @@ def start_draft_sync(league_id: Optional[str] = None):
     # stale draft target. Reject rather than silently creating a duplicate.
     existing_state = _job_state(league_id)
     if existing_state == "Active":
-        raise HTTPException(status_code=409, detail=f"A draft-sync Job for league {league_id} is already Active - stop it before starting another.")
+        return {
+            "status": "accepted",
+            "already_running": True,
+            "league_id": league_id,
+            "team_id": team_id,
+            "season": season,
+            "mode": mode,
+        }
+
+    conflicting_league_id = _active_listener_on_other_league(league_id)
+    if conflicting_league_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A draft-sync Job is already Active for league {conflicting_league_id}; "
+                f"stop it before starting league {league_id}."
+            ),
+        )
 
     job_prefix = "draft-sync-practice" if mode == "practice" else "draft-sync"
     job_name = f"{job_prefix}-{_dns1123_slug(league_id)}-{int(time.time())}"
@@ -489,7 +595,15 @@ def start_draft_sync(league_id: Optional[str] = None):
         logger.error(f"Failed to create draft-sync Job for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create draft-sync Job: {str(e)}")
 
-    return {"status": "accepted", "job_name": job_name, "league_id": league_id, "team_id": team_id, "season": season, "mode": mode}
+    return {
+        "status": "accepted",
+        "already_running": False,
+        "job_name": job_name,
+        "league_id": league_id,
+        "team_id": team_id,
+        "season": season,
+        "mode": mode,
+    }
 
 
 STOP_JOB_TERMINATION_MAX_POLLS = 15
@@ -598,6 +712,11 @@ async def _draft_status_event_generator(request: Request, league_id: str, season
         if payload != last_payload:
             yield f"data: {json.dumps(payload, default=str)}\n\n"
             last_payload = payload
+        heartbeat = {
+            "league_id": league_id,
+            "emitted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        yield f"event: heartbeat\ndata: {json.dumps(heartbeat)}\n\n"
         await asyncio.sleep(SSE_POLL_INTERVAL_SECONDS)
 
 
@@ -734,11 +853,21 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest):
 
 @draft_router.get("/practice/sync-job/status")
 def get_practice_sync_job_status():
-    job_state = _practice_sync_job_state()
+    job = _latest_practice_sync_job()
+    job_state = _job_phase(job.status) if job is not None else "Unknown"
+    active_league_id = (job.metadata.labels or {}).get("league-id") if job is not None else None
+    room_identifier = _practice_room_identifier(job) if job is not None else None
     room_connected = False
     if job_state == "Active":
-        room_connected = _room_connected(_practice_sync_job_league_id())
-    return {"job_state": job_state, "room_connected": room_connected}
+        room_connected = _room_connected(active_league_id)
+    return {
+        "job_state": job_state,
+        "pod_active": job_state == "Active",
+        "room_connected": room_connected,
+        "room_handshake_complete": room_connected,
+        "active_league_id": active_league_id,
+        "room_identifier": room_identifier,
+    }
 
 
 @draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)

@@ -447,6 +447,7 @@ def test_handle_pick_event_skips_recommendation_when_we_just_picked():
     assert result is None
     mock_client.hset.assert_called_once()
     mapping = mock_client.hset.call_args.kwargs["mapping"]
+    assert mapping["listener_state"] == "Active"
     assert mapping["last_processed_pick_number"] == 1
 
 
@@ -466,9 +467,33 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     assert mock_client.hset.call_count == 2
     hset_kwargs = mock_client.hset.call_args_list[-1].kwargs
     assert hset_kwargs["mapping"]["recommended_player_id"] == "p2"
+    assert hset_kwargs["mapping"]["listener_state"] == "Active"
     assert hset_kwargs["mapping"]["last_processed_pick_number"] == 1
     top_candidates = json.loads(hset_kwargs["mapping"]["top_candidates"])
     assert [c["player_id"] for c in top_candidates] == ["p2", "p3"]
+
+
+def test_process_entries_marks_listener_failed_on_handler_exception():
+    mock_client = MagicMock()
+    entries = [("draft_picks:L1", [("1-0", {"pick_number": "1"})])]
+
+    with patch("src.optimization.draft_matrix.handle_pick_event", side_effect=Exception("boom")):
+        dm._process_entries(
+            mock_client,
+            stream_key="draft_picks:L1",
+            league_id="L1",
+            season=2026,
+            week=1,
+            team_id="7",
+            delay_seconds=8,
+            pending_state={},
+            entries=entries,
+        )
+
+    hset_calls = [c for c in mock_client.hset.call_args_list if c.args and c.args[0] == "draft:L1:board"]
+    assert hset_calls
+    assert hset_calls[-1].kwargs["mapping"]["listener_state"] == "Failed"
+    assert hset_calls[-1].kwargs["mapping"]["listener_error"] == "boom"
 
 
 def test_handle_pick_event_records_draft_slot_on_round_one_pick():

@@ -64,6 +64,19 @@ PAUSE_POLL_INTERVAL_SECONDS = 1
 TOP_CANDIDATES_LIMIT = 5
 
 
+def _listener_board_key(league_id: str) -> str:
+    return f"draft:{league_id}:board"
+
+
+def _write_listener_state(r_client, league_id: str, state: str, error: Optional[str] = None) -> None:
+    mapping = {"listener_state": state}
+    if error:
+        mapping["listener_error"] = error
+    else:
+        mapping["listener_error"] = ""
+    r_client.hset(_listener_board_key(league_id), mapping=mapping)
+
+
 # ------------------------------------------------------------------------------
 # Undrafted pool tracking
 # ------------------------------------------------------------------------------
@@ -470,13 +483,23 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 # than guessing - a missing slot just means on_the_clock_team_id can't be
                 # computed yet, not a wrong recommendation.
                 persist_draft_slot(conn, league_id, season, event["team_id"], pick_number)
+            now = int(time.time())
             r_client.hset(
-                f"draft:{league_id}:board",
+                _listener_board_key(league_id),
                 mapping={
-                    "last_processed_pick_at": int(time.time()),
+                    "listener_state": "Active",
+                    "listener_error": "",
+                    "listener_last_event_at": now,
+                    "last_processed_pick_at": now,
                     "last_processed_pick_number": pick_number,
                 },
             )
+            if not r_client.hexists(_listener_board_key(league_id), "listener_first_event_at"):
+                r_client.hset(_listener_board_key(league_id), mapping={"listener_first_event_at": now})
+                logger.info(
+                    "listener_first_pick_observed league_id=%s team_id=%s pick_number=%s",
+                    league_id, our_team_id, pick_number,
+                )
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
@@ -489,11 +512,15 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
 
         target = candidates[0]
         next_pick_number = int(event["pick_number"]) + 1
-        r_client.hset(f"draft:{league_id}:board", mapping={
+        now = int(time.time())
+        r_client.hset(_listener_board_key(league_id), mapping={
             "recommended_player_id": target["player_id"],
             "recommended_name": target["name"],
             "pick_number": next_pick_number,
-            "last_processed_pick_at": int(time.time()),
+            "listener_state": "Active",
+            "listener_error": "",
+            "listener_last_event_at": now,
+            "last_processed_pick_at": now,
             "last_processed_pick_number": pick_number,
             # CORE-14 web UI's comparison panel wants the full ranked list, not just the
             # winner - redis hashes are flat string->string, so the ranked candidates ride
@@ -536,6 +563,7 @@ def _process_entries(r_client, stream_key: str, league_id: str, season: int, wee
                         _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state)
                 except Exception as e:
                     logger.error(f"Failed to process draft pick event {entry_id}: {e}")
+                    _write_listener_state(r_client, league_id, "Failed", error=str(e))
                 finally:
                     r_client.xack(stream_key, CONSUMER_GROUP, entry_id)
 
@@ -544,30 +572,41 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
     """Long-running entrypoint: consumes fantasy-browser-worker's
     draft_picks:{leagueId} Redis Stream via a consumer group so a restart resumes from the
     last acked pick instead of silently missing one."""
+    logger.info("listener_start_attempt league_id=%s team_id=%s season=%s week=%s", league_id, team_id, season, week)
     with tracer.start_as_current_span("draft_listener.startup", attributes={"league_id": league_id, "team_id": team_id}):
-        r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-        r_client.ping()
-
-        stream_key = f"draft_picks:{league_id}"
-        consumer_name = f"draft-matrix-{team_id}"
         try:
-            r_client.xgroup_create(stream_key, CONSUMER_GROUP, id="0", mkstream=True)
-        except redis.ResponseError as e:
-            if "BUSYGROUP" not in str(e):
-                raise
+            r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r_client.ping()
 
-        pending_state: dict = {}
+            stream_key = f"draft_picks:{league_id}"
+            consumer_name = f"draft-matrix-{team_id}"
+            try:
+                r_client.xgroup_create(stream_key, CONSUMER_GROUP, id="0", mkstream=True)
+            except redis.ResponseError as e:
+                if "BUSYGROUP" not in str(e):
+                    raise
 
-        # Drain this consumer's own unacked backlog first (crash/restart recovery): reading
-        # only ">" returns brand-new entries and would treat anything delivered-but-never-
-        # acked before a crash as gone forever, breaking the durability the consumer group
-        # exists for. (Scope note: this recovers this exact consumer name's own backlog, not
-        # another dead consumer's via XAUTOCLAIM - out of scope for a single-team listener.)
-        while True:
-            backlog = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: "0"}, count=100)
-            if not backlog or not backlog[0][1]:
-                break
-            _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, backlog)
+            _write_listener_state(r_client, league_id, "Starting")
+            logger.info("listener_start_success league_id=%s team_id=%s consumer=%s", league_id, team_id, consumer_name)
+            pending_state: dict = {}
+
+            # Drain this consumer's own unacked backlog first (crash/restart recovery): reading
+            # only ">" returns brand-new entries and would treat anything delivered-but-never-
+            # acked before a crash as gone forever, breaking the durability the consumer group
+            # exists for. (Scope note: this recovers this exact consumer name's own backlog, not
+            # another dead consumer's via XAUTOCLAIM - out of scope for a single-team listener.)
+            while True:
+                backlog = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: "0"}, count=100)
+                if not backlog or not backlog[0][1]:
+                    break
+                _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, backlog)
+        except Exception as e:
+            logger.error("listener_start_failure league_id=%s team_id=%s error=%s", league_id, team_id, e)
+            try:
+                _write_listener_state(r_client, league_id, "Failed", error=str(e))
+            except Exception:
+                pass
+            raise
 
     logger.info(f"Listening on '{stream_key}' as consumer '{consumer_name}' for league {league_id}...")
     while True:
