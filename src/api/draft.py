@@ -232,19 +232,32 @@ def _job_phase(job_status) -> str:
     return "Unknown"
 
 
-def _job_state(league_id: str) -> str:
+def _latest_listener_job(league_id: str):
+    """(latest draft-sync Job for the league or None, whether the query actually succeeded).
+
+    Absent and unreadable have to stay distinguishable. Callers use absence to decide that
+    leftover Redis state describes a finished run; treating an apiserver failure the same way
+    would suppress a live run's error banner exactly when something is already wrong.
+    """
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}")
     except Exception as e:
         logger.error(f"Failed to query draft-sync Job status for league {league_id}: {e}")
-        return "Unknown"
+        return None, False
 
-    if not jobs.items:
-        return "Unknown"
+    items = getattr(jobs, "items", []) or []
+    if not items:
+        return None, True
     # Most recently created Job for this league is the one we care about.
-    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-    return _job_phase(latest.status)
+    return max(items, key=lambda j: j.metadata.creation_timestamp), True
+
+
+def _job_state(league_id: str) -> str:
+    job, _query_ok = _latest_listener_job(league_id)
+    if job is None:
+        return "Unknown"
+    return _job_phase(job.status)
 
 
 def _practice_sync_job_state() -> str:
@@ -308,6 +321,44 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
     return conflicting
 
 
+def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False) -> int:
+    """Deletes a league's recommendation board and pause flags - the same Redis state /stop
+    clears, minus /stop's insistence that failure is fatal.
+
+    The board holds listener_state, listener_error and the last recommendation, with no TTL.
+    Nothing expires it, so once a run ends its final state sits there indefinitely and the UI
+    reports a finished run's fatal error, and its stale top-picks, as though they were current.
+    Callers here are cleanup and startup paths, where a Redis hiccup must not abort the
+    operation itself - refusing to start a draft because leftover state could not be cleared
+    would be worse than starting with it. Logged loudly and reported instead.
+
+    include_pick_stream additionally drops the connector's pick ledger, its health key and the
+    pick Stream itself. Those are only safe to remove once the run is definitively over: the
+    room connector starts BEFORE the listener does, so a pick published in that window would be
+    lost if startup cleared the Stream. Teardown has no such race, and clearing there matters -
+    the connector seeds its ledger from draft:{league}:picks and the listener replays the
+    Stream backlog from id 0, so re-using a league id would otherwise resurrect the old run's
+    picks and suppress the new ones as duplicates.
+    """
+    try:
+        r_client = _redis_client()
+        keys = [f"draft:{league_id}:board"]
+        keys.extend(r_client.scan_iter(match=f"draft:{league_id}:pause:*"))
+        if include_pick_stream:
+            keys.extend([f"draft:{league_id}:picks", f"draft:{league_id}:health", f"draft_picks:{league_id}"])
+        cleared = r_client.delete(*keys) if keys else 0
+        if cleared:
+            logger.info(f"Cleared {cleared} stale Redis draft key(s) for league {league_id}.")
+        return cleared
+    except Exception as e:
+        logger.warning(
+            f"Could not clear stale Redis draft state for league {league_id}: {e}. A previous "
+            "run's listener error or recommendation may briefly show until the new listener "
+            "overwrites it."
+        )
+        return 0
+
+
 def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_names: list) -> bool:
     """Like _wait_for_job_termination, but waits for specific Jobs rather than for the whole
     selector to empty - the caller may be intentionally leaving other matching Jobs in place."""
@@ -337,6 +388,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
         raise
 
     deleted = []
+    deleted_league_ids = []
     for job in getattr(jobs, "items", []) or []:
         labels = job.metadata.labels or {}
         if except_league_id is not None and labels.get("league-id") == except_league_id:
@@ -352,6 +404,8 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
                 propagation_policy="Foreground",
             )
             deleted.append(job.metadata.name)
+            if labels.get("league-id"):
+                deleted_league_ids.append(labels["league-id"])
         except Exception as e:
             # Never swallow this. A caller that treats failed cleanup as success either
             # starts a second listener alongside the one it failed to reclaim, or reports a
@@ -370,6 +424,10 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
         )
     if deleted:
         logger.info(f"Deleted stale practice draft-sync listener Jobs: {', '.join(deleted)}")
+    # The Job is only half the run's footprint. Its board outlives it with no TTL, so leaving
+    # it behind is what makes a dead run's error and recommendation keep surfacing as current.
+    for dead_league_id in deleted_league_ids:
+        _clear_league_draft_state(dead_league_id, include_pick_stream=True)
     return deleted
 
 
@@ -382,7 +440,7 @@ def _to_iso_timestamp(value) -> Optional[str]:
         return None
 
 
-def _listener_status(job_state: str, recommendation: dict) -> tuple:
+def _listener_status(job_state: str, recommendation: dict, listener_job_absent: bool = False) -> tuple:
     explicit_state = recommendation.get("listener_state")
     valid_states = {"Active", "Starting", "Failed", "Unknown"}
     listener_state = explicit_state if explicit_state in valid_states else None
@@ -391,6 +449,14 @@ def _listener_status(job_state: str, recommendation: dict) -> tuple:
         recommendation.get("listener_last_event_at", recommendation.get("last_processed_pick_at"))
     )
     listener_error = recommendation.get("listener_error") or None
+
+    if listener_job_absent:
+        # No listener Job exists for this league, so whatever the board says describes a run
+        # that has already ended. Reporting its final "Failed" and error text as the current
+        # state is how a long-finished run keeps showing a fatal banner with nothing running -
+        # there is no listener left to overwrite the board, and it has no TTL. The timestamp
+        # is kept because "last seen at" is still true; the state and error are not.
+        return "Unknown", listener_last_event_at, None
 
     if job_state == "Failed":
         listener_state = "Failed"
@@ -562,7 +628,9 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     must surface as pipeline_health="degraded" in a normal 200 response (so the browser can
     make the documented auto-picker fallback decision), not escape as an unhandled
     exception that turns the whole endpoint into a 500."""
-    job_state = _job_state(league_id)
+    # One apiserver read serves both: the Job's phase, and whether a listener exists at all.
+    listener_job, listener_job_query_ok = _latest_listener_job(league_id)
+    job_state = _job_phase(listener_job.status) if listener_job is not None else "Unknown"
 
     redis_ok = True
     recommendation: dict = {}
@@ -597,7 +665,13 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         db_ok = False
 
     pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
-    listener_state, listener_last_event_at, listener_error = _listener_status(job_state, recommendation)
+    listener_state, listener_last_event_at, listener_error = _listener_status(
+        job_state,
+        recommendation,
+        # Only a successful query that found nothing counts as absent. A failed read leaves
+        # this False so a genuine error stays visible.
+        listener_job_absent=listener_job_query_ok and listener_job is None,
+    )
 
     return {
         "league_id": league_id,
@@ -731,6 +805,14 @@ def start_draft_sync(league_id: Optional[str] = None):
 
     job_prefix = "draft-sync-practice" if mode == "practice" else "draft-sync"
     job_name = f"{job_prefix}-{_dns1123_slug(league_id)}-{int(time.time())}"
+
+    # Reached only when a new listener is genuinely being created - the already_running branch
+    # returned long before this. A previous run for this league leaves its board behind with no
+    # TTL, so without this the new run opens showing the old one's recommendation, its
+    # last-processed pick number and, if it died, its error. Clearing before the Job is created
+    # means the listener's own "Starting" write is the first thing on a fresh board.
+    _clear_league_draft_state(league_id)
+
     job_labels = {"app": "draft-sync", "league-id": league_id, "mode": mode}
     job = client.V1Job(
         metadata=client.V1ObjectMeta(name=job_name, labels=job_labels),
