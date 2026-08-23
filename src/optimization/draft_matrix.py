@@ -573,6 +573,10 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
     draft_picks:{leagueId} Redis Stream via a consumer group so a restart resumes from the
     last acked pick instead of silently missing one."""
     logger.info("listener_start_attempt league_id=%s team_id=%s season=%s week=%s", league_id, team_id, season, week)
+    r_client = None
+    stream_key = None
+    consumer_name = None
+    pending_state = {}
     with tracer.start_as_current_span("draft_listener.startup", attributes={"league_id": league_id, "team_id": team_id}):
         try:
             r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
@@ -588,7 +592,6 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
             _write_listener_state(r_client, league_id, "Starting")
             logger.info("listener_start_success league_id=%s team_id=%s consumer=%s", league_id, team_id, consumer_name)
-            pending_state: dict = {}
 
             # Drain this consumer's own unacked backlog first (crash/restart recovery): reading
             # only ">" returns brand-new entries and would treat anything delivered-but-never-
@@ -602,10 +605,11 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
                 _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, backlog)
         except Exception as e:
             logger.error("listener_start_failure league_id=%s team_id=%s error=%s", league_id, team_id, e)
-            try:
-                _write_listener_state(r_client, league_id, "Failed", error=str(e))
-            except Exception:
-                pass
+            if r_client is not None:
+                try:
+                    _write_listener_state(r_client, league_id, "Failed", error=str(e))
+                except Exception:
+                    pass
             raise
 
     logger.info(f"Listening on '{stream_key}' as consumer '{consumer_name}' for league {league_id}...")

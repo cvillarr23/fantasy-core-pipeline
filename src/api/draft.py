@@ -180,7 +180,7 @@ def _job_phase(job_status) -> str:
 def _job_state(league_id: str) -> str:
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"league-id={league_id}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}")
     except Exception as e:
         logger.error(f"Failed to query draft-sync Job status for league {league_id}: {e}")
         return "Unknown"
@@ -265,10 +265,10 @@ def _listener_status(job_state: str, recommendation: dict) -> tuple:
     )
     listener_error = recommendation.get("listener_error") or None
 
-    if listener_state is None:
-        if job_state == "Failed":
-            listener_state = "Failed"
-        elif job_state == "Active":
+    if job_state == "Failed":
+        listener_state = "Failed"
+    elif listener_state is None:
+        if job_state == "Active":
             listener_state = "Active" if listener_last_event_at is not None else "Starting"
         else:
             listener_state = "Unknown"
