@@ -616,8 +616,10 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 else:
                     logger.warning(
                         f"League {league_id} has no known team_count yet; recording pick {pick_number} "
-                        "with round unknown. Rounds and draft slots are backfilled automatically once "
-                        "round 1 completes and the count can be derived."
+                        "with round unknown. Rounds and draft slots are backfilled automatically as "
+                        "soon as a count becomes available - for a practice room that happens on its "
+                        "own at the snake turnaround, but a live league needs sync_league.py to "
+                        "populate league_settings, since pick trading makes derivation unsafe there."
                     )
             if round_ == 1:
                 # Round-1 arrival order *is* each team's snake-draft slot (see
