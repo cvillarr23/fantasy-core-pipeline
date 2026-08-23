@@ -117,6 +117,7 @@ def test_start_draft_sync_creates_job(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -129,6 +130,7 @@ def test_start_draft_sync_creates_job(client):
     assert body["team_id"] == "7"
     assert body["season"] == 2026
     assert body["mode"] == "live"
+    assert body["already_running"] is False
 
     mock_batch_api.create_namespaced_job.assert_called_once()
     namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
@@ -152,6 +154,7 @@ def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -180,6 +183,7 @@ def test_start_draft_sync_selector_picks_named_league(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -200,6 +204,7 @@ def test_start_draft_sync_no_selector_falls_back_to_most_recent(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -245,7 +250,7 @@ def test_start_draft_sync_requires_config_stored_first(client):
     assert "draft config" in response.json()["detail"].lower()
 
 
-def test_start_draft_sync_rejects_when_job_already_active(client):
+def test_start_draft_sync_is_idempotent_when_same_league_already_active(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
 
@@ -255,8 +260,24 @@ def test_start_draft_sync_rejects_when_job_already_active(client):
          image_patch, secret_patch, configmap_patch:
         response = client.post("/v1/draft/start")
 
+    assert response.status_code == 202
+    assert response.json()["already_running"] is True
+    assert response.json()["status"] == "accepted"
+
+
+def test_start_draft_sync_conflicts_when_another_league_listener_is_active(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value="L2"), \
+         image_patch, secret_patch, configmap_patch:
+        response = client.post("/v1/draft/start")
+
     assert response.status_code == 409
-    assert "already Active" in response.json()["detail"]
+    assert "L2" in response.json()["detail"]
 
 
 def test_start_draft_sync_k8s_failure(client):
@@ -269,6 +290,7 @@ def test_start_draft_sync_k8s_failure(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -459,6 +481,9 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert body["recent_picks"][0]["position"] == "RB"
     assert body["pipeline_health"] == "healthy"
     assert body["recent_errors"][0]["transaction_type"] == "draft_sync"
+    assert body["listener_state"] == "Active"
+    assert body["listener_last_event_at"] == "1970-01-01T00:16:40Z"
+    assert body["listener_error"] is None
 
 
 def test_get_draft_status_reports_failed_clicker_action(client):
@@ -734,7 +759,7 @@ def test_stream_draft_status_emits_first_event_then_stops_on_disconnect():
     payload = {
         "league_id": "L1", "season": 2026, "mode": "live", "job_state": "Active", "recommendation": {},
         "last_clicker_action": None, "recent_picks": [], "on_the_clock_team_id": None,
-        "pipeline_health": "healthy",
+        "pipeline_health": "healthy", "listener_state": "Starting", "listener_last_event_at": None, "listener_error": None,
     }
     mock_request = MagicMock()
     # Connected for the first iteration, disconnected from the second check onward.
@@ -744,10 +769,11 @@ def test_stream_draft_status_emits_first_event_then_stops_on_disconnect():
          patch("src.api.draft.asyncio.sleep", new_callable=AsyncMock):
         events = asyncio_module.run(_collect_events(mock_request, "L1", 2026, 10))
 
-    assert len(events) == 1
+    assert len(events) == 2
     emitted = json_module.loads(events[0][len("data: "):].strip())
     assert emitted["league_id"] == "L1"
     assert emitted["job_state"] == "Active"
+    assert events[1].startswith("event: heartbeat\n")
 
 
 def test_stream_draft_status_skips_duplicate_payloads():
@@ -761,7 +787,9 @@ def test_stream_draft_status_skips_duplicate_payloads():
          patch("src.api.draft.asyncio.sleep", new_callable=AsyncMock):
         events = asyncio_module.run(_collect_events(mock_request, "L1", 2026, 10))
 
-    assert len(events) == 1
+    assert len(events) == 3
+    assert events[1].startswith("event: heartbeat\n")
+    assert events[2].startswith("event: heartbeat\n")
 
 
 # ---------------------------------------------------------------------------
@@ -854,38 +882,80 @@ def test_start_practice_sync_job_k8s_failure(client):
     assert response.status_code == 500
 
 
+def _mock_practice_job(*, state: str, league_id: str = "123", room_url: str = "https://fantasy.espn.com/football/draft#room-xyz"):
+    job = MagicMock()
+    job.metadata.labels = {"app": "practice-draft-sync", "league-id": league_id}
+    status = MagicMock()
+    status.active = 1 if state == "Active" else None
+    status.succeeded = 1 if state == "Succeeded" else None
+    status.failed = 1 if state == "Failed" else None
+    job.status = status
+    env_var = MagicMock()
+    env_var.name = "DRAFT_ROOM_URL"
+    env_var.value = room_url
+    container = MagicMock()
+    container.env = [env_var]
+    pod_spec = MagicMock()
+    pod_spec.containers = [container]
+    template = MagicMock()
+    template.spec = pod_spec
+    spec = MagicMock()
+    spec.template = template
+    job.spec = spec
+    return job
+
+
 def test_get_practice_sync_job_status(client):
     mock_redis = MagicMock()
     mock_redis.exists.return_value = 1
-    with patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
-         patch("src.api.draft._practice_sync_job_league_id", return_value="123"), \
+    with patch("src.api.draft._latest_practice_sync_job", return_value=_mock_practice_job(state="Active", league_id="123")), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.get("/v1/draft/practice/sync-job/status")
 
     assert response.status_code == 200
-    assert response.json() == {"job_state": "Active", "room_connected": True}
+    assert response.json() == {
+        "job_state": "Active",
+        "pod_active": True,
+        "room_connected": True,
+        "room_handshake_complete": True,
+        "active_league_id": "123",
+        "room_identifier": "room-xyz",
+    }
 
 
 def test_get_practice_sync_job_status_room_not_connected(client):
     mock_redis = MagicMock()
     mock_redis.exists.return_value = 0
-    with patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
-         patch("src.api.draft._practice_sync_job_league_id", return_value="123"), \
+    with patch("src.api.draft._latest_practice_sync_job", return_value=_mock_practice_job(state="Active", league_id="123")), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.get("/v1/draft/practice/sync-job/status")
 
     assert response.status_code == 200
-    assert response.json() == {"job_state": "Active", "room_connected": False}
+    assert response.json() == {
+        "job_state": "Active",
+        "pod_active": True,
+        "room_connected": False,
+        "room_handshake_complete": False,
+        "active_league_id": "123",
+        "room_identifier": "room-xyz",
+    }
 
 
 def test_get_practice_sync_job_status_not_active_skips_redis(client):
     mock_redis = MagicMock()
-    with patch("src.api.draft._practice_sync_job_state", return_value="Succeeded"), \
+    with patch("src.api.draft._latest_practice_sync_job", return_value=_mock_practice_job(state="Succeeded", league_id="123")), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.get("/v1/draft/practice/sync-job/status")
 
     assert response.status_code == 200
-    assert response.json() == {"job_state": "Succeeded", "room_connected": False}
+    assert response.json() == {
+        "job_state": "Succeeded",
+        "pod_active": False,
+        "room_connected": False,
+        "room_handshake_complete": False,
+        "active_league_id": "123",
+        "room_identifier": "room-xyz",
+    }
     mock_redis.exists.assert_not_called()
 
 
