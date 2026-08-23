@@ -321,6 +321,16 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
     return conflicting
 
 
+def _redis_glob_escape(value: str) -> str:
+    """Escapes Redis glob metacharacters so a league id can be interpolated into a `scan_iter`
+    match pattern literally.
+
+    league_id reaches us from DraftConfigPayload as an arbitrary string. Unescaped, a value of
+    `*` turns `draft:{id}:pause:*` into `draft:*:pause:*` and wipes every league's pause flags -
+    including a live draft's - before Kubernetes ever gets a chance to reject it as a label."""
+    return re.sub(r"([\\*?\[\]^-])", r"\\\1", value)
+
+
 def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False) -> int:
     """Deletes a league's recommendation board and pause flags - the same Redis state /stop
     clears, minus /stop's insistence that failure is fatal.
@@ -343,7 +353,7 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False)
     try:
         r_client = _redis_client()
         keys = [f"draft:{league_id}:board"]
-        keys.extend(r_client.scan_iter(match=f"draft:{league_id}:pause:*"))
+        keys.extend(r_client.scan_iter(match=f"draft:{_redis_glob_escape(league_id)}:pause:*"))
         if include_pick_stream:
             keys.extend([f"draft:{league_id}:picks", f"draft:{league_id}:health", f"draft_picks:{league_id}"])
         cleared = r_client.delete(*keys) if keys else 0
@@ -935,7 +945,7 @@ def stop_draft(league_id: str):
     try:
         r_client = _redis_client()
         keys_to_delete = [f"draft:{league_id}:board"]
-        keys_to_delete.extend(r_client.scan_iter(match=f"draft:{league_id}:pause:*"))
+        keys_to_delete.extend(r_client.scan_iter(match=f"draft:{_redis_glob_escape(league_id)}:pause:*"))
         if keys_to_delete:
             cleared_keys = r_client.delete(*keys_to_delete)
     except Exception as e:
@@ -1159,6 +1169,7 @@ def end_practice_sync_job():
     # the leaked listener in place with no way to reach it - the exact failure this endpoint
     # is meant to prevent, reintroduced by the ordering.
     connector_name = None
+    connector_league_id = None
     connector_gone = True
     if jobs.items:
         latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
@@ -1173,6 +1184,7 @@ def end_practice_sync_job():
             logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
         connector_name = latest.metadata.name
+        connector_league_id = (latest.metadata.labels or {}).get("league-id")
         connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", [connector_name])
         if not connector_gone:
             # Not fatal: the listener still has to be retired, and reporting failure here
@@ -1196,5 +1208,12 @@ def end_practice_sync_job():
 
     if connector_name is None and not deleted_listeners:
         raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+
+    # _delete_practice_listener_jobs only clears leagues it found a *listener* for. The listener
+    # carries ttl_seconds_after_finished and can already be gone while the connector is still up,
+    # in which case nothing above would clear this league at all. Idempotent, so re-clearing a
+    # league the listener sweep already handled costs a no-op DELETE.
+    if connector_gone and connector_league_id:
+        _clear_league_draft_state(connector_league_id, include_pick_stream=True)
 
     return {"status": "deleted", "job_name": connector_name, "listener_jobs_deleted": deleted_listeners}

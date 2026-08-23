@@ -1323,6 +1323,64 @@ def test_end_practice_sync_job_clears_the_pick_stream_once_the_connector_is_gone
     assert mock_delete.call_args.kwargs["clear_pick_stream"] is True
 
 
+def test_end_practice_sync_job_clears_the_connectors_league_even_with_no_listener_left(client):
+    """The listener carries ttl_seconds_after_finished, so it can already be GC'd while the
+    connector is still up. Deriving cleanup only from listener Jobs would then clear nothing."""
+    connector = MagicMock()
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = 1
+    connector.metadata.labels = {"app": "practice-draft-sync", "league-id": "L7"}
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = [connector]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    mock_clear.assert_called_once_with("L7", include_pick_stream=True)
+
+
+def test_end_practice_sync_job_leaves_the_connectors_league_alone_if_it_wont_die(client):
+    connector = MagicMock()
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = 1
+    connector.metadata.labels = {"app": "practice-draft-sync", "league-id": "L7"}
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = [connector]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]), \
+         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    mock_clear.assert_not_called()
+
+
+def test_clear_league_draft_state_escapes_glob_metacharacters_in_the_league_id():
+    """league_id is an arbitrary string from DraftConfigPayload. Unescaped, a value of `*`
+    would scan draft:*:pause:* and delete every league's pause flags, a live draft's included."""
+    from src.api.draft import _clear_league_draft_state
+
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = iter([])
+
+    with patch("src.api.draft._redis_client", return_value=mock_redis):
+        _clear_league_draft_state("*")
+
+    assert mock_redis.scan_iter.call_args.kwargs["match"] == "draft:\\*:pause:*"
+
+
 def test_end_practice_sync_job_keeps_the_pick_stream_if_the_connector_wont_die(client):
     """Still retire the listener - leaking it is the bug this endpoint exists to prevent - but
     leave the keys a possibly-still-running publisher owns."""
