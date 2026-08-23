@@ -1,4 +1,5 @@
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -143,6 +144,71 @@ def test_start_draft_sync_creates_job(client):
     ]
     assert container.env_from[0].config_map_ref.name == "draft-sync-config"
     assert container.env_from[1].secret_ref.name == "draft-sync-secrets"
+
+
+def test_start_draft_sync_job_gets_db_and_connection_env(client):
+    """draft_matrix.py imports src.database, which opens a connection pool at import time -
+    without DB_PASSWORD the listener Pod crashes before consuming a single pick, so the Job
+    must carry an explicit secretKeyRef (envFrom cannot rename the Secret's own key) plus the
+    non-secret connection settings this API process is using."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    inherited = {
+        "DB_HOST": "fantasy-db.default.svc.cluster.local",
+        "DB_NAME": "fantasy_football",
+        "DB_USER": "bot_admin",
+        "REDIS_HOST": "fantasy-cache.default.svc.cluster.local",
+        "REDIS_PORT": "6379",
+        "CORE_API_BASE_URL": "http://fantasy-core-pipeline.default.svc.cluster.local:8000",
+    }
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch.dict(os.environ, inherited, clear=False), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 202
+    _, job = mock_batch_api.create_namespaced_job.call_args[0]
+    env = {e.name: e for e in job.spec.template.spec.containers[0].env}
+
+    db_password = env["DB_PASSWORD"]
+    assert db_password.value is None
+    assert db_password.value_from.secret_key_ref.name == "database-credentials"
+    assert db_password.value_from.secret_key_ref.key == "postgres-password"
+
+    for name, value in inherited.items():
+        assert env[name].value == value
+
+
+def test_start_draft_sync_job_omits_unset_inherited_env(client):
+    """An unset variable must not become an empty-string env var - that would override the
+    module-level default in src.database/draft_matrix with a value that cannot connect."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch.dict(os.environ, {}, clear=True), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 202
+    _, job = mock_batch_api.create_namespaced_job.call_args[0]
+    env_names = {e.name for e in job.spec.template.spec.containers[0].env}
+    assert env_names == {"DB_PASSWORD"}
 
 
 def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
