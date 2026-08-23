@@ -7,10 +7,11 @@ def _fake_db_cursor(cursor=None):
     yield cursor or MagicMock()
 
 
-def _espn_id_ok_cursor():
-    """Cursor whose first lookup (players.espn_id) hits, so the namespace guard passes."""
+def _espn_id_ok_cursor(name="Some Back"):
+    """Cursor where the espn_id lookup returns the same player the payload names, so the
+    namespace guard passes. The internal-id lookup misses."""
     cursor = MagicMock()
-    cursor.fetchone.return_value = (1,)
+    cursor.fetchone.side_effect = [(name,), None]
     return cursor
 
 
@@ -139,24 +140,100 @@ def test_trigger_draft_pick_validates_payload(client):
     assert response.status_code == 422
 
 
-def test_trigger_draft_pick_rejects_internal_sleeper_id(client):
-    """The exact bug this guard exists for: ESPN 12483 is Matthew Stafford, internal 12483 is
-    Jack Bech. Sending the internal id drafts a different, real player, undetectably."""
+def test_trigger_draft_pick_rejects_the_real_stafford_bech_collision(client):
+    """The exact bug this guard exists for, with both colliding rows modelled: 12483 is a real
+    espn_id (Matthew Stafford) AND a real internal player_id (Jack Bech). A caller meaning Bech
+    sends 12483, and a bare existence check on espn_id would wave it through and draft Stafford."""
     cursor = MagicMock()
-    # Miss on players.espn_id, hit on players.player_id -> definitively the wrong namespace.
-    cursor.fetchone.side_effect = [None, ("Jack Bech",)]
+    cursor.fetchone.side_effect = [("Matthew Stafford",), ("Jack Bech",)]
 
     with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/draft-pick", json={
+            "team_id": "7", "player_id": "12483", "name": "Jack Bech",
+            "position": "WR", "pro_team": "NO",
+        })
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "internal Sleeper id" in detail
+    assert "Matthew Stafford" in detail, "the reply must name who would actually have been drafted"
+    mock_connection.assert_not_called()
+
+
+def test_trigger_draft_pick_allows_the_same_id_when_the_payload_means_the_espn_player(client):
+    """Same colliding id, other direction: the caller names Stafford, so 12483 is correct."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Matthew Stafford",), ("Jack Bech",)]
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
         response = client.post("/v1/trigger/draft-pick", json={
             "team_id": "7", "player_id": "12483", "name": "Matthew Stafford",
             "position": "QB", "pro_team": "LAR",
         })
 
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_rejects_internal_id_absent_from_the_crosswalk(client):
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [None, ("Some Back",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/draft-pick", json={
+            "team_id": "7", "player_id": "4046", "name": "Some Back",
+            "position": "RB", "pro_team": "KC",
+        })
+
     assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert "internal Sleeper id" in detail and "Jack Bech" in detail
     mock_connection.assert_not_called()
+
+
+def test_trigger_draft_pick_tolerates_name_punctuation_differences(client):
+    """ESPN, Sleeper and DynastyProcess disagree on punctuation and suffixes; a formatting
+    difference must not read as a namespace error and block a draft-day pick."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("A.J. Brown",), None]
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
+        response = client.post("/v1/trigger/draft-pick", json={
+            "team_id": "7", "player_id": "e-99", "name": "AJ Brown",
+            "position": "WR", "pro_team": "PHI",
+        })
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_allows_espn_id_whose_name_disagrees_with_no_internal_claim(client):
+    """Crosswalk/name drift, not a namespace error: the payload's player does not hold the id
+    internally either, so there is nothing decidable to reject and blocking a live pick on a
+    name mismatch is worse than allowing it."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Someone Else",), None]
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
+        response = client.post("/v1/trigger/draft-pick", json={
+            "team_id": "7", "player_id": "e-77", "name": "Some Back",
+            "position": "RB", "pro_team": "KC",
+        })
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
 
 
 def test_trigger_draft_pick_allows_id_absent_from_both_columns(client):
