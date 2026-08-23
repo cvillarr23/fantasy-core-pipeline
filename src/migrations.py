@@ -18,6 +18,7 @@ from src.models import (
     CREATE_DRAFT_PICKS_TABLE,
     CREATE_DRAFT_CONFIG_TABLE,
     ADD_DRAFT_CONFIG_MODE_COLUMN,
+    ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN,
     CREATE_DRAFT_SLOTS_TABLE,
     CREATE_RAW_SIGNALS_TABLE,
     CREATE_LLM_CALL_METRICS_TABLE,
@@ -88,6 +89,7 @@ def run_migrations():
             logger.info("Validating 'draft_config' and 'draft_slots' control plane tables...")
             cursor.execute(CREATE_DRAFT_CONFIG_TABLE)
             cursor.execute(ADD_DRAFT_CONFIG_MODE_COLUMN)
+            cursor.execute(ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN)
             cursor.execute(CREATE_DRAFT_SLOTS_TABLE)
 
             # 4d. Execute news/rumor ingestion ledger (CORE-13)
