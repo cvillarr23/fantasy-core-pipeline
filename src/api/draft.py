@@ -53,13 +53,33 @@ REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "default")
 DRAFT_SYNC_IMAGE = os.getenv("DRAFT_SYNC_IMAGE")
-# Names of the k8s Secret/ConfigMap the draft-sync Job's container should pull DB_PASSWORD,
-# DB_HOST/NAME/USER, REDIS_HOST/PORT, and CORE_API_BASE_URL from - the Job's Pod does not
-# inherit this API Pod's own environment, and draft_matrix.py imports src.database, which
-# opens a connection pool at import time and needs these to be real. No defaults: the
-# actual Secret/ConfigMap names are fantasy-infra's to define, not this repo's to guess.
+# Names of the k8s Secret/ConfigMap supplying the draft-sync Job's ESPN session and league
+# config. These intentionally do NOT carry the database/cache connection settings - those
+# are set explicitly by _draft_sync_env() below, because envFrom cannot rename a Secret's
+# own key into the DB_PASSWORD name src/database.py reads. No defaults: the actual
+# Secret/ConfigMap names are fantasy-infra's to define, not this repo's to guess.
 DRAFT_SYNC_ENV_SECRET = os.getenv("DRAFT_SYNC_ENV_SECRET")
 DRAFT_SYNC_ENV_CONFIGMAP = os.getenv("DRAFT_SYNC_ENV_CONFIGMAP")
+# DB_PASSWORD cannot ride envFrom: the k8s Secret that holds it stores it under its own
+# key name (postgres-password), and envFrom would surface it under that key rather than
+# the DB_PASSWORD name src/database.py actually reads. So it needs an explicit
+# secretKeyRef mapping - the same one this API's own Deployment uses. Overridable because
+# the Secret/key names are fantasy-infra's to own, defaulted so a correct cluster works
+# without extra wiring.
+DRAFT_SYNC_DB_SECRET_NAME = os.getenv("DRAFT_SYNC_DB_SECRET_NAME", "database-credentials")
+DRAFT_SYNC_DB_SECRET_KEY = os.getenv("DRAFT_SYNC_DB_SECRET_KEY", "postgres-password")
+# Non-secret connection settings the listener Pod needs. Propagated from this API process
+# so the Job always talks to the same database/cache/API this process does, instead of
+# silently falling back to src.database / draft_matrix module defaults that may not match
+# the cluster it is actually running in.
+DRAFT_SYNC_INHERITED_ENV_VARS = (
+    "DB_HOST",
+    "DB_NAME",
+    "DB_USER",
+    "REDIS_HOST",
+    "REDIS_PORT",
+    "CORE_API_BASE_URL",
+)
 # The real ESPN league (sync_league.py's ESPN_LEAGUE_ID) that practice/mock-draft-room
 # configs must never collide with. Optional: if unset, practice-mode validation is skipped
 # with a logged warning rather than guessed at - same idiom as DRAFT_SYNC_IMAGE above.
@@ -84,6 +104,31 @@ PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 
 def _redis_client() -> redis.Redis:
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+
+def _draft_sync_env() -> list:
+    """Explicit env for the draft-sync Job's Pod.
+
+    The Job's Pod does not inherit this API Pod's environment, and draft_matrix.py imports
+    src.database, which builds a connection pool at import time - so a missing DB_PASSWORD
+    is not a degraded listener, it is an immediate crash before any pick is ever consumed.
+    """
+    env = [
+        client.V1EnvVar(
+            name="DB_PASSWORD",
+            value_from=client.V1EnvVarSource(
+                secret_key_ref=client.V1SecretKeySelector(
+                    name=DRAFT_SYNC_DB_SECRET_NAME,
+                    key=DRAFT_SYNC_DB_SECRET_KEY,
+                )
+            ),
+        )
+    ]
+    for name in DRAFT_SYNC_INHERITED_ENV_VARS:
+        value = os.getenv(name)
+        if value:
+            env.append(client.V1EnvVar(name=name, value=value))
+    return env
 
 
 def _dns1123_slug(value: str) -> str:
@@ -581,6 +626,7 @@ def start_draft_sync(league_id: Optional[str] = None):
                                 client.V1EnvFromSource(config_map_ref=client.V1ConfigMapEnvSource(name=DRAFT_SYNC_ENV_CONFIGMAP)),
                                 client.V1EnvFromSource(secret_ref=client.V1SecretEnvSource(name=DRAFT_SYNC_ENV_SECRET)),
                             ],
+                            env=_draft_sync_env(),
                         )
                     ],
                 ),
