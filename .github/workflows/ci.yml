@@ -46,6 +46,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fantasy-core-pipeline
+          tags: |
+            type=raw,value=main
+            type=raw,value=latest
+            type=sha,format=long
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -54,42 +64,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/fantasy-core-pipeline:latest
-            ghcr.io/${{ github.repository_owner }}/fantasy-core-pipeline:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
-      # ArgoCD (fantasy-infra Application, automated+selfHeal) only syncs on a real git diff -
-      # deployment.yaml pinning :latest means a plain image push produces zero diff, so the
-      # running pod never actually redeploys. Bumping the tag to this commit's SHA here gives
-      # ArgoCD something to sync, which triggers a real rollout. INFRA_DEPLOY_KEY is a
-      # write-enabled deploy key on fantasy-infra only - scoped to that one repo.
-      - name: Set up deploy key for fantasy-infra
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.INFRA_DEPLOY_KEY }}
-
-      - name: Bump fantasy-core-pipeline image tag in fantasy-infra
-        env:
-          GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new"
+      - name: Report published image digest
         run: |
-          git clone git@github.com:cvillarr23/fantasy-infra.git fantasy-infra
-          cd fantasy-infra
-          grep -rl "ghcr.io/cvillarr23/fantasy-core-pipeline:" --include="*.yaml" . \
-            | xargs sed -i "s|ghcr.io/cvillarr23/fantasy-core-pipeline:[A-Za-z0-9_.-]*|ghcr.io/cvillarr23/fantasy-core-pipeline:${GITHUB_SHA}|g"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet; then
-            echo "No image-tag change to commit"
-            exit 0
-          fi
-          git commit -am "Deploy fantasy-core-pipeline@${GITHUB_SHA:0:7}"
-          for attempt in 1 2 3 4 5; do
-            git push && exit 0
-            git fetch origin main
-            git rebase origin/main
-          done
-          exit 1
+          echo "Published ghcr.io/${{ github.repository_owner }}/fantasy-core-pipeline digest:"
+          echo "${{ steps.build.outputs.digest }}"

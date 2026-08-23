@@ -122,5 +122,18 @@ version Y on Python >=3.14") are evaluated against whichever Python is *running*
 so a local dry run under a newer interpreter than 3.11 can report a false conflict (or
 miss a real one) that CI's actual 3.11 runner wouldn't hit.
 
+## Argo CD Image Updater Contract
+Main-branch pushes publish `ghcr.io/cvillarr23/fantasy-core-pipeline` with mutable `:main`
+and `:latest` tags plus an immutable SHA tag. Argo CD Image Updater in `fantasy-infra`
+should track this image in digest mode and commit `@sha256:...` write-backs to `main`.
+
+Expected `fantasy-infra` Application annotations:
+- `argocd-image-updater.argoproj.io/image-list: core-pipeline=ghcr.io/cvillarr23/fantasy-core-pipeline`
+- `argocd-image-updater.argoproj.io/core-pipeline.update-strategy: digest`
+- `argocd-image-updater.argoproj.io/write-back-method: git`
+
+The updater write-back target should be a deterministic Kustomize-managed image field so
+automated commits only change digest-pinned image references.
+
 ## Project Tracking
 Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-core-pipeline/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-browser-worker` and `fantasy-infra`.
