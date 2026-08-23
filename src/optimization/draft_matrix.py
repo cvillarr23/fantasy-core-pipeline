@@ -314,20 +314,29 @@ def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
     team_count + 1 belong to the same team. That back-to-back pair is the signature this
     looks for, and it is the only thing it will accept.
 
+    Restricted to practice/mock rooms. ESPN forbids trading picks in a mock room, so round-1
+    ownership there is guaranteed to be one pick per team and the turnaround is unambiguous.
+    A live league can trade picks, which makes an adjacent repeat like a, b, c, c genuinely
+    indistinguishable from a turnaround - and a live league is exactly the case that has an
+    authoritative count available from sync_league.py anyway.
+
     Returns None until the pair is observed, and refuses outright in three cases:
 
     - the picks seen so far are not a gapless run starting at 1. If an early pick were
       dropped, the boundary would land early and yield a count one too small.
     - a team repeats without being the immediately preceding picker. Round 1 is every team
-      exactly once, so that can only mean traded picks or malformed ownership data - treating
-      it as the boundary would derive a count far below the real one.
-    - the pair appears at pick 2, implying a one-team league. Real back-to-back picks that
-      early are a traded pick, not a turnaround.
+      exactly once, so that can only mean malformed ownership data - treating it as the
+      boundary would derive a count far below the real one.
+    - the pair appears at pick 2, implying a one-team league.
 
     Every rejection is deliberate: an unknown count leaves rounds NULL and visibly repairable,
     while a wrong one quietly mis-sizes every round and draft slot for the whole draft with
     nothing to indicate it."""
     with conn.cursor() as cursor:
+        cursor.execute("SELECT mode FROM draft_config WHERE league_id = %s AND season = %s;", (league_id, season))
+        row = cursor.fetchone()
+        if row is None or row[0] != "practice":
+            return None
         cursor.execute("""
             SELECT pick_number, team_id FROM draft_picks
              WHERE league_id = %s AND season = %s
@@ -594,7 +603,8 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 # Practice/mock rooms are never synced by sync_league.py, so league_settings
                 # has nothing for them and this is the only way they ever get a team count.
                 # Derived *after* the insert, because the pick that reveals the count is the
-                # first repeat - which may well be this one.
+                # snake turnaround - which may well be this one. Returns None for anything
+                # that isn't a practice room; an unsynced live league has to stay unknown.
                 team_count = derive_team_count(conn, league_id, season)
                 if team_count:
                     logger.info(f"Derived team_count={team_count} for league {league_id} from round-1 pick arrivals.")

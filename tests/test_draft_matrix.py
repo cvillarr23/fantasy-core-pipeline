@@ -546,8 +546,10 @@ def test_handle_pick_event_skips_backfill_when_team_count_unknown():
     mock_backfill.assert_not_called()
 
 
-def _mock_conn_with_picks(picks):
+def _mock_conn_with_picks(picks, mode="practice"):
     mock_cursor = MagicMock()
+    # derive_team_count reads draft_config.mode before it will look at picks at all.
+    mock_cursor.fetchone.return_value = (mode,) if mode else None
     mock_cursor.fetchall.return_value = picks
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
@@ -585,6 +587,19 @@ def test_derive_team_count_refuses_a_repeat_that_is_not_the_snake_turnaround():
     one and mis-size every round and slot from then on."""
     picks = [(1, "a"), (2, "b"), (3, "a")]
     assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
+
+
+def test_derive_team_count_refuses_to_infer_for_a_live_league():
+    """Live leagues can trade picks, which makes an adjacent repeat indistinguishable from a
+    turnaround - and they have an authoritative count from sync_league.py anyway. Inferring
+    here would persist a count far below the real one off a traded first-round pick."""
+    picks = [(1, "a"), (2, "b"), (3, "c"), (4, "c")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks, mode="live"), "L1", 2026) is None
+
+
+def test_derive_team_count_refuses_when_no_draft_config_row_exists():
+    picks = [(1, "a"), (2, "b"), (3, "c"), (4, "c")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks, mode=None), "L1", 2026) is None
 
 
 def test_derive_team_count_refuses_back_to_back_picks_at_the_very_start():
