@@ -40,6 +40,25 @@ def test_set_draft_config_upserts(client):
     assert params == ("L1", "7", 2026, "live")
 
 
+def test_set_draft_config_resets_team_count_only_when_the_season_changes(client):
+    """The derived count is fixed for one draft, so reconfiguring a reused room for a new
+    season has to clear it; if it survived, derivation would be skipped and every round and
+    slot would be sized from last season's league. A same-season edit (team_id, mode) must
+    leave it alone, otherwise an in-flight draft loses its count on any config touch."""
+    mock_cursor = MagicMock()
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        response = client.post("/v1/draft/config", json={"league_id": "L1", "team_id": "7", "season": 2027})
+
+    assert response.status_code == 200
+    query = mock_cursor.execute.call_args[0][0]
+    normalized = " ".join(query.split())
+    assert (
+        "team_count = CASE WHEN draft_config.season IS DISTINCT FROM EXCLUDED.season "
+        "THEN NULL ELSE draft_config.team_count END"
+    ) in normalized
+
+
 def test_set_draft_config_validates_payload(client):
     response = client.post("/v1/draft/config", json={"league_id": "L1"})
     assert response.status_code == 422
