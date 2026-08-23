@@ -308,6 +308,19 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
     return conflicting
 
 
+def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_names: list) -> bool:
+    """Like _wait_for_job_termination, but waits for specific Jobs rather than for the whole
+    selector to empty - the caller may be intentionally leaving other matching Jobs in place."""
+    remaining = set(job_names)
+    for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        present = {j.metadata.name for j in (getattr(jobs, "items", []) or [])}
+        if not (remaining & present):
+            return True
+        time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    return False
+
+
 def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> list:
     """Deletes practice draft-sync listener Jobs, optionally sparing one league's.
 
@@ -346,7 +359,11 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
             logger.error(f"Failed to delete practice draft-sync listener Job {job.metadata.name}: {e}")
             raise
 
-    if deleted and not _wait_for_job_termination(batch_api, "app=draft-sync,mode=practice"):
+    # Waits on the deleted names specifically, not the label selector. The selector also
+    # matches the target league's own Job, which except_league_id deliberately spared - a
+    # completed or failed one lingers there indefinitely, so a selector-based wait would
+    # never see an empty list and every reclaim would time out into a 500.
+    if deleted and not _wait_for_jobs_gone(batch_api, "app=draft-sync,mode=practice", deleted):
         raise RuntimeError(
             f"Practice draft-sync listener Job(s) {', '.join(deleted)} did not terminate within "
             f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s."

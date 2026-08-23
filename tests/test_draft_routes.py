@@ -1131,7 +1131,7 @@ def test_end_practice_sync_job_deletes_latest(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_job_termination", return_value=True), \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
@@ -1156,7 +1156,7 @@ def test_end_practice_sync_job_also_deletes_the_listener(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_job_termination", return_value=True), \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
@@ -1334,7 +1334,7 @@ def test_end_practice_sync_job_cleans_listener_after_connector_is_gc_d(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_job_termination", return_value=True), \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
@@ -1354,7 +1354,7 @@ def test_delete_practice_listener_jobs_waits_for_the_pod_to_actually_go():
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_job_termination", return_value=True) as mock_wait, \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True) as mock_wait, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
         _delete_practice_listener_jobs()
 
@@ -1370,7 +1370,7 @@ def test_delete_practice_listener_jobs_raises_if_the_pod_never_terminates():
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_job_termination", return_value=False), \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
         with pytest.raises(RuntimeError, match="did not terminate"):
             _delete_practice_listener_jobs()
@@ -1408,3 +1408,16 @@ def test_start_draft_sync_refuses_to_start_when_listener_state_is_unreadable(cli
 
     assert response.status_code == 500
     assert not mock_batch_api.create_namespaced_job.called
+
+
+def test_wait_for_jobs_gone_ignores_jobs_it_was_not_asked_about():
+    """The reclaim path deliberately spares the target league's own Job. A selector-based
+    wait would keep seeing that spared Job and time out every single reclaim."""
+    from src.api.draft import _wait_for_jobs_gone
+
+    spared = _fake_listener_job("L1", "practice", name="draft-sync-practice-L1-1")
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[spared])
+
+    assert _wait_for_jobs_gone(mock_batch_api, "app=draft-sync,mode=practice", ["draft-sync-practice-L2-1"]) is True
+    assert mock_batch_api.list_namespaced_job.call_count == 1
