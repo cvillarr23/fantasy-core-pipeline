@@ -309,14 +309,24 @@ def league_team_count(conn, league_id: str, season: int) -> Optional[int]:
 
 
 def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
-    """Infers the team count from pick arrivals: in any snake draft round 1 is every team
-    picking exactly once, so the first team to appear twice does so at pick team_count + 1.
+    """Infers the team count from pick arrivals. A snake draft turns around at the round-1/2
+    boundary: the last team of round 1 picks again immediately, so picks team_count and
+    team_count + 1 belong to the same team. That back-to-back pair is the signature this
+    looks for, and it is the only thing it will accept.
 
-    Returns None until that repeat is observed, and also when the picks seen so far are not a
-    gapless run starting at 1. That guard matters - if an early pick were dropped, the first
-    repeat would land one position early and yield a team count one too small, which is far
-    worse than unknown: every derived round and every draft slot would be quietly wrong for
-    the whole draft, with nothing to indicate it."""
+    Returns None until the pair is observed, and refuses outright in three cases:
+
+    - the picks seen so far are not a gapless run starting at 1. If an early pick were
+      dropped, the boundary would land early and yield a count one too small.
+    - a team repeats without being the immediately preceding picker. Round 1 is every team
+      exactly once, so that can only mean traded picks or malformed ownership data - treating
+      it as the boundary would derive a count far below the real one.
+    - the pair appears at pick 2, implying a one-team league. Real back-to-back picks that
+      early are a traded pick, not a turnaround.
+
+    Every rejection is deliberate: an unknown count leaves rounds NULL and visibly repairable,
+    while a wrong one quietly mis-sizes every round and draft slot for the whole draft with
+    nothing to indicate it."""
     with conn.cursor() as cursor:
         cursor.execute("""
             SELECT pick_number, team_id FROM draft_picks
@@ -326,12 +336,17 @@ def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
         picks = cursor.fetchall()
 
     seen: set = set()
+    previous_team_id = None
     for expected, (pick_number, team_id) in enumerate(picks, start=1):
         if int(pick_number) != expected:
             return None
         if team_id in seen:
-            return expected - 1
+            if team_id != previous_team_id:
+                return None
+            team_count = expected - 1
+            return team_count if team_count >= 2 else None
         seen.add(team_id)
+        previous_team_id = team_id
     return None
 
 

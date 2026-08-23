@@ -554,10 +554,10 @@ def _mock_conn_with_picks(picks):
     return mock_conn
 
 
-def test_derive_team_count_reads_the_first_repeated_team():
-    """Round 1 is every team picking exactly once, so the first team to appear twice does so
-    at pick team_count + 1."""
-    picks = [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "a")]
+def test_derive_team_count_reads_the_snake_turnaround():
+    """A snake reverses at the round-1/2 boundary, so the last team of round 1 picks again
+    immediately. That back-to-back pair sits at picks team_count and team_count + 1."""
+    picks = [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "d")]
     assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) == 4
 
 
@@ -567,14 +567,30 @@ def test_derive_team_count_unknown_until_a_team_repeats():
 
 
 def test_derive_team_count_refuses_to_guess_when_a_pick_is_missing():
-    """A dropped pick would put the first repeat one position early and yield a count one too
+    """A dropped pick would put the boundary one position early and yield a count one too
     small - silently wrong rounds and draft slots for the entire draft. Unknown is better."""
-    picks = [(1, "a"), (2, "b"), (4, "c"), (5, "a")]
+    picks = [(1, "a"), (2, "b"), (4, "c"), (5, "c")]
     assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
 
 
 def test_derive_team_count_ignores_picks_that_do_not_start_at_one():
-    picks = [(2, "a"), (3, "b"), (4, "a")]
+    picks = [(2, "a"), (3, "b"), (4, "b")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
+
+
+def test_derive_team_count_refuses_a_repeat_that_is_not_the_snake_turnaround():
+    """A team reappearing without being the immediately preceding picker cannot be the
+    boundary - round 1 is every team exactly once. It means traded picks or malformed
+    ownership data, and reading it as the boundary would derive a count far below the real
+    one and mis-size every round and slot from then on."""
+    picks = [(1, "a"), (2, "b"), (3, "a")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
+
+
+def test_derive_team_count_refuses_back_to_back_picks_at_the_very_start():
+    """Consecutive picks at 1 and 2 would imply a one-team league; in practice it is a traded
+    pick, not a turnaround."""
+    picks = [(1, "a"), (2, "a"), (3, "b")]
     assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
 
 
