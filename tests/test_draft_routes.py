@@ -1270,3 +1270,50 @@ def test_on_the_clock_team_id_is_none_when_no_source_has_a_team_count():
     )
 
     assert _on_the_clock_team_id(cursor, "L1", 2026) is None
+
+
+def test_delete_practice_listener_jobs_propagates_delete_failure(client):
+    """Swallowing this made /start create a second listener alongside the one it failed to
+    reclaim, and /practice/sync-job report a 200 teardown with the listener still running."""
+    from src.api.draft import _delete_practice_listener_jobs
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[_fake_listener_job("L2", "practice")])
+    mock_batch_api.delete_namespaced_job.side_effect = Exception("apiserver unreachable")
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        with pytest.raises(Exception, match="apiserver unreachable"):
+            _delete_practice_listener_jobs()
+
+
+def test_start_draft_sync_aborts_when_stale_listener_cannot_be_reclaimed(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L2", "practice")]), \
+         patch("src.api.draft._delete_practice_listener_jobs", side_effect=Exception("apiserver unreachable")), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 500
+    assert not mock_batch_api.create_namespaced_job.called
+
+
+def test_recent_picks_survive_a_null_internal_player_id(client):
+    from src.api.draft import DraftPickSummary
+
+    """K and D/ST never resolve to an internal id. The response model must allow that or
+    FastAPI 500s on exactly the unnamed picks this is meant to surface."""
+    summary = DraftPickSummary(pick_number=1, round=1, team_id="3", player_id=None,
+                               espn_player_id="-16033", name=None, position=None)
+    assert summary.player_id is None
+    assert summary.espn_player_id == "-16033"

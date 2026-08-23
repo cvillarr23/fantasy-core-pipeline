@@ -519,7 +519,6 @@ def publish_draft_target(team_id: str, target: dict) -> None:
             # never matches (a 15s timeout, no pick) or, where the id spaces collide,
             # matches a real but entirely different player.
             "player_id": target["espn_id"],
-            "internal_player_id": target["player_id"],
             "name": target["name"],
             "position": target["position"],
             "pro_team": target["team"],

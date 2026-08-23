@@ -316,7 +316,6 @@ def test_publish_draft_target_posts_expected_payload():
         "team_id": "7",
         # ESPN's id, not the internal one: the worker clicks data-player-id in the draft room.
         "player_id": "e-1",
-        "internal_player_id": "p1",
         "name": "Some Back",
         "position": "RB",
         "pro_team": "KC",

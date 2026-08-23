@@ -163,7 +163,17 @@ class DraftPickSummary(BaseModel):
     pick_number: int
     round: Optional[int]
     team_id: str
-    player_id: str
+    player_id: Optional[str] = Field(
+        None,
+        description=(
+            "Internal players.player_id (Sleeper-namespaced). Null when the ESPN->internal crosswalk "
+            "has no entry for this player - always the case for K and D/ST, which players does not carry."
+        ),
+    )
+    espn_player_id: Optional[str] = Field(
+        None,
+        description="ESPN's own player id, as it arrived on the draft stream. Null only on picks recorded before this column existed.",
+    )
     name: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
     position: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
 
@@ -316,7 +326,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice")
     except Exception as e:
         logger.error(f"Failed to list practice draft-sync listener Jobs: {e}")
-        return []
+        raise
 
     deleted = []
     for job in getattr(jobs, "items", []) or []:
@@ -327,7 +337,11 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
             batch_api.delete_namespaced_job(job.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
             deleted.append(job.metadata.name)
         except Exception as e:
+            # Never swallow this. A caller that treats failed cleanup as success either
+            # starts a second listener alongside the one it failed to reclaim, or reports a
+            # 200 teardown while the listener is still consuming.
             logger.error(f"Failed to delete practice draft-sync listener Job {job.metadata.name}: {e}")
+            raise
     if deleted:
         logger.info(f"Deleted stale practice draft-sync listener Jobs: {', '.join(deleted)}")
     return deleted
@@ -660,7 +674,16 @@ def start_draft_sync(league_id: Optional[str] = None):
         # never something to interrupt on an implicit signal, so that still fails loudly.
         live_conflicts = [j for j in conflicting if (j.metadata.labels or {}).get("mode") != "practice"]
         if mode == "practice" and not live_conflicts:
-            _delete_practice_listener_jobs(except_league_id=league_id)
+            try:
+                _delete_practice_listener_jobs(except_league_id=league_id)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Could not reclaim the stale practice draft-sync listener: {e}. Starting league "
+                        f"{league_id} anyway would leave two listeners running."
+                    ),
+                )
         else:
             conflicting_league_id = (live_conflicts or conflicting)[0].metadata.labels.get("league-id")
             raise HTTPException(
@@ -1012,6 +1035,12 @@ def end_practice_sync_job():
     # it - it blocks on the stream forever. Leaving it behind is what made every second
     # practice run fail: the next run targets a new league, and start_draft_sync refuses to
     # run two listeners at once.
-    deleted_listeners = _delete_practice_listener_jobs()
+    try:
+        deleted_listeners = _delete_practice_listener_jobs()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Room connector {latest.metadata.name} was deleted, but the draft-sync listener could not be: {e}",
+        )
 
     return {"status": "deleted", "job_name": latest.metadata.name, "listener_jobs_deleted": deleted_listeners}
