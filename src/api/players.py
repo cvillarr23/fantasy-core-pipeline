@@ -41,6 +41,10 @@ class PlayerSummaryResponse(BaseModel):
 
 class PlayerSearchResult(BaseModel):
     player_id: str
+    # Nullable because espn_id is a DynastyProcess crosswalk that covers ~82% of players and
+    # no K or D/ST at all. A null here means the player cannot be manually drafted through the
+    # click bot, which the UI must surface rather than silently sending the wrong id space.
+    espn_id: Optional[str] = None
     name: str
     position: str
     team: str
@@ -78,8 +82,13 @@ def _recent_news(cursor, player_id: str, limit: int) -> list:
 @player_router.get("/search", response_model=List[PlayerSearchResult])
 def search_players(q: str):
     """Name lookup for the web UI's manual-pick picker, so a draft-day override can be typed
-    as a player name instead of the raw Sleeper-namespaced player_id trigger-draft-pick
-    actually expects (see CORE-08 notes: player_id here is Sleeper's, not players.espn_id)."""
+    as a player name instead of a raw id.
+
+    Returns both ids deliberately. player_id is Sleeper's - it is the key for /summary and for
+    every projection/VORP join. espn_id is what trigger-draft-pick requires, because the browser
+    worker clicks button.Button--draft[data-player-id=...] in the ESPN room. The two spaces
+    overlap numerically (ESPN 12483 is Matthew Stafford; internal 12483 is Jack Bech), so
+    sending the wrong one silently drafts a different, real player."""
     query = q.strip()
     if len(query) < 2:
         return []
@@ -90,7 +99,7 @@ def search_players(q: str):
             # season/week is "current" - vorp_score/projected_points are simply null pre-draft
             # for anyone CORE-05/sync_projections hasn't touched yet, not an error.
             cursor.execute("""
-                SELECT p.player_id, p.name, p.position, p.team, p.injury_status,
+                SELECT p.player_id, p.espn_id, p.name, p.position, p.team, p.injury_status,
                        w.vorp_score, w.projected_points
                 FROM players p
                 LEFT JOIN LATERAL (
@@ -111,8 +120,8 @@ def search_players(q: str):
 
     return [
         {
-            "player_id": row[0], "name": row[1], "position": row[2], "team": row[3],
-            "injury_status": row[4], "vorp_score": row[5], "projected_points": row[6],
+            "player_id": row[0], "espn_id": row[1], "name": row[2], "position": row[3], "team": row[4],
+            "injury_status": row[5], "vorp_score": row[6], "projected_points": row[7],
         }
         for row in rows
     ]

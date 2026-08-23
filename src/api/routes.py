@@ -125,6 +125,43 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
+def _reject_internal_player_id(player_id: str, name: str) -> None:
+    """Guard against the id-namespace inversion that made auto-pick silently draft the wrong
+    player. ESPN ids and Sleeper players.player_id values overlap numerically, so a mistake
+    here is undetectable downstream - ESPN 12483 is Matthew Stafford, internal 12483 is Jack Bech.
+
+    Only the decidable case is rejected: an id that is absent from players.espn_id but present
+    as a players.player_id is definitively the wrong namespace. An id in neither column is
+    allowed through, because the espn_id crosswalk covers ~82% of players and no K or D/ST -
+    a legitimate ESPN id for an uncovered player must still be draftable.
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT 1 FROM players WHERE espn_id = %s LIMIT 1;", (str(player_id),))
+            if cursor.fetchone():
+                return
+            cursor.execute("SELECT name FROM players WHERE player_id = %s LIMIT 1;", (str(player_id),))
+            collision = cursor.fetchone()
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Fail open: the click bot is the draft-day safety valve and a database blip must not
+        # block a manual pick. The check is a guard against a caller bug, not an authz gate.
+        logger.warning(f"Could not validate draft-pick id namespace for '{name}' ({player_id}): {e}")
+        return
+
+    if collision:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"player_id '{player_id}' is an internal Sleeper id (it belongs to "
+                f"{collision[0]}), not an ESPN id. The browser worker clicks "
+                f"button.Button--draft[data-player-id=...] in the ESPN draft room, so it needs "
+                f"players.espn_id. Send that instead."
+            ),
+        )
+
+
 @router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
@@ -134,6 +171,8 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
     tracking_id = str(uuid.uuid4())
     logger.info(f"Gateway processing draft pick command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
+
+    _reject_internal_player_id(payload.player_id, payload.name)
 
     try:
         params = pika.URLParameters(AMQP_URL)
