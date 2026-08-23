@@ -372,14 +372,20 @@ def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_n
     return False
 
 
-def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> list:
+def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear_pick_stream: bool = False) -> list:
     """Deletes practice draft-sync listener Jobs, optionally sparing one league's.
 
     Listeners are Redis Stream consumers that block forever, so nothing ever retires one on
     its own. Left running, a stale listener both consumes a league nobody is drafting and
     blocks the next practice run from starting at all (start_draft_sync refuses to run two
     listeners at once). Only practice listeners are ever touched here - a live draft's
-    listener must never be collected as a side effect of practice cleanup."""
+    listener must never be collected as a side effect of practice cleanup.
+
+    clear_pick_stream additionally drops each retired league's pick ledger and Stream. It is
+    off by default because it is only safe once the league's *publisher* is also gone: the
+    room connector writes to those keys, and deleting them underneath a running connector
+    either loses picks or lets it immediately recreate them. Only end_practice_sync_job, which
+    waits for the connector Pod to terminate first, may pass True."""
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice")
@@ -427,7 +433,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> li
     # The Job is only half the run's footprint. Its board outlives it with no TTL, so leaving
     # it behind is what makes a dead run's error and recommendation keep surfacing as current.
     for dead_league_id in deleted_league_ids:
-        _clear_league_draft_state(dead_league_id, include_pick_stream=True)
+        _clear_league_draft_state(dead_league_id, include_pick_stream=clear_pick_stream)
     return deleted
 
 
@@ -665,13 +671,20 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         db_ok = False
 
     pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
+    listener_job_absent = listener_job_query_ok and listener_job is None
     listener_state, listener_last_event_at, listener_error = _listener_status(
         job_state,
         recommendation,
         # Only a successful query that found nothing counts as absent. A failed read leaves
         # this False so a genuine error stays visible.
-        listener_job_absent=listener_job_query_ok and listener_job is None,
+        listener_job_absent=listener_job_absent,
     )
+    if listener_job_absent:
+        # The board's recommendation is as dead as its listener_state: recommended player,
+        # pick number and top_candidates all describe a run that has already ended, and there
+        # is nothing left to refresh them. Suppressing the error while still serving the stale
+        # top picks would just make the staleness harder to notice.
+        recommendation = {}
 
     return {
         "league_id": league_id,
@@ -1146,17 +1159,33 @@ def end_practice_sync_job():
     # the leaked listener in place with no way to reach it - the exact failure this endpoint
     # is meant to prevent, reintroduced by the ordering.
     connector_name = None
+    connector_gone = True
     if jobs.items:
         latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
         try:
-            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
+            # Foreground, not Background: the connector is the publisher for
+            # draft:{league}:picks and draft_picks:{league}, and the cleanup below deletes
+            # them. Background returns while the Pod is still running, so it could publish
+            # into - or recreate - those keys after they were cleared, contaminating the next
+            # run with the previous one's picks.
+            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground")
         except Exception as e:
             logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
         connector_name = latest.metadata.name
+        connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", [connector_name])
+        if not connector_gone:
+            # Not fatal: the listener still has to be retired, and reporting failure here
+            # would leave it leaked - the exact bug this endpoint exists to prevent. Only the
+            # pick-stream cleanup is skipped, since that is the part the connector can race.
+            logger.warning(
+                f"Practice room connector {connector_name} did not terminate in time; retiring the "
+                "listener anyway but leaving the pick ledger and Stream in place, since the connector "
+                "may still be publishing to them."
+            )
 
     try:
-        deleted_listeners = _delete_practice_listener_jobs()
+        deleted_listeners = _delete_practice_listener_jobs(clear_pick_stream=connector_gone)
     except Exception as e:
         detail = (
             f"Room connector {connector_name} was deleted, but the draft-sync listener could not be: {e}"

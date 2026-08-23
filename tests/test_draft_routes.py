@@ -799,6 +799,44 @@ def test_get_draft_status_reports_failed_clicker_action(client):
     assert response.json()["last_clicker_action"] == "Failed to draft Breece Hall: confirmation timed out"
 
 
+def test_get_draft_status_drops_a_dead_runs_recommendation_when_no_listener_exists(client):
+    """Suppressing the stale error while still serving the stale top picks would only make the
+    staleness harder to notice - the recommendation describes the same finished run."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {
+        "recommended_player_id": "p2", "recommended_name": "Best Back", "listener_error": "boom",
+    }
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(None, True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    body = response.json()
+    assert body["recommendation"] == {}
+    assert body["listener_error"] is None
+
+
+def test_get_draft_status_keeps_the_recommendation_when_the_job_lookup_failed(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "listener_error": "boom"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(None, False)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    body = response.json()
+    assert body["recommendation"]["recommended_player_id"] == "p2"
+    assert body["listener_error"] == "boom"
+
+
 def test_get_draft_status_defaults_mode_to_live_when_config_row_missing(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = []
@@ -1259,7 +1297,51 @@ def test_end_practice_sync_job_deletes_latest(client):
 
     assert response.status_code == 200
     assert response.json()["job_name"] == "practice-draft-sync-200"
-    mock_batch_api.delete_namespaced_job.assert_any_call("practice-draft-sync-200", "default", propagation_policy="Background")
+    # Foreground: the connector publishes the pick ledger and Stream that teardown deletes, so
+    # it must actually be gone first, not merely marked for deletion.
+    mock_batch_api.delete_namespaced_job.assert_any_call("practice-draft-sync-200", "default", propagation_policy="Foreground")
+
+
+def test_end_practice_sync_job_clears_the_pick_stream_once_the_connector_is_gone(client):
+    """The connector is the publisher for the ledger and Stream, so teardown may only drop
+    them after its Pod has actually terminated."""
+    connector = MagicMock()
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = 1
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = [connector]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]) as mock_delete, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    assert mock_delete.call_args.kwargs["clear_pick_stream"] is True
+
+
+def test_end_practice_sync_job_keeps_the_pick_stream_if_the_connector_wont_die(client):
+    """Still retire the listener - leaking it is the bug this endpoint exists to prevent - but
+    leave the keys a possibly-still-running publisher owns."""
+    connector = MagicMock()
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = 1
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = [connector]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]) as mock_delete, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    assert mock_delete.call_args.kwargs["clear_pick_stream"] is False
 
 
 def test_end_practice_sync_job_also_deletes_the_listener(client):
@@ -1502,9 +1584,9 @@ def test_delete_practice_listener_jobs_clears_the_board_of_every_league_it_retir
         _delete_practice_listener_jobs()
 
     assert [c.args[0] for c in mock_clear.call_args_list] == ["L2", "L3"]
-    # Teardown is the one moment the pick Stream can safely go, and must - otherwise re-using
-    # the league id replays it.
-    assert all(c.kwargs["include_pick_stream"] for c in mock_clear.call_args_list)
+    # Off by default: the /start reclaim path cannot quiesce the other league's connector, so
+    # only end_practice_sync_job - which waits for it - may opt in.
+    assert not any(c.kwargs["include_pick_stream"] for c in mock_clear.call_args_list)
 
 
 def test_delete_practice_listener_jobs_raises_if_the_pod_never_terminates():
