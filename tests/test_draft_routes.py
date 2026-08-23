@@ -137,7 +137,7 @@ def test_start_draft_sync_creates_job(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -186,7 +186,7 @@ def test_start_draft_sync_job_gets_db_and_connection_env(client):
     }
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          patch.dict(os.environ, inherited, clear=False), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
@@ -217,7 +217,7 @@ def test_start_draft_sync_job_omits_unset_inherited_env(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          patch.dict(os.environ, {}, clear=True), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
@@ -239,7 +239,7 @@ def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -268,7 +268,7 @@ def test_start_draft_sync_selector_picks_named_league(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -289,7 +289,7 @@ def test_start_draft_sync_no_selector_falls_back_to_most_recent(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -357,12 +357,60 @@ def test_start_draft_sync_conflicts_when_another_league_listener_is_active(clien
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value="L2"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L2", "live")]), \
          image_patch, secret_patch, configmap_patch:
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 409
     assert "L2" in response.json()["detail"]
+
+
+def _fake_listener_job(league_id, mode, name=None):
+    job = MagicMock()
+    job.metadata.name = name or f"draft-sync-{league_id}"
+    job.metadata.labels = {"app": "draft-sync", "league-id": league_id, "mode": mode}
+    return job
+
+
+def test_start_draft_sync_reclaims_stale_practice_listener(client):
+    """A new practice room must not be blocked by the listener the last practice run left
+    behind - that made every second practice draft unstartable."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L2", "practice")]), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=["draft-sync-L2"]) as mock_delete, \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 202
+    mock_delete.assert_called_once_with(except_league_id="L1")
+    assert mock_batch_api.create_namespaced_job.called
+
+
+def test_start_draft_sync_never_reclaims_a_live_listener(client):
+    """Practice cleanup must never take down a real draft that is in progress."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
+
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L9", "live")]), \
+         patch("src.api.draft._delete_practice_listener_jobs") as mock_delete, \
+         image_patch, secret_patch, configmap_patch:
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 409
+    assert "L9" in response.json()["detail"]
+    mock_delete.assert_not_called()
 
 
 def test_start_draft_sync_k8s_failure(client):
@@ -375,7 +423,7 @@ def test_start_draft_sync_k8s_failure(client):
     image_patch, secret_patch, configmap_patch = _env_config_patches()
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listener_on_other_league", return_value=None), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
@@ -1087,8 +1135,51 @@ def test_end_practice_sync_job_deletes_latest(client):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "deleted", "job_name": "practice-draft-sync-200"}
-    mock_batch_api.delete_namespaced_job.assert_called_once_with("practice-draft-sync-200", "default", propagation_policy="Background")
+    assert response.json()["job_name"] == "practice-draft-sync-200"
+    mock_batch_api.delete_namespaced_job.assert_any_call("practice-draft-sync-200", "default", propagation_policy="Background")
+
+
+def test_end_practice_sync_job_also_deletes_the_listener(client):
+    """The room connector and the listener are separate Jobs. Deleting only the connector
+    leaves a Redis consumer blocking forever, which blocks the next practice run entirely."""
+    connector = MagicMock()
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = 1
+    listener = _fake_listener_job("L2", "practice", name="draft-sync-practice-L2-1")
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[connector]),
+        MagicMock(items=[listener]),
+    ]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    assert response.json()["listener_jobs_deleted"] == ["draft-sync-practice-L2-1"]
+    selectors = [c.kwargs["label_selector"] for c in mock_batch_api.list_namespaced_job.call_args_list]
+    assert "app=draft-sync,mode=practice" in selectors
+    deleted = [c.args[0] for c in mock_batch_api.delete_namespaced_job.call_args_list]
+    assert deleted == ["practice-draft-sync-1", "draft-sync-practice-L2-1"]
+
+
+def test_delete_practice_listener_jobs_never_touches_live_listeners(client):
+    """The label selector is the only thing standing between practice cleanup and an
+    in-progress real draft."""
+    from src.api.draft import _delete_practice_listener_jobs
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        _delete_practice_listener_jobs()
+
+    assert mock_batch_api.list_namespaced_job.call_args.kwargs["label_selector"] == "app=draft-sync,mode=practice"
 
 
 def test_end_practice_sync_job_no_job_exists(client):

@@ -426,6 +426,24 @@ def compute_on_the_clock_team(next_pick_number: int, team_count: int, slot_map: 
 # ------------------------------------------------------------------------------
 # Draft pick persistence
 # ------------------------------------------------------------------------------
+def resolve_player_id(conn, espn_player_id: str) -> Optional[str]:
+    """Maps ESPN's player id, which is what the draft stream carries, to the internal
+    players.player_id that every other table in this schema is keyed by.
+
+    Deliberately has no "maybe it's already an internal id" fallback. The two id spaces
+    overlap numerically - a real pick was recorded against the wrong player because an ESPN
+    id happened to also exist as an internal player_id - and a pick silently attributed to
+    someone else is worse than one recorded with an unresolved id, because nothing downstream
+    can tell it apart from a correct one.
+
+    Returns None for players the roster sync doesn't carry, notably D/ST and K. Callers must
+    still record those picks: draft order integrity matters more than the name."""
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT player_id FROM players WHERE espn_id = %s;", (str(espn_player_id),))
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def persist_draft_pick(conn, league_id: str, season: int, pick_number: int, round_: Optional[int], team_id: str, player_id: str) -> bool:
     """ON CONFLICT DO NOTHING keyed on (league_id, season, pick_number) - a Stream
     consumer group redelivers an entry if it crashes before XACK, and reprocessing an
@@ -589,12 +607,25 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 # round NULL and no draft slot, and ON CONFLICT DO NOTHING blocks any replay
                 # from fixing them. Repair them the moment it becomes readable.
                 backfill_missing_rounds(conn, league_id, season, team_count)
+            # The stream carries ESPN's player id; draft_picks, VORP and the pick feed's
+            # player join all key off the internal players.player_id. Unresolvable ids (D/ST,
+            # K, or a stale roster sync) are still recorded under the raw ESPN id: dropping
+            # the pick would leave a gap in pick_number, which breaks the gapless run that
+            # team-count derivation requires and mis-sizes every round after it.
+            espn_player_id = str(event["player_id"])
+            resolved_player_id = resolve_player_id(conn, espn_player_id)
+            if resolved_player_id is None:
+                logger.warning(
+                    f"No players row for ESPN player id {espn_player_id} (pick {pick_number}); recording the "
+                    "pick under the raw ESPN id. It will show in the feed without a name until the roster sync "
+                    "covers this player - expected for D/ST and K, which the players table does not carry."
+                )
             inserted = persist_draft_pick(
                 conn, league_id, season,
                 pick_number=pick_number,
                 round_=round_,
                 team_id=event["team_id"],
-                player_id=event["player_id"],
+                player_id=resolved_player_id or espn_player_id,
             )
             if not inserted:
                 logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")

@@ -271,24 +271,66 @@ def _practice_sync_job_league_id() -> Optional[str]:
     return (latest.metadata.labels or {}).get("league-id")
 
 
-def _active_listener_on_other_league(target_league_id: str) -> Optional[str]:
-    """Returns the conflicting active league_id if another draft-sync listener is active."""
+def _active_listeners_on_other_leagues(target_league_id: str) -> list:
+    """Returns the active draft-sync listener Jobs watching some *other* league.
+
+    More than one can exist: every practice run before this fix left its listener behind, so
+    a long-lived cluster accumulates them."""
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync")
     except Exception as e:
         logger.error(f"Failed to query active draft-sync listeners: {e}")
-        return None
+        return []
     items = getattr(jobs, "items", []) or []
     if not isinstance(items, list):
-        return None
+        return []
+    conflicting = []
     for job in items:
         if _job_phase(job.status) != "Active":
             continue
         job_league_id = (job.metadata.labels or {}).get("league-id")
         if job_league_id and job_league_id != target_league_id:
-            return job_league_id
-    return None
+            conflicting.append(job)
+    return conflicting
+
+
+def _active_listener_on_other_league(target_league_id: str) -> Optional[str]:
+    """Returns the conflicting active league_id if another draft-sync listener is active."""
+    conflicting = _active_listeners_on_other_leagues(target_league_id)
+    if not conflicting:
+        return None
+    return (conflicting[0].metadata.labels or {}).get("league-id")
+
+
+def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> list:
+    """Deletes practice draft-sync listener Jobs, optionally sparing one league's.
+
+    Listeners are Redis Stream consumers that block forever, so nothing ever retires one on
+    its own. Left running, a stale listener both consumes a league nobody is drafting and
+    blocks the next practice run from starting at all (start_draft_sync refuses to run two
+    listeners at once). Only practice listeners are ever touched here - a live draft's
+    listener must never be collected as a side effect of practice cleanup."""
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice")
+    except Exception as e:
+        logger.error(f"Failed to list practice draft-sync listener Jobs: {e}")
+        return []
+
+    deleted = []
+    for job in getattr(jobs, "items", []) or []:
+        labels = job.metadata.labels or {}
+        if except_league_id is not None and labels.get("league-id") == except_league_id:
+            continue
+        try:
+            batch_api.delete_namespaced_job(job.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
+            deleted.append(job.metadata.name)
+        except Exception as e:
+            logger.error(f"Failed to delete practice draft-sync listener Job {job.metadata.name}: {e}")
+    if deleted:
+        logger.info(f"Deleted stale practice draft-sync listener Jobs: {', '.join(deleted)}")
+    return deleted
 
 
 def _to_iso_timestamp(value) -> Optional[str]:
@@ -606,15 +648,25 @@ def start_draft_sync(league_id: Optional[str] = None):
             "mode": mode,
         }
 
-    conflicting_league_id = _active_listener_on_other_league(league_id)
-    if conflicting_league_id is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"A draft-sync Job is already Active for league {conflicting_league_id}; "
-                f"stop it before starting league {league_id}."
-            ),
-        )
+    conflicting = _active_listeners_on_other_leagues(league_id)
+    if conflicting:
+        # A practice run starting while stale *practice* listeners linger is the normal case,
+        # not a conflict: the user has simply opened a new practice room, and practice is a
+        # singleton by design (one room connector, one config row). Reclaim them so the run
+        # can proceed. A live listener is never collected this way - drafting for real is
+        # never something to interrupt on an implicit signal, so that still fails loudly.
+        live_conflicts = [j for j in conflicting if (j.metadata.labels or {}).get("mode") != "practice"]
+        if mode == "practice" and not live_conflicts:
+            _delete_practice_listener_jobs(except_league_id=league_id)
+        else:
+            conflicting_league_id = (live_conflicts or conflicting)[0].metadata.labels.get("league-id")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"A draft-sync Job is already Active for league {conflicting_league_id}; "
+                    f"stop it before starting league {league_id}."
+                ),
+            )
 
     job_prefix = "draft-sync-practice" if mode == "practice" else "draft-sync"
     job_name = f"{job_prefix}-{_dns1123_slug(league_id)}-{int(time.time())}"
@@ -952,4 +1004,11 @@ def end_practice_sync_job():
         logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
 
-    return {"status": "deleted", "job_name": latest.metadata.name}
+    # The room connector deleted above is only half the run. The listener Job that consumes
+    # its Redis Stream is a separate Job with different labels, and nothing else ever stops
+    # it - it blocks on the stream forever. Leaving it behind is what made every second
+    # practice run fail: the next run targets a new league, and start_draft_sync refuses to
+    # run two listeners at once.
+    deleted_listeners = _delete_practice_listener_jobs()
+
+    return {"status": "deleted", "job_name": latest.metadata.name, "listener_jobs_deleted": deleted_listeners}

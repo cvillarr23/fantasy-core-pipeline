@@ -252,6 +252,23 @@ ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN = """
 ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS team_count INT;
 """
 
+# Drops the players FK on draft_picks.
+#
+# The draft stream carries ESPN's own player ids, while every other table in this schema keys
+# players by the internal players.player_id. draft_matrix resolves one to the other before
+# inserting, but two kinds of pick can never be resolved: D/ST and K, which the players table
+# does not carry at all, and any player missing from a stale roster sync.
+#
+# With the FK in place those picks didn't degrade - they were rejected outright, taking the
+# whole pick with them. That is far worse than an unnamed pick: a missing pick_number breaks
+# the gapless run team-count derivation depends on, mis-sizes every subsequent round, and
+# leaves a hole in the feed the user is reading to follow their draft. _recent_picks already
+# LEFT JOINs players precisely so a pick with no player row still renders, just without a
+# name; this constraint was the one thing preventing that from ever happening.
+DROP_DRAFT_PICKS_PLAYER_FK = """
+ALTER TABLE draft_picks DROP CONSTRAINT IF EXISTS draft_picks_player_id_fkey;
+"""
+
 # Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in
 # draft_matrix.py's handle_pick_event - ESPN's API cannot supply draft-slot assignment
 # pre-draft (league.draft stays empty until ESPN marks the draft fully complete), so this
