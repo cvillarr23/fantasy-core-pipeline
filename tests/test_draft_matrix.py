@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import pytest
 from unittest.mock import MagicMock, patch
 
 from opentelemetry import trace
@@ -17,8 +18,9 @@ LEAGUE_CONFIG = {
 }
 
 
-def _player(pid, position, vorp_score, name=None, team="KC"):
-    return {"player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score, "team": team}
+def _player(pid, position, vorp_score, name=None, team="KC", espn_id="e-1"):
+    return {"player_id": pid, "espn_id": espn_id, "name": name or pid, "position": position,
+            "vorp_score": vorp_score, "team": team}
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +230,7 @@ def test_persist_draft_pick_returns_true_when_inserted():
     assert "ON CONFLICT" in query
     assert "DO NOTHING" in query
     assert "RETURNING" in query
-    assert params == ("L1", 2026, 5, 1, "7", "p1")
+    assert params == ("L1", 2026, 5, 1, "7", "p1", None)
 
 
 def test_persist_draft_pick_returns_false_when_already_recorded():
@@ -312,11 +314,24 @@ def test_publish_draft_target_posts_expected_payload():
     assert url[0] == f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
     assert kwargs["json"] == {
         "team_id": "7",
-        "player_id": "p1",
+        # ESPN's id, not the internal one: the worker clicks data-player-id in the draft room.
+        "player_id": "e-1",
         "name": "Some Back",
         "position": "RB",
         "pro_team": "KC",
     }
+
+
+def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
+    """182 of 1027 players have no espn_id. Posting a null id would either time out in the
+    draft room or be coerced into clicking a different player - never silently proceed."""
+    target = _player("p1", "RB", 12.0, name="Some Back", espn_id=None)
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        with pytest.raises(ValueError, match="no espn_id"):
+            dm.publish_draft_target("7", target)
+
+    mock_post.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +437,9 @@ def _mock_conn_returning(inserted: bool, team_count: int = 10):
         lookups = [None, None]
     else:
         lookups = [(team_count,)]
-    mock_cursor.fetchone.side_effect = lookups + [insert_row] + [None] * 8
+    # resolve_player_id's espn_id -> internal players.player_id lookup sits between the
+    # team-count lookup and the insert.
+    mock_cursor.fetchone.side_effect = lookups + [("internal-1",)] + [insert_row] + [None] * 8
     # backfill_missing_rounds' UPDATE ... RETURNING, and derive_team_count's pick scan;
     # nothing to repair and nothing to derive by default.
     mock_cursor.fetchall.return_value = []
@@ -861,3 +878,57 @@ def test_compute_on_the_clock_team_returns_none_when_slot_unknown():
 
 def test_compute_on_the_clock_team_returns_none_for_zero_team_count():
     assert dm.compute_on_the_clock_team(1, team_count=0, slot_map={}) is None
+
+
+def test_handle_pick_event_maps_espn_player_id_to_internal_id():
+    """The stream carries ESPN's player id; draft_picks and every join key off the internal
+    players.player_id. Recording the raw ESPN id attributed a pick to a different player
+    entirely, because the two id spaces overlap numerically."""
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=10)
+    mock_client = MagicMock()
+    event = {"pick_number": "5", "team_id": "3", "player_id": "4685526"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.resolve_player_id", return_value="13302") as mock_resolve, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True) as mock_pick, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args.args[1] == "4685526"
+    assert mock_pick.call_args.kwargs["player_id"] == "13302"
+    assert mock_pick.call_args.kwargs["espn_player_id"] == "4685526"
+
+
+def test_handle_pick_event_still_records_unresolvable_players():
+    """D/ST and K have no players row at all. Dropping their picks would leave a gap in
+    pick_number, which breaks the gapless run team-count derivation depends on and mis-sizes
+    every round after it - an unnamed pick is far cheaper than a missing one."""
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=10)
+    mock_client = MagicMock()
+    event = {"pick_number": "5", "team_id": "3", "player_id": "-16033"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.resolve_player_id", return_value=None), \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True) as mock_pick, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert mock_pick.call_args.kwargs["player_id"] is None
+    assert mock_pick.call_args.kwargs["espn_player_id"] == "-16033"
+
+
+def test_resolve_player_id_looks_up_espn_id_only():
+    """No fallback to treating the value as an internal id: the id spaces overlap, so a
+    fallback silently attributes picks to the wrong player, which is undetectable
+    downstream."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    assert dm.resolve_player_id(mock_conn, "12483") is None
+    assert mock_cursor.execute.call_count == 1
+    assert "espn_id" in mock_cursor.execute.call_args.args[0]

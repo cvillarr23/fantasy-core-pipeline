@@ -252,6 +252,27 @@ ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN = """
 ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS team_count INT;
 """
 
+# The raw ESPN player id every draft pick arrives with.
+#
+# players.player_id is Sleeper's id - it is the PK four other tables reference, and the whole
+# projection/VORP/optimizer stack joins on it - so draft_picks has to key off it too, or the
+# "already drafted" anti-join silently stops excluding drafted players. But the draft stream
+# only ever carries ESPN's id, and the espn_id crosswalk that bridges them covers 845 of 1027
+# players and no K or D/ST at all.
+#
+# Storing only the resolved id therefore loses every unresolvable pick, and a gap in
+# pick_number breaks the gapless run team-count derivation needs and mis-sizes every later
+# round. Storing the ESPN id *in* player_id is worse still: the two id spaces overlap
+# numerically, so a pick lands on a real but entirely different player (ESPN 12483 is Matthew
+# Stafford; internal 12483 is Jack Bech) and nothing downstream can tell it apart.
+#
+# So keep both. player_id stays nullable and FK-checked, holding the internal id when the
+# crosswalk resolves it; espn_player_id always holds the stream's own id, so no pick is ever
+# lost and unresolved ones can be backfilled as crosswalk coverage improves.
+ADD_DRAFT_PICKS_ESPN_PLAYER_ID_COLUMN = """
+ALTER TABLE draft_picks ADD COLUMN IF NOT EXISTS espn_player_id VARCHAR(20);
+"""
+
 # Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in
 # draft_matrix.py's handle_pick_event - ESPN's API cannot supply draft-slot assignment
 # pre-draft (league.draft stays empty until ESPN marks the draft fully complete), so this

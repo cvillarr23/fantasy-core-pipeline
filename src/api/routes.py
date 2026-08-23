@@ -32,7 +32,7 @@ class LineupTriggerPayload(BaseModel):
 
 class DraftPickTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
-    player_id: str = Field(..., description="players.player_id (Sleeper-namespaced ID, not espn_id) of the recommended draft target")
+    player_id: str = Field(..., description="ESPN player id of the recommended draft target. Must be ESPN's, not the internal Sleeper players.player_id: the worker clicks button.Button--draft[data-player-id=...] in the draft room, and the two id spaces overlap numerically, so the wrong namespace silently matches a different player")
     name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
     position: str = Field(..., description="Player's position, for a name+position+team match against ESPN's own player pool")
     pro_team: str = Field(..., description="Player's NFL team abbreviation, for a name+position+team match against ESPN's own player pool")

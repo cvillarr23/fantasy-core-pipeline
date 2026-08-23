@@ -163,7 +163,17 @@ class DraftPickSummary(BaseModel):
     pick_number: int
     round: Optional[int]
     team_id: str
-    player_id: str
+    player_id: Optional[str] = Field(
+        None,
+        description=(
+            "Internal players.player_id (Sleeper-namespaced). Null when the ESPN->internal crosswalk "
+            "has no entry for this player - always the case for K and D/ST, which players does not carry."
+        ),
+    )
+    espn_player_id: Optional[str] = Field(
+        None,
+        description="ESPN's own player id, as it arrived on the draft stream. Null only on picks recorded before this column existed.",
+    )
     name: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
     position: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
 
@@ -271,24 +281,96 @@ def _practice_sync_job_league_id() -> Optional[str]:
     return (latest.metadata.labels or {}).get("league-id")
 
 
-def _active_listener_on_other_league(target_league_id: str) -> Optional[str]:
-    """Returns the conflicting active league_id if another draft-sync listener is active."""
+def _active_listeners_on_other_leagues(target_league_id: str) -> list:
+    """Returns the active draft-sync listener Jobs watching some *other* league.
+
+    More than one can exist: every practice run before this fix left its listener behind, so
+    a long-lived cluster accumulates them."""
+    # Never fails open. An unreadable listener state is not "no conflicts" - treating it as
+    # such lets a transient apiserver blip slip a second listener past the duplicate guard,
+    # and two consumers on one Redis group split the pick stream between them.
+    batch_api = _batch_v1_api()
     try:
-        batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync")
     except Exception as e:
         logger.error(f"Failed to query active draft-sync listeners: {e}")
-        return None
+        raise
     items = getattr(jobs, "items", []) or []
     if not isinstance(items, list):
-        return None
+        raise RuntimeError(f"Unexpected response listing draft-sync Jobs: items was {type(items).__name__}, not a list.")
+    conflicting = []
     for job in items:
         if _job_phase(job.status) != "Active":
             continue
         job_league_id = (job.metadata.labels or {}).get("league-id")
         if job_league_id and job_league_id != target_league_id:
-            return job_league_id
-    return None
+            conflicting.append(job)
+    return conflicting
+
+
+def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_names: list) -> bool:
+    """Like _wait_for_job_termination, but waits for specific Jobs rather than for the whole
+    selector to empty - the caller may be intentionally leaving other matching Jobs in place."""
+    remaining = set(job_names)
+    for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        present = {j.metadata.name for j in (getattr(jobs, "items", []) or [])}
+        if not (remaining & present):
+            return True
+        time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    return False
+
+
+def _delete_practice_listener_jobs(except_league_id: Optional[str] = None) -> list:
+    """Deletes practice draft-sync listener Jobs, optionally sparing one league's.
+
+    Listeners are Redis Stream consumers that block forever, so nothing ever retires one on
+    its own. Left running, a stale listener both consumes a league nobody is drafting and
+    blocks the next practice run from starting at all (start_draft_sync refuses to run two
+    listeners at once). Only practice listeners are ever touched here - a live draft's
+    listener must never be collected as a side effect of practice cleanup."""
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice")
+    except Exception as e:
+        logger.error(f"Failed to list practice draft-sync listener Jobs: {e}")
+        raise
+
+    deleted = []
+    for job in getattr(jobs, "items", []) or []:
+        labels = job.metadata.labels or {}
+        if except_league_id is not None and labels.get("league-id") == except_league_id:
+            continue
+        try:
+            batch_api.delete_namespaced_job(
+                job.metadata.name,
+                K8S_NAMESPACE,
+                # Foreground, matching /stop: Background returns before the Pod is gone, and
+                # /start creates the replacement the moment this returns. The old and new
+                # listeners would then briefly share a Redis consumer group and split the
+                # pick stream between them - the very overlap this reclaim exists to avoid.
+                propagation_policy="Foreground",
+            )
+            deleted.append(job.metadata.name)
+        except Exception as e:
+            # Never swallow this. A caller that treats failed cleanup as success either
+            # starts a second listener alongside the one it failed to reclaim, or reports a
+            # 200 teardown while the listener is still consuming.
+            logger.error(f"Failed to delete practice draft-sync listener Job {job.metadata.name}: {e}")
+            raise
+
+    # Waits on the deleted names specifically, not the label selector. The selector also
+    # matches the target league's own Job, which except_league_id deliberately spared - a
+    # completed or failed one lingers there indefinitely, so a selector-based wait would
+    # never see an empty list and every reclaim would time out into a 500.
+    if deleted and not _wait_for_jobs_gone(batch_api, "app=draft-sync,mode=practice", deleted):
+        raise RuntimeError(
+            f"Practice draft-sync listener Job(s) {', '.join(deleted)} did not terminate within "
+            f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s."
+        )
+    if deleted:
+        logger.info(f"Deleted stale practice draft-sync listener Jobs: {', '.join(deleted)}")
+    return deleted
 
 
 def _to_iso_timestamp(value) -> Optional[str]:
@@ -366,9 +448,11 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     """Left-joins players so the pick feed can render name/position without a separate
     per-pick lookup - LEFT JOIN (not INNER) so a pick still shows up even if its player
     row is somehow missing, just with name/position null rather than the whole pick
-    vanishing from the feed."""
+    vanishing from the feed. That is the normal case for K and D/ST, which the players
+    table doesn't carry at all: espn_player_id is returned alongside so the feed can still
+    identify the pick when the crosswalk has nothing to join to."""
     cursor.execute("""
-        SELECT d.pick_number, d.round, d.team_id, d.player_id, p.name, p.position
+        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position
         FROM draft_picks d
         LEFT JOIN players p ON d.player_id = p.player_id
         WHERE d.league_id = %s AND d.season = %s
@@ -376,7 +460,8 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
         LIMIT %s;
     """, (league_id, season, limit))
     return [
-        {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3], "name": row[4], "position": row[5]}
+        {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3],
+         "espn_player_id": row[4], "name": row[5], "position": row[6]}
         for row in cursor.fetchall()
     ]
 
@@ -606,15 +691,43 @@ def start_draft_sync(league_id: Optional[str] = None):
             "mode": mode,
         }
 
-    conflicting_league_id = _active_listener_on_other_league(league_id)
-    if conflicting_league_id is not None:
+    try:
+        conflicting = _active_listeners_on_other_leagues(league_id)
+    except Exception as e:
         raise HTTPException(
-            status_code=409,
+            status_code=500,
             detail=(
-                f"A draft-sync Job is already Active for league {conflicting_league_id}; "
-                f"stop it before starting league {league_id}."
+                f"Could not determine whether another draft-sync listener is active: {e}. Refusing to start "
+                f"league {league_id} rather than risk a second listener splitting the pick stream."
             ),
         )
+    if conflicting:
+        # A practice run starting while stale *practice* listeners linger is the normal case,
+        # not a conflict: the user has simply opened a new practice room, and practice is a
+        # singleton by design (one room connector, one config row). Reclaim them so the run
+        # can proceed. A live listener is never collected this way - drafting for real is
+        # never something to interrupt on an implicit signal, so that still fails loudly.
+        live_conflicts = [j for j in conflicting if (j.metadata.labels or {}).get("mode") != "practice"]
+        if mode == "practice" and not live_conflicts:
+            try:
+                _delete_practice_listener_jobs(except_league_id=league_id)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Could not reclaim the stale practice draft-sync listener: {e}. Starting league "
+                        f"{league_id} anyway would leave two listeners running."
+                    ),
+                )
+        else:
+            conflicting_league_id = (live_conflicts or conflicting)[0].metadata.labels.get("league-id")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"A draft-sync Job is already Active for league {conflicting_league_id}; "
+                    f"stop it before starting league {league_id}."
+                ),
+            )
 
     job_prefix = "draft-sync-practice" if mode == "practice" else "draft-sync"
     job_name = f"{job_prefix}-{_dns1123_slug(league_id)}-{int(time.time())}"
@@ -942,14 +1055,35 @@ def end_practice_sync_job():
         logger.error(f"Failed to list practice draft-sync Jobs for teardown: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list practice draft-sync Jobs: {str(e)}")
 
-    if not jobs.items:
+    # The connector is only half the run: the listener that consumes its Redis Stream is a
+    # separate Job, and nothing else ever stops it - it blocks on the stream forever.
+    #
+    # Crucially the listener is NOT gated on the connector still existing. The connector
+    # carries ttl_seconds_after_finished, so Kubernetes garbage-collects it an hour after it
+    # exits, while the listener is still running. Returning 404 in that window would leave
+    # the leaked listener in place with no way to reach it - the exact failure this endpoint
+    # is meant to prevent, reintroduced by the ordering.
+    connector_name = None
+    if jobs.items:
+        latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
+        try:
+            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
+        except Exception as e:
+            logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
+        connector_name = latest.metadata.name
+
+    try:
+        deleted_listeners = _delete_practice_listener_jobs()
+    except Exception as e:
+        detail = (
+            f"Room connector {connector_name} was deleted, but the draft-sync listener could not be: {e}"
+            if connector_name
+            else f"Failed to delete the practice draft-sync listener: {e}"
+        )
+        raise HTTPException(status_code=500, detail=detail)
+
+    if connector_name is None and not deleted_listeners:
         raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
 
-    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-    try:
-        batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
-    except Exception as e:
-        logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
-
-    return {"status": "deleted", "job_name": latest.metadata.name}
+    return {"status": "deleted", "job_name": connector_name, "listener_jobs_deleted": deleted_listeners}
