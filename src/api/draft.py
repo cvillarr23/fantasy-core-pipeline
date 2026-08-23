@@ -382,9 +382,17 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
 
 
 def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
+    # Mirrors draft_matrix.league_team_count's resolution order rather than reading
+    # league_settings alone: that table only ever holds the one real ESPN_LEAGUE_ID, so for a
+    # practice/mock room the count derived from pick arrivals is the only one there is, and
+    # reading only league_settings here would report "nobody on the clock" for every practice
+    # draft no matter how well the listener was working.
     cursor.execute("SELECT team_count FROM league_settings WHERE league_id = %s;", (league_id,))
     row = cursor.fetchone()
-    if row is None:
+    if row is None or not row[0]:
+        cursor.execute("SELECT team_count FROM draft_config WHERE league_id = %s;", (league_id,))
+        row = cursor.fetchone()
+    if row is None or not row[0]:
         return None
     team_count = row[0]
 

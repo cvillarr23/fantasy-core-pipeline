@@ -240,6 +240,18 @@ ADD_DRAFT_CONFIG_MODE_COLUMN = """
 ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS mode VARCHAR(10) NOT NULL DEFAULT 'live';
 """
 
+# Snake-draft team count for leagues that sync_league.py never touches. league_settings only
+# ever holds the one real ESPN_LEAGUE_ID, so a practice/mock room has no team_count anywhere -
+# which leaves every pick's round NULL, draft_slots empty, and on_the_clock_team permanently
+# unknown. It lives here rather than in league_settings deliberately: load_league_config reads
+# league_settings with `LIMIT 1` and no league filter, and load_lineup_slot_counts takes the
+# most recently updated row for the season, so a synthetic practice row would silently hijack
+# real VORP and lineup math. Nullable: it is derived from pick arrivals, so it is unknown until
+# round 1 completes.
+ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN = """
+ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS team_count INT;
+"""
+
 # Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in
 # draft_matrix.py's handle_pick_event - ESPN's API cannot supply draft-slot assignment
 # pre-draft (league.draft stays empty until ESPN marks the draft fully complete), so this

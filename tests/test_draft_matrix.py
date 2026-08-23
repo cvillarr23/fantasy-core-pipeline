@@ -416,9 +416,15 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary():
 
 def _mock_conn_returning(inserted: bool, team_count: int = 10):
     mock_cursor = MagicMock()
-    # handle_pick_event reads team_count first, then persist_draft_pick's RETURNING.
-    mock_cursor.fetchone.side_effect = [(team_count,), (1,) if inserted else None] + [None] * 8
-    # backfill_missing_rounds' UPDATE ... RETURNING; nothing to repair by default.
+    insert_row = (1,) if inserted else None
+    if team_count is None:
+        # league_team_count falls through league_settings to draft_config before giving up.
+        lookups = [None, None]
+    else:
+        lookups = [(team_count,)]
+    mock_cursor.fetchone.side_effect = lookups + [insert_row] + [None] * 8
+    # backfill_missing_rounds' UPDATE ... RETURNING, and derive_team_count's pick scan;
+    # nothing to repair and nothing to derive by default.
     mock_cursor.fetchall.return_value = []
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
@@ -538,6 +544,103 @@ def test_handle_pick_event_skips_backfill_when_team_count_unknown():
         dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
     mock_backfill.assert_not_called()
+
+
+def _mock_conn_with_picks(picks):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = picks
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    return mock_conn
+
+
+def test_derive_team_count_reads_the_first_repeated_team():
+    """Round 1 is every team picking exactly once, so the first team to appear twice does so
+    at pick team_count + 1."""
+    picks = [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "a")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) == 4
+
+
+def test_derive_team_count_unknown_until_a_team_repeats():
+    picks = [(1, "a"), (2, "b"), (3, "c")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
+
+
+def test_derive_team_count_refuses_to_guess_when_a_pick_is_missing():
+    """A dropped pick would put the first repeat one position early and yield a count one too
+    small - silently wrong rounds and draft slots for the entire draft. Unknown is better."""
+    picks = [(1, "a"), (2, "b"), (4, "c"), (5, "a")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
+
+
+def test_derive_team_count_ignores_picks_that_do_not_start_at_one():
+    picks = [(2, "a"), (3, "b"), (4, "a")]
+    assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
+
+
+def test_handle_pick_event_derives_and_persists_team_count_for_unsynced_league():
+    """Practice/mock rooms are never touched by sync_league, so league_settings has nothing
+    for them; without this the round stays NULL and on_the_clock_team is never known."""
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=None)
+    mock_client = MagicMock()
+    event = {"pick_number": "5", "team_id": "a", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.derive_team_count", return_value=4) as mock_derive, \
+         patch("src.optimization.draft_matrix.persist_derived_team_count") as mock_persist_count, \
+         patch("src.optimization.draft_matrix.backfill_missing_rounds", return_value=0) as mock_backfill, \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_slot, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True), \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_derive.assert_called_once_with(mock_conn, "L1", 2026)
+    mock_persist_count.assert_called_once_with(mock_conn, "L1", 4)
+    # Repairs every round left NULL while the count was unknown, this pick included.
+    mock_backfill.assert_called_once_with(mock_conn, "L1", 2026, 4)
+    # Pick 5 in a 4-team league is round 2, so it must not claim a draft slot.
+    mock_slot.assert_not_called()
+
+
+def test_handle_pick_event_derivation_makes_a_round_one_pick_claim_its_slot():
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=None)
+    mock_client = MagicMock()
+    event = {"pick_number": "3", "team_id": "c", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.derive_team_count", return_value=4), \
+         patch("src.optimization.draft_matrix.persist_derived_team_count"), \
+         patch("src.optimization.draft_matrix.backfill_missing_rounds", return_value=0), \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_slot, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True), \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_slot.assert_called_once()
+    assert mock_slot.call_args[0][3] == "c"
+    assert mock_slot.call_args[0][4] == 3
+
+
+def test_league_team_count_falls_back_to_draft_config():
+    mock_cursor = MagicMock()
+    # league_settings has no row for this league (never synced); draft_config carries the
+    # count derived from pick arrivals.
+    mock_cursor.fetchone.side_effect = [None, (12,)]
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    assert dm.league_team_count(mock_conn, "L1") == 12
+
+
+def test_league_team_count_prefers_league_settings():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.side_effect = [(10,), (99,)]
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    assert dm.league_team_count(mock_conn, "L1") == 10
 
 
 def test_decode_pick_event_unwraps_worker_payload_envelope():

@@ -282,14 +282,60 @@ def select_recommended_target(selected: list, starting_needs: dict) -> Optional[
 # Snake-draft turn order (CORE-10)
 # ------------------------------------------------------------------------------
 def league_team_count(conn, league_id: str) -> Optional[int]:
-    """Team count for snake-draft math. Returns None when the league isn't configured yet,
-    which callers must treat as "round unknown" rather than guessing a default - a wrong
-    team count silently produces a wrong draft slot map and therefore a wrong
-    on_the_clock_team for the rest of the draft."""
+    """Team count for snake-draft math. Returns None when it isn't known yet, which callers
+    must treat as "round unknown" rather than guessing a default - a wrong team count silently
+    produces a wrong draft slot map and therefore a wrong on_the_clock_team for the rest of
+    the draft.
+
+    Prefers league_settings (synced from ESPN by sync_league.py), falling back to the count
+    derived from pick arrivals and cached on draft_config. Only the one real ESPN_LEAGUE_ID is
+    ever synced, so for practice/mock rooms that fallback is the only source there is."""
     with conn.cursor() as cursor:
         cursor.execute("SELECT team_count FROM league_settings WHERE league_id = %s;", (league_id,))
         row = cursor.fetchone()
+        if row and row[0]:
+            return int(row[0])
+        cursor.execute("SELECT team_count FROM draft_config WHERE league_id = %s;", (league_id,))
+        row = cursor.fetchone()
     return int(row[0]) if row and row[0] else None
+
+
+def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
+    """Infers the team count from pick arrivals: in any snake draft round 1 is every team
+    picking exactly once, so the first team to appear twice does so at pick team_count + 1.
+
+    Returns None until that repeat is observed, and also when the picks seen so far are not a
+    gapless run starting at 1. That guard matters - if an early pick were dropped, the first
+    repeat would land one position early and yield a team count one too small, which is far
+    worse than unknown: every derived round and every draft slot would be quietly wrong for
+    the whole draft, with nothing to indicate it."""
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT pick_number, team_id FROM draft_picks
+             WHERE league_id = %s AND season = %s
+             ORDER BY pick_number;
+        """, (league_id, season))
+        picks = cursor.fetchall()
+
+    seen: set = set()
+    for expected, (pick_number, team_id) in enumerate(picks, start=1):
+        if int(pick_number) != expected:
+            return None
+        if team_id in seen:
+            return expected - 1
+        seen.add(team_id)
+    return None
+
+
+def persist_derived_team_count(conn, league_id: str, team_count: int) -> None:
+    """Caches a derived team count on the league's draft_config row. Never overwrites an
+    existing value: the count is fixed for the life of a draft, and a later re-derivation off
+    a partial pick set must not be able to move it."""
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            UPDATE draft_config SET team_count = %s
+             WHERE league_id = %s AND team_count IS NULL;
+        """, (team_count, league_id))
 
 
 def backfill_missing_rounds(conn, league_id: str, season: int, team_count: int) -> int:
@@ -506,16 +552,10 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             team_count = league_team_count(conn, league_id)
             round_ = (pick_number - 1) // team_count + 1 if team_count else None
             if team_count:
-                # A league configured after its draft started leaves earlier picks with round
-                # NULL and no draft slot, and ON CONFLICT DO NOTHING blocks any replay from
-                # fixing them. Repair them the moment team_count becomes readable.
+                # A team count that only became known partway through leaves earlier picks with
+                # round NULL and no draft slot, and ON CONFLICT DO NOTHING blocks any replay
+                # from fixing them. Repair them the moment it becomes readable.
                 backfill_missing_rounds(conn, league_id, season, team_count)
-            else:
-                logger.warning(
-                    f"League {league_id} has no team_count in league_settings; recording pick "
-                    f"{pick_number} with round unknown. Rounds and draft slots will be backfilled "
-                    "once the league is configured."
-                )
             inserted = persist_draft_pick(
                 conn, league_id, season,
                 pick_number=pick_number,
@@ -526,6 +566,25 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             if not inserted:
                 logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
                 return None
+            if team_count is None:
+                # Practice/mock rooms are never synced by sync_league.py, so league_settings
+                # has nothing for them and this is the only way they ever get a team count.
+                # Derived *after* the insert, because the pick that reveals the count is the
+                # first repeat - which may well be this one.
+                team_count = derive_team_count(conn, league_id, season)
+                if team_count:
+                    logger.info(f"Derived team_count={team_count} for league {league_id} from round-1 pick arrivals.")
+                    persist_derived_team_count(conn, league_id, team_count)
+                    # Repairs every round left NULL up to now, this pick included, and claims
+                    # the round-1 draft slots that could not be recorded without a count.
+                    backfill_missing_rounds(conn, league_id, season, team_count)
+                    round_ = (pick_number - 1) // team_count + 1
+                else:
+                    logger.warning(
+                        f"League {league_id} has no known team_count yet; recording pick {pick_number} "
+                        "with round unknown. Rounds and draft slots are backfilled automatically once "
+                        "round 1 completes and the count can be derived."
+                    )
             if round_ == 1:
                 # Round-1 arrival order *is* each team's snake-draft slot (see
                 # compute_on_the_clock_team) - the only reliable source, since ESPN's API
