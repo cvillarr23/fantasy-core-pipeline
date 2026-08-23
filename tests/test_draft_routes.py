@@ -422,6 +422,32 @@ def test_stop_draft_does_not_touch_draft_config(client):
     assert response.status_code == 200
 
 
+def test_job_state_scopes_query_to_draft_sync_app_label():
+    from src.api.draft import _job_state
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value.items = []
+
+    with patch("src.api.draft._batch_v1_api", return_value=mock_batch_api):
+        state = _job_state("L1")
+
+    assert state == "Unknown"
+    assert mock_batch_api.list_namespaced_job.call_args.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
+
+
+def test_listener_status_reports_failed_when_k8s_job_failed_even_if_redis_says_active():
+    from src.api.draft import _listener_status
+
+    listener_state, listener_last_event_at, listener_error = _listener_status(
+        "Failed",
+        {"listener_state": "Active", "listener_last_event_at": "1000", "listener_error": "boom"},
+    )
+
+    assert listener_state == "Failed"
+    assert listener_last_event_at == "1970-01-01T00:16:40Z"
+    assert listener_error == "boom"
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/draft/status
 # ---------------------------------------------------------------------------
