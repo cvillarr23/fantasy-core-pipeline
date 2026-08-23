@@ -414,9 +414,10 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary():
 # handle_pick_event (orchestrator)
 # ---------------------------------------------------------------------------
 
-def _mock_conn_returning(inserted: bool):
+def _mock_conn_returning(inserted: bool, team_count: int = 10):
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = (1,) if inserted else None
+    # handle_pick_event reads team_count first, then persist_draft_pick's RETURNING.
+    mock_cursor.fetchone.side_effect = [(team_count,), (1,) if inserted else None] + [None] * 8
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
     return mock_conn, mock_cursor
@@ -425,7 +426,7 @@ def _mock_conn_returning(inserted: bool):
 def test_handle_pick_event_skips_when_already_recorded():
     mock_conn, _ = _mock_conn_returning(inserted=False)
     mock_client = MagicMock()
-    event = {"pick_number": "1", "round": "1", "team_id": "3", "player_id": "p1"}
+    event = {"pick_number": "1", "team_id": "3", "player_id": "p1"}
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
@@ -435,10 +436,101 @@ def test_handle_pick_event_skips_when_already_recorded():
     mock_client.hset.assert_not_called()
 
 
+def test_handle_pick_event_derives_round_from_pick_number_not_event():
+    """The WS ingest tier puts ESPN's lineup slot id in "round", so a slot-1 (QB) pick
+    arriving at overall pick 34 must NOT be treated as a round-1 pick and claim a draft
+    slot - that is what corrupted the slot map and the on-the-clock team."""
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=10)
+    mock_client = MagicMock()
+    event = {"pick_number": "34", "round": "1", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_slot, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True) as mock_pick, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_slot.assert_not_called()
+    assert mock_pick.call_args.kwargs["round_"] == 4
+
+
+def test_handle_pick_event_records_draft_slot_for_real_round_one_pick():
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=10)
+    mock_client = MagicMock()
+    # Lineup slot 6 (a TE) on overall pick 7 - genuinely round 1 despite "round" saying 6.
+    event = {"pick_number": "7", "round": "6", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_slot, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True) as mock_pick, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert mock_pick.call_args.kwargs["round_"] == 1
+    assert mock_slot.call_args[0][3] == "3"
+    assert mock_slot.call_args[0][4] == 7
+
+
+def test_handle_pick_event_leaves_round_unknown_without_league_settings():
+    mock_conn, _ = _mock_conn_returning(inserted=True, team_count=None)
+    mock_client = MagicMock()
+    event = {"pick_number": "3", "round": "2", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_draft_slot") as mock_slot, \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True) as mock_pick, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[]):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert mock_pick.call_args.kwargs["round_"] is None
+    mock_slot.assert_not_called()
+
+
+def test_decode_pick_event_unwraps_worker_payload_envelope():
+    fields = {"payload": json.dumps({"pick_number": 12, "team_id": 3, "player_id": 99})}
+    assert dm.decode_pick_event(fields) == {"pick_number": 12, "team_id": 3, "player_id": 99}
+
+
+def test_decode_pick_event_passes_through_flat_fields():
+    fields = {"pick_number": "12", "team_id": "3", "player_id": "99"}
+    assert dm.decode_pick_event(fields) == fields
+
+
+def test_process_entries_decodes_payload_before_handling():
+    """Regression: the listener used to hand raw Stream fields to handle_pick_event, so every
+    pick raised KeyError('pick_number'), got acked, and the listener reported itself Failed."""
+    mock_client = MagicMock()
+    event = {"pick_number": 5, "team_id": "3", "player_id": "p1"}
+    entries = [("draft_picks:L1", [("1-0", {"payload": json.dumps(event)})])]
+
+    with patch("src.optimization.draft_matrix.handle_pick_event", return_value=None) as mock_handle:
+        dm._process_entries(
+            mock_client,
+            stream_key="draft_picks:L1",
+            league_id="L1",
+            season=2026,
+            week=1,
+            team_id="7",
+            delay_seconds=8,
+            pending_state={},
+            entries=entries,
+        )
+
+    assert mock_handle.call_args[0][5] == event
+    failed = [
+        c for c in mock_client.hset.call_args_list
+        if c.kwargs.get("mapping", {}).get("listener_state") == "Failed"
+    ]
+    assert not failed
+
+
 def test_handle_pick_event_skips_recommendation_when_we_just_picked():
     mock_conn, _ = _mock_conn_returning(inserted=True)
     mock_client = MagicMock()
-    event = {"pick_number": "1", "round": "1", "team_id": "7", "player_id": "p1"}
+    event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
@@ -454,7 +546,7 @@ def test_handle_pick_event_skips_recommendation_when_we_just_picked():
 def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     mock_conn, _ = _mock_conn_returning(inserted=True)
     mock_client = MagicMock()
-    event = {"pick_number": "1", "round": "1", "team_id": "3", "player_id": "p1"}
+    event = {"pick_number": "1", "team_id": "3", "player_id": "p1"}
     target = _player("p2", "RB", 10.0, name="Best Back")
     runner_up = _player("p3", "WR", 8.0, name="Second Choice")
 

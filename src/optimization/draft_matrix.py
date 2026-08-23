@@ -281,6 +281,17 @@ def select_recommended_target(selected: list, starting_needs: dict) -> Optional[
 # ------------------------------------------------------------------------------
 # Snake-draft turn order (CORE-10)
 # ------------------------------------------------------------------------------
+def league_team_count(conn, league_id: str) -> Optional[int]:
+    """Team count for snake-draft math. Returns None when the league isn't configured yet,
+    which callers must treat as "round unknown" rather than guessing a default - a wrong
+    team count silently produces a wrong draft slot map and therefore a wrong
+    on_the_clock_team for the rest of the draft."""
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT team_count FROM league_settings WHERE league_id = %s;", (league_id,))
+        row = cursor.fetchone()
+    return int(row[0]) if row and row[0] else None
+
+
 def persist_draft_slot(conn, league_id: str, season: int, team_id: str, slot_number: int) -> None:
     """Records a team's round-1 pick_number as its permanent draft slot. ON CONFLICT DO
     NOTHING keyed on (league_id, season, team_id) - a team's slot is fixed the moment they
@@ -453,7 +464,7 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
 
     KNOWN LIMITATION: this always recomputes after any *other* team's pick, not
     specifically "the pick right before our turn" - the worker's event schema
-    (player_id/pick_number/team_id/round) carries no snake-draft turn order, and deriving
+    (player_id/pick_number/team_id) carries no snake-draft turn order, and deriving
     one needs each team's draft-slot assignment, which isn't modeled anywhere yet. In
     practice this means the recommendation stays continuously fresh (harmless), but a
     hold-and-publish job gets scheduled once per opponent pick rather than only once,
@@ -463,7 +474,15 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
     with tracer.start_as_current_span("draft_pick.handle_event", attributes={"league_id": league_id, "team_id": our_team_id}):
         with get_db_connection() as conn:
             pick_number = int(event["pick_number"])
-            round_ = int(event.get("round", 0)) or None
+            # The event's own "round" is NOT trustworthy: the WebSocket ingest tier parses
+            # SELECTED <teamId> <playerId> <slotId>, where the third token is ESPN's lineup
+            # slot id, not a round (proved against a 160-pick practice draft: value 1 was
+            # QB x10, value 6 TE x10, value 7 the FLEX). Its distribution is indistinguishable
+            # from a round's - a 10-team/16-slot league yields ten of each either way - so it
+            # has to be derived rather than read. Snake order makes pick_number the only
+            # thing needed, given team count.
+            team_count = league_team_count(conn, league_id)
+            round_ = (pick_number - 1) // team_count + 1 if team_count else None
             inserted = persist_draft_pick(
                 conn, league_id, season,
                 pick_number=pick_number,
@@ -475,13 +494,12 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
                 return None
             if round_ == 1:
-                # Round 1 pick arrival order *is* each team's snake-draft slot (see
+                # Round-1 arrival order *is* each team's snake-draft slot (see
                 # compute_on_the_clock_team) - the only reliable source, since ESPN's API
-                # can't supply draft-slot assignment pre-draft. Requires the worker to
-                # actually send round=1 on these events; if round is ever omitted for
-                # round-1 picks, slot tracking silently stays empty for that team rather
-                # than guessing - a missing slot just means on_the_clock_team_id can't be
-                # computed yet, not a wrong recommendation.
+                # can't supply draft-slot assignment pre-draft. Gated on a derived round,
+                # never the event's: trusting the event mapped slots off the ten picks that
+                # happened to carry lineup slot 1 (each team's QB, scattered across all 16
+                # rounds), which produced a plausible-looking but wrong slot map.
                 persist_draft_slot(conn, league_id, season, event["team_id"], pick_number)
             now = int(time.time())
             r_client.hset(
@@ -552,12 +570,29 @@ def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, 
     ).start()
 
 
+def decode_pick_event(fields: dict) -> dict:
+    """fantasy-browser-worker publishes each pick as a single JSON-encoded Stream field
+    (xAdd(key, '*', {payload: JSON.stringify(event)})) so the event keeps real types and
+    nesting, which flat Redis Stream fields cannot carry. Reading fields directly yields
+    only {'payload': '...'}, so every access like event['pick_number'] raised KeyError and
+    the listener acked away the whole draft while reporting itself Failed.
+
+    Entries without a payload wrapper are passed through unchanged: the DOM/REST ingest
+    tiers may write flat fields, and unwrapping must not become a second contract to break."""
+    payload = fields.get("payload")
+    if payload is None:
+        return fields
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode()
+    return json.loads(payload)
+
+
 def _process_entries(r_client, stream_key: str, league_id: str, season: int, week: int, team_id: str, delay_seconds: int, pending_state: dict, entries: list) -> None:
     with tracer.start_as_current_span("draft_listener.process_batch", attributes={"league_id": league_id}):
         for _stream, messages in entries:
             for entry_id, fields in messages:
                 try:
-                    result = handle_pick_event(r_client, league_id, season, week, team_id, fields)
+                    result = handle_pick_event(r_client, league_id, season, week, team_id, decode_pick_event(fields))
                     if result is not None:
                         target, next_pick_number = result
                         _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state)
