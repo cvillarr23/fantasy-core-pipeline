@@ -1020,27 +1020,35 @@ def end_practice_sync_job():
         logger.error(f"Failed to list practice draft-sync Jobs for teardown: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list practice draft-sync Jobs: {str(e)}")
 
-    if not jobs.items:
-        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+    # The connector is only half the run: the listener that consumes its Redis Stream is a
+    # separate Job, and nothing else ever stops it - it blocks on the stream forever.
+    #
+    # Crucially the listener is NOT gated on the connector still existing. The connector
+    # carries ttl_seconds_after_finished, so Kubernetes garbage-collects it an hour after it
+    # exits, while the listener is still running. Returning 404 in that window would leave
+    # the leaked listener in place with no way to reach it - the exact failure this endpoint
+    # is meant to prevent, reintroduced by the ordering.
+    connector_name = None
+    if jobs.items:
+        latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
+        try:
+            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
+        except Exception as e:
+            logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
+        connector_name = latest.metadata.name
 
-    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-    try:
-        batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Background")
-    except Exception as e:
-        logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
-
-    # The room connector deleted above is only half the run. The listener Job that consumes
-    # its Redis Stream is a separate Job with different labels, and nothing else ever stops
-    # it - it blocks on the stream forever. Leaving it behind is what made every second
-    # practice run fail: the next run targets a new league, and start_draft_sync refuses to
-    # run two listeners at once.
     try:
         deleted_listeners = _delete_practice_listener_jobs()
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Room connector {latest.metadata.name} was deleted, but the draft-sync listener could not be: {e}",
+        detail = (
+            f"Room connector {connector_name} was deleted, but the draft-sync listener could not be: {e}"
+            if connector_name
+            else f"Failed to delete the practice draft-sync listener: {e}"
         )
+        raise HTTPException(status_code=500, detail=detail)
 
-    return {"status": "deleted", "job_name": latest.metadata.name, "listener_jobs_deleted": deleted_listeners}
+    if connector_name is None and not deleted_listeners:
+        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+
+    return {"status": "deleted", "job_name": connector_name, "listener_jobs_deleted": deleted_listeners}

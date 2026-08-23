@@ -1317,3 +1317,24 @@ def test_recent_picks_survive_a_null_internal_player_id(client):
                                espn_player_id="-16033", name=None, position=None)
     assert summary.player_id is None
     assert summary.espn_player_id == "-16033"
+
+
+def test_end_practice_sync_job_cleans_listener_after_connector_is_gc_d(client):
+    """The connector carries ttl_seconds_after_finished; the listener blocks forever. Once
+    Kubernetes collects the connector, gating cleanup on it would strand the listener with
+    no way to reach it - reintroducing the exact leak this endpoint exists to prevent."""
+    listener = _fake_listener_job("L2", "practice", name="draft-sync-practice-L2-1")
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[]),          # connector already garbage-collected
+        MagicMock(items=[listener]),  # listener still running
+    ]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    assert response.json()["job_name"] is None
+    assert response.json()["listener_jobs_deleted"] == ["draft-sync-practice-L2-1"]
