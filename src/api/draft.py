@@ -1090,11 +1090,24 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest, force: bool = False
 
     if force:
         try:
-            _teardown_practice_run()
+            teardown = _teardown_practice_run()
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Could not tear down the existing practice run: {e}")
+        # Teardown reports success as long as the listener was retired, even when the connector
+        # outlived its termination poll. Starting a replacement then would leave two connectors
+        # publishing into draft_picks:{league} at once - precisely the overlap this guard exists
+        # to prevent - so force has to insist on a positive result where DELETE does not.
+        if not teardown["connector_gone"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The existing practice room connector ({teardown['job_name']}) was deleted but has not "
+                    "terminated yet. Starting another now would let two connectors publish into the same "
+                    "draft Stream. Retry in a few seconds."
+                ),
+            )
     elif _practice_sync_job_state() == "Active":
         raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another, or retry with force=true.")
 
@@ -1176,9 +1189,13 @@ def _teardown_practice_run() -> dict:
     """Retires the practice room connector and its listener, and clears their Redis state.
 
     Split out of the DELETE endpoint so POST ?force=true can reuse it. Returns the connector
-    name (None if there was none) and the listener Jobs deleted, and deliberately does NOT
-    treat "nothing was running" as an error - only the endpoint decides whether that deserves
-    a 404."""
+    name (None if there was none), the listener Jobs deleted, and whether the connector
+    actually terminated. Deliberately does NOT treat "nothing was running" as an error - only
+    the endpoint decides whether that deserves a 404.
+
+    connector_gone=False means the connector outlived its termination poll and may still be
+    publishing. That is tolerable for DELETE, whose job is to retire the listener, but NOT for
+    ?force=true, which goes on to start a second connector against the same Redis Stream."""
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
@@ -1239,7 +1256,7 @@ def _teardown_practice_run() -> dict:
     if connector_gone and connector_league_id:
         _clear_league_draft_state(connector_league_id, include_pick_stream=True)
 
-    return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners}
+    return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners, "connector_gone": connector_gone}
 
 
 @draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)

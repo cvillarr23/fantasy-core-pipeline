@@ -1198,7 +1198,7 @@ def test_start_practice_sync_job_force_tears_down_the_existing_run_first(client)
 
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          patch("src.api.draft._practice_sync_job_state", return_value="Active") as mock_state, \
-         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": ["draft-listener-1"]}) as mock_teardown, \
+         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": ["draft-listener-1"], "connector_gone": True}) as mock_teardown, \
          incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
@@ -1227,6 +1227,24 @@ def test_start_practice_sync_job_force_surfaces_a_failed_teardown(client):
     mock_api.return_value.create_namespaced_job.assert_not_called()
 
 
+def test_start_practice_sync_job_force_refuses_when_the_old_connector_is_still_alive(client):
+    """Teardown reports success once the listener is retired, even if the connector outlived
+    its termination poll. Starting a replacement then would leave two connectors publishing
+    into the same draft Stream - force has to be stricter than DELETE about this."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": [], "connector_gone": False}), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    assert "has not terminated" in response.json()["detail"]
+    mock_batch_api.create_namespaced_job.assert_not_called()
+
+
 def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
     """Only the DELETE endpoint turns "nothing running" into a 404; ?force=true on a clean
     cluster must be a no-op, not a failure."""
@@ -1243,6 +1261,8 @@ def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
 
     assert result["job_name"] is None
     assert result["listener_jobs_deleted"] == []
+    # Nothing to terminate counts as gone, or ?force=true on a clean cluster would 409.
+    assert result["connector_gone"] is True
 
 
 def test_every_kubernetes_call_is_bounded_by_a_timeout():
@@ -1257,17 +1277,19 @@ def test_every_kubernetes_call_is_bounded_by_a_timeout():
 
     source = inspect.getsource(draft_module)
     tree = ast.parse(source)
-    k8s_methods = {"list_namespaced_job", "create_namespaced_job", "delete_namespaced_job", "list_namespaced_pod", "read_namespaced_job", "delete_namespaced_pod"}
 
-    unbounded = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in k8s_methods:
-            continue
-        if not any(kw.arg == "_request_timeout" for kw in node.keywords):
-            unbounded.append(f"{node.func.attr} at line {node.lineno}")
+    # Matched by shape, not by an allowlist of the methods that happen to exist today. An
+    # allowlist would silently skip a future patch_namespaced_job or read_namespaced_pod - the
+    # regression guard would keep passing while the hang it exists to prevent came back.
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and "_namespaced_" in node.func.attr
+    ]
+    # If this ever hits zero the matcher has drifted and the assert below is vacuously true.
+    assert calls, "found no kubernetes *_namespaced_* calls - the matcher is broken, not the code"
 
+    unbounded = [f"{c.func.attr} at line {c.lineno}" for c in calls if not any(kw.arg == "_request_timeout" for kw in c.keywords)]
     assert unbounded == [], f"unbounded kubernetes calls: {unbounded}"
 
 
