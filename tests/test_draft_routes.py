@@ -1245,6 +1245,73 @@ def test_start_practice_sync_job_force_refuses_when_the_old_connector_is_still_a
     mock_batch_api.create_namespaced_job.assert_not_called()
 
 
+def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(client):
+    """Normally there is one connector, but concurrent starts or a manual kubectl apply during
+    recovery can leave more. Retiring only the newest would report connector_gone=True while an
+    older publisher was still writing to the same Stream - and ?force=true starts a replacement
+    on the strength of that flag."""
+    from src.api.draft import _teardown_practice_run
+
+    older = _mock_practice_job(state="Active", league_id="111")
+    older.metadata.name = "practice-draft-sync-100"
+    older.metadata.creation_timestamp = datetime(2026, 1, 1)
+    newer = _mock_practice_job(state="Active", league_id="222")
+    newer.metadata.name = "practice-draft-sync-200"
+    newer.metadata.creation_timestamp = datetime(2026, 1, 2)
+
+    mock_batch_api = MagicMock()
+    # Deleted Jobs are gone on the first poll.
+    mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[])]
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        result = _teardown_practice_run()
+
+    deleted = {c[0][0] for c in mock_batch_api.delete_namespaced_job.call_args_list}
+    assert deleted == {"practice-draft-sync-100", "practice-draft-sync-200"}
+    assert result["connector_gone"] is True
+    assert result["job_name"] == "practice-draft-sync-200"
+    # Both leagues get cleared, not just the newest connector's.
+    cleared = {c[0][0] for c in mock_redis.delete.call_args_list if c[0]}
+    assert any("111" in k for k in cleared) and any("222" in k for k in cleared)
+
+
+def test_teardown_practice_run_reports_not_gone_if_an_older_connector_survives(client):
+    """The whole point of the flag: an older connector outliving the poll must veto force-start."""
+    from src.api.draft import _teardown_practice_run
+
+    older = _mock_practice_job(state="Active", league_id="111")
+    older.metadata.name = "practice-draft-sync-100"
+    older.metadata.creation_timestamp = datetime(2026, 1, 1)
+    newer = _mock_practice_job(state="Active", league_id="222")
+    newer.metadata.name = "practice-draft-sync-200"
+    newer.metadata.creation_timestamp = datetime(2026, 1, 2)
+
+    mock_batch_api = MagicMock()
+    # The older one never disappears from the selector.
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[older])
+    mock_redis = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.STOP_JOB_TERMINATION_MAX_POLLS", 1), \
+         patch("src.api.draft.STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS", 0), \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[older])]
+        result = _teardown_practice_run()
+
+    assert result["connector_gone"] is False
+    # And nothing is cleared, since the survivor may still be publishing into it.
+    mock_redis.delete.assert_not_called()
+
+
 def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
     """Only the DELETE endpoint turns "nothing running" into a 404; ?force=true on a clean
     cluster must be a no-op, not a failure."""

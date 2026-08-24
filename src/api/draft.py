@@ -1211,30 +1211,41 @@ def _teardown_practice_run() -> dict:
     # exits, while the listener is still running. Returning 404 in that window would leave
     # the leaked listener in place with no way to reach it - the exact failure this endpoint
     # is meant to prevent, reintroduced by the ordering.
+    # Every connector, not just the newest. There is normally one, but concurrent starts or a
+    # manual `kubectl apply` during recovery can leave more, and retiring only the newest would
+    # report connector_gone=True while an older publisher was still writing to the same Stream -
+    # which is exactly the guarantee ?force=true relies on before starting a replacement.
     connector_name = None
-    connector_league_id = None
+    connector_league_ids = []
     connector_gone = True
     if jobs.items:
-        latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-        try:
-            # Foreground, not Background: the connector is the publisher for
-            # draft:{league}:picks and draft_picks:{league}, and the cleanup below deletes
-            # them. Background returns while the Pod is still running, so it could publish
-            # into - or recreate - those keys after they were cleared, contaminating the next
-            # run with the previous one's picks.
-            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-        except Exception as e:
-            logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
-        connector_name = latest.metadata.name
-        connector_league_id = (latest.metadata.labels or {}).get("league-id")
-        connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", [connector_name])
+        ordered = sorted(jobs.items, key=lambda j: j.metadata.creation_timestamp, reverse=True)
+        connector_name = ordered[0].metadata.name
+        deleted_connectors = []
+        for job in ordered:
+            try:
+                # Foreground, not Background: the connector is the publisher for
+                # draft:{league}:picks and draft_picks:{league}, and the cleanup below deletes
+                # them. Background returns while the Pod is still running, so it could publish
+                # into - or recreate - those keys after they were cleared, contaminating the next
+                # run with the previous one's picks.
+                batch_api.delete_namespaced_job(job.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+            except Exception as e:
+                logger.error(f"Failed to delete practice draft-sync Job {job.metadata.name}: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
+            deleted_connectors.append(job.metadata.name)
+            league_id = (job.metadata.labels or {}).get("league-id")
+            if league_id and league_id not in connector_league_ids:
+                connector_league_ids.append(league_id)
+        # One wait for the whole set rather than per Job, so the polls overlap instead of
+        # summing - N connectors would otherwise take N x the termination budget.
+        connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", deleted_connectors)
         if not connector_gone:
             # Not fatal: the listener still has to be retired, and reporting failure here
             # would leave it leaked - the exact bug this endpoint exists to prevent. Only the
             # pick-stream cleanup is skipped, since that is the part the connector can race.
             logger.warning(
-                f"Practice room connector {connector_name} did not terminate in time; retiring the "
+                f"Practice room connector(s) {', '.join(deleted_connectors)} did not terminate in time; retiring the "
                 "listener anyway but leaving the pick ledger and Stream in place, since the connector "
                 "may still be publishing to them."
             )
@@ -1253,8 +1264,9 @@ def _teardown_practice_run() -> dict:
     # carries ttl_seconds_after_finished and can already be gone while the connector is still up,
     # in which case nothing above would clear this league at all. Idempotent, so re-clearing a
     # league the listener sweep already handled costs a no-op DELETE.
-    if connector_gone and connector_league_id:
-        _clear_league_draft_state(connector_league_id, include_pick_stream=True)
+    if connector_gone:
+        for league_id in connector_league_ids:
+            _clear_league_draft_state(league_id, include_pick_stream=True)
 
     return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners, "connector_gone": connector_gone}
 
