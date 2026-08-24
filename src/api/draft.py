@@ -101,6 +101,15 @@ BROWSER_WORKER_IMAGE = os.getenv("BROWSER_WORKER_IMAGE")
 ESPN_SESSION_SECRET_NAME = "espn-session-secrets"
 PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 
+# Every Kubernetes call in this module is made from a synchronous FastAPI endpoint, which runs
+# on a bounded threadpool. The kubernetes client applies no timeout of its own, so a control
+# plane that accepts the TCP connection but never answers - the exact failure mode of an
+# overloaded apiserver - parks a thread indefinitely. Enough parked threads and every sync
+# endpoint stops responding, the liveness probe starts failing, and a degraded control plane
+# becomes a hard outage of the whole API. Bounded so those calls fail fast and the endpoint can
+# report "unknown" instead of hanging.
+K8S_REQUEST_TIMEOUT_SECONDS = 10
+
 
 def _redis_client() -> redis.Redis:
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
@@ -241,7 +250,7 @@ def _latest_listener_job(league_id: str):
     """
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query draft-sync Job status for league {league_id}: {e}")
         return None, False
@@ -263,7 +272,7 @@ def _job_state(league_id: str) -> str:
 def _practice_sync_job_state() -> str:
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query practice draft-sync Job status: {e}")
         return "Unknown"
@@ -277,7 +286,7 @@ def _practice_sync_job_state() -> str:
 def _latest_practice_sync_job():
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query practice draft-sync Job status: {e}")
         return None
@@ -304,7 +313,7 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
     # and two consumers on one Redis group split the pick stream between them.
     batch_api = _batch_v1_api()
     try:
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query active draft-sync listeners: {e}")
         raise
@@ -374,7 +383,7 @@ def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_n
     selector to empty - the caller may be intentionally leaving other matching Jobs in place."""
     remaining = set(job_names)
     for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         present = {j.metadata.name for j in (getattr(jobs, "items", []) or [])}
         if not (remaining & present):
             return True
@@ -398,7 +407,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear
     waits for the connector Pod to terminate first, may pass True."""
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to list practice draft-sync listener Jobs: {e}")
         raise
@@ -418,6 +427,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear
                 # listeners would then briefly share a Redis consumer group and split the
                 # pick stream between them - the very overlap this reclaim exists to avoid.
                 propagation_policy="Foreground",
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
             deleted.append(job.metadata.name)
             if labels.get("league-id"):
@@ -869,7 +879,7 @@ def start_draft_sync(league_id: Optional[str] = None):
 
     try:
         batch_api = _batch_v1_api()
-        batch_api.create_namespaced_job(K8S_NAMESPACE, job)
+        batch_api.create_namespaced_job(K8S_NAMESPACE, job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to create draft-sync Job for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create draft-sync Job: {str(e)}")
@@ -896,7 +906,7 @@ def _wait_for_job_termination(batch_api: client.BatchV1Api, label_selector: str)
     can't hang this request forever. Returns False on timeout - callers must not treat that
     as a successful stop."""
     for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         if not jobs.items:
             return True
         time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
@@ -919,12 +929,13 @@ def stop_draft(league_id: str):
     deleted_job = False
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         for job in jobs.items:
             batch_api.delete_namespaced_job(
                 name=job.metadata.name,
                 namespace=K8S_NAMESPACE,
                 propagation_policy="Foreground",  # blocks the Job's own deletion until its Pods are gone
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
             deleted_job = True
 
@@ -1064,16 +1075,28 @@ def resume_draft(payload: DraftPauseRequest):
 # POST/GET/DELETE /v1/draft/practice/sync-job (cvillarr23/fantasy-web-ui#9)
 # ------------------------------------------------------------------------------
 @draft_router.post("/practice/sync-job", status_code=status.HTTP_202_ACCEPTED)
-def start_practice_sync_job(payload: PracticeSyncJobRequest):
+def start_practice_sync_job(payload: PracticeSyncJobRequest, force: bool = False):
     """Creates fantasy-browser-worker's draft_sync.js Job pointed at a manually-joined
     ESPN mock/practice draft room - replacing the manual `kubectl apply` of
     k8s/test-draft-sync-job.yaml. Distinct from /start's own draft-sync Job; see module
-    docstring."""
+    docstring.
+
+    force=true retires whatever practice run is already there instead of refusing. Without it
+    a wedged run - a Job stuck Terminating, or one stranded by a control plane that stopped
+    answering - is a dead end: the 409 tells the user to end the run first, and ending it is
+    exactly what is failing. This is the escape hatch."""
     if not BROWSER_WORKER_IMAGE:
         raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
 
-    if _practice_sync_job_state() == "Active":
-        raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another.")
+    if force:
+        try:
+            _teardown_practice_run()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not tear down the existing practice run: {e}")
+    elif _practice_sync_job_state() == "Active":
+        raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another, or retry with force=true.")
 
     parsed_room_url = urlparse(payload.room_url)
     room_league_id = parse_qs(parsed_room_url.query).get("leagueId", [None])[0]
@@ -1122,7 +1145,7 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest):
 
     try:
         batch_api = _batch_v1_api()
-        batch_api.create_namespaced_job(K8S_NAMESPACE, job)
+        batch_api.create_namespaced_job(K8S_NAMESPACE, job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to create practice draft-sync Job: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create practice draft-sync Job: {str(e)}")
@@ -1149,13 +1172,16 @@ def get_practice_sync_job_status():
     }
 
 
-@draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
-def end_practice_sync_job():
-    """Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere
-    with a later run - the cleanup concern the issue explicitly calls out."""
+def _teardown_practice_run() -> dict:
+    """Retires the practice room connector and its listener, and clears their Redis state.
+
+    Split out of the DELETE endpoint so POST ?force=true can reuse it. Returns the connector
+    name (None if there was none) and the listener Jobs deleted, and deliberately does NOT
+    treat "nothing was running" as an error - only the endpoint decides whether that deserves
+    a 404."""
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to list practice draft-sync Jobs for teardown: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list practice draft-sync Jobs: {str(e)}")
@@ -1179,7 +1205,7 @@ def end_practice_sync_job():
             # them. Background returns while the Pod is still running, so it could publish
             # into - or recreate - those keys after they were cleared, contaminating the next
             # run with the previous one's picks.
-            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground")
+            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         except Exception as e:
             logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
@@ -1206,9 +1232,6 @@ def end_practice_sync_job():
         )
         raise HTTPException(status_code=500, detail=detail)
 
-    if connector_name is None and not deleted_listeners:
-        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
-
     # _delete_practice_listener_jobs only clears leagues it found a *listener* for. The listener
     # carries ttl_seconds_after_finished and can already be gone while the connector is still up,
     # in which case nothing above would clear this league at all. Idempotent, so re-clearing a
@@ -1216,4 +1239,14 @@ def end_practice_sync_job():
     if connector_gone and connector_league_id:
         _clear_league_draft_state(connector_league_id, include_pick_stream=True)
 
-    return {"status": "deleted", "job_name": connector_name, "listener_jobs_deleted": deleted_listeners}
+    return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners}
+
+
+@draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
+def end_practice_sync_job():
+    """Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere
+    with a later run - the cleanup concern the issue explicitly calls out."""
+    result = _teardown_practice_run()
+    if result["job_name"] is None and not result["listener_jobs_deleted"]:
+        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+    return {"status": "deleted", **result}

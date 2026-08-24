@@ -9,6 +9,8 @@ import pytest
 from kubernetes import client as k8s_client
 from kubernetes.config.config_exception import ConfigException
 
+from src.api.draft import K8S_REQUEST_TIMEOUT_SECONDS
+
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
@@ -504,6 +506,7 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
 
     mock_batch_api.delete_namespaced_job.assert_called_once_with(
         name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
+        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
     )
     for call in mock_batch_api.list_namespaced_job.call_args_list:
         assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
@@ -1187,6 +1190,87 @@ def test_start_practice_sync_job_rejects_when_already_active(client):
     assert "already Active" in response.json()["detail"]
 
 
+def test_start_practice_sync_job_force_tears_down_the_existing_run_first(client):
+    """The escape hatch for a wedged run. Without it the 409 tells the user to end the run
+    first, and ending it is exactly what is failing - a dead end with no way out of the UI."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Active") as mock_state, \
+         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": ["draft-listener-1"]}) as mock_teardown, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 202
+    mock_teardown.assert_called_once_with()
+    # The Active guard must not even be consulted when forcing, or a run wedged Active would
+    # still 409 after being torn down.
+    mock_state.assert_not_called()
+    mock_batch_api.create_namespaced_job.assert_called_once()
+
+
+def test_start_practice_sync_job_force_surfaces_a_failed_teardown(client):
+    """Silently starting a second connector against a still-live one would double-publish
+    picks into the same Redis Stream."""
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._teardown_practice_run", side_effect=Exception("apiserver unreachable")), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=MagicMock()) as mock_api:
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 500
+    assert "tear down" in response.json()["detail"]
+    mock_api.return_value.create_namespaced_job.assert_not_called()
+
+
+def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
+    """Only the DELETE endpoint turns "nothing running" into a 404; ?force=true on a clean
+    cluster must be a no-op, not a failure."""
+    from src.api.draft import _teardown_practice_run
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=MagicMock()):
+        result = _teardown_practice_run()
+
+    assert result["job_name"] is None
+    assert result["listener_jobs_deleted"] == []
+
+
+def test_every_kubernetes_call_is_bounded_by_a_timeout():
+    """The kubernetes client defaults to NO timeout, and every one of these calls sits in a
+    synchronous FastAPI endpoint on a bounded threadpool. One hung apiserver read parks a
+    worker forever; enough of them and the whole API - liveness probe included - wedges.
+    That is not hypothetical: it is exactly how a degraded control plane took the app down."""
+    import ast
+    import inspect
+
+    import src.api.draft as draft_module
+
+    source = inspect.getsource(draft_module)
+    tree = ast.parse(source)
+    k8s_methods = {"list_namespaced_job", "create_namespaced_job", "delete_namespaced_job", "list_namespaced_pod", "read_namespaced_job", "delete_namespaced_pod"}
+
+    unbounded = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in k8s_methods:
+            continue
+        if not any(kw.arg == "_request_timeout" for kw in node.keywords):
+            unbounded.append(f"{node.func.attr} at line {node.lineno}")
+
+    assert unbounded == [], f"unbounded kubernetes calls: {unbounded}"
+
+
 def test_start_practice_sync_job_k8s_failure(client):
     mock_batch_api = MagicMock()
     mock_batch_api.create_namespaced_job.side_effect = Exception("apiserver unreachable")
@@ -1299,7 +1383,10 @@ def test_end_practice_sync_job_deletes_latest(client):
     assert response.json()["job_name"] == "practice-draft-sync-200"
     # Foreground: the connector publishes the pick ledger and Stream that teardown deletes, so
     # it must actually be gone first, not merely marked for deletion.
-    mock_batch_api.delete_namespaced_job.assert_any_call("practice-draft-sync-200", "default", propagation_policy="Foreground")
+    mock_batch_api.delete_namespaced_job.assert_any_call(
+        "practice-draft-sync-200", "default", propagation_policy="Foreground",
+        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 def test_end_practice_sync_job_clears_the_pick_stream_once_the_connector_is_gone(client):
