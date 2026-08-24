@@ -1291,6 +1291,37 @@ def test_start_practice_sync_job_refuses_a_concurrent_start(client):
     assert "already in progress" in response.json()["detail"]
 
 
+def test_practice_start_lock_ttl_covers_the_worst_case_start(client):
+    """A lease shorter than the operation expires mid-start, letting a second request acquire the
+    lock and create a connector alongside the first - the overlap the lock exists to prevent,
+    reintroduced by its own timeout. Two full termination waits can run (connector and listener),
+    each a bounded apiserver call plus a sleep per poll."""
+    from src.api.draft import (
+        K8S_REQUEST_TIMEOUT_SECONDS as k8s_timeout,
+        PRACTICE_START_LOCK_TTL_SECONDS,
+        STOP_JOB_TERMINATION_MAX_POLLS,
+        STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS,
+    )
+
+    worst_case_wait = STOP_JOB_TERMINATION_MAX_POLLS * (k8s_timeout + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    assert PRACTICE_START_LOCK_TTL_SECONDS >= 2 * worst_case_wait
+
+
+def test_redis_client_bounds_its_socket_timeouts():
+    """redis-py waits forever by default. These calls sit in synchronous endpoints on a bounded
+    threadpool, so a Redis that accepts the connection then stops replying parks a worker
+    permanently - the same failure mode as the unbounded Kubernetes calls this PR bounds, and the
+    reason the start lock's fail-open behaviour is real rather than nominal."""
+    from src.api.draft import _redis_client
+
+    with patch("src.api.draft.redis.Redis") as mock_redis_cls:
+        _redis_client()
+
+    kwargs = mock_redis_cls.call_args.kwargs
+    assert kwargs["socket_connect_timeout"] > 0
+    assert kwargs["socket_timeout"] > 0
+
+
 def test_start_practice_sync_job_proceeds_when_the_lock_is_unavailable(client):
     """An unreachable lock service must not become a hard dependency of starting a draft - the
     k8s-side Active check still catches the ordinary case."""
@@ -1320,7 +1351,13 @@ def test_start_practice_sync_job_releases_the_lock_on_failure(client):
         response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 409
-    mock_redis.delete.assert_called_once_with("draft:practice:start-lock")
+    # Compare-and-delete, not a plain DELETE: after a lease expiry the key belongs to a
+    # DIFFERENT request, and dropping it would create the double-start the lock prevents.
+    mock_redis.eval.assert_called_once()
+    args = mock_redis.eval.call_args[0]
+    assert args[1] == 1 and args[2] == "draft:practice:start-lock"
+    # Released with the same token it acquired with.
+    assert args[3] == mock_redis.set.call_args[0][1]
 
 
 def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(client):

@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
@@ -112,8 +113,22 @@ PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 K8S_REQUEST_TIMEOUT_SECONDS = 10
 
 
+# Same reasoning as K8S_REQUEST_TIMEOUT_SECONDS: these calls run in synchronous endpoints on a
+# bounded threadpool, and redis-py defaults to waiting forever. A Redis that accepts the
+# connection and then stops replying would park a worker permanently - the exact way a degraded
+# dependency turns into a dead API. Bounded, so it degrades one call instead.
+REDIS_CONNECT_TIMEOUT_SECONDS = 3
+REDIS_SOCKET_TIMEOUT_SECONDS = 5
+
+
 def _redis_client() -> redis.Redis:
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    return redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
 
 
 def _draft_sync_env() -> list:
@@ -1084,11 +1099,25 @@ def resume_draft(payload: DraftPauseRequest):
 # POST/GET/DELETE /v1/draft/practice/sync-job (cvillarr23/fantasy-web-ui#9)
 # ------------------------------------------------------------------------------
 PRACTICE_START_LOCK_KEY = "draft:practice:start-lock"
-# Long enough to cover a full teardown (connector delete + termination polls) plus the create,
-# short enough that a process killed mid-flight cannot wedge starts for long. The lock is an
-# optimisation over the race, not a correctness boundary on its own - it is always paired with
-# the checks below.
-PRACTICE_START_LOCK_TTL_SECONDS = 120
+# Derived from the real worst case, not guessed. A start can run two full termination waits (the
+# connector's and the listener's), each STOP_JOB_TERMINATION_MAX_POLLS iterations of a bounded
+# apiserver call plus a sleep, then the create. A lease shorter than that expires mid-start, which
+# lets a second request acquire the lock and create a connector alongside the first - the overlap
+# the lock exists to prevent, reintroduced by the timeout.
+PRACTICE_START_LOCK_TTL_SECONDS = int(
+    2 * STOP_JOB_TERMINATION_MAX_POLLS * (K8S_REQUEST_TIMEOUT_SECONDS + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    + 4 * K8S_REQUEST_TIMEOUT_SECONDS
+)
+
+# Compare-and-delete: release only if we still hold the lease. A plain DELETE would drop whoever
+# owns it now, which after an expiry is a DIFFERENT request - so the naive version actively
+# creates the double-start it is meant to prevent.
+_RELEASE_LOCK_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
 
 
 @contextmanager
@@ -1096,19 +1125,21 @@ def _practice_start_lock():
     """Serialises teardown-then-create so two concurrent starts cannot both find the room empty
     and then both create a connector.
 
-    The check and the create are separated by seconds of termination polling, so the window is
+    The check and the create are separated by minutes of termination polling, so the window is
     wide, and two connectors publishing into the same Stream is exactly what every other guard
     here exists to prevent. Job names are second-resolution, so colliding requests do not even
     collide on name.
 
     Best-effort by design: if Redis is unreachable we proceed unlocked rather than refusing to
     start a draft, since the k8s-side Active check still catches the common case and an
-    unavailable lock service must not be a hard dependency of starting a run."""
+    unavailable lock service must not be a hard dependency of starting a run. That fail-open only
+    holds because _redis_client() now has finite socket timeouts - without them an unresponsive
+    Redis would hang here forever instead of raising."""
+    token = str(uuid.uuid4())
     r_client = None
-    acquired = False
     try:
         r_client = _redis_client()
-        acquired = bool(r_client.set(PRACTICE_START_LOCK_KEY, str(time.time()), nx=True, ex=PRACTICE_START_LOCK_TTL_SECONDS))
+        acquired = bool(r_client.set(PRACTICE_START_LOCK_KEY, token, nx=True, ex=PRACTICE_START_LOCK_TTL_SECONDS))
     except Exception as e:
         logger.warning(f"Could not acquire the practice start lock ({e}); proceeding without it.")
         yield
@@ -1123,7 +1154,7 @@ def _practice_start_lock():
         yield
     finally:
         try:
-            r_client.delete(PRACTICE_START_LOCK_KEY)
+            r_client.eval(_RELEASE_LOCK_LUA, 1, PRACTICE_START_LOCK_KEY, token)
         except Exception as e:
             logger.warning(f"Could not release the practice start lock ({e}); it expires in {PRACTICE_START_LOCK_TTL_SECONDS}s.")
 
