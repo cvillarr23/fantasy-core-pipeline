@@ -9,6 +9,8 @@ import pytest
 from kubernetes import client as k8s_client
 from kubernetes.config.config_exception import ConfigException
 
+from src.api.draft import K8S_REQUEST_TIMEOUT_SECONDS
+
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
@@ -504,6 +506,7 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
 
     mock_batch_api.delete_namespaced_job.assert_called_once_with(
         name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
+        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
     )
     for call in mock_batch_api.list_namespaced_job.call_args_list:
         assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
@@ -1187,6 +1190,331 @@ def test_start_practice_sync_job_rejects_when_already_active(client):
     assert "already Active" in response.json()["detail"]
 
 
+def test_start_practice_sync_job_force_tears_down_the_existing_run_first(client):
+    """The escape hatch for a wedged run. Without it the 409 tells the user to end the run
+    first, and ending it is exactly what is failing - a dead end with no way out of the UI."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Active") as mock_state, \
+         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": ["draft-listener-1"], "connector_gone": True}) as mock_teardown, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 202
+    # strict_cleanup: a force start that proceeds after a failed Redis delete hands the new
+    # connector the old run's ledger to seed from.
+    mock_teardown.assert_called_once_with(strict_cleanup=True)
+    # The Active guard must not even be consulted when forcing, or a run wedged Active would
+    # still 409 after being torn down.
+    mock_state.assert_not_called()
+    mock_batch_api.create_namespaced_job.assert_called_once()
+
+
+def test_start_practice_sync_job_force_surfaces_a_failed_teardown(client):
+    """Silently starting a second connector against a still-live one would double-publish
+    picks into the same Redis Stream."""
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._teardown_practice_run", side_effect=Exception("apiserver unreachable")), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=MagicMock()) as mock_api:
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 500
+    assert "tear down" in response.json()["detail"]
+    mock_api.return_value.create_namespaced_job.assert_not_called()
+
+
+def test_start_practice_sync_job_force_refuses_when_the_old_connector_is_still_alive(client):
+    """Teardown reports success once the listener is retired, even if the connector outlived
+    its termination poll. Starting a replacement then would leave two connectors publishing
+    into the same draft Stream - force has to be stricter than DELETE about this."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": [], "connector_gone": False}), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    assert "has not terminated" in response.json()["detail"]
+    mock_batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_start_practice_sync_job_force_refuses_when_redis_cleanup_fails(client):
+    """Redis cleanup is best-effort everywhere else on purpose - refusing to start a draft over
+    leftover state is worse than starting with it. Force is the exception: it creates a connector
+    that seeds its ledger from draft:{league}:picks, so proceeding after a failed delete would
+    silently resurrect the previous run's picks and drop the real ones as duplicates."""
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    mock_redis.delete.side_effect = Exception("redis unreachable")
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    connector = _mock_practice_job(state="Active", league_id="L9")
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = datetime(2026, 1, 1)
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[connector]), MagicMock(items=[])]
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft?leagueId=L9"})
+
+    assert response.status_code == 500
+    assert "could not be" in response.json()["detail"]
+    mock_batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_start_practice_sync_job_refuses_a_concurrent_start(client):
+    """Teardown and create are separated by seconds of termination polling, so two concurrent
+    starts could both find the room empty and then both create a connector - two publishers on
+    one Stream, the thing every other guard here exists to prevent."""
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = False  # someone else holds the lock
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    assert "already in progress" in response.json()["detail"]
+
+
+def test_practice_start_lock_ttl_covers_the_worst_case_start(client):
+    """A lease shorter than the operation expires mid-start, letting a second request acquire the
+    lock and create a connector alongside the first - the overlap the lock exists to prevent,
+    reintroduced by its own timeout. Two full termination waits can run (connector and listener),
+    each a bounded apiserver call plus a sleep per poll."""
+    from src.api.draft import (
+        K8S_REQUEST_TIMEOUT_SECONDS as k8s_timeout,
+        PRACTICE_START_LOCK_TTL_SECONDS,
+        STOP_JOB_TERMINATION_MAX_POLLS,
+        STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS,
+    )
+
+    worst_case_wait = STOP_JOB_TERMINATION_MAX_POLLS * (k8s_timeout + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    assert PRACTICE_START_LOCK_TTL_SECONDS >= 2 * worst_case_wait
+
+
+def test_redis_client_bounds_its_socket_timeouts():
+    """redis-py waits forever by default. These calls sit in synchronous endpoints on a bounded
+    threadpool, so a Redis that accepts the connection then stops replying parks a worker
+    permanently - the same failure mode as the unbounded Kubernetes calls this PR bounds, and the
+    reason the start lock's fail-open behaviour is real rather than nominal."""
+    from src.api.draft import _redis_client
+
+    with patch("src.api.draft.redis.Redis") as mock_redis_cls:
+        _redis_client()
+
+    kwargs = mock_redis_cls.call_args.kwargs
+    assert kwargs["socket_connect_timeout"] > 0
+    assert kwargs["socket_timeout"] > 0
+
+
+def test_start_practice_sync_job_proceeds_when_the_lock_is_unavailable(client):
+    """An unreachable lock service must not become a hard dependency of starting a draft - the
+    k8s-side Active check still catches the ordinary case."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
+         patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 202
+    mock_batch_api.create_namespaced_job.assert_called_once()
+
+
+def test_start_practice_sync_job_releases_the_lock_on_failure(client):
+    """A lock leaked by a failed start would block every retry for its full TTL - exactly the
+    wedged-and-no-way-out state this PR is about."""
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = True
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    # Compare-and-delete, not a plain DELETE: after a lease expiry the key belongs to a
+    # DIFFERENT request, and dropping it would create the double-start the lock prevents.
+    mock_redis.eval.assert_called_once()
+    args = mock_redis.eval.call_args[0]
+    assert args[1] == 1 and args[2] == "draft:practice:start-lock"
+    # Released with the same token it acquired with.
+    assert args[3] == mock_redis.set.call_args[0][1]
+
+
+def test_practice_start_lock_renews_the_lease_while_the_start_is_running():
+    from src.api.draft import _practice_start_lock
+
+    class _FakeEvent:
+        def __init__(self):
+            self._set = False
+            self._wait_calls = 0
+
+        def wait(self, _timeout):
+            self._wait_calls += 1
+            return self._set or self._wait_calls > 1
+
+        def set(self):
+            self._set = True
+
+    class _InlineThread:
+        def __init__(self, target, daemon):
+            self._target = target
+            self.daemon = daemon
+
+        def start(self):
+            self._target()
+
+        def join(self, timeout=None):
+            return None
+
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = True
+    with patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.threading.Event", _FakeEvent), \
+         patch("src.api.draft.threading.Thread", _InlineThread):
+        with _practice_start_lock():
+            pass
+
+    assert mock_redis.eval.call_count == 2
+    renew_call, release_call = mock_redis.eval.call_args_list
+    assert "expire" in renew_call.args[0]
+    assert "del" in release_call.args[0]
+
+
+def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(client):
+    """Normally there is one connector, but concurrent starts or a manual kubectl apply during
+    recovery can leave more. Retiring only the newest would report connector_gone=True while an
+    older publisher was still writing to the same Stream - and ?force=true starts a replacement
+    on the strength of that flag."""
+    from src.api.draft import _teardown_practice_run
+
+    older = _mock_practice_job(state="Active", league_id="111")
+    older.metadata.name = "practice-draft-sync-100"
+    older.metadata.creation_timestamp = datetime(2026, 1, 1)
+    newer = _mock_practice_job(state="Active", league_id="222")
+    newer.metadata.name = "practice-draft-sync-200"
+    newer.metadata.creation_timestamp = datetime(2026, 1, 2)
+
+    mock_batch_api = MagicMock()
+    # Deleted Jobs are gone on the first poll.
+    mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[])]
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        result = _teardown_practice_run()
+
+    deleted = {c[0][0] for c in mock_batch_api.delete_namespaced_job.call_args_list}
+    assert deleted == {"practice-draft-sync-100", "practice-draft-sync-200"}
+    assert result["connector_gone"] is True
+    assert result["job_name"] == "practice-draft-sync-200"
+    # Both leagues get cleared, not just the newest connector's.
+    cleared = {c[0][0] for c in mock_redis.delete.call_args_list if c[0]}
+    assert any("111" in k for k in cleared) and any("222" in k for k in cleared)
+
+
+def test_teardown_practice_run_reports_not_gone_if_an_older_connector_survives(client):
+    """The whole point of the flag: an older connector outliving the poll must veto force-start."""
+    from src.api.draft import _teardown_practice_run
+
+    older = _mock_practice_job(state="Active", league_id="111")
+    older.metadata.name = "practice-draft-sync-100"
+    older.metadata.creation_timestamp = datetime(2026, 1, 1)
+    newer = _mock_practice_job(state="Active", league_id="222")
+    newer.metadata.name = "practice-draft-sync-200"
+    newer.metadata.creation_timestamp = datetime(2026, 1, 2)
+
+    mock_batch_api = MagicMock()
+    # The older one never disappears from the selector.
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[older])
+    mock_redis = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.STOP_JOB_TERMINATION_MAX_POLLS", 1), \
+         patch("src.api.draft.STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS", 0), \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[older])]
+        result = _teardown_practice_run()
+
+    assert result["connector_gone"] is False
+    # And nothing is cleared, since the survivor may still be publishing into it.
+    mock_redis.delete.assert_not_called()
+
+
+def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
+    """Only the DELETE endpoint turns "nothing running" into a 404; ?force=true on a clean
+    cluster must be a no-op, not a failure."""
+    from src.api.draft import _teardown_practice_run
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=MagicMock()):
+        result = _teardown_practice_run()
+
+    assert result["job_name"] is None
+    assert result["listener_jobs_deleted"] == []
+    # Nothing to terminate counts as gone, or ?force=true on a clean cluster would 409.
+    assert result["connector_gone"] is True
+
+
+def test_every_kubernetes_call_is_bounded_by_a_timeout():
+    """The kubernetes client defaults to NO timeout, and every one of these calls sits in a
+    synchronous FastAPI endpoint on a bounded threadpool. One hung apiserver read parks a
+    worker forever; enough of them and the whole API - liveness probe included - wedges.
+    That is not hypothetical: it is exactly how a degraded control plane took the app down."""
+    import ast
+    import inspect
+
+    import src.api.draft as draft_module
+
+    source = inspect.getsource(draft_module)
+    tree = ast.parse(source)
+
+    # Matched by shape, not by an allowlist of the methods that happen to exist today. An
+    # allowlist would silently skip a future patch_namespaced_job or read_namespaced_pod - the
+    # regression guard would keep passing while the hang it exists to prevent came back.
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and "_namespaced_" in node.func.attr
+    ]
+    # If this ever hits zero the matcher has drifted and the assert below is vacuously true.
+    assert calls, "found no kubernetes *_namespaced_* calls - the matcher is broken, not the code"
+
+    unbounded = [f"{c.func.attr} at line {c.lineno}" for c in calls if not any(kw.arg == "_request_timeout" for kw in c.keywords)]
+    assert unbounded == [], f"unbounded kubernetes calls: {unbounded}"
+
+
 def test_start_practice_sync_job_k8s_failure(client):
     mock_batch_api = MagicMock()
     mock_batch_api.create_namespaced_job.side_effect = Exception("apiserver unreachable")
@@ -1299,7 +1627,10 @@ def test_end_practice_sync_job_deletes_latest(client):
     assert response.json()["job_name"] == "practice-draft-sync-200"
     # Foreground: the connector publishes the pick ledger and Stream that teardown deletes, so
     # it must actually be gone first, not merely marked for deletion.
-    mock_batch_api.delete_namespaced_job.assert_any_call("practice-draft-sync-200", "default", propagation_policy="Foreground")
+    mock_batch_api.delete_namespaced_job.assert_any_call(
+        "practice-draft-sync-200", "default", propagation_policy="Foreground",
+        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 def test_end_practice_sync_job_clears_the_pick_stream_once_the_connector_is_gone(client):
@@ -1343,7 +1674,7 @@ def test_end_practice_sync_job_clears_the_connectors_league_even_with_no_listene
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
-    mock_clear.assert_called_once_with("L7", include_pick_stream=True)
+    mock_clear.assert_called_once_with("L7", include_pick_stream=True, raise_on_error=False)
 
 
 def test_end_practice_sync_job_leaves_the_connectors_league_alone_if_it_wont_die(client):

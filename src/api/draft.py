@@ -31,7 +31,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from urllib.parse import parse_qs, urlparse
@@ -101,9 +104,32 @@ BROWSER_WORKER_IMAGE = os.getenv("BROWSER_WORKER_IMAGE")
 ESPN_SESSION_SECRET_NAME = "espn-session-secrets"
 PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 
+# Every Kubernetes call in this module is made from a synchronous FastAPI endpoint, which runs
+# on a bounded threadpool. The kubernetes client applies no timeout of its own, so a control
+# plane that accepts the TCP connection but never answers - the exact failure mode of an
+# overloaded apiserver - parks a thread indefinitely. Enough parked threads and every sync
+# endpoint stops responding, the liveness probe starts failing, and a degraded control plane
+# becomes a hard outage of the whole API. Bounded so those calls fail fast and the endpoint can
+# report "unknown" instead of hanging.
+K8S_REQUEST_TIMEOUT_SECONDS = 10
+
+
+# Same reasoning as K8S_REQUEST_TIMEOUT_SECONDS: these calls run in synchronous endpoints on a
+# bounded threadpool, and redis-py defaults to waiting forever. A Redis that accepts the
+# connection and then stops replying would park a worker permanently - the exact way a degraded
+# dependency turns into a dead API. Bounded, so it degrades one call instead.
+REDIS_CONNECT_TIMEOUT_SECONDS = 3
+REDIS_SOCKET_TIMEOUT_SECONDS = 5
+
 
 def _redis_client() -> redis.Redis:
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    return redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
 
 
 def _draft_sync_env() -> list:
@@ -241,7 +267,7 @@ def _latest_listener_job(league_id: str):
     """
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query draft-sync Job status for league {league_id}: {e}")
         return None, False
@@ -263,7 +289,7 @@ def _job_state(league_id: str) -> str:
 def _practice_sync_job_state() -> str:
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query practice draft-sync Job status: {e}")
         return "Unknown"
@@ -277,7 +303,7 @@ def _practice_sync_job_state() -> str:
 def _latest_practice_sync_job():
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query practice draft-sync Job status: {e}")
         return None
@@ -304,7 +330,7 @@ def _active_listeners_on_other_leagues(target_league_id: str) -> list:
     # and two consumers on one Redis group split the pick stream between them.
     batch_api = _batch_v1_api()
     try:
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to query active draft-sync listeners: {e}")
         raise
@@ -331,7 +357,7 @@ def _redis_glob_escape(value: str) -> str:
     return re.sub(r"([\\*?\[\]^-])", r"\\\1", value)
 
 
-def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False) -> int:
+def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False, raise_on_error: bool = False) -> int:
     """Deletes a league's recommendation board and pause flags - the same Redis state /stop
     clears, minus /stop's insistence that failure is fatal.
 
@@ -349,6 +375,12 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False)
     the connector seeds its ledger from draft:{league}:picks and the listener replays the
     Stream backlog from id 0, so re-using a league id would otherwise resurrect the old run's
     picks and suppress the new ones as duplicates.
+
+    raise_on_error flips that tolerance for the one caller that cannot afford it: ?force=true
+    goes on to start a NEW connector, which seeds its ledger from draft:{league}:picks. Swallowing
+    a failed delete there means the replacement silently inherits the previous run's picks and
+    drops the real ones as duplicates - the precise failure this cleanup exists to prevent, so
+    force fails closed where the cleanup paths fail open.
     """
     try:
         r_client = _redis_client()
@@ -361,6 +393,8 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False)
             logger.info(f"Cleared {cleared} stale Redis draft key(s) for league {league_id}.")
         return cleared
     except Exception as e:
+        if raise_on_error:
+            raise
         logger.warning(
             f"Could not clear stale Redis draft state for league {league_id}: {e}. A previous "
             "run's listener error or recommendation may briefly show until the new listener "
@@ -374,7 +408,7 @@ def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_n
     selector to empty - the caller may be intentionally leaving other matching Jobs in place."""
     remaining = set(job_names)
     for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         present = {j.metadata.name for j in (getattr(jobs, "items", []) or [])}
         if not (remaining & present):
             return True
@@ -398,7 +432,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear
     waits for the connector Pod to terminate first, may pass True."""
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to list practice draft-sync listener Jobs: {e}")
         raise
@@ -418,6 +452,7 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear
                 # listeners would then briefly share a Redis consumer group and split the
                 # pick stream between them - the very overlap this reclaim exists to avoid.
                 propagation_policy="Foreground",
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
             deleted.append(job.metadata.name)
             if labels.get("league-id"):
@@ -869,7 +904,7 @@ def start_draft_sync(league_id: Optional[str] = None):
 
     try:
         batch_api = _batch_v1_api()
-        batch_api.create_namespaced_job(K8S_NAMESPACE, job)
+        batch_api.create_namespaced_job(K8S_NAMESPACE, job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to create draft-sync Job for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create draft-sync Job: {str(e)}")
@@ -896,7 +931,7 @@ def _wait_for_job_termination(batch_api: client.BatchV1Api, label_selector: str)
     can't hang this request forever. Returns False on timeout - callers must not treat that
     as a successful stop."""
     for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         if not jobs.items:
             return True
         time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
@@ -919,12 +954,13 @@ def stop_draft(league_id: str):
     deleted_job = False
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector)
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
         for job in jobs.items:
             batch_api.delete_namespaced_job(
                 name=job.metadata.name,
                 namespace=K8S_NAMESPACE,
                 propagation_policy="Foreground",  # blocks the Job's own deletion until its Pods are gone
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
             deleted_job = True
 
@@ -1063,17 +1099,140 @@ def resume_draft(payload: DraftPauseRequest):
 # ------------------------------------------------------------------------------
 # POST/GET/DELETE /v1/draft/practice/sync-job (cvillarr23/fantasy-web-ui#9)
 # ------------------------------------------------------------------------------
+PRACTICE_START_LOCK_KEY = "draft:practice:start-lock"
+# Derived from the real worst case, not guessed. A start can run two full termination waits (the
+# connector's and the listener's), each STOP_JOB_TERMINATION_MAX_POLLS iterations of a bounded
+# apiserver call plus a sleep, then the create. A lease shorter than that expires mid-start, which
+# lets a second request acquire the lock and create a connector alongside the first - the overlap
+# the lock exists to prevent, reintroduced by the timeout.
+PRACTICE_START_LOCK_TTL_SECONDS = int(
+    2 * STOP_JOB_TERMINATION_MAX_POLLS * (K8S_REQUEST_TIMEOUT_SECONDS + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    + 4 * K8S_REQUEST_TIMEOUT_SECONDS
+)
+PRACTICE_START_LOCK_RENEW_INTERVAL_SECONDS = max(1, PRACTICE_START_LOCK_TTL_SECONDS // 4)
+
+# Compare-and-delete: release only if we still hold the lease. A plain DELETE would drop whoever
+# owns it now, which after an expiry is a DIFFERENT request - so the naive version actively
+# creates the double-start it is meant to prevent.
+_RELEASE_LOCK_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+_RENEW_LOCK_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+
+@contextmanager
+def _practice_start_lock():
+    """Serialises teardown-then-create so two concurrent starts cannot both find the room empty
+    and then both create a connector.
+
+    The check and the create are separated by minutes of termination polling, so the window is
+    wide, and two connectors publishing into the same Stream is exactly what every other guard
+    here exists to prevent. Job names are second-resolution, so colliding requests do not even
+    collide on name.
+
+    Best-effort by design: if Redis is unreachable we proceed unlocked rather than refusing to
+    start a draft, since the k8s-side Active check still catches the common case and an
+    unavailable lock service must not be a hard dependency of starting a run. That fail-open only
+    holds because _redis_client() now has finite socket timeouts - without them an unresponsive
+    Redis would hang here forever instead of raising."""
+    token = str(uuid.uuid4())
+    r_client = None
+    try:
+        r_client = _redis_client()
+        acquired = bool(r_client.set(PRACTICE_START_LOCK_KEY, token, nx=True, ex=PRACTICE_START_LOCK_TTL_SECONDS))
+    except Exception as e:
+        logger.warning(f"Could not acquire the practice start lock ({e}); proceeding without it.")
+        yield
+        return
+
+    if not acquired:
+        raise HTTPException(
+            status_code=409,
+            detail="Another practice draft start is already in progress. Retry in a few seconds.",
+        )
+    stop_renewal = threading.Event()
+
+    def _renew_lock_lease():
+        while not stop_renewal.wait(PRACTICE_START_LOCK_RENEW_INTERVAL_SECONDS):
+            try:
+                renewed = r_client.eval(
+                    _RENEW_LOCK_LUA,
+                    1,
+                    PRACTICE_START_LOCK_KEY,
+                    token,
+                    PRACTICE_START_LOCK_TTL_SECONDS,
+                )
+                if not renewed:
+                    logger.warning("Practice start lock lease is no longer owned; stopping lease renewal.")
+                    return
+            except Exception as e:
+                logger.warning(f"Could not renew the practice start lock lease ({e}); will retry.")
+
+    renewal_thread = threading.Thread(target=_renew_lock_lease, daemon=True)
+    renewal_thread.start()
+    try:
+        yield
+    finally:
+        stop_renewal.set()
+        renewal_thread.join(timeout=1)
+        try:
+            r_client.eval(_RELEASE_LOCK_LUA, 1, PRACTICE_START_LOCK_KEY, token)
+        except Exception as e:
+            logger.warning(f"Could not release the practice start lock ({e}); it expires in {PRACTICE_START_LOCK_TTL_SECONDS}s.")
+
+
 @draft_router.post("/practice/sync-job", status_code=status.HTTP_202_ACCEPTED)
-def start_practice_sync_job(payload: PracticeSyncJobRequest):
+def start_practice_sync_job(payload: PracticeSyncJobRequest, force: bool = False):
     """Creates fantasy-browser-worker's draft_sync.js Job pointed at a manually-joined
     ESPN mock/practice draft room - replacing the manual `kubectl apply` of
     k8s/test-draft-sync-job.yaml. Distinct from /start's own draft-sync Job; see module
-    docstring."""
+    docstring.
+
+    force=true retires whatever practice run is already there instead of refusing. Without it
+    a wedged run - a Job stuck Terminating, or one stranded by a control plane that stopped
+    answering - is a dead end: the 409 tells the user to end the run first, and ending it is
+    exactly what is failing. This is the escape hatch."""
     if not BROWSER_WORKER_IMAGE:
         raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
 
-    if _practice_sync_job_state() == "Active":
-        raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another.")
+    with _practice_start_lock():
+        return _start_practice_sync_job_locked(payload, force)
+
+
+def _start_practice_sync_job_locked(payload: PracticeSyncJobRequest, force: bool):
+    """The body of the endpoint, held under the start lock so the Active check / teardown and the
+    create cannot be interleaved by a concurrent request."""
+    if force:
+        try:
+            teardown = _teardown_practice_run(strict_cleanup=True)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not tear down the existing practice run: {e}")
+        # Teardown reports success as long as the listener was retired, even when the connector
+        # outlived its termination poll. Starting a replacement then would leave two connectors
+        # publishing into draft_picks:{league} at once - precisely the overlap this guard exists
+        # to prevent - so force has to insist on a positive result where DELETE does not.
+        if not teardown["connector_gone"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The existing practice room connector ({teardown['job_name']}) was deleted but has not "
+                    "terminated yet. Starting another now would let two connectors publish into the same "
+                    "draft Stream. Retry in a few seconds."
+                ),
+            )
+    elif _practice_sync_job_state() == "Active":
+        raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another, or retry with force=true.")
 
     parsed_room_url = urlparse(payload.room_url)
     room_league_id = parse_qs(parsed_room_url.query).get("leagueId", [None])[0]
@@ -1122,7 +1281,7 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest):
 
     try:
         batch_api = _batch_v1_api()
-        batch_api.create_namespaced_job(K8S_NAMESPACE, job)
+        batch_api.create_namespaced_job(K8S_NAMESPACE, job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to create practice draft-sync Job: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create practice draft-sync Job: {str(e)}")
@@ -1149,13 +1308,24 @@ def get_practice_sync_job_status():
     }
 
 
-@draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
-def end_practice_sync_job():
-    """Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere
-    with a later run - the cleanup concern the issue explicitly calls out."""
+def _teardown_practice_run(strict_cleanup: bool = False) -> dict:
+    """Retires the practice room connector and its listener, and clears their Redis state.
+
+    Split out of the DELETE endpoint so POST ?force=true can reuse it. Returns the connector
+    name (None if there was none), the listener Jobs deleted, and whether the connector
+    actually terminated. Deliberately does NOT treat "nothing was running" as an error - only
+    the endpoint decides whether that deserves a 404.
+
+    connector_gone=False means the connector outlived its termination poll and may still be
+    publishing. That is tolerable for DELETE, whose job is to retire the listener, but NOT for
+    ?force=true, which goes on to start a second connector against the same Redis Stream.
+
+    strict_cleanup makes a failed Redis delete fatal rather than logged. Redis cleanup is
+    best-effort everywhere else on purpose, but a force start that proceeds after it failed hands
+    the new connector the old run's ledger to seed from."""
     try:
         batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}")
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
     except Exception as e:
         logger.error(f"Failed to list practice draft-sync Jobs for teardown: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list practice draft-sync Jobs: {str(e)}")
@@ -1168,30 +1338,41 @@ def end_practice_sync_job():
     # exits, while the listener is still running. Returning 404 in that window would leave
     # the leaked listener in place with no way to reach it - the exact failure this endpoint
     # is meant to prevent, reintroduced by the ordering.
+    # Every connector, not just the newest. There is normally one, but concurrent starts or a
+    # manual `kubectl apply` during recovery can leave more, and retiring only the newest would
+    # report connector_gone=True while an older publisher was still writing to the same Stream -
+    # which is exactly the guarantee ?force=true relies on before starting a replacement.
     connector_name = None
-    connector_league_id = None
+    connector_league_ids = []
     connector_gone = True
     if jobs.items:
-        latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-        try:
-            # Foreground, not Background: the connector is the publisher for
-            # draft:{league}:picks and draft_picks:{league}, and the cleanup below deletes
-            # them. Background returns while the Pod is still running, so it could publish
-            # into - or recreate - those keys after they were cleared, contaminating the next
-            # run with the previous one's picks.
-            batch_api.delete_namespaced_job(latest.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground")
-        except Exception as e:
-            logger.error(f"Failed to delete practice draft-sync Job {latest.metadata.name}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
-        connector_name = latest.metadata.name
-        connector_league_id = (latest.metadata.labels or {}).get("league-id")
-        connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", [connector_name])
+        ordered = sorted(jobs.items, key=lambda j: j.metadata.creation_timestamp, reverse=True)
+        connector_name = ordered[0].metadata.name
+        deleted_connectors = []
+        for job in ordered:
+            try:
+                # Foreground, not Background: the connector is the publisher for
+                # draft:{league}:picks and draft_picks:{league}, and the cleanup below deletes
+                # them. Background returns while the Pod is still running, so it could publish
+                # into - or recreate - those keys after they were cleared, contaminating the next
+                # run with the previous one's picks.
+                batch_api.delete_namespaced_job(job.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+            except Exception as e:
+                logger.error(f"Failed to delete practice draft-sync Job {job.metadata.name}: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
+            deleted_connectors.append(job.metadata.name)
+            league_id = (job.metadata.labels or {}).get("league-id")
+            if league_id and league_id not in connector_league_ids:
+                connector_league_ids.append(league_id)
+        # One wait for the whole set rather than per Job, so the polls overlap instead of
+        # summing - N connectors would otherwise take N x the termination budget.
+        connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", deleted_connectors)
         if not connector_gone:
             # Not fatal: the listener still has to be retired, and reporting failure here
             # would leave it leaked - the exact bug this endpoint exists to prevent. Only the
             # pick-stream cleanup is skipped, since that is the part the connector can race.
             logger.warning(
-                f"Practice room connector {connector_name} did not terminate in time; retiring the "
+                f"Practice room connector(s) {', '.join(deleted_connectors)} did not terminate in time; retiring the "
                 "listener anyway but leaving the pick ledger and Stream in place, since the connector "
                 "may still be publishing to them."
             )
@@ -1206,14 +1387,32 @@ def end_practice_sync_job():
         )
         raise HTTPException(status_code=500, detail=detail)
 
-    if connector_name is None and not deleted_listeners:
-        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
-
     # _delete_practice_listener_jobs only clears leagues it found a *listener* for. The listener
     # carries ttl_seconds_after_finished and can already be gone while the connector is still up,
     # in which case nothing above would clear this league at all. Idempotent, so re-clearing a
     # league the listener sweep already handled costs a no-op DELETE.
-    if connector_gone and connector_league_id:
-        _clear_league_draft_state(connector_league_id, include_pick_stream=True)
+    if connector_gone:
+        for league_id in connector_league_ids:
+            try:
+                _clear_league_draft_state(league_id, include_pick_stream=True, raise_on_error=strict_cleanup)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"The practice run was retired but its Redis state for league {league_id} could not be "
+                        f"cleared ({e}). Starting a replacement now would let it seed from the previous run's "
+                        "pick ledger, so it has been stopped instead. Retry once Redis is reachable."
+                    ),
+                )
 
-    return {"status": "deleted", "job_name": connector_name, "listener_jobs_deleted": deleted_listeners}
+    return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners, "connector_gone": connector_gone}
+
+
+@draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
+def end_practice_sync_job():
+    """Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere
+    with a later run - the cleanup concern the issue explicitly calls out."""
+    result = _teardown_practice_run()
+    if result["job_name"] is None and not result["listener_jobs_deleted"]:
+        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+    return {"status": "deleted", **result}
