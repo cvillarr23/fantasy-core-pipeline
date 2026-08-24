@@ -1360,6 +1360,46 @@ def test_start_practice_sync_job_releases_the_lock_on_failure(client):
     assert args[3] == mock_redis.set.call_args[0][1]
 
 
+def test_practice_start_lock_renews_the_lease_while_the_start_is_running():
+    from src.api.draft import _practice_start_lock
+
+    class _FakeEvent:
+        def __init__(self):
+            self._set = False
+            self._wait_calls = 0
+
+        def wait(self, _timeout):
+            self._wait_calls += 1
+            return self._set or self._wait_calls > 1
+
+        def set(self):
+            self._set = True
+
+    class _InlineThread:
+        def __init__(self, target, daemon):
+            self._target = target
+            self.daemon = daemon
+
+        def start(self):
+            self._target()
+
+        def join(self, timeout=None):
+            return None
+
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = True
+    with patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.threading.Event", _FakeEvent), \
+         patch("src.api.draft.threading.Thread", _InlineThread):
+        with _practice_start_lock():
+            pass
+
+    assert mock_redis.eval.call_count == 2
+    renew_call, release_call = mock_redis.eval.call_args_list
+    assert "expire" in renew_call.args[0]
+    assert "del" in release_call.args[0]
+
+
 def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(client):
     """Normally there is one connector, but concurrent starts or a manual kubectl apply during
     recovery can leave more. Retiring only the newest would report connector_gone=True while an

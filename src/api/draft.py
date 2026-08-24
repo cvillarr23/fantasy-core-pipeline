@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -1108,6 +1109,7 @@ PRACTICE_START_LOCK_TTL_SECONDS = int(
     2 * STOP_JOB_TERMINATION_MAX_POLLS * (K8S_REQUEST_TIMEOUT_SECONDS + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
     + 4 * K8S_REQUEST_TIMEOUT_SECONDS
 )
+PRACTICE_START_LOCK_RENEW_INTERVAL_SECONDS = max(1, PRACTICE_START_LOCK_TTL_SECONDS // 4)
 
 # Compare-and-delete: release only if we still hold the lease. A plain DELETE would drop whoever
 # owns it now, which after an expiry is a DIFFERENT request - so the naive version actively
@@ -1115,6 +1117,13 @@ PRACTICE_START_LOCK_TTL_SECONDS = int(
 _RELEASE_LOCK_LUA = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+_RENEW_LOCK_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], ARGV[2])
 end
 return 0
 """
@@ -1150,9 +1159,31 @@ def _practice_start_lock():
             status_code=409,
             detail="Another practice draft start is already in progress. Retry in a few seconds.",
         )
+    stop_renewal = threading.Event()
+
+    def _renew_lock_lease():
+        while not stop_renewal.wait(PRACTICE_START_LOCK_RENEW_INTERVAL_SECONDS):
+            try:
+                renewed = r_client.eval(
+                    _RENEW_LOCK_LUA,
+                    1,
+                    PRACTICE_START_LOCK_KEY,
+                    token,
+                    PRACTICE_START_LOCK_TTL_SECONDS,
+                )
+                if not renewed:
+                    logger.warning("Practice start lock lease is no longer owned; stopping lease renewal.")
+                    return
+            except Exception as e:
+                logger.warning(f"Could not renew the practice start lock lease ({e}); will retry.")
+
+    renewal_thread = threading.Thread(target=_renew_lock_lease, daemon=True)
+    renewal_thread.start()
     try:
         yield
     finally:
+        stop_renewal.set()
+        renewal_thread.join(timeout=1)
         try:
             r_client.eval(_RELEASE_LOCK_LUA, 1, PRACTICE_START_LOCK_KEY, token)
         except Exception as e:
