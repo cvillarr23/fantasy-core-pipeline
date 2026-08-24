@@ -1204,7 +1204,9 @@ def test_start_practice_sync_job_force_tears_down_the_existing_run_first(client)
         response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 202
-    mock_teardown.assert_called_once_with()
+    # strict_cleanup: a force start that proceeds after a failed Redis delete hands the new
+    # connector the old run's ledger to seed from.
+    mock_teardown.assert_called_once_with(strict_cleanup=True)
     # The Active guard must not even be consulted when forcing, or a run wedged Active would
     # still 409 after being torn down.
     mock_state.assert_not_called()
@@ -1243,6 +1245,82 @@ def test_start_practice_sync_job_force_refuses_when_the_old_connector_is_still_a
     assert response.status_code == 409
     assert "has not terminated" in response.json()["detail"]
     mock_batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_start_practice_sync_job_force_refuses_when_redis_cleanup_fails(client):
+    """Redis cleanup is best-effort everywhere else on purpose - refusing to start a draft over
+    leftover state is worse than starting with it. Force is the exception: it creates a connector
+    that seeds its ledger from draft:{league}:picks, so proceeding after a failed delete would
+    silently resurrect the previous run's picks and drop the real ones as duplicates."""
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    mock_redis.delete.side_effect = Exception("redis unreachable")
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    connector = _mock_practice_job(state="Active", league_id="L9")
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = datetime(2026, 1, 1)
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[connector]), MagicMock(items=[])]
+        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft?leagueId=L9"})
+
+    assert response.status_code == 500
+    assert "could not be" in response.json()["detail"]
+    mock_batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_start_practice_sync_job_refuses_a_concurrent_start(client):
+    """Teardown and create are separated by seconds of termination polling, so two concurrent
+    starts could both find the room empty and then both create a connector - two publishers on
+    one Stream, the thing every other guard here exists to prevent."""
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = False  # someone else holds the lock
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    assert "already in progress" in response.json()["detail"]
+
+
+def test_start_practice_sync_job_proceeds_when_the_lock_is_unavailable(client):
+    """An unreachable lock service must not become a hard dependency of starting a draft - the
+    k8s-side Active check still catches the ordinary case."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
+         patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")), \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 202
+    mock_batch_api.create_namespaced_job.assert_called_once()
+
+
+def test_start_practice_sync_job_releases_the_lock_on_failure(client):
+    """A lock leaked by a failed start would block every retry for its full TTL - exactly the
+    wedged-and-no-way-out state this PR is about."""
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = True
+
+    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
+
+    assert response.status_code == 409
+    mock_redis.delete.assert_called_once_with("draft:practice:start-lock")
 
 
 def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(client):
@@ -1519,7 +1597,7 @@ def test_end_practice_sync_job_clears_the_connectors_league_even_with_no_listene
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
-    mock_clear.assert_called_once_with("L7", include_pick_stream=True)
+    mock_clear.assert_called_once_with("L7", include_pick_stream=True, raise_on_error=False)
 
 
 def test_end_practice_sync_job_leaves_the_connectors_league_alone_if_it_wont_die(client):

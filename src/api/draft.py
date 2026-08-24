@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from urllib.parse import parse_qs, urlparse
@@ -340,7 +341,7 @@ def _redis_glob_escape(value: str) -> str:
     return re.sub(r"([\\*?\[\]^-])", r"\\\1", value)
 
 
-def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False) -> int:
+def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False, raise_on_error: bool = False) -> int:
     """Deletes a league's recommendation board and pause flags - the same Redis state /stop
     clears, minus /stop's insistence that failure is fatal.
 
@@ -358,6 +359,12 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False)
     the connector seeds its ledger from draft:{league}:picks and the listener replays the
     Stream backlog from id 0, so re-using a league id would otherwise resurrect the old run's
     picks and suppress the new ones as duplicates.
+
+    raise_on_error flips that tolerance for the one caller that cannot afford it: ?force=true
+    goes on to start a NEW connector, which seeds its ledger from draft:{league}:picks. Swallowing
+    a failed delete there means the replacement silently inherits the previous run's picks and
+    drops the real ones as duplicates - the precise failure this cleanup exists to prevent, so
+    force fails closed where the cleanup paths fail open.
     """
     try:
         r_client = _redis_client()
@@ -370,6 +377,8 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False)
             logger.info(f"Cleared {cleared} stale Redis draft key(s) for league {league_id}.")
         return cleared
     except Exception as e:
+        if raise_on_error:
+            raise
         logger.warning(
             f"Could not clear stale Redis draft state for league {league_id}: {e}. A previous "
             "run's listener error or recommendation may briefly show until the new listener "
@@ -1074,6 +1083,51 @@ def resume_draft(payload: DraftPauseRequest):
 # ------------------------------------------------------------------------------
 # POST/GET/DELETE /v1/draft/practice/sync-job (cvillarr23/fantasy-web-ui#9)
 # ------------------------------------------------------------------------------
+PRACTICE_START_LOCK_KEY = "draft:practice:start-lock"
+# Long enough to cover a full teardown (connector delete + termination polls) plus the create,
+# short enough that a process killed mid-flight cannot wedge starts for long. The lock is an
+# optimisation over the race, not a correctness boundary on its own - it is always paired with
+# the checks below.
+PRACTICE_START_LOCK_TTL_SECONDS = 120
+
+
+@contextmanager
+def _practice_start_lock():
+    """Serialises teardown-then-create so two concurrent starts cannot both find the room empty
+    and then both create a connector.
+
+    The check and the create are separated by seconds of termination polling, so the window is
+    wide, and two connectors publishing into the same Stream is exactly what every other guard
+    here exists to prevent. Job names are second-resolution, so colliding requests do not even
+    collide on name.
+
+    Best-effort by design: if Redis is unreachable we proceed unlocked rather than refusing to
+    start a draft, since the k8s-side Active check still catches the common case and an
+    unavailable lock service must not be a hard dependency of starting a run."""
+    r_client = None
+    acquired = False
+    try:
+        r_client = _redis_client()
+        acquired = bool(r_client.set(PRACTICE_START_LOCK_KEY, str(time.time()), nx=True, ex=PRACTICE_START_LOCK_TTL_SECONDS))
+    except Exception as e:
+        logger.warning(f"Could not acquire the practice start lock ({e}); proceeding without it.")
+        yield
+        return
+
+    if not acquired:
+        raise HTTPException(
+            status_code=409,
+            detail="Another practice draft start is already in progress. Retry in a few seconds.",
+        )
+    try:
+        yield
+    finally:
+        try:
+            r_client.delete(PRACTICE_START_LOCK_KEY)
+        except Exception as e:
+            logger.warning(f"Could not release the practice start lock ({e}); it expires in {PRACTICE_START_LOCK_TTL_SECONDS}s.")
+
+
 @draft_router.post("/practice/sync-job", status_code=status.HTTP_202_ACCEPTED)
 def start_practice_sync_job(payload: PracticeSyncJobRequest, force: bool = False):
     """Creates fantasy-browser-worker's draft_sync.js Job pointed at a manually-joined
@@ -1088,9 +1142,16 @@ def start_practice_sync_job(payload: PracticeSyncJobRequest, force: bool = False
     if not BROWSER_WORKER_IMAGE:
         raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
 
+    with _practice_start_lock():
+        return _start_practice_sync_job_locked(payload, force)
+
+
+def _start_practice_sync_job_locked(payload: PracticeSyncJobRequest, force: bool):
+    """The body of the endpoint, held under the start lock so the Active check / teardown and the
+    create cannot be interleaved by a concurrent request."""
     if force:
         try:
-            teardown = _teardown_practice_run()
+            teardown = _teardown_practice_run(strict_cleanup=True)
         except HTTPException:
             raise
         except Exception as e:
@@ -1185,7 +1246,7 @@ def get_practice_sync_job_status():
     }
 
 
-def _teardown_practice_run() -> dict:
+def _teardown_practice_run(strict_cleanup: bool = False) -> dict:
     """Retires the practice room connector and its listener, and clears their Redis state.
 
     Split out of the DELETE endpoint so POST ?force=true can reuse it. Returns the connector
@@ -1195,7 +1256,11 @@ def _teardown_practice_run() -> dict:
 
     connector_gone=False means the connector outlived its termination poll and may still be
     publishing. That is tolerable for DELETE, whose job is to retire the listener, but NOT for
-    ?force=true, which goes on to start a second connector against the same Redis Stream."""
+    ?force=true, which goes on to start a second connector against the same Redis Stream.
+
+    strict_cleanup makes a failed Redis delete fatal rather than logged. Redis cleanup is
+    best-effort everywhere else on purpose, but a force start that proceeds after it failed hands
+    the new connector the old run's ledger to seed from."""
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
@@ -1266,7 +1331,17 @@ def _teardown_practice_run() -> dict:
     # league the listener sweep already handled costs a no-op DELETE.
     if connector_gone:
         for league_id in connector_league_ids:
-            _clear_league_draft_state(league_id, include_pick_stream=True)
+            try:
+                _clear_league_draft_state(league_id, include_pick_stream=True, raise_on_error=strict_cleanup)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"The practice run was retired but its Redis state for league {league_id} could not be "
+                        f"cleared ({e}). Starting a replacement now would let it seed from the previous run's "
+                        "pick ledger, so it has been stopped instead. Retry once Redis is reachable."
+                    ),
+                )
 
     return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners, "connector_gone": connector_gone}
 
