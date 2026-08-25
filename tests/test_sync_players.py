@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import polars as pl
 import pytest
 
 from src.ingestion import sync_players
@@ -16,27 +17,84 @@ RAW_SLEEPER_PAYLOAD = {
         "position": "K", "team": "SF", "status": "Active", "injury_status": None,
         "gsis_id": "00-0000000",
     },
+    "HOU": {
+        "player_id": "HOU", "first_name": "Houston", "last_name": "Texans",
+        "position": "DEF", "team": "HOU", "status": None, "injury_status": None,
+        "gsis_id": None,
+    },
     "1111": {
         "player_id": "1111", "first_name": "Free", "last_name": "Agent",
         "position": "WR", "team": None, "status": "Active", "injury_status": None,
         "gsis_id": None,
     },
+    "2222": {
+        "player_id": "2222", "first_name": "Not", "last_name": "Rosterable",
+        "position": "LS", "team": "SF", "status": "Active", "injury_status": None,
+        "gsis_id": None,
+    },
 }
 
 
-def test_filter_skill_position_players_drops_non_skill_and_teamless():
+def test_filter_skill_position_players_drops_non_rosterable_and_teamless():
     df = sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD)
 
-    assert df.height == 1
-    row = df.row(0, named=True)
-    assert row["player_id"] == "4046"
-    assert row["name"] == "Christian McCaffrey"
-    assert row["injury_status"] == "Questionable"
-    assert row["gsis_id"] == "00-0033280"
+    assert df.height == 3
+    by_id = {row["player_id"]: row for row in df.iter_rows(named=True)}
+    assert set(by_id) == {"4046", "9999", "HOU"}
+
+    rb_row = by_id["4046"]
+    assert rb_row["name"] == "Christian McCaffrey"
+    assert rb_row["injury_status"] == "Questionable"
+    assert rb_row["gsis_id"] == "00-0033280"
+
+    k_row = by_id["9999"]
+    assert k_row["position"] == "K"
+    assert k_row["injury_status"] == "Healthy"
+
+    def_row = by_id["HOU"]
+    assert def_row["position"] == "D/ST"
+    assert def_row["name"] == "Houston Texans"
+    assert def_row["status"] == "Unknown"
+
+
+def test_assert_position_coverage_raises_when_a_position_is_entirely_missing():
+    df = sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD)
+
+    with pytest.raises(RuntimeError, match="QB"):
+        sync_players.assert_position_coverage(df)
+
+
+def test_assert_position_coverage_passes_when_every_position_present():
+    full_payload = dict(RAW_SLEEPER_PAYLOAD)
+    full_payload["4047"] = {
+        "player_id": "4047", "first_name": "Some", "last_name": "Quarterback",
+        "position": "QB", "team": "SF", "status": "Active", "injury_status": None,
+        "gsis_id": None,
+    }
+    full_payload["4048"] = {
+        "player_id": "4048", "first_name": "Some", "last_name": "TightEnd",
+        "position": "TE", "team": "SF", "status": "Active", "injury_status": None,
+        "gsis_id": None,
+    }
+    full_payload["4049"] = {
+        "player_id": "4049", "first_name": "Some", "last_name": "Receiver",
+        "position": "WR", "team": "SF", "status": "Active", "injury_status": None,
+        "gsis_id": None,
+    }
+    df = sync_players.filter_skill_position_players(full_payload)
+
+    sync_players.assert_position_coverage(df)  # does not raise
+
+
+def _mccaffrey_only(df: pl.DataFrame) -> pl.DataFrame:
+    """Scopes the shared fixture's filtered output down to just player 4046, so these
+    diff_players tests aren't tripped up by the K/D-ST rows RAW_SLEEPER_PAYLOAD also
+    carries (added to exercise filter_skill_position_players's position coverage)."""
+    return df.filter(pl.col("player_id") == "4046")
 
 
 def test_diff_players_flags_injury_status_change_as_transition():
-    df = sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD)
+    df = _mccaffrey_only(sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD))
     existing = {"4046": {"status": "Active", "injury_status": "Healthy"}}
 
     changed = sync_players.diff_players(df, existing)
@@ -47,7 +105,7 @@ def test_diff_players_flags_injury_status_change_as_transition():
 
 
 def test_diff_players_status_only_change_is_not_a_transition():
-    df = sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD)
+    df = _mccaffrey_only(sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD))
     # injury_status matches incoming ("Questionable"); only `status` differs.
     existing = {"4046": {"status": "Inactive", "injury_status": "Questionable"}}
 
@@ -59,7 +117,7 @@ def test_diff_players_status_only_change_is_not_a_transition():
 
 
 def test_diff_players_ignores_unchanged_rows():
-    df = sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD)
+    df = _mccaffrey_only(sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD))
     existing = {"4046": {"status": "Active", "injury_status": "Questionable"}}
 
     changed = sync_players.diff_players(df, existing)
@@ -68,7 +126,7 @@ def test_diff_players_ignores_unchanged_rows():
 
 
 def test_diff_players_new_player_is_not_a_transition():
-    df = sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD)
+    df = _mccaffrey_only(sync_players.filter_skill_position_players(RAW_SLEEPER_PAYLOAD))
 
     changed = sync_players.diff_players(df, existing_by_id={})
 
@@ -149,6 +207,7 @@ def test_sync_players_forces_fetch_when_requested():
 
     with patch("src.ingestion.sync_players.redis.Redis", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_players.fetch_sleeper_players", return_value={}) as mock_fetch, \
+         patch("src.ingestion.sync_players.assert_position_coverage"), \
          patch("src.ingestion.sync_players.get_db_connection") as mock_get_conn, \
          patch("src.ingestion.sync_players.publish_waiver_alerts") as mock_publish:
         mock_conn = MagicMock()
@@ -174,6 +233,7 @@ def test_sync_players_does_not_mark_synced_when_publish_fails():
 
     with patch("src.ingestion.sync_players.redis.Redis", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_players.fetch_sleeper_players", return_value={}), \
+         patch("src.ingestion.sync_players.assert_position_coverage"), \
          patch("src.ingestion.sync_players.get_db_connection") as mock_get_conn, \
          patch("src.ingestion.sync_players.publish_waiver_alerts", side_effect=Exception("broker down")):
         mock_conn = MagicMock()

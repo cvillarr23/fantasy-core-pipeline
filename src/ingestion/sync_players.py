@@ -22,7 +22,12 @@ REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
-SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
+# Sleeper labels team defenses "DEF"; everywhere else in this codebase (lineup_solver's
+# DEFAULT_LINEUP_SLOT_COUNTS, sync_league's POSITION_MAP, league_settings.lineup_slot_counts)
+# uses ESPN's "D/ST" label instead - SLEEPER_TO_INTERNAL_POSITION retags it at ingestion so
+# every downstream position lookup (`lineup_slot_counts.get("D/ST")`, etc.) actually matches.
+ROSTERABLE_POSITIONS = ["QB", "RB", "WR", "TE", "K", "DEF"]
+SLEEPER_TO_INTERNAL_POSITION = {"DEF": "D/ST"}
 ALERT_INJURY_STATUSES = {"Questionable", "Doubtful", "Out"}
 
 SYNC_LOCK_KEY = "sleeper:sync:last_run"
@@ -72,19 +77,22 @@ def mark_synced(r_client: "redis.Redis") -> None:
 
 
 def filter_skill_position_players(raw_data: dict) -> pl.DataFrame:
-    """Retains only active-roster skill-position players, shaped to match the `players` table."""
+    """Retains only active-roster rosterable-position players, shaped to match the
+    `players` table. Sleeper's "DEF" position label is retagged to "D/ST" here (see
+    SLEEPER_TO_INTERNAL_POSITION) so it matches this codebase's convention everywhere else."""
     records = []
     for player_id, info in raw_data.items():
         if not info:
             continue
-        if info.get("position") not in SKILL_POSITIONS:
+        position = info.get("position")
+        if position not in ROSTERABLE_POSITIONS:
             continue
         if not info.get("team"):
             continue
         records.append({
             "player_id": player_id,
             "name": f"{info.get('first_name', '')} {info.get('last_name', '')}".strip(),
-            "position": info.get("position"),
+            "position": SLEEPER_TO_INTERNAL_POSITION.get(position, position),
             "team": info.get("team"),
             "status": info.get("status") or "Unknown",
             "injury_status": info.get("injury_status") or "Healthy",
@@ -95,6 +103,20 @@ def filter_skill_position_players(raw_data: dict) -> pl.DataFrame:
         "status": pl.Utf8, "injury_status": pl.Utf8, "gsis_id": pl.Utf8,
     }
     return pl.DataFrame(records, schema=schema)
+
+
+def assert_position_coverage(df: pl.DataFrame) -> None:
+    """Fails loudly if any expected position class comes back empty from Sleeper - #83's
+    fix for a missing position class (K/D-ST had zero rows) silently corrupting the
+    undrafted pool instead of failing the ingestion job at sync time."""
+    expected = {SLEEPER_TO_INTERNAL_POSITION.get(pos, pos) for pos in ROSTERABLE_POSITIONS}
+    present = set(df["position"].unique().to_list()) if df.height else set()
+    missing = expected - present
+    if missing:
+        raise RuntimeError(
+            f"Sleeper sync returned zero players for position(s) {sorted(missing)} - "
+            "refusing to persist a partial player set. Check the upstream payload before retrying."
+        )
 
 
 def load_existing_players(cursor) -> dict:
@@ -206,7 +228,8 @@ def sync_players(force: bool = False) -> None:
         return
 
     incoming_df = filter_skill_position_players(raw_data)
-    logger.info(f"Filtered Sleeper payload down to {incoming_df.height} active skill-position players.")
+    logger.info(f"Filtered Sleeper payload down to {incoming_df.height} active rosterable-position players.")
+    assert_position_coverage(incoming_df)
 
     # Persist and publish inside the same DB transaction: if the RabbitMQ publish fails,
     # the DB changes roll back too, so the next run's diff sees the transition again

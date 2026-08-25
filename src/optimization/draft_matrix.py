@@ -56,6 +56,13 @@ CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-api.core.svc.
 REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
+# Scoped to this file's roster-cap/ILP bookkeeping only - vorp_matrix.SKILL_POSITIONS (4)
+# stays untouched since its replacement-baseline/scarcity math doesn't apply to K/D-ST
+# (no route-rate/pressure/depth-chart signal exists for them; they fall through
+# compute_vorp/apply_scarcity's default branches to a plain points-based score instead,
+# which is the correct behavior for commodity positions, not a gap to fill in).
+DRAFT_POSITIONS = SKILL_POSITIONS + ["K", "D/ST"]
+
 CONSUMER_GROUP = "draft_matrix"
 DEFAULT_ROSTER_SIZE = 16
 DEFAULT_AUTO_DRAFT_DELAY_SECONDS = 8
@@ -192,7 +199,7 @@ def compute_draftable_roster_size(league_config: dict) -> tuple:
     all)."""
     flex_alloc = resolve_own_team_flex_allocation(league_config)
     lineup_slot_counts = league_config["lineup_slot_counts"]
-    starting_total = sum(lineup_slot_counts.get(pos, 0) for pos in SKILL_POSITIONS) + sum(flex_alloc.values())
+    starting_total = sum(lineup_slot_counts.get(pos, 0) for pos in DRAFT_POSITIONS) + sum(flex_alloc.values())
     bench_total = lineup_slot_counts.get("BE")
     if bench_total is None:
         return starting_total, max(0, DEFAULT_ROSTER_SIZE - starting_total)
@@ -208,13 +215,13 @@ def compute_position_caps(league_config: dict, drafted_by_us: dict) -> tuple:
     "still need a starter here" position apart from "just filling bench depth"."""
     flex_alloc = resolve_own_team_flex_allocation(league_config)
     lineup_slot_counts = league_config["lineup_slot_counts"]
-    starting_slots = {pos: lineup_slot_counts.get(pos, 0) for pos in SKILL_POSITIONS}
+    starting_slots = {pos: lineup_slot_counts.get(pos, 0) for pos in DRAFT_POSITIONS}
     _, bench_total = compute_draftable_roster_size(league_config)
     bench_alloc = _largest_remainder_allocate(dict(FLEX_DEFAULT_WEIGHTS), bench_total)
 
     starting_needs = {}
     position_caps = {}
-    for pos in SKILL_POSITIONS:
+    for pos in DRAFT_POSITIONS:
         target = starting_slots.get(pos, 0) + flex_alloc.get(pos, 0)
         drafted = drafted_by_us.get(pos, 0)
         starting_needs[pos] = max(0, target - drafted)
@@ -236,7 +243,7 @@ def build_and_solve_draft_pick(undrafted_pool: list, position_caps: dict, remain
     # all zero/negative, even though a real draft still forces a pick every round. Force
     # exactly as many picks as are actually fillable (bounded by both the position caps
     # and the pool size), so the solver can't dodge a mandatory pick by declining value.
-    target_picks = min(remaining_picks, len(undrafted_pool), sum(position_caps.get(pos, 0) for pos in SKILL_POSITIONS))
+    target_picks = min(remaining_picks, len(undrafted_pool), sum(position_caps.get(pos, 0) for pos in DRAFT_POSITIONS))
     if target_picks <= 0:
         return []
 
@@ -246,7 +253,7 @@ def build_and_solve_draft_pick(undrafted_pool: list, position_caps: dict, remain
 
     prob += pulp.lpSum(player_vars[pid] * by_id[pid]["vorp_score"] for pid in player_vars), "Total_VORP"
     prob += pulp.lpSum(player_vars.values()) == target_picks, "Remaining_Picks"
-    for pos in SKILL_POSITIONS:
+    for pos in DRAFT_POSITIONS:
         cap = position_caps.get(pos, 0)
         prob += (
             pulp.lpSum(var for pid, var in player_vars.items() if by_id[pid]["position"] == pos) <= cap,
