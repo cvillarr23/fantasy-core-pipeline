@@ -87,11 +87,9 @@ def _listener_board_key(league_id: str) -> str:
 
 
 def _write_listener_state(r_client, league_id: str, state: str, error: Optional[str] = None) -> None:
-    mapping = {"listener_state": state}
-    if error:
-        mapping["listener_error"] = error
-    else:
-        mapping["listener_error"] = ""
+    # listener_error_owner is reset on every listener write: the listener owns the field it
+    # just wrote, so a publisher thread holding a stale token must not be able to retract it.
+    mapping = {"listener_state": state, "listener_error": error or "", "listener_error_owner": ""}
     r_client.hset(_listener_board_key(league_id), mapping=mapping)
 
 
@@ -515,7 +513,7 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -544,6 +542,11 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             # timeout, or a reset after the request was sent) cannot enqueue the same draft
             # action twice and have the worker click twice.
             "idempotency_key": idempotency_key,
+            # The request timeout only stops *this* client waiting; the FastAPI handler is
+            # synchronous and can resume from a blocked broker call long after we gave up.
+            # An absolute deadline lets the gateway discard the pick itself rather than
+            # queue a click for a slot ESPN has already autodrafted.
+            "expires_at": expires_at,
         },
         headers=headers,
         timeout=timeout,
@@ -639,6 +642,9 @@ def _surface_publish_error(r_client, league_id: str, target: dict, error: Except
 # ("connection refused"), and the older one succeeding would then clear the newer one's
 # still-current failure.
 _CLEAR_PUBLISH_ERROR_LUA = """
+if redis.call('HGET', KEYS[1], 'listener_state') == 'Failed' then
+    return 0
+end
 if redis.call('HGET', KEYS[1], 'listener_error_owner') == ARGV[1] then
     return redis.call('HSET', KEYS[1], 'listener_error', '', 'listener_error_owner', '')
 end
@@ -671,7 +677,7 @@ def hold_and_publish(
     r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
     trace_context: Optional[context.Context] = None,
-    monotonic_fn=time.monotonic, clock_origin: Optional[float] = None,
+    monotonic_fn=time.monotonic, clock_origin: Optional[float] = None, time_fn=time.time,
 ) -> None:
     """Runs the cancellable delay window and publishes if it elapses uninterrupted. Called
     from a background thread (see _schedule_publish) so the Stream consumer loop keeps
@@ -749,6 +755,7 @@ def hold_and_publish(
                         publish_draft_target(
                             team_id, target, idempotency_key=idempotency_key,
                             timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
+                            expires_at=time_fn() + remaining,
                         )
                         if failure_surfaced:
                             _clear_publish_error(r_client, league_id, error_owner)

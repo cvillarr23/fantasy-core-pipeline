@@ -36,6 +36,8 @@ def _board_client(**initial):
                 board["listener_state"] = "Active"
             board["listener_error"], board["listener_error_owner"] = argv
         elif script == dm._CLEAR_PUBLISH_ERROR_LUA:
+            if board.get("listener_state") == "Failed":
+                return 0
             if board.get("listener_error_owner") == argv[0]:
                 board["listener_error"] = ""
                 board["listener_error_owner"] = ""
@@ -349,6 +351,8 @@ def test_publish_draft_target_posts_expected_payload():
         "pro_team": "KC",
         # Absent unless the caller is retrying; the gateway treats None as "no dedup".
         "idempotency_key": None,
+        # Absent for a direct call; hold_and_publish always sets it from the pick clock.
+        "expires_at": None,
     }
 
 
@@ -474,6 +478,54 @@ def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_succe
     assert mock_client.board["listener_state"] == "Failed"
 
 
+def test_hold_and_publish_sends_an_absolute_deadline_to_the_gateway():
+    """The gateway handler is synchronous and can resume from a blocked broker call after our
+    request timed out, so it needs the deadline itself rather than our timeout."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 90), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            monotonic_fn=lambda: 30.0, clock_origin=0.0, time_fn=lambda: 1_000.0,
+        )
+
+    # 60s of clock left at wall time 1000.
+    assert mock_publish.call_args.kwargs["expires_at"] == 1_060.0
+
+
+def test_hold_and_publish_will_not_retract_an_error_a_failed_listener_now_owns():
+    """_write_listener_state resets listener_error_owner, so a publisher holding a stale
+    token cannot clear the fatal reason the listener wrote after it."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    attempts = []
+
+    def publish(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise dm.requests.ConnectionError("unavailable")
+        dm._write_listener_state(mock_client, "L1", "Failed", error="Listener crashed")
+        # _write_listener_state goes through hset, which the board mock does not model.
+        mock_client.board.update({
+            "listener_state": "Failed",
+            "listener_error": "Listener crashed",
+            "listener_error_owner": "",
+        })
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=publish), \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_error"] == "Listener crashed"
+
+
 def test_hold_and_publish_leaves_a_failed_listeners_error_intact():
     """When the Stream consumer has already recorded a fatal listener reason, a later publish
     error must not replace it on the board - that reason is the one an operator acts on. The
@@ -560,9 +612,10 @@ def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick()
         )
 
     assert sum(sleeps) == 8
-    mock_publish.assert_called_once_with(
-        "7", target, idempotency_key="L1:5:e-1", timeout=dm.PUBLISH_TIMEOUT_SECONDS,
-    )
+    assert mock_publish.call_count == 1
+    assert mock_publish.call_args.args == ("7", target)
+    assert mock_publish.call_args.kwargs["idempotency_key"] == "L1:5:e-1"
+    assert mock_publish.call_args.kwargs["timeout"] == dm.PUBLISH_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------

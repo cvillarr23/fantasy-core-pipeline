@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import uuid
+import time
 import pika
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status
@@ -17,6 +18,8 @@ router = APIRouter()
 # pick clock (the retry window it guards) and far shorter than a draft, so keys from an
 # earlier draft can never collide with a later one.
 DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 900
+# Ceiling on any single broker operation for a deadline-carrying request.
+BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 
 # Load AMQP broker settings securely injected into environment variables
 # Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
@@ -51,6 +54,16 @@ class DraftPickTriggerPayload(BaseModel):
             "the same pick and the worker would click twice. Supplying the same key on every "
             "attempt makes the enqueue idempotent. Optional: callers that genuinely want an "
             "independent action (a manual override from the UI, say) simply omit it."
+        ),
+    )
+    expires_at: Optional[float] = Field(
+        None,
+        description=(
+            "Unix timestamp after which this pick must not be enqueued. The caller's HTTP "
+            "timeout only stops the caller waiting; it does not cancel this handler, which "
+            "can resume from a blocked broker call and queue a click long after the pick "
+            "clock has run out - by then ESPN has autodrafted and the click lands on the "
+            "next team's pick. Checked immediately before the message is published."
         ),
     )
 
@@ -225,7 +238,7 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     return
 
 
-def _claim_idempotency_key(key: Optional[str]) -> str:
+def _claim_idempotency_key(key: Optional[str], token: str) -> str:
     """Claims `key` for this request. Returns "claimed", "pending" or "published".
 
     A publish that fails ambiguously - a read timeout, or a connection reset after the bytes
@@ -248,7 +261,8 @@ def _claim_idempotency_key(key: Optional[str]) -> str:
     redis_key = f"draft:trigger:idempotency:{key}"
     try:
         client = _redis_client()
-        if client.set(redis_key, "pending", nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS):
+        # The value carries this request's token so only this request can release the claim.
+        if client.set(redis_key, f"pending:{token}", nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS):
             return "claimed"
         # Lost the race. A key with no value left (expired between SET and GET) is treated as
         # still in flight rather than published; the caller retrying is the safe reading.
@@ -272,7 +286,15 @@ def _mark_idempotency_key_published(key: Optional[str]) -> None:
         logger.warning(f"Could not mark idempotency key {key} published: {e}")
 
 
-def _release_idempotency_key(key: Optional[str]) -> None:
+_RELEASE_CLAIM_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+def _release_idempotency_key(key: Optional[str], token: str) -> None:
     """Releases a claim for a request that provably never enqueued anything.
 
     Called only from the pre-publish failure path. Leaving the claim there would turn a
@@ -282,21 +304,11 @@ def _release_idempotency_key(key: Optional[str]) -> None:
     if not key:
         return
     try:
-        _redis_client().delete(f"draft:trigger:idempotency:{key}")
-    except Exception as e:
-        # The TTL is the backstop. Worst case the retries for this pick all report duplicate
-        # until it expires, which is the pre-existing failure and not made worse here.
-        logger.warning(f"Could not release idempotency key {key}: {e}")
-    """Releases a claim for a request that provably never enqueued anything.
-
-    Called only from the pre-publish failure path. Leaving the claim there would turn a
-    transient broker error into a permanent one: the caller's retry gets "duplicate", reads
-    it as success, and stops - so the pick is lost by the mechanism that exists to protect it.
-    """
-    if not key:
-        return
-    try:
-        _redis_client().delete(f"draft:trigger:idempotency:{key}")
+        # Compare-and-delete: a retry may already hold a fresh "pending" claim by the time
+        # this runs, and a blind DELETE would drop it and let a third request enqueue too.
+        _redis_client().eval(
+            _RELEASE_CLAIM_LUA, 1, f"draft:trigger:idempotency:{key}", f"pending:{token}",
+        )
     except Exception as e:
         # The TTL is the backstop. Worst case the retries for this pick all report duplicate
         # until it expires, which is the pre-existing failure and not made worse here.
@@ -315,7 +327,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
 
     _reject_internal_player_id(payload.player_id, payload.name)
 
-    claim = _claim_idempotency_key(payload.idempotency_key)
+    claim = _claim_idempotency_key(payload.idempotency_key, tracking_id)
     if claim == "published":
         logger.info(
             f"Draft pick for Team {payload.team_id} -> {payload.name} already enqueued under "
@@ -343,6 +355,12 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
     try:
         publish_attempted = False
         params = pika.URLParameters(AMQP_URL)
+        if payload.expires_at is not None:
+            # Without this, a wedged broker blocks the handler past the deadline and the
+            # expiry check below only discards work we already spent the pick clock on.
+            budget = max(1.0, min(BROKER_SOCKET_TIMEOUT_SECONDS, payload.expires_at - time.time()))
+            params.socket_timeout = budget
+            params.blocked_connection_timeout = budget
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
 
@@ -357,8 +375,23 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"idempotency_key"}),
+            **payload.model_dump(exclude={"idempotency_key", "expires_at"}),
         })
+
+        # Last possible moment before the message becomes durable. Everything above can
+        # block for an unbounded time on a wedged broker, so the caller's deadline has to be
+        # re-checked here rather than trusted at request entry.
+        if payload.expires_at is not None and time.time() >= payload.expires_at:
+            logger.warning(
+                f"Draft pick for Team {payload.team_id} -> {payload.name} expired before it could be "
+                f"queued (deadline {payload.expires_at}); discarding rather than clicking a stale pick."
+            )
+            connection.close()
+            _release_idempotency_key(payload.idempotency_key, tracking_id)
+            raise HTTPException(
+                status_code=409,
+                detail="Pick deadline passed before the target could be queued.",
+            )
 
         publish_attempted = True
         channel.basic_publish(
@@ -381,6 +414,10 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             "tracking_id": tracking_id,
         }
 
+    except HTTPException:
+        # The deadline check above raises this deliberately and has already released the
+        # claim; the generic handler below would relabel it a 500 and hide the reason.
+        raise
     except Exception as e:
         # Everything up to basic_publish is provably pre-publish: no message can exist, so
         # holding the claim would be actively harmful. The caller's retry would come back
@@ -390,7 +427,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         # the plain retry. A failure at or after basic_publish is genuinely ambiguous, so
         # the claim stands and a possible duplicate is preferred to a possible miss.
         if not publish_attempted:
-            _release_idempotency_key(payload.idempotency_key)
+            _release_idempotency_key(payload.idempotency_key, tracking_id)
         else:
             # Ambiguous: the bytes may have landed. Promote the claim so a retry gets a clean
             # "duplicate" rather than being told to keep retrying an outcome we cannot resolve.

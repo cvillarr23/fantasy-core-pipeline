@@ -1,3 +1,6 @@
+import time
+
+from src.api import routes
 import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -25,6 +28,13 @@ def _fake_redis():
 
         def delete(self, key):
             return 1 if store.pop(key, None) is not None else 0
+
+        def eval(self, _script, _numkeys, key, argv):
+            # Mirrors _RELEASE_CLAIM_LUA: compare-and-delete on the caller's own token.
+            if store.get(key) == argv:
+                del store[key]
+                return 1
+            return 0
 
     client = _R()
     client.store = store
@@ -208,6 +218,63 @@ def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
     mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_discards_a_pick_whose_deadline_has_passed(client):
+    """The caller's HTTP timeout does not cancel this handler. Resuming from a blocked broker
+    call and queueing anyway would click for a slot ESPN has already autodrafted."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+        "expires_at": time.time() - 1,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 409
+    mock_channel.basic_publish.assert_not_called()
+    # Nothing was enqueued, so the claim must not block a caller that still has clock left.
+    assert "draft:trigger:idempotency:L1:5:4046" not in mock_redis.store
+
+
+def test_trigger_draft_pick_publishes_when_the_deadline_is_still_ahead(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "expires_at": time.time() + 60,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "expires_at" not in body
+
+
+def test_trigger_draft_pick_release_does_not_drop_a_retrys_fresh_claim(client):
+    """A blind DELETE would drop the claim a retry already took, letting a third request
+    enqueue the same action. The release is scoped to the releasing request's own token."""
+    mock_redis = _fake_redis()
+    mock_redis.store["draft:trigger:idempotency:L1:5:4046"] = "pending:someone-else"
+
+    with patch("src.api.routes._redis_client", return_value=mock_redis):
+        routes._release_idempotency_key("L1:5:4046", "my-token")
+
+    assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "pending:someone-else"
 
 
 def test_trigger_draft_pick_does_not_leak_the_idempotency_key_onto_the_queue(client):
