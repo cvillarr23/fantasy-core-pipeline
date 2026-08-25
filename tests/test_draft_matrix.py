@@ -1246,6 +1246,44 @@ def test_decode_pick_event_passes_through_flat_fields():
     assert dm.decode_pick_event(fields) == fields
 
 
+def test_process_entries_supersedes_a_pending_publish_when_our_own_pick_lands():
+    """handle_pick_event returns None for our own pick, so _schedule_publish never runs and
+    used to leave the old publisher alive. It could then recover from a transient failure and
+    enqueue a target for a slot ESPN had already filled - a click on the next team's pick."""
+    mock_client = MagicMock()
+    cancel_event = threading.Event()
+    pending_state = {"cancel_event": cancel_event, "pick_number": 6}
+    event = {"pick_number": 6, "team_id": "7", "player_id": "p1"}
+    entries = [("draft_picks:L1", [("1-0", {"payload": json.dumps(event)})])]
+
+    with patch("src.optimization.draft_matrix.handle_pick_event", return_value=None):
+        dm._process_entries(
+            mock_client, stream_key="draft_picks:L1", league_id="L1", season=2026, week=1,
+            team_id="7", delay_seconds=8, pending_state=pending_state, entries=entries,
+        )
+
+    assert cancel_event.is_set()
+    assert "cancel_event" not in pending_state
+
+
+def test_process_entries_leaves_a_pending_publish_alone_for_a_replayed_older_pick():
+    """A redelivered entry from before the pending target must not cancel a live publish."""
+    mock_client = MagicMock()
+    cancel_event = threading.Event()
+    pending_state = {"cancel_event": cancel_event, "pick_number": 6}
+    event = {"pick_number": 4, "team_id": "3", "player_id": "p1"}
+    entries = [("draft_picks:L1", [("1-0", {"payload": json.dumps(event)})])]
+
+    with patch("src.optimization.draft_matrix.handle_pick_event", return_value=None):
+        dm._process_entries(
+            mock_client, stream_key="draft_picks:L1", league_id="L1", season=2026, week=1,
+            team_id="7", delay_seconds=8, pending_state=pending_state, entries=entries,
+        )
+
+    assert not cancel_event.is_set()
+    assert pending_state["cancel_event"] is cancel_event
+
+
 def test_process_entries_decodes_payload_before_handling():
     """Regression: the listener used to hand raw Stream fields to handle_pick_event, so every
     pick raised KeyError('pick_number'), got acked, and the listener reported itself Failed."""

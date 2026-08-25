@@ -959,16 +959,25 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
         return target, next_pick_number
 
 
+def _cancel_pending_publish(pending_state: dict) -> None:
+    cancel_event = pending_state.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.set()
+    pending_state.pop("cancel_event", None)
+    pending_state.pop("pick_number", None)
+
+
 def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int, pending_state: dict, clock_origin: Optional[float] = None) -> None:
     """Supersedes any still-pending hold-and-publish job (a newer pick means the old
     recommendation is stale) and schedules the new one on a background thread, so
     run_draft_listener's XREADGROUP loop keeps consuming instead of blocking through the
     delay window."""
-    old_cancel_event = pending_state.get("cancel_event")
-    if old_cancel_event is not None:
-        old_cancel_event.set()
+    _cancel_pending_publish(pending_state)
     cancel_event = threading.Event()
     pending_state["cancel_event"] = cancel_event
+    # The slot this pending target is for. _process_entries uses it to supersede the thread
+    # the moment that slot is taken, without waiting for another recommendation.
+    pending_state["pick_number"] = pick_number
 
     # Capture the calling thread's OTel context (this span, e.g. handle_pick_event's) so
     # hold_and_publish can re-attach it on the new OS thread - threading.Thread does not
@@ -1020,6 +1029,24 @@ def _stream_entry_clock_origin(entry_id, monotonic_fn=time.monotonic, time_fn=ti
     return now_monotonic - age_seconds
 
 
+def _supersede_pending_publish_if_stale(pending_state: dict, event: dict) -> None:
+    """Cancels the pending publisher once the slot it targets has been filled. Older or
+    replayed events leave it alone: a redelivered pick must not cancel a live publish."""
+    pending_pick = pending_state.get("pick_number")
+    if pending_pick is None:
+        return
+    try:
+        event_pick = int(event["pick_number"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if event_pick >= pending_pick:
+        logger.info(
+            "Pick %s arrived for a slot with a publish still pending (%s); superseding it.",
+            event_pick, pending_pick,
+        )
+        _cancel_pending_publish(pending_state)
+
+
 def _process_entries(r_client, stream_key: str, league_id: str, season: int, week: int, team_id: str, delay_seconds: int, pending_state: dict, entries: list) -> None:
     with tracer.start_as_current_span("draft_listener.process_batch", attributes={"league_id": league_id}):
         for _stream, messages in entries:
@@ -1030,7 +1057,14 @@ def _process_entries(r_client, stream_key: str, league_id: str, season: int, wee
                 # minutes old - both would otherwise silently extend the real clock.
                 clock_origin = _stream_entry_clock_origin(entry_id)
                 try:
-                    result = handle_pick_event(r_client, league_id, season, week, team_id, decode_pick_event(fields))
+                    event = decode_pick_event(fields)
+                    # Superseding cannot wait for _schedule_publish. handle_pick_event returns
+                    # None whenever the new pick produces no recommendation - our own pick is
+                    # the common case - so the pending thread would survive, recover from a
+                    # transient failure and enqueue a target for a slot already taken, which
+                    # lands the click on the *next* team's pick.
+                    _supersede_pending_publish_if_stale(pending_state, event)
+                    result = handle_pick_event(r_client, league_id, season, week, team_id, event)
                     if result is not None:
                         target, next_pick_number = result
                         _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state, clock_origin=clock_origin)
