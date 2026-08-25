@@ -116,18 +116,26 @@ def persist_espn_ids(conn, matches: list) -> int:
 
 
 def persist_projections(conn, matches: list, season: int, week: int) -> int:
-    """Writes weekly_stats.projected_points for resolved K/D-ST rows, sourced from ESPN's
-    own per-player projection. Same upsert shape as sync_projections.persist_projections."""
+    """Writes weekly_stats.projected_points (and team) for resolved K/D-ST rows, sourced
+    from ESPN's own per-player projection. Same upsert shape as
+    sync_projections.persist_projections, plus `team`: draft_matrix.load_undrafted_pool
+    selects s.team (not players.team) and publish_draft_target forwards it as the
+    required pro_team field, so leaving it NULL here left every K/D-ST recommendation
+    rejected with a 422 the moment the worker tried to publish one. espn_player.proTeam,
+    normalized, is exactly the internal team by construction of the match (matched by team
+    for D/ST, by name+team for K), so there's no separate lookup needed."""
     if not matches:
         return 0
     rows = [
-        (player_id, season, week, _projected_points(espn_player, week))
+        (player_id, season, week, _projected_points(espn_player, week), _normalize_team(espn_player.proTeam))
         for player_id, espn_player in matches
     ]
     upsert_query = """
-        INSERT INTO weekly_stats (player_id, season, week, projected_points)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (player_id, season, week) DO UPDATE SET projected_points = EXCLUDED.projected_points;
+        INSERT INTO weekly_stats (player_id, season, week, projected_points, team)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (player_id, season, week) DO UPDATE SET
+            projected_points = EXCLUDED.projected_points,
+            team = EXCLUDED.team;
     """
     with conn.cursor() as cursor:
         cursor.executemany(upsert_query, rows)

@@ -101,7 +101,25 @@ def test_persist_projections_writes_week_scoped_points():
     assert written == 1
     query, rows = mock_cursor.executemany.call_args.args
     assert "ON CONFLICT (player_id, season, week)" in query
-    assert rows == [("HOU", 2026, 1, 7.25)]
+    assert rows == [("HOU", 2026, 1, 7.25, "HOU")]
+
+
+def test_persist_projections_writes_team_so_the_pool_query_never_sees_a_null(): # noqa: E501
+    """Regression test: draft_matrix.load_undrafted_pool selects s.team (not
+    players.team), and publish_draft_target forwards it as the required pro_team field -
+    leaving weekly_stats.team NULL here made every K/D-ST recommendation get rejected with
+    a 422 the moment the worker tried to publish one (caught live verifying #83)."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    espn_player = _espn_player("Washington D/ST", "WSH", -16028, week=1, projected_points=6.5)
+    skd.persist_projections(mock_conn, [("WAS", espn_player)], season=2026, week=1)
+
+    query, rows = mock_cursor.executemany.call_args.args
+    assert "team" in query
+    # ESPN's "WSH" normalized to Sleeper/this repo's "WAS" - same mismatch match_dst_espn_ids handles.
+    assert rows == [("WAS", 2026, 1, 6.5, "WAS")]
 
 
 def test_persist_projections_defaults_missing_week_stats_to_zero():
@@ -115,7 +133,7 @@ def test_persist_projections_defaults_missing_week_stats_to_zero():
 
     assert written == 1
     _, rows = mock_cursor.executemany.call_args.args
-    assert rows == [("HOU", 2026, 2, 0.0)]
+    assert rows == [("HOU", 2026, 2, 0.0, "HOU")]
 
 
 def test_fetch_espn_kicker_dst_tags_each_player_with_its_requested_position():
