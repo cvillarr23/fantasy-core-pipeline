@@ -7,6 +7,29 @@ def _fake_db_cursor(cursor=None):
     yield cursor or MagicMock()
 
 
+def _fake_redis():
+    """Minimal Redis stand-in with real SET/SET NX/GET/DELETE semantics, so idempotency
+    tests exercise the actual claim state machine rather than a scripted call sequence."""
+    store: dict = {}
+
+    class _R:
+        def set(self, key, value, nx=False, ex=None):
+            if nx and key in store:
+                return None
+            store[key] = value
+            return True
+
+        def get(self, key):
+            return store.get(key)
+
+        def delete(self, key):
+            return 1 if store.pop(key, None) is not None else 0
+
+    client = _R()
+    client.store = store
+    return client
+
+
 def _espn_id_ok_cursor(name="Some Back"):
     """Cursor where the espn_id lookup returns the same player the payload names, so the
     namespace guard passes. The internal-id lookup misses."""
@@ -130,9 +153,7 @@ def test_trigger_draft_pick_idempotency_key_blocks_a_duplicate_enqueue(client):
     mock_channel = MagicMock()
     mock_connection = MagicMock()
     mock_connection.channel.return_value = mock_channel
-    mock_redis = MagicMock()
-    # First claim wins, second finds the key already held.
-    mock_redis.set.side_effect = [True, None]
+    mock_redis = _fake_redis()
 
     payload = {
         "team_id": "7", "player_id": "4046", "name": "Some Back",
@@ -148,7 +169,7 @@ def test_trigger_draft_pick_idempotency_key_blocks_a_duplicate_enqueue(client):
     assert first.status_code == 202 and first.json()["status"] == "accepted"
     assert second.status_code == 202 and second.json()["status"] == "duplicate"
     assert mock_channel.basic_publish.call_count == 1
-    assert mock_redis.set.call_args.kwargs["nx"] is True
+    assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "published"
 
 
 def test_trigger_draft_pick_without_an_idempotency_key_never_touches_redis(client):
@@ -188,12 +209,33 @@ def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
     mock_channel.basic_publish.assert_called_once()
 
 
+def test_trigger_draft_pick_tells_the_caller_to_retry_while_an_earlier_request_is_in_flight(client):
+    """A claim alone does not prove a message exists. If the first request claims the key and
+    then hangs in BlockingConnection, answering "duplicate" stops the caller - and the first
+    request may still fail pre-publish and release, leaving nothing enqueued at all."""
+    mock_redis = _fake_redis()
+    mock_redis.store["draft:trigger:idempotency:L1:5:4046"] = "pending"
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection") as mock_conn, \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    # 503 is in the optimizer's retryable set, so hold_and_publish tries again.
+    assert response.status_code == 503
+    mock_conn.assert_not_called()
+
+
 def test_trigger_draft_pick_releases_the_claim_when_the_broker_fails_before_publishing(client):
     """A pre-publish broker failure that kept the claim turned a transient error into a
     permanent one: the retry got "duplicate", hold_and_publish read that as success and
     stopped, and the pick was ceded to autodraft by the guard meant to protect it."""
-    mock_redis = MagicMock()
-    mock_redis.set.return_value = True
+    mock_redis = _fake_redis()
 
     payload = {
         "team_id": "7", "player_id": "4046", "name": "Some Back",
@@ -206,7 +248,7 @@ def test_trigger_draft_pick_releases_the_claim_when_the_broker_fails_before_publ
         response = client.post("/v1/trigger/draft-pick", json=payload)
 
     assert response.status_code == 500
-    mock_redis.delete.assert_called_once_with("draft:trigger:idempotency:L1:5:4046")
+    assert "draft:trigger:idempotency:L1:5:4046" not in mock_redis.store
 
 
 def test_trigger_draft_pick_keeps_the_claim_when_the_failure_is_ambiguous(client):
@@ -216,8 +258,7 @@ def test_trigger_draft_pick_keeps_the_claim_when_the_failure_is_ambiguous(client
     mock_channel.basic_publish.side_effect = Exception("reset after send")
     mock_connection = MagicMock()
     mock_connection.channel.return_value = mock_channel
-    mock_redis = MagicMock()
-    mock_redis.set.return_value = True
+    mock_redis = _fake_redis()
 
     payload = {
         "team_id": "7", "player_id": "4046", "name": "Some Back",
@@ -230,7 +271,9 @@ def test_trigger_draft_pick_keeps_the_claim_when_the_failure_is_ambiguous(client
         response = client.post("/v1/trigger/draft-pick", json=payload)
 
     assert response.status_code == 500
-    mock_redis.delete.assert_not_called()
+    # Ambiguous, so the claim is kept AND promoted: a retry must get a clean "duplicate"
+    # rather than being told to keep retrying an outcome that can never be resolved.
+    assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "published"
 
 
 def test_trigger_draft_pick_broker_failure(client):

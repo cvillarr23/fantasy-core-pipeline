@@ -225,12 +225,18 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     return
 
 
-def _claim_idempotency_key(key: Optional[str]) -> bool:
-    """Claims `key` for this request, returning False if an earlier request already had it.
+def _claim_idempotency_key(key: Optional[str]) -> str:
+    """Claims `key` for this request. Returns "claimed", "pending" or "published".
 
     A publish that fails ambiguously - a read timeout, or a connection reset after the bytes
     went out - may already have committed a durable message. Without this, the caller's retry
     enqueues a second draft action and the worker clicks twice.
+
+    The claim carries a state, not just existence, because a bare claim does not prove a
+    message exists. If the first request claims the key and then hangs in BlockingConnection,
+    the caller can time out and retry while it is still running: answering "duplicate" there
+    would stop the caller, and the original request could then fail pre-publish and release
+    the key with nothing ever enqueued. "pending" lets the caller retry instead.
 
     Fails OPEN. If Redis is unreachable we cannot prove the key is unclaimed, and the choice
     is between a possible duplicate click and a certainly missed pick. A duplicate SELECT for
@@ -238,18 +244,49 @@ def _claim_idempotency_key(key: Optional[str]) -> bool:
     autodraft, which is the failure this whole retry path exists to prevent.
     """
     if not key:
-        return True
+        return "claimed"
+    redis_key = f"draft:trigger:idempotency:{key}"
     try:
-        return bool(_redis_client().set(
-            f"draft:trigger:idempotency:{key}", "1",
-            nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-        ))
+        client = _redis_client()
+        if client.set(redis_key, "pending", nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS):
+            return "claimed"
+        # Lost the race. A key with no value left (expired between SET and GET) is treated as
+        # still in flight rather than published; the caller retrying is the safe reading.
+        return "published" if client.get(redis_key) == "published" else "pending"
     except Exception as e:
         logger.warning(f"Idempotency check unavailable for key {key}; proceeding without it: {e}")
-        return True
+        return "claimed"
+
+
+def _mark_idempotency_key_published(key: Optional[str]) -> None:
+    """Promotes a claim from "pending" once the message provably may exist, so that later
+    retries for this pick get "duplicate" instead of being told to try again."""
+    if not key:
+        return
+    try:
+        _redis_client().set(
+            f"draft:trigger:idempotency:{key}", "published",
+            ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.warning(f"Could not mark idempotency key {key} published: {e}")
 
 
 def _release_idempotency_key(key: Optional[str]) -> None:
+    """Releases a claim for a request that provably never enqueued anything.
+
+    Called only from the pre-publish failure path. Leaving the claim there would turn a
+    transient broker error into a permanent one: the caller's retry gets "duplicate", reads
+    it as success, and stops - so the pick is lost by the mechanism that exists to protect it.
+    """
+    if not key:
+        return
+    try:
+        _redis_client().delete(f"draft:trigger:idempotency:{key}")
+    except Exception as e:
+        # The TTL is the backstop. Worst case the retries for this pick all report duplicate
+        # until it expires, which is the pre-existing failure and not made worse here.
+        logger.warning(f"Could not release idempotency key {key}: {e}")
     """Releases a claim for a request that provably never enqueued anything.
 
     Called only from the pre-publish failure path. Leaving the claim there would turn a
@@ -278,7 +315,8 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
 
     _reject_internal_player_id(payload.player_id, payload.name)
 
-    if not _claim_idempotency_key(payload.idempotency_key):
+    claim = _claim_idempotency_key(payload.idempotency_key)
+    if claim == "published":
         logger.info(
             f"Draft pick for Team {payload.team_id} -> {payload.name} already enqueued under "
             f"idempotency key {payload.idempotency_key}; not queueing a duplicate."
@@ -289,6 +327,18 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             "team_id": payload.team_id,
             "tracking_id": tracking_id,
         }
+    if claim == "pending":
+        # Another request holds the key but has not reached the broker yet. It may still fail
+        # pre-publish and release, so reporting success here could lose the pick entirely.
+        # 503 is retryable, which sends the caller back for another attempt.
+        logger.info(
+            f"Draft pick for Team {payload.team_id} -> {payload.name} is still in flight under "
+            f"idempotency key {payload.idempotency_key}; asking the caller to retry."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="An earlier request for this pick is still in flight; retry shortly.",
+        )
 
     try:
         publish_attempted = False
@@ -320,6 +370,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         )
         connection.close()
         logger.info(f"Draft pick target committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
+        _mark_idempotency_key_published(payload.idempotency_key)
         return {
             "status": "accepted",
             "queue": "draft_targets",
@@ -337,6 +388,10 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         # the claim stands and a possible duplicate is preferred to a possible miss.
         if not publish_attempted:
             _release_idempotency_key(payload.idempotency_key)
+        else:
+            # Ambiguous: the bytes may have landed. Promote the claim so a retry gets a clean
+            # "duplicate" rather than being told to keep retrying an outcome we cannot resolve.
+            _mark_idempotency_key_published(payload.idempotency_key)
         logger.error(f"Gateway failed to push draft pick target onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 

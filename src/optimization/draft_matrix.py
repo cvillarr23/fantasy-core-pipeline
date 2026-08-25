@@ -595,10 +595,24 @@ def _record_publish_error(league_id: str, target: dict, error_message: str) -> N
         logger.error("Failed to record draft target publish error for league %s: %s", league_id, error)
 
 
+# Records a publish failure without asserting the consumer's health. The publisher runs on a
+# separate thread from the Stream consumer, which owns listener_state; a plain write of
+# "Active" here can land after the consumer recorded "Failed" and report a dead listener as
+# healthy. This only fills an empty/unset state, and never overwrites an existing one.
+_SURFACE_PUBLISH_ERROR_LUA = """
+local state = redis.call('HGET', KEYS[1], 'listener_state')
+if not state or state == '' then
+    redis.call('HSET', KEYS[1], 'listener_state', 'Active')
+end
+redis.call('HSET', KEYS[1], 'listener_error', ARGV[1])
+return 1
+"""
+
+
 def _surface_publish_failure(r_client, league_id: str, target: dict, error_message: str) -> None:
     logger.error("Failed to publish draft target for league %s: %s", league_id, error_message)
     try:
-        _write_listener_state(r_client, league_id, "Active", error=error_message)
+        r_client.eval(_SURFACE_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), error_message)
     except Exception as state_error:
         logger.error("Failed to update listener error state for league %s: %s", league_id, state_error)
     _record_publish_error(league_id, target, error_message)
