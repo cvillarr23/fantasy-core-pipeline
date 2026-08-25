@@ -462,6 +462,177 @@ def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick()
 
 
 # ---------------------------------------------------------------------------
+# hold_and_publish - PR #85 review fixes
+# ---------------------------------------------------------------------------
+
+def test_hold_and_publish_does_not_retry_a_deterministic_client_error():
+    """A 422 answers identically to a byte-identical retry. Retrying it spends the rest of
+    the pick clock re-asking a settled question and buries the one useful log line."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    response = dm.requests.Response()
+    response.status_code = 422
+    response._content = b'{"detail":[{"loc":["body","pro_team"]}]}'
+    error = dm.requests.HTTPError("422 Client Error", response=response)
+    sleeps = []
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=error) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=sleeps.append,
+        )
+
+    assert mock_publish.call_count == 1
+    assert sleeps == []
+
+
+def test_hold_and_publish_does_not_retry_a_missing_crosswalk_entry():
+    """publish_draft_target's own ValueError is deterministic too - the target will still
+    have no espn_id two seconds later."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    sleeps = []
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=ValueError("no espn_id")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=sleeps.append,
+        )
+
+    assert mock_publish.call_count == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", sorted(dm.RETRYABLE_PUBLISH_STATUSES))
+def test_retryable_publish_statuses_are_retried(status):
+    response = dm.requests.Response()
+    response.status_code = status
+    assert dm._is_retryable_publish_error(dm.requests.HTTPError("boom", response=response)) is True
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_deterministic_client_errors_are_not_retried(status):
+    response = dm.requests.Response()
+    response.status_code = status
+    assert dm._is_retryable_publish_error(dm.requests.HTTPError("boom", response=response)) is False
+
+
+def test_transport_failures_with_no_response_are_retried():
+    assert dm._is_retryable_publish_error(dm.requests.ConnectionError("reset")) is True
+    assert dm._is_retryable_publish_error(dm.requests.Timeout("slow")) is True
+    assert dm._is_retryable_publish_error(RuntimeError("programming error")) is False
+
+
+def test_hold_and_publish_rechecks_cancellation_between_retries():
+    """A newer pick can supersede this target *during* the retry sleep. Checking only after
+    a failure - and not again before the next attempt - published the stale target anyway."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    cancel_event = threading.Event()
+
+    def _sleep(_seconds):
+        cancel_event.set()
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            cancel_event=cancel_event, sleep_fn=_sleep,
+        )
+
+    assert mock_publish.call_count == 1
+
+
+def test_hold_and_publish_rechecks_operator_pause_between_retries():
+    mock_client = MagicMock()
+    pause_key = "draft:L1:pause:5"
+    paused = {"value": False}
+    mock_client.get.side_effect = lambda key: "1" if (key == pause_key and paused["value"]) else None
+    target = _player("p1", "RB", 10.0)
+
+    def _sleep(_seconds):
+        paused["value"] = True
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=_sleep,
+        )
+
+    assert mock_publish.call_count == 1
+
+
+def test_hold_and_publish_never_publishes_after_the_clock_has_already_expired():
+    """The deadline is anchored to when the upstream pick was observed, so a slow ILP solve
+    can consume the entire clock before this thread even starts. Publishing then would send
+    a target for a pick ESPN has already autodrafted."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 100.0,
+            clock_origin=0.0,  # the pick landed 100s ago; a 30s clock is long gone
+        )
+
+    mock_publish.assert_not_called()
+
+
+def test_hold_and_publish_uses_the_supplied_clock_origin_not_thread_start():
+    """Regression: anchoring the deadline at thread start excluded everything
+    handle_pick_event does synchronously first, silently extending the real clock."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    # 20s of the 30s clock was already spent persisting the pick and solving the ILP, so
+    # only ~5s of publish window remains after the safety margin - one attempt, no retry.
+    now = [20.0]
+
+    def _sleep(seconds):
+        now[0] += seconds
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 5), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=_sleep, monotonic_fn=lambda: now[0], clock_origin=0.0,
+        )
+
+    # Deadline is 0 + 30 - 5 = 25, so attempts land at t=20, 22 and 24 and the loop then
+    # stops rather than running to t=45 as a thread-start anchor would have.
+    assert mock_publish.call_count == 3
+    assert now[0] < 25.0
+
+
+def test_process_entries_anchors_the_deadline_before_handling_the_event():
+    entries = [("draft_picks:L1", [("1-1", {"payload": json.dumps({"pick_number": 4})})])]
+
+    with patch.object(dm, "handle_pick_event", return_value=(_player("p1", "RB", 1.0), 5)), \
+         patch.object(dm, "_schedule_publish") as mock_schedule, \
+         patch.object(dm, "time") as mock_time:
+        mock_time.monotonic.return_value = 1234.5
+        dm._process_entries(MagicMock(), "draft_picks:L1", "L1", 2026, 1, "7", 8, {}, entries)
+
+    assert mock_schedule.call_args.kwargs["clock_origin"] == 1234.5
+
+
+# ---------------------------------------------------------------------------
 # _schedule_publish
 # ---------------------------------------------------------------------------
 
