@@ -90,6 +90,15 @@ ESPN_LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
 # Draft-sync listener defaults to week 1 preseason projections (matches draft_matrix.py's
 # own --week CLI default) - draft config doesn't track a week, since a draft has none.
 DRAFT_SYNC_WEEK = 1
+# The publish-retry deadline in draft_matrix.hold_and_publish is bounded by the pick clock,
+# and the two modes do not share one: ESPN practice rooms run 30s while real drafts are 90s+.
+# Passed explicitly per Job rather than left to the module default, because the failure is
+# silent in the dangerous direction - a practice listener inheriting the 90s live default
+# keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
+DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
+    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "90")),
+    "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),
+}
 
 SSE_POLL_INTERVAL_SECONDS = 2
 DRAFT_STATUS_STALENESS_SECONDS = int(os.getenv("DRAFT_STATUS_STALENESS_SECONDS", "15"))
@@ -132,7 +141,7 @@ def _redis_client() -> redis.Redis:
     )
 
 
-def _draft_sync_env() -> list:
+def _draft_sync_env(mode: str = "live") -> list:
     """Explicit env for the draft-sync Job's Pod.
 
     The Job's Pod does not inherit this API Pod's environment, and draft_matrix.py imports
@@ -148,7 +157,11 @@ def _draft_sync_env() -> list:
                     key=DRAFT_SYNC_DB_SECRET_KEY,
                 )
             ),
-        )
+        ),
+        client.V1EnvVar(
+            name="DRAFT_PICK_CLOCK_SECONDS",
+            value=str(DRAFT_PICK_CLOCK_SECONDS_BY_MODE.get(mode, DRAFT_PICK_CLOCK_SECONDS_BY_MODE["live"])),
+        ),
     ]
     for name in DRAFT_SYNC_INHERITED_ENV_VARS:
         value = os.getenv(name)
@@ -611,21 +624,28 @@ def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
     return compute_on_the_clock_team(latest_pick_number + 1, team_count, slot_map)
 
 
-def _recent_execution_errors(cursor, league_id: str, limit: int) -> list:
+def _recent_execution_errors(cursor, league_id: str, season: int, limit: int) -> list:
     """Scoped by league_id so a practice room's failures never surface in a live league's
     /status - execution_log has no dedicated mode column (see the module docstring), but
     practice/live configs always use distinct league_ids, so this filter alone keeps the
-    two from ever mixing here."""
+    two from ever mixing here.
+
+    Also scoped by season, for the same reason _last_clicker_action is: a reactivated league
+    keeps its league_id year over year, so without this next year's draft would open showing
+    last year's failures as current. Rows with a null season are still included - producers
+    other than the draft path do not set it, and dropping them would silently narrow what
+    /status has always reported."""
     cursor.execute("""
         SELECT transaction_type, bot_name, error_message, executed_at
         FROM execution_log
         WHERE status <> 'success'
           AND error_message IS NOT NULL
           AND league_id = %s
+          AND (season = %s OR season IS NULL)
           AND (transaction_type ILIKE 'draft%%' OR COALESCE(bot_name, '') ILIKE 'draft%%')
         ORDER BY executed_at DESC
         LIMIT %s;
-    """, (league_id, limit))
+    """, (league_id, season, limit))
     return [
         {
             "transaction_type": row[0],
@@ -709,7 +729,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             mode = mode_row[0] if mode_row is not None else "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
-            recent_errors = _recent_execution_errors(cursor, league_id, RECENT_ERRORS_LIMIT)
+            recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots/mode for league {league_id}: {e}")
@@ -894,7 +914,7 @@ def start_draft_sync(league_id: Optional[str] = None):
                                 client.V1EnvFromSource(config_map_ref=client.V1ConfigMapEnvSource(name=DRAFT_SYNC_ENV_CONFIGMAP)),
                                 client.V1EnvFromSource(secret_ref=client.V1SecretEnvSource(name=DRAFT_SYNC_ENV_SECRET)),
                             ],
-                            env=_draft_sync_env(),
+                            env=_draft_sync_env(mode),
                         )
                     ],
                 ),

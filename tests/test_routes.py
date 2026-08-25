@@ -1,3 +1,7 @@
+import time
+
+from src.api import routes
+import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -5,6 +9,41 @@ from unittest.mock import MagicMock, patch
 @contextmanager
 def _fake_db_cursor(cursor=None):
     yield cursor or MagicMock()
+
+
+def _fake_redis():
+    """Minimal Redis stand-in with real SET/SET NX/GET/DELETE semantics, so idempotency
+    tests exercise the actual claim state machine rather than a scripted call sequence."""
+    store: dict = {}
+    hashes: dict = {}
+
+    class _R:
+        def hget(self, key, field):
+            return hashes.get(key, {}).get(field)
+
+        def set(self, key, value, nx=False, ex=None):
+            if nx and key in store:
+                return None
+            store[key] = value
+            return True
+
+        def get(self, key):
+            return store.get(key)
+
+        def delete(self, key):
+            return 1 if store.pop(key, None) is not None else 0
+
+        def eval(self, _script, _numkeys, key, argv):
+            # Mirrors _RELEASE_CLAIM_LUA: compare-and-delete on the caller's own token.
+            if store.get(key) == argv:
+                del store[key]
+                return 1
+            return 0
+
+    client = _R()
+    client.store = store
+    client.hashes = hashes
+    return client
 
 
 def _espn_id_ok_cursor(name="Some Back"):
@@ -121,6 +160,352 @@ def test_trigger_draft_pick_success(client):
     assert publish_kwargs["routing_key"] == "draft_targets"
     assert publish_kwargs["properties"].delivery_mode == 2
     assert body["tracking_id"] in publish_kwargs["body"]
+
+
+def test_trigger_draft_pick_idempotency_key_blocks_a_duplicate_enqueue(client):
+    """A publish that fails ambiguously - read timeout, or a reset after the bytes went out -
+    may already have committed a durable message. Without this the caller's retry queues a
+    second draft action and the worker clicks twice."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        first = client.post("/v1/trigger/draft-pick", json=payload)
+        second = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert first.status_code == 202 and first.json()["status"] == "accepted"
+    assert second.status_code == 202 and second.json()["status"] == "duplicate"
+    assert mock_channel.basic_publish.call_count == 1
+    assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "published"
+
+
+def test_trigger_draft_pick_without_an_idempotency_key_never_touches_redis(client):
+    mock_connection = MagicMock()
+    mock_redis = MagicMock()
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "position": "RB", "pro_team": "KC"}
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    mock_redis.set.assert_not_called()
+
+
+def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
+    """A duplicate SELECT for a player we already hold is rejected by ESPN; a missed pick
+    hands the roster spot to autodraft. Given an unprovable claim, take the recoverable
+    failure."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", side_effect=Exception("redis down")), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_closes_the_broker_connection_on_a_pre_publish_failure(client):
+    """The optimizer retries this endpoint for the length of the pick clock. A failure after
+    the TCP connection opened leaked a socket per attempt and could exhaust the broker."""
+    mock_channel = MagicMock()
+    mock_channel.queue_declare.side_effect = Exception("declare failed")
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_connection.is_open = True
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    mock_connection.close.assert_called_once()
+
+
+def test_trigger_draft_pick_closes_the_broker_connection_when_the_slot_is_superseded(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_connection.is_open = True
+    mock_redis = _fake_redis()
+    mock_redis.hashes["draft:L1:board"] = {"last_processed_pick_number": "6"}
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "league_id": "L1", "pick_number": 6,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 409
+    mock_connection.close.assert_called_once()
+
+
+def test_trigger_draft_pick_closes_the_broker_connection_exactly_once_on_success(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_connection.is_open = True
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    mock_connection.close.assert_called_once()
+
+
+def test_trigger_draft_pick_discards_a_target_whose_slot_was_filled_mid_flight(client):
+    """hold_and_publish's cancel_event cannot interrupt a request already inside
+    requests.post. If the slot fills while the request is in flight, only the gateway can
+    still stop it - otherwise the click lands on a later team's pick."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+    mock_redis.hashes["draft:L1:board"] = {"last_processed_pick_number": "6"}
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:6:4046",
+        "league_id": "L1", "pick_number": 6,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 409
+    mock_channel.basic_publish.assert_not_called()
+    assert "draft:trigger:idempotency:L1:6:4046" not in mock_redis.store
+
+
+def test_trigger_draft_pick_publishes_when_the_slot_is_still_open(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+    mock_redis.hashes["draft:L1:board"] = {"last_processed_pick_number": "5"}
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "league_id": "L1", "pick_number": 6,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "league_id" not in body and "pick_number" not in body
+
+
+def test_trigger_draft_pick_releases_the_claim_on_a_pika_wrong_state_error(client):
+    """ChannelWrongStateError is raised before any frame reaches the socket, so no message
+    exists. Promoting the claim would hand the retry a 202 duplicate for nothing."""
+    mock_channel = MagicMock()
+    mock_channel.basic_publish.side_effect = routes.pika.exceptions.ChannelWrongStateError("closed")
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    assert "draft:trigger:idempotency:L1:5:4046" not in mock_redis.store
+
+
+def test_trigger_draft_pick_discards_a_pick_whose_deadline_has_passed(client):
+    """The caller's HTTP timeout does not cancel this handler. Resuming from a blocked broker
+    call and queueing anyway would click for a slot ESPN has already autodrafted."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+        "expires_at": time.time() - 1,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 409
+    mock_channel.basic_publish.assert_not_called()
+    # Nothing was enqueued, so the claim must not block a caller that still has clock left.
+    assert "draft:trigger:idempotency:L1:5:4046" not in mock_redis.store
+
+
+def test_trigger_draft_pick_publishes_when_the_deadline_is_still_ahead(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "expires_at": time.time() + 60,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "expires_at" not in body
+
+
+def test_trigger_draft_pick_release_does_not_drop_a_retrys_fresh_claim(client):
+    """A blind DELETE would drop the claim a retry already took, letting a third request
+    enqueue the same action. The release is scoped to the releasing request's own token."""
+    mock_redis = _fake_redis()
+    mock_redis.store["draft:trigger:idempotency:L1:5:4046"] = "pending:someone-else"
+
+    with patch("src.api.routes._redis_client", return_value=mock_redis):
+        routes._release_idempotency_key("L1:5:4046", "my-token")
+
+    assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "pending:someone-else"
+
+
+def test_trigger_draft_pick_does_not_leak_the_idempotency_key_onto_the_queue(client):
+    """idempotency_key is gateway-only state; the click-bot does not deduplicate. Forwarding
+    it would change the draft_targets JSON contract for no consumer benefit."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "idempotency_key" not in body
+    assert body["player_id"] == "4046"
+
+
+def test_trigger_draft_pick_tells_the_caller_to_retry_while_an_earlier_request_is_in_flight(client):
+    """A claim alone does not prove a message exists. If the first request claims the key and
+    then hangs in BlockingConnection, answering "duplicate" stops the caller - and the first
+    request may still fail pre-publish and release, leaving nothing enqueued at all."""
+    mock_redis = _fake_redis()
+    mock_redis.store["draft:trigger:idempotency:L1:5:4046"] = "pending"
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection") as mock_conn, \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    # 503 is in the optimizer's retryable set, so hold_and_publish tries again.
+    assert response.status_code == 503
+    mock_conn.assert_not_called()
+
+
+def test_trigger_draft_pick_releases_the_claim_when_the_broker_fails_before_publishing(client):
+    """A pre-publish broker failure that kept the claim turned a transient error into a
+    permanent one: the retry got "duplicate", hold_and_publish read that as success and
+    stopped, and the pick was ceded to autodraft by the guard meant to protect it."""
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", side_effect=Exception("broker down")), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    assert "draft:trigger:idempotency:L1:5:4046" not in mock_redis.store
+
+
+def test_trigger_draft_pick_keeps_the_claim_when_the_failure_is_ambiguous(client):
+    """A failure at or after basic_publish may have committed the message. Releasing then
+    would allow a genuine duplicate, so the claim stands."""
+    mock_channel = MagicMock()
+    mock_channel.basic_publish.side_effect = Exception("reset after send")
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    # Ambiguous, so the claim is kept AND promoted: a retry must get a clean "duplicate"
+    # rather than being told to keep retrying an outcome that can never be resolved.
+    assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "published"
 
 
 def test_trigger_draft_pick_broker_failure(client):

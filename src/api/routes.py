@@ -2,15 +2,24 @@ import os
 import json
 import logging
 import uuid
+import time
 import pika
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status
 from opentelemetry import propagate
 from pydantic import BaseModel, Field
+from src.api.draft import _redis_client
 from src.database import get_db_cursor
 
 logger = logging.getLogger("GatewayRoutes")
 router = APIRouter()
+
+# How long a claimed idempotency key blocks a repeat enqueue. Comfortably longer than any
+# pick clock (the retry window it guards) and far shorter than a draft, so keys from an
+# earlier draft can never collide with a later one.
+DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 900
+# Ceiling on any single broker operation for a deadline-carrying request.
+BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 
 # Load AMQP broker settings securely injected into environment variables
 # Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
@@ -36,6 +45,43 @@ class DraftPickTriggerPayload(BaseModel):
     name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
     position: str = Field(..., description="Player's position, for a name+position+team match against ESPN's own player pool")
     pro_team: str = Field(..., description="Player's NFL team abbreviation, for a name+position+team match against ESPN's own player pool")
+    idempotency_key: Optional[str] = Field(
+        None,
+        description=(
+            "Stable per-pick key. A publish that fails ambiguously - a read timeout, or a "
+            "connection reset after the request was sent - may already have queued a durable "
+            "message, so the caller's retry would otherwise enqueue a second draft action for "
+            "the same pick and the worker would click twice. Supplying the same key on every "
+            "attempt makes the enqueue idempotent. Optional: callers that genuinely want an "
+            "independent action (a manual override from the UI, say) simply omit it."
+        ),
+    )
+    league_id: Optional[str] = Field(
+        None,
+        description=(
+            "League this pick belongs to. With pick_number, lets the gateway revalidate "
+            "supersession immediately before publishing."
+        ),
+    )
+    pick_number: Optional[int] = Field(
+        None,
+        description=(
+            "Draft slot this target is for. The caller's cancellation flag cannot reach an "
+            "attempt already blocked inside requests.post, so a pick landing mid-flight "
+            "would otherwise still be enqueued and clicked against a later slot. The "
+            "gateway rechecks the listener board's last_processed_pick_number here."
+        ),
+    )
+    expires_at: Optional[float] = Field(
+        None,
+        description=(
+            "Unix timestamp after which this pick must not be enqueued. The caller's HTTP "
+            "timeout only stops the caller waiting; it does not cancel this handler, which "
+            "can resume from a blocked broker call and queue a click long after the pick "
+            "clock has run out - by then ESPN has autodrafted and the click lands on the "
+            "next team's pick. Checked immediately before the message is published."
+        ),
+    )
 
 # ------------------------------------------------------------------------------
 # ROUTE ENDPOINTS
@@ -208,6 +254,121 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     return
 
 
+def _claim_idempotency_key(key: Optional[str], token: str) -> str:
+    """Claims `key` for this request. Returns "claimed", "pending" or "published".
+
+    A publish that fails ambiguously - a read timeout, or a connection reset after the bytes
+    went out - may already have committed a durable message. Without this, the caller's retry
+    enqueues a second draft action and the worker clicks twice.
+
+    The claim carries a state, not just existence, because a bare claim does not prove a
+    message exists. If the first request claims the key and then hangs in BlockingConnection,
+    the caller can time out and retry while it is still running: answering "duplicate" there
+    would stop the caller, and the original request could then fail pre-publish and release
+    the key with nothing ever enqueued. "pending" lets the caller retry instead.
+
+    Fails OPEN. If Redis is unreachable we cannot prove the key is unclaimed, and the choice
+    is between a possible duplicate click and a certainly missed pick. A duplicate SELECT for
+    a player we already have is rejected by ESPN; a missed pick hands the roster spot to
+    autodraft, which is the failure this whole retry path exists to prevent.
+    """
+    if not key:
+        return "claimed"
+    redis_key = f"draft:trigger:idempotency:{key}"
+    try:
+        client = _redis_client()
+        # The value carries this request's token so only this request can release the claim.
+        if client.set(redis_key, f"pending:{token}", nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS):
+            return "claimed"
+        # Lost the race. A key with no value left (expired between SET and GET) is treated as
+        # still in flight rather than published; the caller retrying is the safe reading.
+        return "published" if client.get(redis_key) == "published" else "pending"
+    except Exception as e:
+        logger.warning(f"Idempotency check unavailable for key {key}; proceeding without it: {e}")
+        return "claimed"
+
+
+def _mark_idempotency_key_published(key: Optional[str]) -> None:
+    """Promotes a claim from "pending" once the message provably may exist, so that later
+    retries for this pick get "duplicate" instead of being told to try again."""
+    if not key:
+        return
+    try:
+        _redis_client().set(
+            f"draft:trigger:idempotency:{key}", "published",
+            ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.warning(f"Could not mark idempotency key {key} published: {e}")
+
+
+_RELEASE_CLAIM_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+def _release_idempotency_key(key: Optional[str], token: str) -> None:
+    """Releases a claim for a request that provably never enqueued anything.
+
+    Called only from the pre-publish failure path. Leaving the claim there would turn a
+    transient broker error into a permanent one: the caller's retry gets "duplicate", reads
+    it as success, and stops - so the pick is lost by the mechanism that exists to protect it.
+    """
+    if not key:
+        return
+    try:
+        # Compare-and-delete: a retry may already hold a fresh "pending" claim by the time
+        # this runs, and a blind DELETE would drop it and let a third request enqueue too.
+        _redis_client().eval(
+            _RELEASE_CLAIM_LUA, 1, f"draft:trigger:idempotency:{key}", f"pending:{token}",
+        )
+    except Exception as e:
+        # The TTL is the backstop. Worst case the retries for this pick all report duplicate
+        # until it expires, which is the pre-existing failure and not made worse here.
+        logger.warning(f"Could not release idempotency key {key}: {e}")
+
+
+def _pick_slot_already_filled(league_id: Optional[str], pick_number: Optional[int]) -> bool:
+    """Last-moment supersession check. hold_and_publish's cancel_event cannot interrupt an
+    attempt already blocked inside requests.post, so the slot can be taken while the request
+    is in flight; enqueueing then puts the click on a later team's pick. The listener writes
+    last_processed_pick_number as it persists each pick, so the board answers this directly.
+
+    Fails OPEN, like the idempotency claim: an unreachable Redis cannot prove the slot is
+    gone, and a missed pick is the worse outcome.
+    """
+    if not league_id or pick_number is None:
+        return False
+    try:
+        last_processed = _redis_client().hget(f"draft:{league_id}:board", "last_processed_pick_number")
+        return last_processed is not None and int(last_processed) >= int(pick_number)
+    except Exception as e:
+        logger.warning(f"Could not check pick supersession for league {league_id}: {e}")
+        return False
+
+
+# Pika raises these before any frame reaches the socket, so no message can exist.
+PRE_WRITE_BROKER_ERRORS = (
+    pika.exceptions.ChannelWrongStateError,
+    pika.exceptions.ConnectionWrongStateError,
+)
+
+
+def _close_broker_connection(connection) -> None:
+    """Best-effort close. Already-closed connections raise from pika rather than no-op, and a
+    failure to close must never mask the real outcome of the request."""
+    if connection is None:
+        return
+    try:
+        if connection.is_open:
+            connection.close()
+    except Exception as e:
+        logger.warning(f"Could not close broker connection cleanly: {e}")
+
+
 @router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
@@ -220,8 +381,41 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
 
     _reject_internal_player_id(payload.player_id, payload.name)
 
+    claim = _claim_idempotency_key(payload.idempotency_key, tracking_id)
+    if claim == "published":
+        logger.info(
+            f"Draft pick for Team {payload.team_id} -> {payload.name} already enqueued under "
+            f"idempotency key {payload.idempotency_key}; not queueing a duplicate."
+        )
+        return {
+            "status": "duplicate",
+            "queue": "draft_targets",
+            "team_id": payload.team_id,
+            "tracking_id": tracking_id,
+        }
+    if claim == "pending":
+        # Another request holds the key but has not reached the broker yet. It may still fail
+        # pre-publish and release, so reporting success here could lose the pick entirely.
+        # 503 is retryable, which sends the caller back for another attempt.
+        logger.info(
+            f"Draft pick for Team {payload.team_id} -> {payload.name} is still in flight under "
+            f"idempotency key {payload.idempotency_key}; asking the caller to retry."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="An earlier request for this pick is still in flight; retry shortly.",
+        )
+
+    connection = None
+    publish_attempted = False
     try:
         params = pika.URLParameters(AMQP_URL)
+        if payload.expires_at is not None:
+            # Without this, a wedged broker blocks the handler past the deadline and the
+            # expiry check below only discards work we already spent the pick clock on.
+            budget = max(1.0, min(BROKER_SOCKET_TIMEOUT_SECONDS, payload.expires_at - time.time()))
+            params.socket_timeout = budget
+            params.blocked_connection_timeout = budget
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
 
@@ -230,12 +424,41 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         carrier: dict = {}
         propagate.inject(carrier)
 
+        # idempotency_key is gateway-only state. The click-bot does not participate in
+        # deduplication, so forwarding it (or a null for legacy callers) would change the
+        # draft_targets JSON contract for no consumer benefit.
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"idempotency_key", "expires_at", "league_id", "pick_number"}),
         })
 
+        # Last possible moment before the message becomes durable. Everything above can
+        # block for an unbounded time on a wedged broker, so the caller's deadline has to be
+        # re-checked here rather than trusted at request entry.
+        if _pick_slot_already_filled(payload.league_id, payload.pick_number):
+            logger.warning(
+                f"Draft pick for Team {payload.team_id} -> {payload.name} targets slot "
+                f"{payload.pick_number}, which has already been filled; discarding."
+            )
+            _release_idempotency_key(payload.idempotency_key, tracking_id)
+            raise HTTPException(
+                status_code=409,
+                detail="The targeted pick slot has already been filled.",
+            )
+
+        if payload.expires_at is not None and time.time() >= payload.expires_at:
+            logger.warning(
+                f"Draft pick for Team {payload.team_id} -> {payload.name} expired before it could be "
+                f"queued (deadline {payload.expires_at}); discarding rather than clicking a stale pick."
+            )
+            _release_idempotency_key(payload.idempotency_key, tracking_id)
+            raise HTTPException(
+                status_code=409,
+                detail="Pick deadline passed before the target could be queued.",
+            )
+
+        publish_attempted = True
         channel.basic_publish(
             exchange="",
             routing_key="draft_targets",
@@ -246,8 +469,8 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
                 headers=carrier,
             )
         )
-        connection.close()
         logger.info(f"Draft pick target committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
+        _mark_idempotency_key_published(payload.idempotency_key)
         return {
             "status": "accepted",
             "queue": "draft_targets",
@@ -255,7 +478,33 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             "tracking_id": tracking_id,
         }
 
+    except HTTPException:
+        # The deadline check above raises this deliberately and has already released the
+        # claim; the generic handler below would relabel it a 500 and hide the reason.
+        raise
     except Exception as e:
+        # Everything up to basic_publish is provably pre-publish: no message can exist, so
+        # holding the claim would be actively harmful. The caller's retry would come back
+        # "duplicate", hold_and_publish would read that as success and stop retrying, and
+        # the pick would be silently ceded to autodraft by the very mechanism meant to
+        # prevent it - a broker blip converted into a guaranteed miss. Releasing restores
+        # the plain retry. A failure at or after basic_publish is genuinely ambiguous, so
+        # the claim stands and a possible duplicate is preferred to a possible miss.
+        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
+            # A wrong-state error from basic_publish is raised before any frame is emitted,
+            # so it is provably pre-write despite happening inside the call. Treating it as
+            # ambiguous would hand the retry a 202 duplicate for a message that never was.
+            _release_idempotency_key(payload.idempotency_key, tracking_id)
+        else:
+            # Ambiguous: the bytes may have landed. Promote the claim so a retry gets a clean
+            # "duplicate" rather than being told to keep retrying an outcome we cannot resolve.
+            _mark_idempotency_key_published(payload.idempotency_key)
         logger.error(f"Gateway failed to push draft pick target onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
+    finally:
+        # Every exit path closes exactly once. The optimizer retries this endpoint for the
+        # length of the pick clock, so a failure after the TCP connection opened - a
+        # queue_declare that raises, or either 409 below - used to leak a socket per attempt
+        # and could exhaust the gateway or the broker mid-draft.
+        _close_broker_connection(connection)
 

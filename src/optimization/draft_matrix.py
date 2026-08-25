@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Optional
 
 import polars as pl
@@ -59,6 +60,23 @@ CONSUMER_GROUP = "draft_matrix"
 DEFAULT_ROSTER_SIZE = 16
 DEFAULT_AUTO_DRAFT_DELAY_SECONDS = 8
 PAUSE_POLL_INTERVAL_SECONDS = 1
+# The pick clock bounds how long a failed publish may keep retrying. It is deliberately
+# configurable rather than a constant: ESPN practice rooms run a 30s clock while real
+# drafts are 90s+, and a hardcoded 90 would let a practice run retry for a full minute
+# after the clock it was meant to protect had already expired and autodrafted.
+DRAFT_PICK_CLOCK_SECONDS = int(os.getenv("DRAFT_PICK_CLOCK_SECONDS", "90"))
+DRAFT_PUBLISH_SAFETY_SECONDS = 5
+PUBLISH_RETRY_INTERVAL_SECONDS = 2
+# Retry only what a retry can actually fix. A deterministic 4xx (notably the 422 that
+# motivated this work) returns the same result to a byte-identical request, so retrying it
+# just burns the clock and floods the log while the real fix is upstream.
+RETRYABLE_PUBLISH_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# An attempt must finish inside the pick window, not merely start inside it: a request begun
+# a second before the deadline with a fixed 10s timeout could enqueue nine seconds after the
+# clock it was bounded by. The per-attempt timeout is therefore clamped to whatever window is
+# actually left, and an attempt is not started at all below the floor.
+PUBLISH_TIMEOUT_SECONDS = 10
+MIN_PUBLISH_WINDOW_SECONDS = 1
 # CORE-14 web UI wants to show the system's top-N alternatives, not just the one it would
 # auto-draft - see rank_recommended_targets/compute_draft_recommendation_candidates.
 TOP_CANDIDATES_LIMIT = 5
@@ -69,11 +87,9 @@ def _listener_board_key(league_id: str) -> str:
 
 
 def _write_listener_state(r_client, league_id: str, state: str, error: Optional[str] = None) -> None:
-    mapping = {"listener_state": state}
-    if error:
-        mapping["listener_error"] = error
-    else:
-        mapping["listener_error"] = ""
+    # listener_error_owner is reset on every listener write: the listener owns the field it
+    # just wrote, so a publisher thread holding a stale token must not be able to retract it.
+    mapping = {"listener_state": state, "listener_error": error or "", "listener_error_owner": ""}
     r_client.hset(_listener_board_key(league_id), mapping=mapping)
 
 
@@ -88,7 +104,7 @@ def load_undrafted_pool(cursor, league_id: str, season: int, week: int) -> pl.Da
     by definition, exactly vorp_matrix's pre-draft branch."""
     cursor.execute("""
         SELECT p.player_id, p.espn_id, p.name, p.position, s.projected_points, s.team_implied_total,
-               s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team
+               s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, COALESCE(s.team, p.team) AS team
         FROM players p
         JOIN weekly_stats s ON p.player_id = s.player_id
         WHERE s.season = %s AND s.week = %s
@@ -497,7 +513,7 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -522,18 +538,152 @@ def publish_draft_target(team_id: str, target: dict) -> None:
             "name": target["name"],
             "position": target["position"],
             "pro_team": target["team"],
+            # Stable across every retry of this pick, so an ambiguous failure (a read
+            # timeout, or a reset after the request was sent) cannot enqueue the same draft
+            # action twice and have the worker click twice.
+            "idempotency_key": idempotency_key,
+            # The request timeout only stops *this* client waiting; the FastAPI handler is
+            # synchronous and can resume from a blocked broker call long after we gave up.
+            # An absolute deadline lets the gateway discard the pick itself rather than
+            # queue a click for a slot ESPN has already autodrafted.
+            "expires_at": expires_at,
+            # cancel_event cannot interrupt a request already inside requests.post, so if the
+            # slot is filled mid-flight only the gateway can still stop the enqueue. It
+            # rechecks these against the listener board immediately before publishing.
+            "league_id": league_id,
+            "pick_number": pick_number,
         },
         headers=headers,
-        timeout=10,
+        timeout=timeout,
     )
+    if response.status_code >= 400:
+        logger.error(
+            "Draft target API rejected %s for Team %s with HTTP %s: %s",
+            target["name"], team_id, response.status_code, response.text,
+        )
     response.raise_for_status()
     logger.info(f"Published draft target for Team {team_id}: {target['name']} ({target['position']}).")
+
+
+def _publish_error_detail(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    response_body = getattr(response, "text", None)
+    return f"{error}; response body: {response_body}" if response_body else str(error)
+
+
+def _is_retryable_publish_error(error: Exception) -> bool:
+    """Distinguishes "the request never landed" from "the API considered it and said no".
+
+    Only the former can be fixed by sending the same bytes again. A 422 (the failure this
+    whole path was built for) or the missing-espn_id ValueError will answer identically
+    every time, so retrying them spends the remaining pick clock re-asking a settled
+    question and buries the one useful log line under dozens of copies.
+    """
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is not None:
+        return status in RETRYABLE_PUBLISH_STATUSES
+    # No response at all means the request never completed - a connection reset, DNS blip
+    # or timeout against a service that may well be up by the next attempt.
+    return isinstance(error, requests.exceptions.RequestException)
+
+
+def _record_publish_error(league_id: str, target: dict, error_message: str, season: Optional[int] = None) -> None:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO execution_log
+                        (transaction_type, bot_name, status, error_message, league_id, season, player_id, player_name)
+                    VALUES ('draft_target_publish', 'draft_matrix', 'failure', %s, %s, %s, %s, %s);
+                    """,
+                    (error_message, league_id, season, target.get("espn_id"), target.get("name")),
+                )
+    except Exception as error:
+        logger.error("Failed to record draft target publish error for league %s: %s", league_id, error)
+
+
+# Records a publish failure without asserting the consumer's health, and without stepping on
+# an error the consumer owns. The publisher runs on a separate thread from the Stream
+# consumer, which owns listener_state: a plain write of "Active" here can land after the
+# consumer recorded "Failed" and report a dead listener as healthy, and a plain write of
+# listener_error can replace the fatal listener reason with an unrelated HTTP error.
+# listener_error_owner records who wrote the message, so only that writer may retract it.
+_SURFACE_PUBLISH_ERROR_LUA = """
+local state = redis.call('HGET', KEYS[1], 'listener_state')
+if state == 'Failed' then
+    return 0
+end
+if not state or state == '' then
+    redis.call('HSET', KEYS[1], 'listener_state', 'Active')
+end
+redis.call('HSET', KEYS[1], 'listener_error', ARGV[1], 'listener_error_owner', ARGV[2])
+return 1
+"""
+
+
+def _surface_publish_failure(r_client, league_id: str, target: dict, error_message: str, owner: str = "", season: Optional[int] = None) -> None:
+    logger.error("Failed to publish draft target for league %s: %s", league_id, error_message)
+    try:
+        r_client.eval(
+            _SURFACE_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), error_message, owner,
+        )
+    except Exception as state_error:
+        logger.error("Failed to update listener error state for league %s: %s", league_id, state_error)
+    # Always recorded, even when the board write was skipped: execution_log is the durable
+    # record and must not lose a publish failure just because the listener is already down.
+    _record_publish_error(league_id, target, error_message, season=season)
+
+
+def _surface_publish_error(r_client, league_id: str, target: dict, error: Exception, owner: str = "", season: Optional[int] = None) -> str:
+    error_message = _publish_error_detail(error)
+    _surface_publish_failure(r_client, league_id, target, error_message, owner=owner, season=season)
+    return error_message
+
+
+# Clears listener_error only while this publisher still owns it. Matching the message text is
+# not an ownership check - two overlapping publisher threads can record the identical string
+# ("connection refused"), and the older one succeeding would then clear the newer one's
+# still-current failure.
+_CLEAR_PUBLISH_ERROR_LUA = """
+if redis.call('HGET', KEYS[1], 'listener_state') == 'Failed' then
+    return 0
+end
+if redis.call('HGET', KEYS[1], 'listener_error_owner') == ARGV[1] then
+    return redis.call('HSET', KEYS[1], 'listener_error', '', 'listener_error_owner', '')
+end
+return 0
+"""
+
+
+def _clear_publish_error(r_client, league_id: str, owner: str) -> None:
+    """Retracts our own transient publish error after a retry succeeded, leaving any error
+    another writer recorded in the meantime intact."""
+    try:
+        r_client.eval(_CLEAR_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), owner)
+    except Exception as state_error:
+        logger.error("Failed to clear listener error state for league %s: %s", league_id, state_error)
+
+
+def _surface_clock_expired(r_client, league_id: str, target: dict, pick_number: int, detail: str, owner: str = "", season: Optional[int] = None) -> None:
+    """A pick abandoned because the clock ran out is a missed pick, not a quiet no-op: it
+    hands the slot to ESPN autodraft. It has to reach /v1/draft/status and execution_log,
+    not just pod logs, or the operator's first sign of it is a player they did not choose."""
+    _surface_publish_failure(
+        r_client, league_id, target,
+        f"Pick clock expired before pick {pick_number} could be published ({detail}); "
+        f"target '{target.get('name')}' was not sent and the pick may be autodrafted.",
+        owner=owner, season=season,
+    )
 
 
 def hold_and_publish(
     r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
     trace_context: Optional[context.Context] = None,
+    monotonic_fn=time.monotonic, clock_origin: Optional[float] = None, time_fn=time.time,
+    season: Optional[int] = None,
 ) -> None:
     """Runs the cancellable delay window and publishes if it elapses uninterrupted. Called
     from a background thread (see _schedule_publish) so the Stream consumer loop keeps
@@ -543,12 +693,112 @@ def hold_and_publish(
     Runs on a separate OS thread, which (unlike an asyncio task) does not automatically
     inherit the calling thread's OTel context - trace_context is the parent span's context
     captured by _schedule_publish before spawning this thread, and must be explicitly
-    re-attached here or the eventual publish span silently starts a disconnected trace."""
+    re-attached here or the eventual publish span silently starts a disconnected trace.
+
+    clock_origin is a monotonic reading anchored to when the *upstream* pick was written to
+    the Redis Stream (see _stream_entry_clock_origin). Starting the deadline at thread start
+    would exclude everything handle_pick_event does synchronously first - persisting the
+    pick, reloading the undrafted pool, and solving the ILP - and would also give a drained
+    backlog entry a fresh clock, so a slow recompute or a restart could publish a target for
+    a pick ESPN had already autodrafted."""
     token = context.attach(trace_context) if trace_context is not None else None
     try:
         with tracer.start_as_current_span("draft_pick.hold_and_publish", attributes={"team_id": team_id, "pick_number": pick_number}):
-            if wait_for_pause_or_timeout(r_client, league_id, pick_number, delay_seconds, cancel_event=cancel_event, sleep_fn=sleep_fn):
-                publish_draft_target(team_id, target)
+            origin = monotonic_fn() if clock_origin is None else clock_origin
+            deadline = origin + DRAFT_PICK_CLOCK_SECONDS - DRAFT_PUBLISH_SAFETY_SECONDS
+            # Identifies this publisher thread on the board, so a retry that finally succeeds
+            # retracts only its own error. Two overlapping threads can record the identical
+            # message, which makes the text alone useless as an ownership check.
+            error_owner = f"publish:{league_id}:{pick_number}:{uuid.uuid4()}"
+            try:
+                should_publish = wait_for_pause_or_timeout(
+                    r_client, league_id, pick_number, delay_seconds,
+                    cancel_event=cancel_event, sleep_fn=sleep_fn,
+                )
+                if not should_publish:
+                    return
+
+                failure_surfaced = False
+                # Identifies this pick, not this attempt, so every retry claims the same key
+                # at the gateway and an ambiguous failure cannot enqueue the action twice.
+                idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
+                while True:
+                    # Both guards are re-evaluated before *every* attempt, not just the
+                    # first. The pause key and cancel_event are set by other threads and a
+                    # retry sleep is a wide window for either to land; publishing a target
+                    # the operator just paused (or that a newer pick superseded) is exactly
+                    # the override this whole mechanism exists to honour.
+                    # Read first, deliberately. A cancellation or pause landing during the
+                    # final retry sleep would otherwise be reported as a missed pick - an
+                    # error in Redis and execution_log - when the retry was stopped on
+                    # purpose because the slot was filled or the operator intervened.
+                    if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
+                        return
+                    if monotonic_fn() >= deadline:
+                        logger.warning(
+                            "Pick clock expired before the draft target for league %s pick %s could be published; "
+                            "abandoning rather than sending a target for a pick that has already been made.",
+                            league_id, pick_number,
+                        )
+                        _surface_clock_expired(
+                            r_client, league_id, target, pick_number, "deadline reached",
+                            owner=error_owner, season=season,
+                        )
+                        return
+                    # Clamp the attempt to the window that is actually left. Starting one is
+                    # not enough - a request begun just inside the deadline with the full
+                    # timeout would enqueue well outside it, publishing a target for a pick
+                    # ESPN had already made.
+                    remaining = deadline - monotonic_fn()
+                    if remaining < MIN_PUBLISH_WINDOW_SECONDS:
+                        logger.warning(
+                            "Too little of the pick clock left for league %s pick %s to complete a publish (%.1fs); abandoning.",
+                            league_id, pick_number, remaining,
+                        )
+                        _surface_clock_expired(
+                            r_client, league_id, target, pick_number,
+                            f"only {remaining:.1f}s left, below the {MIN_PUBLISH_WINDOW_SECONDS}s minimum request window",
+                            owner=error_owner, season=season,
+                        )
+                        return
+                    try:
+                        publish_draft_target(
+                            team_id, target, idempotency_key=idempotency_key,
+                            timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
+                            expires_at=time_fn() + remaining,
+                            league_id=league_id, pick_number=pick_number,
+                        )
+                        if failure_surfaced:
+                            _clear_publish_error(r_client, league_id, error_owner)
+                        return
+                    except Exception as error:
+                        retryable = _is_retryable_publish_error(error)
+                        # Surface the first failure, and again for whatever finally stops us.
+                        # Reporting only the first meant that a connection reset followed by a
+                        # 422 left /v1/draft/status and execution_log describing the reset -
+                        # a transient blip - while hiding the validation error that actually
+                        # ended the attempt and is the one a human needs to act on.
+                        if not failure_surfaced or not retryable:
+                            _surface_publish_error(r_client, league_id, target, error, owner=error_owner, season=season)
+                            failure_surfaced = True
+                        if not retryable:
+                            logger.error(
+                                "Draft target publish for league %s pick %s failed permanently; not retrying: %s",
+                                league_id, pick_number, _publish_error_detail(error),
+                            )
+                            return
+                        if monotonic_fn() + PUBLISH_RETRY_INTERVAL_SECONDS >= deadline:
+                            # Also terminal, and for a reason the first error does not convey.
+                            _surface_publish_error(r_client, league_id, target, error, owner=error_owner, season=season)
+                            return
+                        logger.warning(
+                            "Draft target publish failed for league %s pick %s; retrying in %ss: %s",
+                            league_id, pick_number, PUBLISH_RETRY_INTERVAL_SECONDS,
+                            _publish_error_detail(error),
+                        )
+                        sleep_fn(PUBLISH_RETRY_INTERVAL_SECONDS)
+            except Exception as error:
+                _surface_publish_error(r_client, league_id, target, error, owner=error_owner, season=season)
     finally:
         if token is not None:
             context.detach(token)
@@ -720,16 +970,25 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
         return target, next_pick_number
 
 
-def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int, pending_state: dict) -> None:
+def _cancel_pending_publish(pending_state: dict) -> None:
+    cancel_event = pending_state.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.set()
+    pending_state.pop("cancel_event", None)
+    pending_state.pop("pick_number", None)
+
+
+def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int, pending_state: dict, clock_origin: Optional[float] = None, season: Optional[int] = None) -> None:
     """Supersedes any still-pending hold-and-publish job (a newer pick means the old
     recommendation is stale) and schedules the new one on a background thread, so
     run_draft_listener's XREADGROUP loop keeps consuming instead of blocking through the
     delay window."""
-    old_cancel_event = pending_state.get("cancel_event")
-    if old_cancel_event is not None:
-        old_cancel_event.set()
+    _cancel_pending_publish(pending_state)
     cancel_event = threading.Event()
     pending_state["cancel_event"] = cancel_event
+    # The slot this pending target is for. _process_entries uses it to supersede the thread
+    # the moment that slot is taken, without waiting for another recommendation.
+    pending_state["pick_number"] = pick_number
 
     # Capture the calling thread's OTel context (this span, e.g. handle_pick_event's) so
     # hold_and_publish can re-attach it on the new OS thread - threading.Thread does not
@@ -738,6 +997,7 @@ def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, 
     threading.Thread(
         target=hold_and_publish,
         args=(r_client, league_id, team_id, pick_number, target, delay_seconds, cancel_event, time.sleep, trace_context),
+        kwargs={"clock_origin": clock_origin, "season": season},
         daemon=True,
     ).start()
 
@@ -759,15 +1019,66 @@ def decode_pick_event(fields: dict) -> dict:
     return json.loads(payload)
 
 
+def _stream_entry_clock_origin(entry_id, monotonic_fn=time.monotonic, time_fn=time.time) -> float:
+    """Converts a Redis Stream id ("<unixMillis>-<seq>") into a monotonic origin.
+
+    The pick clock starts when the upstream pick landed, which for a backlog entry may be
+    minutes before this process even read it. Stamping monotonic() at read time gave every
+    drained entry a fresh clock, so a restart draining up to 100 old entries could publish
+    a target for a pick ESPN autodrafted long ago. Falls back to "now" when the id is not
+    parseable (the DOM/REST tiers may write ids we did not mint) - the old behaviour, which
+    is wrong only in the direction of being too generous, and never blocks a live pick.
+    """
+    now_monotonic = monotonic_fn()
+    try:
+        entry_ms = int(str(entry_id).split("-")[0])
+    except (ValueError, AttributeError, IndexError):
+        return now_monotonic
+    age_seconds = time_fn() - (entry_ms / 1000.0)
+    if age_seconds <= 0:
+        return now_monotonic
+    return now_monotonic - age_seconds
+
+
+def _supersede_pending_publish_if_stale(pending_state: dict, event: dict) -> None:
+    """Cancels the pending publisher once the slot it targets has been filled. Older or
+    replayed events leave it alone: a redelivered pick must not cancel a live publish."""
+    pending_pick = pending_state.get("pick_number")
+    if pending_pick is None:
+        return
+    try:
+        event_pick = int(event["pick_number"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if event_pick >= pending_pick:
+        logger.info(
+            "Pick %s arrived for a slot with a publish still pending (%s); superseding it.",
+            event_pick, pending_pick,
+        )
+        _cancel_pending_publish(pending_state)
+
+
 def _process_entries(r_client, stream_key: str, league_id: str, season: int, week: int, team_id: str, delay_seconds: int, pending_state: dict, entries: list) -> None:
     with tracer.start_as_current_span("draft_listener.process_batch", attributes={"league_id": league_id}):
         for _stream, messages in entries:
             for entry_id, fields in messages:
+                # Anchored to when the pick was written to the Stream, not to when we got
+                # round to it. Persisting the pick and solving the ILP happen synchronously
+                # below, and a restart may drain a backlog of entries that are already
+                # minutes old - both would otherwise silently extend the real clock.
+                clock_origin = _stream_entry_clock_origin(entry_id)
                 try:
-                    result = handle_pick_event(r_client, league_id, season, week, team_id, decode_pick_event(fields))
+                    event = decode_pick_event(fields)
+                    # Superseding cannot wait for _schedule_publish. handle_pick_event returns
+                    # None whenever the new pick produces no recommendation - our own pick is
+                    # the common case - so the pending thread would survive, recover from a
+                    # transient failure and enqueue a target for a slot already taken, which
+                    # lands the click on the *next* team's pick.
+                    _supersede_pending_publish_if_stale(pending_state, event)
+                    result = handle_pick_event(r_client, league_id, season, week, team_id, event)
                     if result is not None:
                         target, next_pick_number = result
-                        _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state)
+                        _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state, clock_origin=clock_origin, season=season)
                 except Exception as e:
                     logger.error(f"Failed to process draft pick event {entry_id}: {e}")
                     _write_listener_state(r_client, league_id, "Failed", error=str(e))

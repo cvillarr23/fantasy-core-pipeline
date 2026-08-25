@@ -23,6 +23,35 @@ def _player(pid, position, vorp_score, name=None, team="KC", espn_id="e-1"):
             "vorp_score": vorp_score, "team": team}
 
 
+def _board_client(**initial):
+    """A Redis mock whose eval() applies the real semantics of draft_matrix's two Lua scripts
+    to a plain dict, exposed as client.board so tests can assert on the resulting board."""
+    board = dict(initial)
+
+    def fake_eval(script, _numkeys, _key, *argv):
+        if script == dm._SURFACE_PUBLISH_ERROR_LUA:
+            if board.get("listener_state") == "Failed":
+                return 0
+            if not board.get("listener_state"):
+                board["listener_state"] = "Active"
+            board["listener_error"], board["listener_error_owner"] = argv
+        elif script == dm._CLEAR_PUBLISH_ERROR_LUA:
+            if board.get("listener_state") == "Failed":
+                return 0
+            if board.get("listener_error_owner") == argv[0]:
+                board["listener_error"] = ""
+                board["listener_error_owner"] = ""
+        else:
+            raise AssertionError(f"unexpected script: {script}")
+        return 1
+
+    client = MagicMock()
+    client.get.return_value = None
+    client.eval.side_effect = fake_eval
+    client.board = board
+    return client
+
+
 # ---------------------------------------------------------------------------
 # resolve_own_team_flex_allocation / compute_position_caps
 # ---------------------------------------------------------------------------
@@ -202,6 +231,7 @@ def test_load_undrafted_pool_excludes_drafted_players():
     query, params = mock_cursor.execute.call_args[0]
     assert "NOT EXISTS" in query
     assert "draft_picks" in query
+    assert "COALESCE(s.team, p.team)" in query
     assert params == (2026, 1, "L1", 2026)
 
 
@@ -319,6 +349,12 @@ def test_publish_draft_target_posts_expected_payload():
         "name": "Some Back",
         "position": "RB",
         "pro_team": "KC",
+        # Absent unless the caller is retrying; the gateway treats None as "no dedup".
+        "idempotency_key": None,
+        # Absent for a direct call; hold_and_publish always sets these.
+        "expires_at": None,
+        "league_id": None,
+        "pick_number": None,
     }
 
 
@@ -332,6 +368,39 @@ def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
             dm.publish_draft_target("7", target)
 
     mock_post.assert_not_called()
+
+
+def test_publish_draft_target_logs_error_response_body(caplog):
+    target = _player("p1", "RB", 12.0, name="Some Back")
+    response = dm.requests.Response()
+    response.status_code = 422
+    response._content = b'{"detail":[{"loc":["body","pro_team"],"msg":"Input should be a valid string"}]}'
+    response.url = f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
+
+    with patch("src.optimization.draft_matrix.requests.post", return_value=response):
+        with caplog.at_level("ERROR", logger="DraftMatrix"):
+            with pytest.raises(dm.requests.HTTPError):
+                dm.publish_draft_target("7", target)
+
+    assert '"pro_team"' in caplog.text
+    assert "Input should be a valid string" in caplog.text
+
+
+def test_record_publish_error_writes_status_visible_execution_log_row():
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm._record_publish_error("L1", _player("p1", "RB", 10.0, name="Some Back"), "HTTP 422", season=2026)
+
+    query, params = mock_cursor.execute.call_args.args
+    assert "draft_target_publish" in query
+    assert "execution_log" in query
+    # season is recorded because a reactivated league keeps its league_id year over year;
+    # without it /status opens next year's draft showing this year's failures.
+    assert params == ("HTTP 422", "L1", 2026, "e-1", "Some Back")
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +430,516 @@ def test_hold_and_publish_skips_when_cancelled():
         dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
 
     mock_post.assert_not_called()
+
+
+def test_hold_and_publish_retries_transient_publish_failure():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    sleeps = []
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=[dm.requests.ConnectionError("unavailable"), None]) as mock_publish, \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            sleep_fn=sleeps.append,
+        )
+
+    assert mock_publish.call_count == 2
+    assert sleeps == [dm.PUBLISH_RETRY_INTERVAL_SECONDS]
+    mock_record.assert_called_once()
+    # The retracting write is a compare-and-set on this thread's ownership token.
+    assert mock_client.eval.call_args.args[0] == dm._CLEAR_PUBLISH_ERROR_LUA
+    assert mock_client.eval.call_args.args[-1].startswith("publish:L1:5:")
+    assert mock_client.board["listener_error"] == ""
+
+
+def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_success():
+    """The Stream consumer can record a real listener failure while our HTTP attempt is in
+    flight. Clearing unconditionally would blank it and report a healthy draft."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    attempts = []
+
+    def publish(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise dm.requests.ConnectionError("unavailable")
+        # The consumer thread records a genuine listener failure while this attempt runs,
+        # replacing the transient publish error we surfaced a moment ago.
+        mock_client.board["listener_state"] = "Failed"
+        mock_client.board["listener_error"] = "Listener died: connection refused"
+        mock_client.board["listener_error_owner"] = "listener"
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=publish), \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_error"] == "Listener died: connection refused"
+    assert mock_client.board["listener_state"] == "Failed"
+
+
+def test_hold_and_publish_identifies_the_slot_so_the_gateway_can_revalidate():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_publish.call_args.kwargs["league_id"] == "L1"
+    assert mock_publish.call_args.kwargs["pick_number"] == 5
+
+
+def test_hold_and_publish_sends_an_absolute_deadline_to_the_gateway():
+    """The gateway handler is synchronous and can resume from a blocked broker call after our
+    request timed out, so it needs the deadline itself rather than our timeout."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 90), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            monotonic_fn=lambda: 30.0, clock_origin=0.0, time_fn=lambda: 1_000.0,
+        )
+
+    # 60s of clock left at wall time 1000.
+    assert mock_publish.call_args.kwargs["expires_at"] == 1_060.0
+
+
+def test_hold_and_publish_will_not_retract_an_error_a_failed_listener_now_owns():
+    """_write_listener_state resets listener_error_owner, so a publisher holding a stale
+    token cannot clear the fatal reason the listener wrote after it."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    attempts = []
+
+    def publish(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise dm.requests.ConnectionError("unavailable")
+        dm._write_listener_state(mock_client, "L1", "Failed", error="Listener crashed")
+        # _write_listener_state goes through hset, which the board mock does not model.
+        mock_client.board.update({
+            "listener_state": "Failed",
+            "listener_error": "Listener crashed",
+            "listener_error_owner": "",
+        })
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=publish), \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_error"] == "Listener crashed"
+
+
+def test_hold_and_publish_leaves_a_failed_listeners_error_intact():
+    """When the Stream consumer has already recorded a fatal listener reason, a later publish
+    error must not replace it on the board - that reason is the one an operator acts on. The
+    publish failure still reaches execution_log, which is the durable record."""
+    mock_client = _board_client(listener_state="Failed", listener_error="Listener died: connection refused")
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=RuntimeError("no espn_id")), \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_state"] == "Failed"
+    assert mock_client.board["listener_error"] == "Listener died: connection refused"
+    mock_record.assert_called_once()
+
+
+def test_hold_and_publish_does_not_clear_an_identical_error_owned_by_another_publisher():
+    """Two publisher threads can record the same message text. Matching on text alone would
+    let the older thread's success retract the newer thread's still-current failure."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    attempts = []
+
+    def publish(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise dm.requests.ConnectionError("connection refused")
+        # A concurrent publisher for the next pick records the identical message.
+        mock_client.board["listener_error"] = "connection refused"
+        mock_client.board["listener_error_owner"] = "publish:L1:6:other"
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=publish), \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_error"] == "connection refused"
+    assert mock_client.board["listener_error_owner"] == "publish:L1:6:other"
+
+
+def test_hold_and_publish_surfaces_failure_after_clock_expires():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    now = [0]
+
+    def _sleep(seconds):
+        now[0] += seconds
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 5), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=_sleep, monotonic_fn=lambda: now[0],
+        )
+
+    assert mock_publish.call_count > 1
+    # Twice: the first failure, then again for the one that actually ended the attempt.
+    # Reporting only the first hides the terminal cause, which is the one a human acts on.
+    assert mock_record.call_count == 2
+    assert mock_record.call_args.args[:2] == ("L1", target)
+    assert "unavailable" in mock_record.call_args.args[2]
+    assert mock_client.board["listener_state"] == "Active"
+    assert "unavailable" in mock_client.board["listener_error"]
+
+
+def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    sleeps = []
+
+    with patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            sleep_fn=sleeps.append,
+        )
+
+    assert sum(sleeps) == 8
+    assert mock_publish.call_count == 1
+    assert mock_publish.call_args.args == ("7", target)
+    assert mock_publish.call_args.kwargs["idempotency_key"] == "L1:5:e-1"
+    assert mock_publish.call_args.kwargs["timeout"] == dm.PUBLISH_TIMEOUT_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# hold_and_publish - PR #85 review fixes
+# ---------------------------------------------------------------------------
+
+def test_hold_and_publish_does_not_retry_a_deterministic_client_error():
+    """A 422 answers identically to a byte-identical retry. Retrying it spends the rest of
+    the pick clock re-asking a settled question and buries the one useful log line."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    response = dm.requests.Response()
+    response.status_code = 422
+    response._content = b'{"detail":[{"loc":["body","pro_team"]}]}'
+    error = dm.requests.HTTPError("422 Client Error", response=response)
+    sleeps = []
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=error) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=sleeps.append,
+        )
+
+    assert mock_publish.call_count == 1
+    assert sleeps == []
+
+
+def test_hold_and_publish_does_not_retry_a_missing_crosswalk_entry():
+    """publish_draft_target's own ValueError is deterministic too - the target will still
+    have no espn_id two seconds later."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    sleeps = []
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=ValueError("no espn_id")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=sleeps.append,
+        )
+
+    assert mock_publish.call_count == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", sorted(dm.RETRYABLE_PUBLISH_STATUSES))
+def test_retryable_publish_statuses_are_retried(status):
+    response = dm.requests.Response()
+    response.status_code = status
+    assert dm._is_retryable_publish_error(dm.requests.HTTPError("boom", response=response)) is True
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_deterministic_client_errors_are_not_retried(status):
+    response = dm.requests.Response()
+    response.status_code = status
+    assert dm._is_retryable_publish_error(dm.requests.HTTPError("boom", response=response)) is False
+
+
+def test_transport_failures_with_no_response_are_retried():
+    assert dm._is_retryable_publish_error(dm.requests.ConnectionError("reset")) is True
+    assert dm._is_retryable_publish_error(dm.requests.Timeout("slow")) is True
+    assert dm._is_retryable_publish_error(RuntimeError("programming error")) is False
+
+
+def test_hold_and_publish_rechecks_cancellation_between_retries():
+    """A newer pick can supersede this target *during* the retry sleep. Checking only after
+    a failure - and not again before the next attempt - published the stale target anyway."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    cancel_event = threading.Event()
+
+    def _sleep(_seconds):
+        cancel_event.set()
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            cancel_event=cancel_event, sleep_fn=_sleep,
+        )
+
+    assert mock_publish.call_count == 1
+
+
+def test_hold_and_publish_rechecks_operator_pause_between_retries():
+    mock_client = MagicMock()
+    pause_key = "draft:L1:pause:5"
+    paused = {"value": False}
+    mock_client.get.side_effect = lambda key: "1" if (key == pause_key and paused["value"]) else None
+    target = _player("p1", "RB", 10.0)
+
+    def _sleep(_seconds):
+        paused["value"] = True
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=_sleep,
+        )
+
+    assert mock_publish.call_count == 1
+
+
+def test_hold_and_publish_never_publishes_after_the_clock_has_already_expired():
+    """The deadline is anchored to when the upstream pick was observed, so a slow ILP solve
+    can consume the entire clock before this thread even starts. Publishing then would send
+    a target for a pick ESPN has already autodrafted."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 100.0,
+            clock_origin=0.0,  # the pick landed 100s ago; a 30s clock is long gone
+        )
+
+    mock_publish.assert_not_called()
+
+
+def test_hold_and_publish_uses_the_supplied_clock_origin_not_thread_start():
+    """Regression: anchoring the deadline at thread start excluded everything
+    handle_pick_event does synchronously first, silently extending the real clock."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    # 20s of the 30s clock was already spent persisting the pick and solving the ILP, so
+    # only ~5s of publish window remains after the safety margin - one attempt, no retry.
+    now = [20.0]
+
+    def _sleep(seconds):
+        now[0] += seconds
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 5), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=_sleep, monotonic_fn=lambda: now[0], clock_origin=0.0,
+        )
+
+    # Deadline is 0 + 30 - 5 = 25, so attempts land at t=20, 22 and 24 and the loop then
+    # stops rather than running to t=45 as a thread-start anchor would have.
+    assert mock_publish.call_count == 3
+    assert now[0] < 25.0
+
+
+def test_hold_and_publish_clamps_the_request_timeout_to_the_remaining_window():
+    """Starting an attempt inside the deadline is not enough: with a fixed 10s timeout, a
+    request begun one second before it could enqueue nine seconds after the pick clock."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 27.0, clock_origin=0.0,
+        )
+
+    # 3s of window left, so the attempt gets 3s - not the 10s default.
+    assert mock_publish.call_args.kwargs["timeout"] == 3.0
+
+
+def test_hold_and_publish_uses_the_full_timeout_when_the_window_is_wide():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 90), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 0.0, clock_origin=0.0,
+        )
+
+    assert mock_publish.call_args.kwargs["timeout"] == dm.PUBLISH_TIMEOUT_SECONDS
+
+
+def test_hold_and_publish_does_not_start_an_attempt_that_cannot_finish():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_record_publish_error") as mock_record, \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 29.5, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+    # An abandoned pick hands the slot to autodraft, so it has to be visible in
+    # /v1/draft/status and execution_log, not only in the pod log.
+    mock_record.assert_called_once()
+    assert "Pick clock expired" in mock_client.board["listener_error"]
+    assert "minimum request window" in mock_client.board["listener_error"]
+
+
+def test_hold_and_publish_does_not_report_a_cancellation_as_a_missed_pick():
+    """A cancellation landing during the final retry sleep must not be recorded as a clock
+    expiry: the retry was stopped on purpose, and a false missed-pick error in /status and
+    execution_log sends the operator looking for a problem that does not exist."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_record_publish_error") as mock_record, \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, cancel_event=cancel_event,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+    mock_record.assert_not_called()
+    assert not mock_client.board.get("listener_error")
+
+
+def test_hold_and_publish_records_the_season_with_a_publish_failure():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=RuntimeError("no espn_id")), \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            season=2026,
+        )
+
+    assert mock_record.call_args.kwargs["season"] == 2026
+
+
+def test_hold_and_publish_reports_a_pick_abandoned_at_the_deadline():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_record_publish_error") as mock_record, \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+    mock_record.assert_called_once()
+    assert "Pick clock expired" in mock_client.board["listener_error"]
+
+
+def test_process_entries_anchors_the_deadline_to_the_stream_entry_not_the_read_time():
+    # Redis Stream id is "<unixMillis>-<seq>". This entry was written 60s ago, so its clock
+    # origin must be 60s in the past - not "now", which is what a fresh monotonic() reading
+    # at read time produced and which gave every drained backlog entry a brand new clock.
+    entry_ms = int((time.time() - 60) * 1000)
+    entries = [(f"draft_picks:L1", [(f"{entry_ms}-0", {"payload": json.dumps({"pick_number": 4})})])]
+
+    with patch.object(dm, "handle_pick_event", return_value=(_player("p1", "RB", 1.0), 5)), \
+         patch.object(dm, "_schedule_publish") as mock_schedule:
+        before = time.monotonic()
+        dm._process_entries(MagicMock(), "draft_picks:L1", "L1", 2026, 1, "7", 8, {}, entries)
+        after = time.monotonic()
+
+    origin = mock_schedule.call_args.kwargs["clock_origin"]
+    assert before - 61 <= origin <= after - 59
+
+
+def test_stream_entry_clock_origin_falls_back_to_now_for_an_unparseable_id():
+    # The DOM/REST tiers may write ids we did not mint. Falling back to "now" is only wrong
+    # in the generous direction and must never block a live pick.
+    assert dm._stream_entry_clock_origin("not-an-id", monotonic_fn=lambda: 500.0) == 500.0
+    assert dm._stream_entry_clock_origin(None, monotonic_fn=lambda: 500.0) == 500.0
+
+
+def test_stream_entry_clock_origin_ignores_a_future_dated_entry():
+    # Clock skew between the worker writing the entry and this process reading it must not
+    # push the deadline into the future and extend the clock.
+    future_ms = int((time.time() + 30) * 1000)
+    assert dm._stream_entry_clock_origin(f"{future_ms}-0", monotonic_fn=lambda: 500.0) == 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +1301,44 @@ def test_decode_pick_event_unwraps_worker_payload_envelope():
 def test_decode_pick_event_passes_through_flat_fields():
     fields = {"pick_number": "12", "team_id": "3", "player_id": "99"}
     assert dm.decode_pick_event(fields) == fields
+
+
+def test_process_entries_supersedes_a_pending_publish_when_our_own_pick_lands():
+    """handle_pick_event returns None for our own pick, so _schedule_publish never runs and
+    used to leave the old publisher alive. It could then recover from a transient failure and
+    enqueue a target for a slot ESPN had already filled - a click on the next team's pick."""
+    mock_client = MagicMock()
+    cancel_event = threading.Event()
+    pending_state = {"cancel_event": cancel_event, "pick_number": 6}
+    event = {"pick_number": 6, "team_id": "7", "player_id": "p1"}
+    entries = [("draft_picks:L1", [("1-0", {"payload": json.dumps(event)})])]
+
+    with patch("src.optimization.draft_matrix.handle_pick_event", return_value=None):
+        dm._process_entries(
+            mock_client, stream_key="draft_picks:L1", league_id="L1", season=2026, week=1,
+            team_id="7", delay_seconds=8, pending_state=pending_state, entries=entries,
+        )
+
+    assert cancel_event.is_set()
+    assert "cancel_event" not in pending_state
+
+
+def test_process_entries_leaves_a_pending_publish_alone_for_a_replayed_older_pick():
+    """A redelivered entry from before the pending target must not cancel a live publish."""
+    mock_client = MagicMock()
+    cancel_event = threading.Event()
+    pending_state = {"cancel_event": cancel_event, "pick_number": 6}
+    event = {"pick_number": 4, "team_id": "3", "player_id": "p1"}
+    entries = [("draft_picks:L1", [("1-0", {"payload": json.dumps(event)})])]
+
+    with patch("src.optimization.draft_matrix.handle_pick_event", return_value=None):
+        dm._process_entries(
+            mock_client, stream_key="draft_picks:L1", league_id="L1", season=2026, week=1,
+            team_id="7", delay_seconds=8, pending_state=pending_state, entries=entries,
+        )
+
+    assert not cancel_event.is_set()
+    assert pending_state["cancel_event"] is cancel_event
 
 
 def test_process_entries_decodes_payload_before_handling():
