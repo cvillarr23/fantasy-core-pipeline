@@ -1555,11 +1555,12 @@ def test_resolve_player_id_looks_up_espn_id_only():
 # run_draft_listener's Redis client construction (#87)
 # ---------------------------------------------------------------------------
 def test_run_draft_listener_sets_socket_timeout_above_the_block_duration():
-    """Regression test for #87: an unset socket_timeout defaults to 5s on redis-py 8.1,
-    colliding with the main loop's block=XREADGROUP_BLOCK_MS (also 5000ms) and raising a
-    client-side TimeoutError on any natural quiet gap between picks - reproduced live
-    against a real draft room. socket_timeout must stay comfortably larger than the block
-    duration so a quiet gap resolves as a clean nil, not an exception."""
+    """Regression test for #87: an unset socket_timeout leaves this repo's pinned
+    redis==5.0.4 unbounded, so a genuinely dropped connection hangs the listener forever
+    with no exception - the consumer-group backlog-drain-on-restart design never gets a
+    chance to run if the process never actually dies. socket_timeout must stay set and
+    comfortably larger than the block duration, so a normal quiet gap (already handled
+    server-side by BLOCK) still resolves as a clean nil, not an exception."""
     with patch("src.optimization.draft_matrix.redis.Redis") as mock_redis_cls:
         mock_client = MagicMock()
         mock_client.ping.side_effect = RuntimeError("boom")
