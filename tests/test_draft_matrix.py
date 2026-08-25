@@ -414,10 +414,34 @@ def test_hold_and_publish_retries_transient_publish_failure():
     assert mock_publish.call_count == 2
     assert sleeps == [dm.PUBLISH_RETRY_INTERVAL_SECONDS]
     mock_record.assert_called_once()
-    assert mock_client.hset.call_args.kwargs["mapping"] == {
-        "listener_state": "Active",
-        "listener_error": "",
-    }
+    # The retracting write is a compare-and-set on the message we ourselves recorded.
+    assert mock_client.eval.call_count == 1
+    assert "unavailable" in mock_client.eval.call_args.args[-1]
+
+
+def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_success():
+    """The Stream consumer can record a real listener failure while our HTTP attempt is in
+    flight. Clearing unconditionally would blank it and report a healthy draft."""
+    board = {"listener_error": "Listener died: connection refused"}
+
+    def fake_eval(_script, _numkeys, _key, expected):
+        if board.get("listener_error") == expected:
+            board["listener_error"] = ""
+        return 0
+
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    mock_client.eval.side_effect = fake_eval
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=[dm.requests.ConnectionError("unavailable"), None]), \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=lambda _s: None,
+        )
+
+    assert board["listener_error"] == "Listener died: connection refused"
 
 
 def test_hold_and_publish_surfaces_failure_after_clock_expires():
@@ -670,6 +694,7 @@ def test_hold_and_publish_does_not_start_an_attempt_that_cannot_finish():
     with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
          patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
          patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_record_publish_error") as mock_record, \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
             mock_client, "L1", "7", 5, target, delay_seconds=0,
@@ -677,6 +702,32 @@ def test_hold_and_publish_does_not_start_an_attempt_that_cannot_finish():
         )
 
     mock_publish.assert_not_called()
+    # An abandoned pick hands the slot to autodraft, so it has to be visible in
+    # /v1/draft/status and execution_log, not only in the pod log.
+    mock_record.assert_called_once()
+    mapping = mock_client.hset.call_args.kwargs["mapping"]
+    assert "Pick clock expired" in mapping["listener_error"]
+    assert "minimum request window" in mapping["listener_error"]
+
+
+def test_hold_and_publish_reports_a_pick_abandoned_at_the_deadline():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_record_publish_error") as mock_record, \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+    mock_record.assert_called_once()
+    assert "Pick clock expired" in mock_client.hset.call_args.kwargs["mapping"]["listener_error"]
 
 
 def test_process_entries_anchors_the_deadline_to_the_stream_entry_not_the_read_time():

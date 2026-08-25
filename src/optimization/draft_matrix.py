@@ -595,14 +595,50 @@ def _record_publish_error(league_id: str, target: dict, error_message: str) -> N
         logger.error("Failed to record draft target publish error for league %s: %s", league_id, error)
 
 
-def _surface_publish_error(r_client, league_id: str, target: dict, error: Exception) -> None:
-    error_message = _publish_error_detail(error)
+def _surface_publish_failure(r_client, league_id: str, target: dict, error_message: str) -> None:
     logger.error("Failed to publish draft target for league %s: %s", league_id, error_message)
     try:
         _write_listener_state(r_client, league_id, "Active", error=error_message)
     except Exception as state_error:
         logger.error("Failed to update listener error state for league %s: %s", league_id, state_error)
     _record_publish_error(league_id, target, error_message)
+
+
+def _surface_publish_error(r_client, league_id: str, target: dict, error: Exception) -> str:
+    error_message = _publish_error_detail(error)
+    _surface_publish_failure(r_client, league_id, target, error_message)
+    return error_message
+
+
+# Clears listener_error only while it still holds the exact message we wrote. HGET-then-HSET
+# would not do: the Stream consumer thread can record a genuine listener failure while our
+# HTTP attempt is in flight, and an unconditional clear would blank a newer, unrelated error.
+_CLEAR_PUBLISH_ERROR_LUA = """
+if redis.call('HGET', KEYS[1], 'listener_error') == ARGV[1] then
+    return redis.call('HSET', KEYS[1], 'listener_error', '')
+end
+return 0
+"""
+
+
+def _clear_publish_error(r_client, league_id: str, error_message: str) -> None:
+    """Retracts our own transient publish error after a retry succeeded, leaving any error
+    another writer recorded in the meantime intact."""
+    try:
+        r_client.eval(_CLEAR_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), error_message)
+    except Exception as state_error:
+        logger.error("Failed to clear listener error state for league %s: %s", league_id, state_error)
+
+
+def _surface_clock_expired(r_client, league_id: str, target: dict, pick_number: int, detail: str) -> None:
+    """A pick abandoned because the clock ran out is a missed pick, not a quiet no-op: it
+    hands the slot to ESPN autodraft. It has to reach /v1/draft/status and execution_log,
+    not just pod logs, or the operator's first sign of it is a player they did not choose."""
+    _surface_publish_failure(
+        r_client, league_id, target,
+        f"Pick clock expired before pick {pick_number} could be published ({detail}); "
+        f"target '{target.get('name')}' was not sent and the pick may be autodrafted.",
+    )
 
 
 def hold_and_publish(
@@ -641,6 +677,7 @@ def hold_and_publish(
                     return
 
                 failure_surfaced = False
+                last_error_message = ""
                 # Identifies this pick, not this attempt, so every retry claims the same key
                 # at the gateway and an ambiguous failure cannot enqueue the action twice.
                 idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
@@ -656,6 +693,9 @@ def hold_and_publish(
                             "abandoning rather than sending a target for a pick that has already been made.",
                             league_id, pick_number,
                         )
+                        _surface_clock_expired(
+                            r_client, league_id, target, pick_number, "deadline reached",
+                        )
                         return
                     if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
                         return
@@ -669,6 +709,10 @@ def hold_and_publish(
                             "Too little of the pick clock left for league %s pick %s to complete a publish (%.1fs); abandoning.",
                             league_id, pick_number, remaining,
                         )
+                        _surface_clock_expired(
+                            r_client, league_id, target, pick_number,
+                            f"only {remaining:.1f}s left, below the {MIN_PUBLISH_WINDOW_SECONDS}s minimum request window",
+                        )
                         return
                     try:
                         publish_draft_target(
@@ -676,10 +720,7 @@ def hold_and_publish(
                             timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
                         )
                         if failure_surfaced:
-                            try:
-                                _write_listener_state(r_client, league_id, "Active")
-                            except Exception as state_error:
-                                logger.error("Failed to clear listener error state for league %s: %s", league_id, state_error)
+                            _clear_publish_error(r_client, league_id, last_error_message)
                         return
                     except Exception as error:
                         retryable = _is_retryable_publish_error(error)
@@ -689,7 +730,7 @@ def hold_and_publish(
                         # a transient blip - while hiding the validation error that actually
                         # ended the attempt and is the one a human needs to act on.
                         if not failure_surfaced or not retryable:
-                            _surface_publish_error(r_client, league_id, target, error)
+                            last_error_message = _surface_publish_error(r_client, league_id, target, error)
                             failure_surfaced = True
                         if not retryable:
                             logger.error(
