@@ -15,8 +15,12 @@ def _fake_redis():
     """Minimal Redis stand-in with real SET/SET NX/GET/DELETE semantics, so idempotency
     tests exercise the actual claim state machine rather than a scripted call sequence."""
     store: dict = {}
+    hashes: dict = {}
 
     class _R:
+        def hget(self, key, field):
+            return hashes.get(key, {}).get(field)
+
         def set(self, key, value, nx=False, ex=None):
             if nx and key in store:
                 return None
@@ -38,6 +42,7 @@ def _fake_redis():
 
     client = _R()
     client.store = store
+    client.hashes = hashes
     return client
 
 
@@ -218,6 +223,77 @@ def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
     mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_discards_a_target_whose_slot_was_filled_mid_flight(client):
+    """hold_and_publish's cancel_event cannot interrupt a request already inside
+    requests.post. If the slot fills while the request is in flight, only the gateway can
+    still stop it - otherwise the click lands on a later team's pick."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+    mock_redis.hashes["draft:L1:board"] = {"last_processed_pick_number": "6"}
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:6:4046",
+        "league_id": "L1", "pick_number": 6,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 409
+    mock_channel.basic_publish.assert_not_called()
+    assert "draft:trigger:idempotency:L1:6:4046" not in mock_redis.store
+
+
+def test_trigger_draft_pick_publishes_when_the_slot_is_still_open(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+    mock_redis.hashes["draft:L1:board"] = {"last_processed_pick_number": "5"}
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "league_id": "L1", "pick_number": 6,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "league_id" not in body and "pick_number" not in body
+
+
+def test_trigger_draft_pick_releases_the_claim_on_a_pika_wrong_state_error(client):
+    """ChannelWrongStateError is raised before any frame reaches the socket, so no message
+    exists. Promoting the claim would hand the retry a 202 duplicate for nothing."""
+    mock_channel = MagicMock()
+    mock_channel.basic_publish.side_effect = routes.pika.exceptions.ChannelWrongStateError("closed")
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    assert "draft:trigger:idempotency:L1:5:4046" not in mock_redis.store
 
 
 def test_trigger_draft_pick_discards_a_pick_whose_deadline_has_passed(client):

@@ -513,7 +513,7 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -547,6 +547,11 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             # An absolute deadline lets the gateway discard the pick itself rather than
             # queue a click for a slot ESPN has already autodrafted.
             "expires_at": expires_at,
+            # cancel_event cannot interrupt a request already inside requests.post, so if the
+            # slot is filled mid-flight only the gateway can still stop the enqueue. It
+            # rechecks these against the listener board immediately before publishing.
+            "league_id": league_id,
+            "pick_number": pick_number,
         },
         headers=headers,
         timeout=timeout,
@@ -756,6 +761,7 @@ def hold_and_publish(
                             team_id, target, idempotency_key=idempotency_key,
                             timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
                             expires_at=time_fn() + remaining,
+                            league_id=league_id, pick_number=pick_number,
                         )
                         if failure_surfaced:
                             _clear_publish_error(r_client, league_id, error_owner)

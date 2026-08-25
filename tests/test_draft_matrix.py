@@ -351,8 +351,10 @@ def test_publish_draft_target_posts_expected_payload():
         "pro_team": "KC",
         # Absent unless the caller is retrying; the gateway treats None as "no dedup".
         "idempotency_key": None,
-        # Absent for a direct call; hold_and_publish always sets it from the pick clock.
+        # Absent for a direct call; hold_and_publish always sets these.
         "expires_at": None,
+        "league_id": None,
+        "pick_number": None,
     }
 
 
@@ -476,6 +478,20 @@ def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_succe
 
     assert mock_client.board["listener_error"] == "Listener died: connection refused"
     assert mock_client.board["listener_state"] == "Failed"
+
+
+def test_hold_and_publish_identifies_the_slot_so_the_gateway_can_revalidate():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_publish.call_args.kwargs["league_id"] == "L1"
+    assert mock_publish.call_args.kwargs["pick_number"] == 5
 
 
 def test_hold_and_publish_sends_an_absolute_deadline_to_the_gateway():

@@ -56,6 +56,22 @@ class DraftPickTriggerPayload(BaseModel):
             "independent action (a manual override from the UI, say) simply omit it."
         ),
     )
+    league_id: Optional[str] = Field(
+        None,
+        description=(
+            "League this pick belongs to. With pick_number, lets the gateway revalidate "
+            "supersession immediately before publishing."
+        ),
+    )
+    pick_number: Optional[int] = Field(
+        None,
+        description=(
+            "Draft slot this target is for. The caller's cancellation flag cannot reach an "
+            "attempt already blocked inside requests.post, so a pick landing mid-flight "
+            "would otherwise still be enqueued and clicked against a later slot. The "
+            "gateway rechecks the listener board's last_processed_pick_number here."
+        ),
+    )
     expires_at: Optional[float] = Field(
         None,
         description=(
@@ -315,6 +331,32 @@ def _release_idempotency_key(key: Optional[str], token: str) -> None:
         logger.warning(f"Could not release idempotency key {key}: {e}")
 
 
+def _pick_slot_already_filled(league_id: Optional[str], pick_number: Optional[int]) -> bool:
+    """Last-moment supersession check. hold_and_publish's cancel_event cannot interrupt an
+    attempt already blocked inside requests.post, so the slot can be taken while the request
+    is in flight; enqueueing then puts the click on a later team's pick. The listener writes
+    last_processed_pick_number as it persists each pick, so the board answers this directly.
+
+    Fails OPEN, like the idempotency claim: an unreachable Redis cannot prove the slot is
+    gone, and a missed pick is the worse outcome.
+    """
+    if not league_id or pick_number is None:
+        return False
+    try:
+        last_processed = _redis_client().hget(f"draft:{league_id}:board", "last_processed_pick_number")
+        return last_processed is not None and int(last_processed) >= int(pick_number)
+    except Exception as e:
+        logger.warning(f"Could not check pick supersession for league {league_id}: {e}")
+        return False
+
+
+# Pika raises these before any frame reaches the socket, so no message can exist.
+PRE_WRITE_BROKER_ERRORS = (
+    pika.exceptions.ChannelWrongStateError,
+    pika.exceptions.ConnectionWrongStateError,
+)
+
+
 @router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
@@ -375,12 +417,24 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"idempotency_key", "expires_at"}),
+            **payload.model_dump(exclude={"idempotency_key", "expires_at", "league_id", "pick_number"}),
         })
 
         # Last possible moment before the message becomes durable. Everything above can
         # block for an unbounded time on a wedged broker, so the caller's deadline has to be
         # re-checked here rather than trusted at request entry.
+        if _pick_slot_already_filled(payload.league_id, payload.pick_number):
+            logger.warning(
+                f"Draft pick for Team {payload.team_id} -> {payload.name} targets slot "
+                f"{payload.pick_number}, which has already been filled; discarding."
+            )
+            connection.close()
+            _release_idempotency_key(payload.idempotency_key, tracking_id)
+            raise HTTPException(
+                status_code=409,
+                detail="The targeted pick slot has already been filled.",
+            )
+
         if payload.expires_at is not None and time.time() >= payload.expires_at:
             logger.warning(
                 f"Draft pick for Team {payload.team_id} -> {payload.name} expired before it could be "
@@ -426,7 +480,10 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         # prevent it - a broker blip converted into a guaranteed miss. Releasing restores
         # the plain retry. A failure at or after basic_publish is genuinely ambiguous, so
         # the claim stands and a possible duplicate is preferred to a possible miss.
-        if not publish_attempted:
+        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
+            # A wrong-state error from basic_publish is raised before any frame is emitted,
+            # so it is provably pre-write despite happening inside the call. Treating it as
+            # ambiguous would hand the retry a 202 duplicate for a message that never was.
             _release_idempotency_key(payload.idempotency_key, tracking_id)
         else:
             # Ambiguous: the bytes may have landed. Promote the claim so a retry gets a clean
