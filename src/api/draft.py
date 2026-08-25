@@ -624,21 +624,28 @@ def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
     return compute_on_the_clock_team(latest_pick_number + 1, team_count, slot_map)
 
 
-def _recent_execution_errors(cursor, league_id: str, limit: int) -> list:
+def _recent_execution_errors(cursor, league_id: str, season: int, limit: int) -> list:
     """Scoped by league_id so a practice room's failures never surface in a live league's
     /status - execution_log has no dedicated mode column (see the module docstring), but
     practice/live configs always use distinct league_ids, so this filter alone keeps the
-    two from ever mixing here."""
+    two from ever mixing here.
+
+    Also scoped by season, for the same reason _last_clicker_action is: a reactivated league
+    keeps its league_id year over year, so without this next year's draft would open showing
+    last year's failures as current. Rows with a null season are still included - producers
+    other than the draft path do not set it, and dropping them would silently narrow what
+    /status has always reported."""
     cursor.execute("""
         SELECT transaction_type, bot_name, error_message, executed_at
         FROM execution_log
         WHERE status <> 'success'
           AND error_message IS NOT NULL
           AND league_id = %s
+          AND (season = %s OR season IS NULL)
           AND (transaction_type ILIKE 'draft%%' OR COALESCE(bot_name, '') ILIKE 'draft%%')
         ORDER BY executed_at DESC
         LIMIT %s;
-    """, (league_id, limit))
+    """, (league_id, season, limit))
     return [
         {
             "transaction_type": row[0],
@@ -722,7 +729,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             mode = mode_row[0] if mode_row is not None else "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
-            recent_errors = _recent_execution_errors(cursor, league_id, RECENT_ERRORS_LIMIT)
+            recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots/mode for league {league_id}: {e}")

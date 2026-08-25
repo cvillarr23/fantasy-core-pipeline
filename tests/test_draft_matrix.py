@@ -393,12 +393,14 @@ def test_record_publish_error_writes_status_visible_execution_log_row():
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
-        dm._record_publish_error("L1", _player("p1", "RB", 10.0, name="Some Back"), "HTTP 422")
+        dm._record_publish_error("L1", _player("p1", "RB", 10.0, name="Some Back"), "HTTP 422", season=2026)
 
     query, params = mock_cursor.execute.call_args.args
     assert "draft_target_publish" in query
     assert "execution_log" in query
-    assert params == ("HTTP 422", "L1", "e-1", "Some Back")
+    # season is recorded because a reactivated league keeps its league_id year over year;
+    # without it /status opens next year's draft showing this year's failures.
+    assert params == ("HTTP 422", "L1", 2026, "e-1", "Some Back")
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +851,45 @@ def test_hold_and_publish_does_not_start_an_attempt_that_cannot_finish():
     mock_record.assert_called_once()
     assert "Pick clock expired" in mock_client.board["listener_error"]
     assert "minimum request window" in mock_client.board["listener_error"]
+
+
+def test_hold_and_publish_does_not_report_a_cancellation_as_a_missed_pick():
+    """A cancellation landing during the final retry sleep must not be recorded as a clock
+    expiry: the retry was stopped on purpose, and a false missed-pick error in /status and
+    execution_log sends the operator looking for a problem that does not exist."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_record_publish_error") as mock_record, \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, cancel_event=cancel_event,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+    mock_record.assert_not_called()
+    assert not mock_client.board.get("listener_error")
+
+
+def test_hold_and_publish_records_the_season_with_a_publish_failure():
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=RuntimeError("no espn_id")), \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            season=2026,
+        )
+
+    assert mock_record.call_args.kwargs["season"] == 2026
 
 
 def test_hold_and_publish_reports_a_pick_abandoned_at_the_deadline():
