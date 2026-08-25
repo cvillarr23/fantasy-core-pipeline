@@ -357,6 +357,18 @@ PRE_WRITE_BROKER_ERRORS = (
 )
 
 
+def _close_broker_connection(connection) -> None:
+    """Best-effort close. Already-closed connections raise from pika rather than no-op, and a
+    failure to close must never mask the real outcome of the request."""
+    if connection is None:
+        return
+    try:
+        if connection.is_open:
+            connection.close()
+    except Exception as e:
+        logger.warning(f"Could not close broker connection cleanly: {e}")
+
+
 @router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
@@ -394,8 +406,9 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             detail="An earlier request for this pick is still in flight; retry shortly.",
         )
 
+    connection = None
+    publish_attempted = False
     try:
-        publish_attempted = False
         params = pika.URLParameters(AMQP_URL)
         if payload.expires_at is not None:
             # Without this, a wedged broker blocks the handler past the deadline and the
@@ -428,7 +441,6 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
                 f"Draft pick for Team {payload.team_id} -> {payload.name} targets slot "
                 f"{payload.pick_number}, which has already been filled; discarding."
             )
-            connection.close()
             _release_idempotency_key(payload.idempotency_key, tracking_id)
             raise HTTPException(
                 status_code=409,
@@ -440,7 +452,6 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
                 f"Draft pick for Team {payload.team_id} -> {payload.name} expired before it could be "
                 f"queued (deadline {payload.expires_at}); discarding rather than clicking a stale pick."
             )
-            connection.close()
             _release_idempotency_key(payload.idempotency_key, tracking_id)
             raise HTTPException(
                 status_code=409,
@@ -458,7 +469,6 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
                 headers=carrier,
             )
         )
-        connection.close()
         logger.info(f"Draft pick target committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
         _mark_idempotency_key_published(payload.idempotency_key)
         return {
@@ -491,4 +501,10 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             _mark_idempotency_key_published(payload.idempotency_key)
         logger.error(f"Gateway failed to push draft pick target onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
+    finally:
+        # Every exit path closes exactly once. The optimizer retries this endpoint for the
+        # length of the pick clock, so a failure after the TCP connection opened - a
+        # queue_declare that raises, or either 409 below - used to leak a socket per attempt
+        # and could exhaust the gateway or the broker mid-draft.
+        _close_broker_connection(connection)
 

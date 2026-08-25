@@ -225,6 +225,71 @@ def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
     mock_channel.basic_publish.assert_called_once()
 
 
+def test_trigger_draft_pick_closes_the_broker_connection_on_a_pre_publish_failure(client):
+    """The optimizer retries this endpoint for the length of the pick clock. A failure after
+    the TCP connection opened leaked a socket per attempt and could exhaust the broker."""
+    mock_channel = MagicMock()
+    mock_channel.queue_declare.side_effect = Exception("declare failed")
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_connection.is_open = True
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    mock_connection.close.assert_called_once()
+
+
+def test_trigger_draft_pick_closes_the_broker_connection_when_the_slot_is_superseded(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_connection.is_open = True
+    mock_redis = _fake_redis()
+    mock_redis.hashes["draft:L1:board"] = {"last_processed_pick_number": "6"}
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "league_id": "L1", "pick_number": 6,
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 409
+    mock_connection.close.assert_called_once()
+
+
+def test_trigger_draft_pick_closes_the_broker_connection_exactly_once_on_success(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_connection.is_open = True
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    mock_connection.close.assert_called_once()
+
+
 def test_trigger_draft_pick_discards_a_target_whose_slot_was_filled_mid_flight(client):
     """hold_and_publish's cancel_event cannot interrupt a request already inside
     requests.post. If the slot fills while the request is in flight, only the gateway can
