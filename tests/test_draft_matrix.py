@@ -73,7 +73,7 @@ def test_compute_position_caps_no_picks_yet():
 
     # Caps must be >= starting needs (bench adds on top), and QB caps stay tight since
     # QB has no FLEX/bench share in FLEX_DEFAULT_WEIGHTS.
-    for pos in dm.SKILL_POSITIONS:
+    for pos in dm.VORP_POSITIONS:
         assert position_caps[pos] >= starting_needs[pos]
     assert position_caps["QB"] == starting_needs["QB"]
 
@@ -178,6 +178,23 @@ def test_build_and_solve_draft_pick_recommends_when_only_k_dst_remain():
     assert len(selected) == 2
     ids = {p["player_id"] for p in selected}
     assert ids == {"k1", "dst1"}  # best-VORP K and D/ST, not the pair by chance
+
+
+def test_build_and_solve_draft_pick_feasible_when_a_capped_position_has_no_candidates():
+    """Regression test for PR #86 review: summing position_caps (K=1 + D/ST=1 = 2) can
+    overstate what's actually fillable when the pool doesn't have a candidate at every
+    capped position - here there are 2 kickers but zero D/ST left in the pool. The old
+    target_picks (min(remaining, len(pool), sum(caps))) would demand 2 picks, the
+    Remaining_Picks equality constraint could never be satisfied (at most 1 kicker, 0
+    D/ST), and CBC would report the whole ILP infeasible - the exact "No feasible draft
+    recommendation" symptom #83 was about, just triggered by pool depletion instead of
+    missing ingestion. Must still return the 1 pick that's genuinely available."""
+    pool = [_player("k1", "K", 8.0), _player("k2", "K", 6.0)]
+    position_caps = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "K": 1, "D/ST": 1}
+    selected = dm.build_and_solve_draft_pick(pool, position_caps, remaining_picks=2)
+
+    assert len(selected) == 1
+    assert selected[0]["player_id"] == "k1"
 
 
 def test_build_and_solve_draft_pick_caps_dst_at_one_even_with_surplus_budget():
