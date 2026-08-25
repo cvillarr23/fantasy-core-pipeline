@@ -70,6 +70,12 @@ PUBLISH_RETRY_INTERVAL_SECONDS = 2
 # motivated this work) returns the same result to a byte-identical request, so retrying it
 # just burns the clock and floods the log while the real fix is upstream.
 RETRYABLE_PUBLISH_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# An attempt must finish inside the pick window, not merely start inside it: a request begun
+# a second before the deadline with a fixed 10s timeout could enqueue nine seconds after the
+# clock it was bounded by. The per-attempt timeout is therefore clamped to whatever window is
+# actually left, and an attempt is not started at all below the floor.
+PUBLISH_TIMEOUT_SECONDS = 10
+MIN_PUBLISH_WINDOW_SECONDS = 1
 # CORE-14 web UI wants to show the system's top-N alternatives, not just the one it would
 # auto-draft - see rank_recommended_targets/compute_draft_recommendation_candidates.
 TOP_CANDIDATES_LIMIT = 5
@@ -508,7 +514,7 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -539,7 +545,7 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             "idempotency_key": idempotency_key,
         },
         headers=headers,
-        timeout=10,
+        timeout=timeout,
     )
     if response.status_code >= 400:
         logger.error(
@@ -653,8 +659,22 @@ def hold_and_publish(
                         return
                     if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
                         return
+                    # Clamp the attempt to the window that is actually left. Starting one is
+                    # not enough - a request begun just inside the deadline with the full
+                    # timeout would enqueue well outside it, publishing a target for a pick
+                    # ESPN had already made.
+                    remaining = deadline - monotonic_fn()
+                    if remaining < MIN_PUBLISH_WINDOW_SECONDS:
+                        logger.warning(
+                            "Too little of the pick clock left for league %s pick %s to complete a publish (%.1fs); abandoning.",
+                            league_id, pick_number, remaining,
+                        )
+                        return
                     try:
-                        publish_draft_target(team_id, target, idempotency_key=idempotency_key)
+                        publish_draft_target(
+                            team_id, target, idempotency_key=idempotency_key,
+                            timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
+                        )
                         if failure_surfaced:
                             try:
                                 _write_listener_state(r_client, league_id, "Active")

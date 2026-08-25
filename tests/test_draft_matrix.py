@@ -462,7 +462,9 @@ def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick()
         )
 
     assert sum(sleeps) == 8
-    mock_publish.assert_called_once_with("7", target, idempotency_key="L1:5:e-1")
+    mock_publish.assert_called_once_with(
+        "7", target, idempotency_key="L1:5:e-1", timeout=dm.PUBLISH_TIMEOUT_SECONDS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +624,59 @@ def test_hold_and_publish_uses_the_supplied_clock_origin_not_thread_start():
     # stops rather than running to t=45 as a thread-start anchor would have.
     assert mock_publish.call_count == 3
     assert now[0] < 25.0
+
+
+def test_hold_and_publish_clamps_the_request_timeout_to_the_remaining_window():
+    """Starting an attempt inside the deadline is not enough: with a fixed 10s timeout, a
+    request begun one second before it could enqueue nine seconds after the pick clock."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 27.0, clock_origin=0.0,
+        )
+
+    # 3s of window left, so the attempt gets 3s - not the 10s default.
+    assert mock_publish.call_args.kwargs["timeout"] == 3.0
+
+
+def test_hold_and_publish_uses_the_full_timeout_when_the_window_is_wide():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 90), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 0.0, clock_origin=0.0,
+        )
+
+    assert mock_publish.call_args.kwargs["timeout"] == dm.PUBLISH_TIMEOUT_SECONDS
+
+
+def test_hold_and_publish_does_not_start_an_attempt_that_cannot_finish():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 29.5, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
 
 
 def test_process_entries_anchors_the_deadline_to_the_stream_entry_not_the_read_time():

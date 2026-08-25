@@ -249,6 +249,23 @@ def _claim_idempotency_key(key: Optional[str]) -> bool:
         return True
 
 
+def _release_idempotency_key(key: Optional[str]) -> None:
+    """Releases a claim for a request that provably never enqueued anything.
+
+    Called only from the pre-publish failure path. Leaving the claim there would turn a
+    transient broker error into a permanent one: the caller's retry gets "duplicate", reads
+    it as success, and stops - so the pick is lost by the mechanism that exists to protect it.
+    """
+    if not key:
+        return
+    try:
+        _redis_client().delete(f"draft:trigger:idempotency:{key}")
+    except Exception as e:
+        # The TTL is the backstop. Worst case the retries for this pick all report duplicate
+        # until it expires, which is the pre-existing failure and not made worse here.
+        logger.warning(f"Could not release idempotency key {key}: {e}")
+
+
 @router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
@@ -274,6 +291,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         }
 
     try:
+        publish_attempted = False
         params = pika.URLParameters(AMQP_URL)
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
@@ -289,6 +307,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             **payload.model_dump(),
         })
 
+        publish_attempted = True
         channel.basic_publish(
             exchange="",
             routing_key="draft_targets",
@@ -309,6 +328,15 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         }
 
     except Exception as e:
+        # Everything up to basic_publish is provably pre-publish: no message can exist, so
+        # holding the claim would be actively harmful. The caller's retry would come back
+        # "duplicate", hold_and_publish would read that as success and stop retrying, and
+        # the pick would be silently ceded to autodraft by the very mechanism meant to
+        # prevent it - a broker blip converted into a guaranteed miss. Releasing restores
+        # the plain retry. A failure at or after basic_publish is genuinely ambiguous, so
+        # the claim stands and a possible duplicate is preferred to a possible miss.
+        if not publish_attempted:
+            _release_idempotency_key(payload.idempotency_key)
         logger.error(f"Gateway failed to push draft pick target onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 

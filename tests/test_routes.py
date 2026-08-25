@@ -188,6 +188,51 @@ def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
     mock_channel.basic_publish.assert_called_once()
 
 
+def test_trigger_draft_pick_releases_the_claim_when_the_broker_fails_before_publishing(client):
+    """A pre-publish broker failure that kept the claim turned a transient error into a
+    permanent one: the retry got "duplicate", hold_and_publish read that as success and
+    stopped, and the pick was ceded to autodraft by the guard meant to protect it."""
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = True
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", side_effect=Exception("broker down")), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    mock_redis.delete.assert_called_once_with("draft:trigger:idempotency:L1:5:4046")
+
+
+def test_trigger_draft_pick_keeps_the_claim_when_the_failure_is_ambiguous(client):
+    """A failure at or after basic_publish may have committed the message. Releasing then
+    would allow a genuine duplicate, so the claim stands."""
+    mock_channel = MagicMock()
+    mock_channel.basic_publish.side_effect = Exception("reset after send")
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = MagicMock()
+    mock_redis.set.return_value = True
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 500
+    mock_redis.delete.assert_not_called()
+
+
 def test_trigger_draft_pick_broker_failure(client):
     payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "position": "RB", "pro_team": "KC"}
 
