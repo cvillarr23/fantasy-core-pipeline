@@ -1008,6 +1008,92 @@ def test_get_draft_status_degraded_when_listener_stale_while_active(client):
     assert response.json()["pipeline_health"] == "degraded"
 
 
+def test_get_draft_status_includes_connector_health_when_present(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    health_snapshot = {"ws_connected": False, "pick_silence_ms": 9000, "picks_known": 42}
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+    mock_redis.get.return_value = json.dumps(health_snapshot)
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connector_health"] == health_snapshot
+    mock_redis.get.assert_called_with("draft:L1:health")
+
+
+def test_get_draft_status_connector_health_is_none_when_key_missing(client):
+    """Never written yet, or its 1h TTL expired - a normal state, not a Redis failure, so
+    pipeline_health must stay whatever the listener's own signals say."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"last_processed_pick_at": "1000"}
+    mock_redis.get.return_value = None
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         patch("src.api.draft.time.time", return_value=1005):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connector_health"] is None
+    assert body["pipeline_health"] == "healthy"
+
+
+def test_get_draft_status_connector_health_is_none_when_malformed(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+    mock_redis.get.return_value = "not-json"
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["connector_health"] is None
+
+
+def test_get_draft_status_connector_health_failure_does_not_affect_pipeline_health(client):
+    """The connector and the listener fail independently (#81) - a broken read of the
+    connector's own heartbeat must never flip pipeline_health, which is the listener's
+    signal."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"last_processed_pick_at": "1000"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._connector_health", side_effect=Exception("boom")), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         patch("src.api.draft.time.time", return_value=1005):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connector_health"] is None
+    assert body["pipeline_health"] == "healthy"
+
+
 # ---------------------------------------------------------------------------
 # POST /v1/draft/pause, /v1/draft/resume
 # ---------------------------------------------------------------------------
