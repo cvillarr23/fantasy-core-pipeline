@@ -22,6 +22,7 @@ import os
 import threading
 import time
 import uuid
+from collections import Counter
 from typing import Optional
 
 import polars as pl
@@ -33,7 +34,7 @@ from opentelemetry import context, propagate, trace
 from src.database import get_db_connection
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.optimization.vorp_matrix import (
-    SKILL_POSITIONS,
+    VORP_POSITIONS,
     FLEX_DEFAULT_WEIGHTS,
     FLEX_SLOT_ELIGIBLE_POSITIONS,
     _largest_remainder_allocate,
@@ -221,7 +222,7 @@ def compute_draftable_roster_size(league_config: dict) -> tuple:
     all)."""
     flex_alloc = resolve_own_team_flex_allocation(league_config)
     lineup_slot_counts = league_config["lineup_slot_counts"]
-    starting_total = sum(lineup_slot_counts.get(pos, 0) for pos in SKILL_POSITIONS) + sum(flex_alloc.values())
+    starting_total = sum(lineup_slot_counts.get(pos, 0) for pos in VORP_POSITIONS) + sum(flex_alloc.values())
     bench_total = lineup_slot_counts.get("BE")
     if bench_total is None:
         return starting_total, max(0, DEFAULT_ROSTER_SIZE - starting_total)
@@ -237,13 +238,13 @@ def compute_position_caps(league_config: dict, drafted_by_us: dict) -> tuple:
     "still need a starter here" position apart from "just filling bench depth"."""
     flex_alloc = resolve_own_team_flex_allocation(league_config)
     lineup_slot_counts = league_config["lineup_slot_counts"]
-    starting_slots = {pos: lineup_slot_counts.get(pos, 0) for pos in SKILL_POSITIONS}
+    starting_slots = {pos: lineup_slot_counts.get(pos, 0) for pos in VORP_POSITIONS}
     _, bench_total = compute_draftable_roster_size(league_config)
     bench_alloc = _largest_remainder_allocate(dict(FLEX_DEFAULT_WEIGHTS), bench_total)
 
     starting_needs = {}
     position_caps = {}
-    for pos in SKILL_POSITIONS:
+    for pos in VORP_POSITIONS:
         target = starting_slots.get(pos, 0) + flex_alloc.get(pos, 0)
         drafted = drafted_by_us.get(pos, 0)
         starting_needs[pos] = max(0, target - drafted)
@@ -263,9 +264,21 @@ def build_and_solve_draft_pick(undrafted_pool: list, position_caps: dict, remain
     # vorp_score is intentionally signed (vorp_matrix.compute_vorp) - a "<=" budget
     # constraint would let CBC maximize by taking nobody once remaining candidates are
     # all zero/negative, even though a real draft still forces a pick every round. Force
-    # exactly as many picks as are actually fillable (bounded by both the position caps
-    # and the pool size), so the solver can't dodge a mandatory pick by declining value.
-    target_picks = min(remaining_picks, len(undrafted_pool), sum(position_caps.get(pos, 0) for pos in SKILL_POSITIONS))
+    # exactly as many picks as are actually fillable, so the solver can't dodge a
+    # mandatory pick by declining value.
+    #
+    # "Fillable" must be bounded per position, not just by the sum of caps: summing caps
+    # alone assumes every capped position can actually supply that many candidates, which
+    # a small, fast-depleting pool (K/D-ST, capped at 1 each with no bench share) can
+    # violate well before the draft is likely to have used up the deep skill-position
+    # pools. Two kickers left in the pool with caps {K: 1, D/ST: 1} sums to 2, but only 1
+    # is actually achievable (no D/ST candidates exist to fill that cap) - the old sum
+    # would set target_picks=2, the Remaining_Picks equality constraint could never be
+    # satisfied, and CBC would report the whole problem infeasible instead of returning
+    # the one pick that *is* available.
+    pool_counts = Counter(p["position"] for p in undrafted_pool)
+    fillable = sum(min(position_caps.get(pos, 0), pool_counts.get(pos, 0)) for pos in VORP_POSITIONS)
+    target_picks = min(remaining_picks, len(undrafted_pool), fillable)
     if target_picks <= 0:
         return []
 
@@ -275,7 +288,7 @@ def build_and_solve_draft_pick(undrafted_pool: list, position_caps: dict, remain
 
     prob += pulp.lpSum(player_vars[pid] * by_id[pid]["vorp_score"] for pid in player_vars), "Total_VORP"
     prob += pulp.lpSum(player_vars.values()) == target_picks, "Remaining_Picks"
-    for pos in SKILL_POSITIONS:
+    for pos in VORP_POSITIONS:
         cap = position_caps.get(pos, 0)
         prob += (
             pulp.lpSum(var for pid, var in player_vars.items() if by_id[pid]["position"] == pos) <= cap,

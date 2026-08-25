@@ -73,7 +73,7 @@ def test_compute_position_caps_no_picks_yet():
 
     # Caps must be >= starting needs (bench adds on top), and QB caps stay tight since
     # QB has no FLEX/bench share in FLEX_DEFAULT_WEIGHTS.
-    for pos in dm.SKILL_POSITIONS:
+    for pos in dm.VORP_POSITIONS:
         assert position_caps[pos] >= starting_needs[pos]
     assert position_caps["QB"] == starting_needs["QB"]
 
@@ -160,6 +160,86 @@ def test_build_and_solve_draft_pick_zero_position_caps_returns_empty():
     pool = [_player("rb1", "RB", 10.0)]
     selected = dm.build_and_solve_draft_pick(pool, position_caps={"RB": 0, "WR": 0, "QB": 0, "TE": 0}, remaining_picks=5)
     assert selected == []
+
+
+def test_build_and_solve_draft_pick_recommends_when_only_k_dst_remain():
+    # Regression test for #83: once every skill-position slot is full, the pool and the
+    # league's remaining need are both K/D-ST-only - the solver must still recommend one
+    # of each rather than returning [] (the "No feasible draft recommendation" symptom).
+    pool = [
+        _player("k1", "K", 8.0),
+        _player("k2", "K", 6.0),
+        _player("dst1", "D/ST", 9.0),
+        _player("dst2", "D/ST", 5.0),
+    ]
+    position_caps = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "K": 1, "D/ST": 1}
+    selected = dm.build_and_solve_draft_pick(pool, position_caps, remaining_picks=2)
+
+    assert len(selected) == 2
+    ids = {p["player_id"] for p in selected}
+    assert ids == {"k1", "dst1"}  # best-VORP K and D/ST, not the pair by chance
+
+
+def test_build_and_solve_draft_pick_feasible_when_a_capped_position_has_no_candidates():
+    """Regression test for PR #86 review: summing position_caps (K=1 + D/ST=1 = 2) can
+    overstate what's actually fillable when the pool doesn't have a candidate at every
+    capped position - here there are 2 kickers but zero D/ST left in the pool. The old
+    target_picks (min(remaining, len(pool), sum(caps))) would demand 2 picks, the
+    Remaining_Picks equality constraint could never be satisfied (at most 1 kicker, 0
+    D/ST), and CBC would report the whole ILP infeasible - the exact "No feasible draft
+    recommendation" symptom #83 was about, just triggered by pool depletion instead of
+    missing ingestion. Must still return the 1 pick that's genuinely available."""
+    pool = [_player("k1", "K", 8.0), _player("k2", "K", 6.0)]
+    position_caps = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "K": 1, "D/ST": 1}
+    selected = dm.build_and_solve_draft_pick(pool, position_caps, remaining_picks=2)
+
+    assert len(selected) == 1
+    assert selected[0]["player_id"] == "k1"
+
+
+def test_build_and_solve_draft_pick_caps_dst_at_one_even_with_surplus_budget():
+    # Without a Cap_D/ST constraint the solver would happily take every D/ST in the pool
+    # once remaining_picks/other caps allow it - a real roster only ever starts one.
+    pool = [_player("dst1", "D/ST", 9.0), _player("dst2", "D/ST", 7.0), _player("dst3", "D/ST", 5.0)]
+    position_caps = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "K": 0, "D/ST": 1}
+    selected = dm.build_and_solve_draft_pick(pool, position_caps, remaining_picks=3)
+
+    assert len(selected) == 1
+    assert selected[0]["player_id"] == "dst1"
+
+
+def test_compute_position_caps_includes_k_and_dst_from_lineup_slot_counts():
+    config = {
+        "team_count": 10,
+        "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "K": 1, "D/ST": 1, "BE": 7},
+    }
+    position_caps, starting_needs = dm.compute_position_caps(config, drafted_by_us={})
+    assert starting_needs["K"] == 1
+    assert starting_needs["D/ST"] == 1
+    assert position_caps["K"] == 1  # no bench/FLEX share for K, same as QB
+    assert position_caps["D/ST"] == 1
+
+
+def test_compute_position_caps_k_and_dst_drop_to_zero_once_drafted():
+    config = {
+        "team_count": 10,
+        "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "K": 1, "D/ST": 1, "BE": 7},
+    }
+    position_caps, starting_needs = dm.compute_position_caps(config, drafted_by_us={"K": 1, "D/ST": 1})
+    assert starting_needs["K"] == 0
+    assert starting_needs["D/ST"] == 0
+    assert position_caps["K"] == 0
+    assert position_caps["D/ST"] == 0
+
+
+def test_compute_draftable_roster_size_includes_k_and_dst():
+    config = {
+        "team_count": 10,
+        "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "K": 1, "D/ST": 1, "BE": 6},
+    }
+    starting_total, bench_total = dm.compute_draftable_roster_size(config)
+    assert starting_total == 9  # 7 skill-position slots (incl. FLEX) + K + D/ST
+    assert bench_total == 6
 
 
 # ---------------------------------------------------------------------------

@@ -208,7 +208,9 @@ def test_baseline_lands_on_rank_n_plus_1_for_real_ten_team_league_shape():
     flex_alloc = vm.resolve_flex_allocation(10, empty_rosters)
     rank_at = vm.calculate_rank_at(league_config, flex_alloc)
 
-    assert rank_at == {"QB": 10, "RB": 25, "WR": 24, "TE": 11}
+    # K/D-ST included too (VORP_POSITIONS) - both 0 since league_config has no slot for
+    # either here, unlike the FLEX-bearing skill positions this test is actually about.
+    assert rank_at == {"QB": 10, "RB": 25, "WR": 24, "TE": 11, "K": 0, "D/ST": 0}
 
     all_rows, schema = [], {"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64}
     for pos, count in [("QB", 30), ("RB", 40), ("WR", 40), ("TE", 30)]:
@@ -221,6 +223,26 @@ def test_baseline_lands_on_rank_n_plus_1_for_real_ten_team_league_shape():
     for pos in ["QB", "RB", "WR", "TE"]:
         expected = 100.0 - rank_at[pos] * 1.0
         assert baselines[pos] == expected
+
+
+def test_baseline_computed_for_k_and_dst_not_left_at_zero():
+    """Regression test for PR #86 review: K/D-ST are in VORP_POSITIONS now, so a
+    populated pool gets a real rank_at-based baseline instead of falling through to
+    DEFAULT_BASELINES/0.0 - the earlier version of this fix left their vorp_score equal to
+    raw projected_points, not comparable to a skill position's delta-over-replacement
+    score, which could rank a mediocre D/ST above a genuinely above-replacement WR."""
+    league_config = {
+        "team_count": 10,
+        "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "K": 1, "D/ST": 1},
+    }
+    rows, schema = _deep_pool_frame("D/ST", 32)  # real-world-sized D/ST pool (32 NFL teams)
+    df = pl.DataFrame(rows, schema=schema)
+
+    baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=False)
+
+    # rank_at["D/ST"] = 1 slot x 10 teams = 10 -> the 11th-ranked (index 10) D/ST's points.
+    assert baselines["D/ST"] == df.sort(["adjusted_projected_points", "player_id"], descending=[True, False]).row(10, named=True)["adjusted_projected_points"]
+    assert baselines["D/ST"] != 0.0
 
 
 def test_baseline_falls_back_to_pool_minimum_when_pool_shorter_than_rank():
@@ -364,14 +386,19 @@ def test_empty_rosters_yields_all_scarcity_multipliers_of_one():
     starting slot (rank_at), the number of above-replacement free agents structurally
     equals rank_at, which is >= 2x the expected depth - so ratio always clamps to 1.0
     and every scarcity multiplier resolves to exactly 1.0. Not a bug - the correct
-    pre-draft behavior per the CORE-05 spec."""
-    league_config = {"team_count": 10, "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1}}
+    pre-draft behavior per the CORE-05 spec. Includes K/D-ST (VORP_POSITIONS) with the
+    same deep-pool shape, or those two would show as maximally scarce purely from having
+    zero rows in this fixture rather than a real thin pool."""
+    league_config = {
+        "team_count": 10,
+        "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "K": 1, "D/ST": 1},
+    }
     empty_rosters = pl.DataFrame(schema={"slot_position": pl.Utf8, "position": pl.Utf8})
     flex_alloc = vm.resolve_flex_allocation(10, empty_rosters)
     rank_at = vm.calculate_rank_at(league_config, flex_alloc)
 
     all_rows = []
-    for pos, count in [("QB", 30), ("RB", 40), ("WR", 40), ("TE", 30)]:
+    for pos, count in [("QB", 30), ("RB", 40), ("WR", 40), ("TE", 30), ("K", 30), ("D/ST", 30)]:
         rows, _ = _deep_pool_frame(pos, count)
         all_rows.extend([{**r, "is_rostered": False} for r in rows])
     schema = {"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64, "is_rostered": pl.Boolean}

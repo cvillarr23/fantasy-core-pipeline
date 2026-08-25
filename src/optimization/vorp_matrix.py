@@ -28,7 +28,7 @@ COEFFICIENT_BOUNDS = (0.85, 1.15)
 FLEX_DEFAULT_WEIGHTS = {"RB": 0.5, "WR": 0.4, "TE": 0.1}
 SCARCITY_DEPTH_FACTOR = 0.5
 SCARCITY_MAX_MULTIPLIER = 1.35
-DEFAULT_BASELINES = {"QB": 10.0, "RB": 8.0, "WR": 8.0, "TE": 5.0}
+DEFAULT_BASELINES = {"QB": 10.0, "RB": 8.0, "WR": 8.0, "TE": 5.0, "K": 7.0, "D/ST": 7.0}
 FLEX_SLOT_NAMES = {"RB/WR/TE", "RB/WR", "WR/TE"}
 FLEX_SLOT_ELIGIBLE_POSITIONS = {
     "RB/WR/TE": ("RB", "WR", "TE"),
@@ -36,6 +36,16 @@ FLEX_SLOT_ELIGIBLE_POSITIONS = {
     "WR/TE": ("WR", "TE"),
 }
 SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
+# Baseline/rank/scarcity math (calculate_replacement_baselines, calculate_rank_at,
+# compute_scarcity_multipliers) needs nothing position-specific beyond adjusted_projected_
+# points and lineup_slot_counts - unlike compute_matchup_coefficient's _signal_raw branch,
+# which genuinely has no equivalent metric for K/D-ST and is deliberately left
+# SKILL_POSITIONS-only. Leaving K/D-ST out of baseline/scarcity (as an earlier version of
+# this fix did) left their vorp_score equal to raw projected_points with no baseline
+# subtracted - not comparable to a skill position's delta-over-replacement score, so a
+# 9-point D/ST could outrank an 8-point-of-actual-VORP WR and get recommended in an early
+# round instead of being properly scarcity-ranked among its own tiny, fast-depleting pool.
+VORP_POSITIONS = SKILL_POSITIONS + ["K", "D/ST"]
 
 
 def _zscore_within(df: pl.DataFrame, value_col: str, group_cols: list, out_col: str) -> pl.DataFrame:
@@ -194,7 +204,7 @@ def calculate_replacement_baselines(
     lineup_slot_counts = league_config["lineup_slot_counts"]
     team_count = league_config["team_count"]
     baselines = {}
-    for pos in SKILL_POSITIONS:
+    for pos in VORP_POSITIONS:
         pool = (
             df.filter(pl.col("position") == pos)
             .sort(["adjusted_projected_points", "player_id"], descending=[True, False])
@@ -224,7 +234,7 @@ def calculate_rank_at(league_config: dict, flex_alloc: dict) -> dict:
     team_count = league_config["team_count"]
     return {
         pos: lineup_slot_counts.get(pos, 0) * team_count + flex_alloc.get(pos, 0)
-        for pos in SKILL_POSITIONS
+        for pos in VORP_POSITIONS
     }
 
 
@@ -242,7 +252,7 @@ def compute_scarcity_multipliers(df: pl.DataFrame, rank_at: dict) -> dict:
     player look worse purely because his position is thin, which is backwards.
     """
     multipliers = {}
-    for pos in SKILL_POSITIONS:
+    for pos in VORP_POSITIONS:
         pool = df.filter((pl.col("position") == pos) & (~pl.col("is_rostered")) & (pl.col("vorp_base") > 0))
         surplus = pool.height
         expected = max(1, round(SCARCITY_DEPTH_FACTOR * rank_at.get(pos, 0)))
