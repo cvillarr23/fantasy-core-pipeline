@@ -202,6 +202,7 @@ def test_load_undrafted_pool_excludes_drafted_players():
     query, params = mock_cursor.execute.call_args[0]
     assert "NOT EXISTS" in query
     assert "draft_picks" in query
+    assert "COALESCE(s.team, p.team)" in query
     assert params == (2026, 1, "L1", 2026)
 
 
@@ -334,6 +335,37 @@ def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
     mock_post.assert_not_called()
 
 
+def test_publish_draft_target_logs_error_response_body(caplog):
+    target = _player("p1", "RB", 12.0, name="Some Back")
+    response = dm.requests.Response()
+    response.status_code = 422
+    response._content = b'{"detail":[{"loc":["body","pro_team"],"msg":"Input should be a valid string"}]}'
+    response.url = f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
+
+    with patch("src.optimization.draft_matrix.requests.post", return_value=response):
+        with caplog.at_level("ERROR", logger="DraftMatrix"):
+            with pytest.raises(dm.requests.HTTPError):
+                dm.publish_draft_target("7", target)
+
+    assert '"pro_team"' in caplog.text
+    assert "Input should be a valid string" in caplog.text
+
+
+def test_record_publish_error_writes_status_visible_execution_log_row():
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm._record_publish_error("L1", _player("p1", "RB", 10.0, name="Some Back"), "HTTP 422")
+
+    query, params = mock_cursor.execute.call_args.args
+    assert "draft_target_publish" in query
+    assert "execution_log" in query
+    assert params == ("HTTP 422", "L1", "e-1", "Some Back")
+
+
 # ---------------------------------------------------------------------------
 # hold_and_publish
 # ---------------------------------------------------------------------------
@@ -361,6 +393,72 @@ def test_hold_and_publish_skips_when_cancelled():
         dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
 
     mock_post.assert_not_called()
+
+
+def test_hold_and_publish_retries_transient_publish_failure():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    sleeps = []
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=[dm.requests.ConnectionError("unavailable"), None]) as mock_publish, \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            sleep_fn=sleeps.append,
+        )
+
+    assert mock_publish.call_count == 2
+    assert sleeps == [dm.PUBLISH_RETRY_INTERVAL_SECONDS]
+    mock_record.assert_called_once()
+    assert mock_client.hset.call_args.kwargs["mapping"] == {
+        "listener_state": "Active",
+        "listener_error": "",
+    }
+
+
+def test_hold_and_publish_surfaces_failure_after_clock_expires():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    now = [0]
+
+    def _sleep(seconds):
+        now[0] += seconds
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 5), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            sleep_fn=_sleep, monotonic_fn=lambda: now[0],
+        )
+
+    assert mock_publish.call_count > 1
+    mock_record.assert_called_once()
+    assert mock_record.call_args.args[:2] == ("L1", target)
+    assert "unavailable" in mock_record.call_args.args[2]
+    assert mock_client.hset.call_args.kwargs["mapping"]["listener_state"] == "Active"
+    assert "unavailable" in mock_client.hset.call_args.kwargs["mapping"]["listener_error"]
+
+
+def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick():
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+    sleeps = []
+
+    with patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            sleep_fn=sleeps.append,
+        )
+
+    assert sum(sleeps) == 8
+    mock_publish.assert_called_once_with("7", target)
 
 
 # ---------------------------------------------------------------------------

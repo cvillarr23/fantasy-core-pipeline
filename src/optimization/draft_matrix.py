@@ -59,6 +59,9 @@ CONSUMER_GROUP = "draft_matrix"
 DEFAULT_ROSTER_SIZE = 16
 DEFAULT_AUTO_DRAFT_DELAY_SECONDS = 8
 PAUSE_POLL_INTERVAL_SECONDS = 1
+DRAFT_PICK_CLOCK_SECONDS = 90
+DRAFT_PUBLISH_SAFETY_SECONDS = 5
+PUBLISH_RETRY_INTERVAL_SECONDS = 2
 # CORE-14 web UI wants to show the system's top-N alternatives, not just the one it would
 # auto-draft - see rank_recommended_targets/compute_draft_recommendation_candidates.
 TOP_CANDIDATES_LIMIT = 5
@@ -88,7 +91,7 @@ def load_undrafted_pool(cursor, league_id: str, season: int, week: int) -> pl.Da
     by definition, exactly vorp_matrix's pre-draft branch."""
     cursor.execute("""
         SELECT p.player_id, p.espn_id, p.name, p.position, s.projected_points, s.team_implied_total,
-               s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team
+               s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, COALESCE(s.team, p.team)
         FROM players p
         JOIN weekly_stats s ON p.player_id = s.player_id
         WHERE s.season = %s AND s.week = %s
@@ -526,14 +529,52 @@ def publish_draft_target(team_id: str, target: dict) -> None:
         headers=headers,
         timeout=10,
     )
+    if response.status_code >= 400:
+        logger.error(
+            "Draft target API rejected %s for Team %s with HTTP %s: %s",
+            target["name"], team_id, response.status_code, response.text,
+        )
     response.raise_for_status()
     logger.info(f"Published draft target for Team {team_id}: {target['name']} ({target['position']}).")
+
+
+def _publish_error_detail(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    response_body = getattr(response, "text", None)
+    return f"{error}; response body: {response_body}" if response_body else str(error)
+
+
+def _record_publish_error(league_id: str, target: dict, error_message: str) -> None:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO execution_log
+                        (transaction_type, bot_name, status, error_message, league_id, player_id, player_name)
+                    VALUES ('draft_target_publish', 'draft_matrix', 'failure', %s, %s, %s, %s);
+                    """,
+                    (error_message, league_id, target.get("espn_id"), target.get("name")),
+                )
+    except Exception as error:
+        logger.error("Failed to record draft target publish error for league %s: %s", league_id, error)
+
+
+def _surface_publish_error(r_client, league_id: str, target: dict, error: Exception) -> None:
+    error_message = _publish_error_detail(error)
+    logger.error("Failed to publish draft target for league %s: %s", league_id, error_message)
+    try:
+        _write_listener_state(r_client, league_id, "Active", error=error_message)
+    except Exception as state_error:
+        logger.error("Failed to update listener error state for league %s: %s", league_id, state_error)
+    _record_publish_error(league_id, target, error_message)
 
 
 def hold_and_publish(
     r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
     trace_context: Optional[context.Context] = None,
+    monotonic_fn=time.monotonic,
 ) -> None:
     """Runs the cancellable delay window and publishes if it elapses uninterrupted. Called
     from a background thread (see _schedule_publish) so the Stream consumer loop keeps
@@ -547,8 +588,41 @@ def hold_and_publish(
     token = context.attach(trace_context) if trace_context is not None else None
     try:
         with tracer.start_as_current_span("draft_pick.hold_and_publish", attributes={"team_id": team_id, "pick_number": pick_number}):
-            if wait_for_pause_or_timeout(r_client, league_id, pick_number, delay_seconds, cancel_event=cancel_event, sleep_fn=sleep_fn):
-                publish_draft_target(team_id, target)
+            deadline = monotonic_fn() + DRAFT_PICK_CLOCK_SECONDS - DRAFT_PUBLISH_SAFETY_SECONDS
+            try:
+                should_publish = wait_for_pause_or_timeout(
+                    r_client, league_id, pick_number, delay_seconds,
+                    cancel_event=cancel_event, sleep_fn=sleep_fn,
+                )
+                if not should_publish:
+                    return
+
+                failure_surfaced = False
+                while True:
+                    try:
+                        publish_draft_target(team_id, target)
+                        if failure_surfaced:
+                            try:
+                                _write_listener_state(r_client, league_id, "Active")
+                            except Exception as state_error:
+                                logger.error("Failed to clear listener error state for league %s: %s", league_id, state_error)
+                        return
+                    except Exception as error:
+                        if not failure_surfaced:
+                            _surface_publish_error(r_client, league_id, target, error)
+                            failure_surfaced = True
+                        if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
+                            return
+                        if monotonic_fn() + PUBLISH_RETRY_INTERVAL_SECONDS >= deadline:
+                            return
+                        logger.warning(
+                            "Draft target publish failed for league %s pick %s; retrying in %ss: %s",
+                            league_id, pick_number, PUBLISH_RETRY_INTERVAL_SECONDS,
+                            _publish_error_detail(error),
+                        )
+                        sleep_fn(PUBLISH_RETRY_INTERVAL_SECONDS)
+            except Exception as error:
+                _surface_publish_error(r_client, league_id, target, error)
     finally:
         if token is not None:
             context.detach(token)
