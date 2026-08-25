@@ -28,14 +28,17 @@ def _board_client(**initial):
     to a plain dict, exposed as client.board so tests can assert on the resulting board."""
     board = dict(initial)
 
-    def fake_eval(script, _numkeys, _key, argv):
+    def fake_eval(script, _numkeys, _key, *argv):
         if script == dm._SURFACE_PUBLISH_ERROR_LUA:
+            if board.get("listener_state") == "Failed":
+                return 0
             if not board.get("listener_state"):
                 board["listener_state"] = "Active"
-            board["listener_error"] = argv
+            board["listener_error"], board["listener_error_owner"] = argv
         elif script == dm._CLEAR_PUBLISH_ERROR_LUA:
-            if board.get("listener_error") == argv:
+            if board.get("listener_error_owner") == argv[0]:
                 board["listener_error"] = ""
+                board["listener_error_owner"] = ""
         else:
             raise AssertionError(f"unexpected script: {script}")
         return 1
@@ -437,9 +440,9 @@ def test_hold_and_publish_retries_transient_publish_failure():
     assert mock_publish.call_count == 2
     assert sleeps == [dm.PUBLISH_RETRY_INTERVAL_SECONDS]
     mock_record.assert_called_once()
-    # The retracting write is a compare-and-set on the message we ourselves recorded.
+    # The retracting write is a compare-and-set on this thread's ownership token.
     assert mock_client.eval.call_args.args[0] == dm._CLEAR_PUBLISH_ERROR_LUA
-    assert "unavailable" in mock_client.eval.call_args.args[-1]
+    assert mock_client.eval.call_args.args[-1].startswith("publish:L1:5:")
     assert mock_client.board["listener_error"] == ""
 
 
@@ -458,6 +461,7 @@ def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_succe
         # replacing the transient publish error we surfaced a moment ago.
         mock_client.board["listener_state"] = "Failed"
         mock_client.board["listener_error"] = "Listener died: connection refused"
+        mock_client.board["listener_error_owner"] = "listener"
 
     with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target", side_effect=publish), \
@@ -468,6 +472,51 @@ def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_succe
 
     assert mock_client.board["listener_error"] == "Listener died: connection refused"
     assert mock_client.board["listener_state"] == "Failed"
+
+
+def test_hold_and_publish_leaves_a_failed_listeners_error_intact():
+    """When the Stream consumer has already recorded a fatal listener reason, a later publish
+    error must not replace it on the board - that reason is the one an operator acts on. The
+    publish failure still reaches execution_log, which is the durable record."""
+    mock_client = _board_client(listener_state="Failed", listener_error="Listener died: connection refused")
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=RuntimeError("no espn_id")), \
+         patch.object(dm, "_record_publish_error") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_state"] == "Failed"
+    assert mock_client.board["listener_error"] == "Listener died: connection refused"
+    mock_record.assert_called_once()
+
+
+def test_hold_and_publish_does_not_clear_an_identical_error_owned_by_another_publisher():
+    """Two publisher threads can record the same message text. Matching on text alone would
+    let the older thread's success retract the newer thread's still-current failure."""
+    mock_client = _board_client()
+    target = _player("p1", "RB", 10.0)
+    attempts = []
+
+    def publish(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise dm.requests.ConnectionError("connection refused")
+        # A concurrent publisher for the next pick records the identical message.
+        mock_client.board["listener_error"] = "connection refused"
+        mock_client.board["listener_error_owner"] = "publish:L1:6:other"
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=publish), \
+         patch.object(dm, "_record_publish_error"):
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    assert mock_client.board["listener_error"] == "connection refused"
+    assert mock_client.board["listener_error_owner"] == "publish:L1:6:other"
 
 
 def test_hold_and_publish_surfaces_failure_after_clock_expires():

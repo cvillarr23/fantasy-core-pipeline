@@ -351,10 +351,13 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         carrier: dict = {}
         propagate.inject(carrier)
 
+        # idempotency_key is gateway-only state. The click-bot does not participate in
+        # deduplication, so forwarding it (or a null for legacy callers) would change the
+        # draft_targets JSON contract for no consumer benefit.
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"idempotency_key"}),
         })
 
         publish_attempted = True

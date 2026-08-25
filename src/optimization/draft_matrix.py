@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Optional
 
 import polars as pl
@@ -595,56 +596,66 @@ def _record_publish_error(league_id: str, target: dict, error_message: str) -> N
         logger.error("Failed to record draft target publish error for league %s: %s", league_id, error)
 
 
-# Records a publish failure without asserting the consumer's health. The publisher runs on a
-# separate thread from the Stream consumer, which owns listener_state; a plain write of
-# "Active" here can land after the consumer recorded "Failed" and report a dead listener as
-# healthy. This only fills an empty/unset state, and never overwrites an existing one.
+# Records a publish failure without asserting the consumer's health, and without stepping on
+# an error the consumer owns. The publisher runs on a separate thread from the Stream
+# consumer, which owns listener_state: a plain write of "Active" here can land after the
+# consumer recorded "Failed" and report a dead listener as healthy, and a plain write of
+# listener_error can replace the fatal listener reason with an unrelated HTTP error.
+# listener_error_owner records who wrote the message, so only that writer may retract it.
 _SURFACE_PUBLISH_ERROR_LUA = """
 local state = redis.call('HGET', KEYS[1], 'listener_state')
+if state == 'Failed' then
+    return 0
+end
 if not state or state == '' then
     redis.call('HSET', KEYS[1], 'listener_state', 'Active')
 end
-redis.call('HSET', KEYS[1], 'listener_error', ARGV[1])
+redis.call('HSET', KEYS[1], 'listener_error', ARGV[1], 'listener_error_owner', ARGV[2])
 return 1
 """
 
 
-def _surface_publish_failure(r_client, league_id: str, target: dict, error_message: str) -> None:
+def _surface_publish_failure(r_client, league_id: str, target: dict, error_message: str, owner: str = "") -> None:
     logger.error("Failed to publish draft target for league %s: %s", league_id, error_message)
     try:
-        r_client.eval(_SURFACE_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), error_message)
+        r_client.eval(
+            _SURFACE_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), error_message, owner,
+        )
     except Exception as state_error:
         logger.error("Failed to update listener error state for league %s: %s", league_id, state_error)
+    # Always recorded, even when the board write was skipped: execution_log is the durable
+    # record and must not lose a publish failure just because the listener is already down.
     _record_publish_error(league_id, target, error_message)
 
 
-def _surface_publish_error(r_client, league_id: str, target: dict, error: Exception) -> str:
+def _surface_publish_error(r_client, league_id: str, target: dict, error: Exception, owner: str = "") -> str:
     error_message = _publish_error_detail(error)
-    _surface_publish_failure(r_client, league_id, target, error_message)
+    _surface_publish_failure(r_client, league_id, target, error_message, owner=owner)
     return error_message
 
 
-# Clears listener_error only while it still holds the exact message we wrote. HGET-then-HSET
-# would not do: the Stream consumer thread can record a genuine listener failure while our
-# HTTP attempt is in flight, and an unconditional clear would blank a newer, unrelated error.
+# Clears listener_error only while this publisher still owns it. Matching the message text is
+# not an ownership check - two overlapping publisher threads can record the identical string
+# ("connection refused"), and the older one succeeding would then clear the newer one's
+# still-current failure.
 _CLEAR_PUBLISH_ERROR_LUA = """
-if redis.call('HGET', KEYS[1], 'listener_error') == ARGV[1] then
-    return redis.call('HSET', KEYS[1], 'listener_error', '')
+if redis.call('HGET', KEYS[1], 'listener_error_owner') == ARGV[1] then
+    return redis.call('HSET', KEYS[1], 'listener_error', '', 'listener_error_owner', '')
 end
 return 0
 """
 
 
-def _clear_publish_error(r_client, league_id: str, error_message: str) -> None:
+def _clear_publish_error(r_client, league_id: str, owner: str) -> None:
     """Retracts our own transient publish error after a retry succeeded, leaving any error
     another writer recorded in the meantime intact."""
     try:
-        r_client.eval(_CLEAR_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), error_message)
+        r_client.eval(_CLEAR_PUBLISH_ERROR_LUA, 1, _listener_board_key(league_id), owner)
     except Exception as state_error:
         logger.error("Failed to clear listener error state for league %s: %s", league_id, state_error)
 
 
-def _surface_clock_expired(r_client, league_id: str, target: dict, pick_number: int, detail: str) -> None:
+def _surface_clock_expired(r_client, league_id: str, target: dict, pick_number: int, detail: str, owner: str = "") -> None:
     """A pick abandoned because the clock ran out is a missed pick, not a quiet no-op: it
     hands the slot to ESPN autodraft. It has to reach /v1/draft/status and execution_log,
     not just pod logs, or the operator's first sign of it is a player they did not choose."""
@@ -652,6 +663,7 @@ def _surface_clock_expired(r_client, league_id: str, target: dict, pick_number: 
         r_client, league_id, target,
         f"Pick clock expired before pick {pick_number} could be published ({detail}); "
         f"target '{target.get('name')}' was not sent and the pick may be autodrafted.",
+        owner=owner,
     )
 
 
@@ -682,6 +694,10 @@ def hold_and_publish(
         with tracer.start_as_current_span("draft_pick.hold_and_publish", attributes={"team_id": team_id, "pick_number": pick_number}):
             origin = monotonic_fn() if clock_origin is None else clock_origin
             deadline = origin + DRAFT_PICK_CLOCK_SECONDS - DRAFT_PUBLISH_SAFETY_SECONDS
+            # Identifies this publisher thread on the board, so a retry that finally succeeds
+            # retracts only its own error. Two overlapping threads can record the identical
+            # message, which makes the text alone useless as an ownership check.
+            error_owner = f"publish:{league_id}:{pick_number}:{uuid.uuid4()}"
             try:
                 should_publish = wait_for_pause_or_timeout(
                     r_client, league_id, pick_number, delay_seconds,
@@ -691,7 +707,6 @@ def hold_and_publish(
                     return
 
                 failure_surfaced = False
-                last_error_message = ""
                 # Identifies this pick, not this attempt, so every retry claims the same key
                 # at the gateway and an ambiguous failure cannot enqueue the action twice.
                 idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
@@ -709,6 +724,7 @@ def hold_and_publish(
                         )
                         _surface_clock_expired(
                             r_client, league_id, target, pick_number, "deadline reached",
+                            owner=error_owner,
                         )
                         return
                     if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
@@ -726,6 +742,7 @@ def hold_and_publish(
                         _surface_clock_expired(
                             r_client, league_id, target, pick_number,
                             f"only {remaining:.1f}s left, below the {MIN_PUBLISH_WINDOW_SECONDS}s minimum request window",
+                            owner=error_owner,
                         )
                         return
                     try:
@@ -734,7 +751,7 @@ def hold_and_publish(
                             timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
                         )
                         if failure_surfaced:
-                            _clear_publish_error(r_client, league_id, last_error_message)
+                            _clear_publish_error(r_client, league_id, error_owner)
                         return
                     except Exception as error:
                         retryable = _is_retryable_publish_error(error)
@@ -744,7 +761,7 @@ def hold_and_publish(
                         # a transient blip - while hiding the validation error that actually
                         # ended the attempt and is the one a human needs to act on.
                         if not failure_surfaced or not retryable:
-                            last_error_message = _surface_publish_error(r_client, league_id, target, error)
+                            _surface_publish_error(r_client, league_id, target, error, owner=error_owner)
                             failure_surfaced = True
                         if not retryable:
                             logger.error(
@@ -754,7 +771,7 @@ def hold_and_publish(
                             return
                         if monotonic_fn() + PUBLISH_RETRY_INTERVAL_SECONDS >= deadline:
                             # Also terminal, and for a reason the first error does not convey.
-                            _surface_publish_error(r_client, league_id, target, error)
+                            _surface_publish_error(r_client, league_id, target, error, owner=error_owner)
                             return
                         logger.warning(
                             "Draft target publish failed for league %s pick %s; retrying in %ss: %s",
@@ -763,7 +780,7 @@ def hold_and_publish(
                         )
                         sleep_fn(PUBLISH_RETRY_INTERVAL_SECONDS)
             except Exception as error:
-                _surface_publish_error(r_client, league_id, target, error)
+                _surface_publish_error(r_client, league_id, target, error, owner=error_owner)
     finally:
         if token is not None:
             context.detach(token)

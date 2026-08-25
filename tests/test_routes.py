@@ -1,3 +1,4 @@
+import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -207,6 +208,29 @@ def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
     mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_does_not_leak_the_idempotency_key_onto_the_queue(client):
+    """idempotency_key is gateway-only state; the click-bot does not deduplicate. Forwarding
+    it would change the draft_targets JSON contract for no consumer benefit."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=_fake_redis()), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "idempotency_key" not in body
+    assert body["player_id"] == "4046"
 
 
 def test_trigger_draft_pick_tells_the_caller_to_retry_while_an_earlier_request_is_in_flight(client):
