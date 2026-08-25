@@ -1571,3 +1571,31 @@ def test_run_draft_listener_sets_socket_timeout_above_the_block_duration():
 
     _, kwargs = mock_redis_cls.call_args
     assert kwargs["socket_timeout"] * 1000 > dm.XREADGROUP_BLOCK_MS
+
+
+def test_run_draft_listener_retries_transient_redis_errors_instead_of_dying():
+    """Regression test for #87 review: the generated Job sets backoff_limit=0 and
+    restart_policy="Never" (src/api/draft.py), so nothing outside this process will ever
+    restart it. Bounding socket_timeout means a merely transient stall now raises
+    TimeoutError/ConnectionError where it previously would have just kept blocking - an
+    unhandled exception here would turn a brief, self-healing network blip into permanent
+    loss of recommendations for the rest of the draft. The main loop must retry these two
+    exception types indefinitely rather than let them propagate; any other exception
+    (a real bug, not a transient Redis condition) must still propagate normally."""
+    mock_client = MagicMock()
+    mock_client.xreadgroup.side_effect = [
+        [],  # startup backlog drain (id="0"): nothing pending, breaks immediately
+        dm.redis.exceptions.TimeoutError("stall"),
+        dm.redis.exceptions.ConnectionError("dropped"),
+        RuntimeError("a real bug, must not be swallowed"),
+    ]
+
+    with patch("src.optimization.draft_matrix.redis.Redis", return_value=mock_client), \
+         patch("src.optimization.draft_matrix.time.sleep") as mock_sleep:
+        with pytest.raises(RuntimeError, match="a real bug"):
+            dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
+
+    # Retried (slept) exactly twice - once per caught transient error - not on the final,
+    # unrelated RuntimeError that's expected to propagate.
+    assert mock_sleep.call_count == 2
+    assert mock_client.xreadgroup.call_count == 4

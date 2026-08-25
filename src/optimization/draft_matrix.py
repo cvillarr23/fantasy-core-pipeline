@@ -98,6 +98,14 @@ MIN_PUBLISH_WINDOW_SECONDS = 1
 # it also avoids the 8.1-style collision.
 XREADGROUP_BLOCK_MS = 5000
 REDIS_SOCKET_TIMEOUT_SECONDS = 15
+# The generated Job (src/api/draft.py's start_draft_sync) sets backoff_limit=0 and
+# restart_policy="Never" - nothing outside this process will ever restart it. Now that
+# XREADGROUP_BLOCK_MS is bounded above, an unhandled TimeoutError/ConnectionError from a
+# merely transient Redis stall (a brief network blip, not a truly dead connection) would
+# permanently end recommendations for the rest of the draft instead of just this one poll.
+# Retried indefinitely rather than propagated - there is no external supervisor to fall
+# back on, so an internal retry loop is the only way a transient stall can ever recover.
+TRANSIENT_REDIS_RETRY_SECONDS = 2
 # CORE-14 web UI wants to show the system's top-N alternatives, not just the one it would
 # auto-draft - see rank_recommended_targets/compute_draft_recommendation_candidates.
 TOP_CANDIDATES_LIMIT = 5
@@ -1156,7 +1164,15 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
     logger.info(f"Listening on '{stream_key}' as consumer '{consumer_name}' for league {league_id}...")
     while True:
-        entries = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: ">"}, count=1, block=XREADGROUP_BLOCK_MS)
+        try:
+            entries = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: ">"}, count=1, block=XREADGROUP_BLOCK_MS)
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+            logger.warning(
+                "Transient Redis error in listener main loop (league_id=%s); retrying in %ss: %s",
+                league_id, TRANSIENT_REDIS_RETRY_SECONDS, e,
+            )
+            time.sleep(TRANSIENT_REDIS_RETRY_SECONDS)
+            continue
         if not entries:
             continue
         _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, entries)
