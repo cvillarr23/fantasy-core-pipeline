@@ -3,14 +3,20 @@ import json
 import logging
 import uuid
 import pika
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status
 from opentelemetry import propagate
 from pydantic import BaseModel, Field
+from src.api.draft import _redis_client
 from src.database import get_db_cursor
 
 logger = logging.getLogger("GatewayRoutes")
 router = APIRouter()
+
+# How long a claimed idempotency key blocks a repeat enqueue. Comfortably longer than any
+# pick clock (the retry window it guards) and far shorter than a draft, so keys from an
+# earlier draft can never collide with a later one.
+DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 900
 
 # Load AMQP broker settings securely injected into environment variables
 # Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
@@ -36,6 +42,17 @@ class DraftPickTriggerPayload(BaseModel):
     name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
     position: str = Field(..., description="Player's position, for a name+position+team match against ESPN's own player pool")
     pro_team: str = Field(..., description="Player's NFL team abbreviation, for a name+position+team match against ESPN's own player pool")
+    idempotency_key: Optional[str] = Field(
+        None,
+        description=(
+            "Stable per-pick key. A publish that fails ambiguously - a read timeout, or a "
+            "connection reset after the request was sent - may already have queued a durable "
+            "message, so the caller's retry would otherwise enqueue a second draft action for "
+            "the same pick and the worker would click twice. Supplying the same key on every "
+            "attempt makes the enqueue idempotent. Optional: callers that genuinely want an "
+            "independent action (a manual override from the UI, say) simply omit it."
+        ),
+    )
 
 # ------------------------------------------------------------------------------
 # ROUTE ENDPOINTS
@@ -208,6 +225,30 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     return
 
 
+def _claim_idempotency_key(key: Optional[str]) -> bool:
+    """Claims `key` for this request, returning False if an earlier request already had it.
+
+    A publish that fails ambiguously - a read timeout, or a connection reset after the bytes
+    went out - may already have committed a durable message. Without this, the caller's retry
+    enqueues a second draft action and the worker clicks twice.
+
+    Fails OPEN. If Redis is unreachable we cannot prove the key is unclaimed, and the choice
+    is between a possible duplicate click and a certainly missed pick. A duplicate SELECT for
+    a player we already have is rejected by ESPN; a missed pick hands the roster spot to
+    autodraft, which is the failure this whole retry path exists to prevent.
+    """
+    if not key:
+        return True
+    try:
+        return bool(_redis_client().set(
+            f"draft:trigger:idempotency:{key}", "1",
+            nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+        ))
+    except Exception as e:
+        logger.warning(f"Idempotency check unavailable for key {key}; proceeding without it: {e}")
+        return True
+
+
 @router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
@@ -219,6 +260,18 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
     logger.info(f"Gateway processing draft pick command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
 
     _reject_internal_player_id(payload.player_id, payload.name)
+
+    if not _claim_idempotency_key(payload.idempotency_key):
+        logger.info(
+            f"Draft pick for Team {payload.team_id} -> {payload.name} already enqueued under "
+            f"idempotency key {payload.idempotency_key}; not queueing a duplicate."
+        )
+        return {
+            "status": "duplicate",
+            "queue": "draft_targets",
+            "team_id": payload.team_id,
+            "tracking_id": tracking_id,
+        }
 
     try:
         params = pika.URLParameters(AMQP_URL)

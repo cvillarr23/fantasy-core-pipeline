@@ -229,7 +229,10 @@ def test_start_draft_sync_job_omits_unset_inherited_env(client):
     assert response.status_code == 202
     _, job = mock_batch_api.create_namespaced_job.call_args[0]
     env_names = {e.name for e in job.spec.template.spec.containers[0].env}
-    assert env_names == {"DB_PASSWORD"}
+    # DRAFT_PICK_CLOCK_SECONDS is always set, never inherited: it is mode-derived, and a
+    # practice listener silently falling back to the 90s live default would keep retrying
+    # long after the 30s practice clock expired.
+    assert env_names == {"DB_PASSWORD", "DRAFT_PICK_CLOCK_SECONDS"}
 
 
 def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
@@ -259,6 +262,32 @@ def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
     assert job.spec.template.metadata.labels["mode"] == "practice"
     container = job.spec.template.spec.containers[0]
     assert "MOCK123" in container.command
+    # A practice room's clock is 30s, not the 90s a real draft gets. Inheriting the live
+    # default would let the publish-retry loop run for a full minute after the clock it is
+    # meant to protect had already expired and autodrafted.
+    clock = {e.name: e.value for e in container.env}["DRAFT_PICK_CLOCK_SECONDS"]
+    assert clock == "30"
+
+
+def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start")
+
+    assert response.status_code == 202
+    _, job = mock_batch_api.create_namespaced_job.call_args[0]
+    container = job.spec.template.spec.containers[0]
+    assert {e.name: e.value for e in container.env}["DRAFT_PICK_CLOCK_SECONDS"] == "90"
 
 
 def test_start_draft_sync_selector_picks_named_league(client):

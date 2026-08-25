@@ -320,6 +320,8 @@ def test_publish_draft_target_posts_expected_payload():
         "name": "Some Back",
         "position": "RB",
         "pro_team": "KC",
+        # Absent unless the caller is retrying; the gateway treats None as "no dedup".
+        "idempotency_key": None,
     }
 
 
@@ -438,7 +440,9 @@ def test_hold_and_publish_surfaces_failure_after_clock_expires():
         )
 
     assert mock_publish.call_count > 1
-    mock_record.assert_called_once()
+    # Twice: the first failure, then again for the one that actually ended the attempt.
+    # Reporting only the first hides the terminal cause, which is the one a human acts on.
+    assert mock_record.call_count == 2
     assert mock_record.call_args.args[:2] == ("L1", target)
     assert "unavailable" in mock_record.call_args.args[2]
     assert mock_client.hset.call_args.kwargs["mapping"]["listener_state"] == "Active"
@@ -458,7 +462,7 @@ def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick()
         )
 
     assert sum(sleeps) == 8
-    mock_publish.assert_called_once_with("7", target)
+    mock_publish.assert_called_once_with("7", target, idempotency_key="L1:5:e-1")
 
 
 # ---------------------------------------------------------------------------
@@ -620,16 +624,35 @@ def test_hold_and_publish_uses_the_supplied_clock_origin_not_thread_start():
     assert now[0] < 25.0
 
 
-def test_process_entries_anchors_the_deadline_before_handling_the_event():
-    entries = [("draft_picks:L1", [("1-1", {"payload": json.dumps({"pick_number": 4})})])]
+def test_process_entries_anchors_the_deadline_to_the_stream_entry_not_the_read_time():
+    # Redis Stream id is "<unixMillis>-<seq>". This entry was written 60s ago, so its clock
+    # origin must be 60s in the past - not "now", which is what a fresh monotonic() reading
+    # at read time produced and which gave every drained backlog entry a brand new clock.
+    entry_ms = int((time.time() - 60) * 1000)
+    entries = [(f"draft_picks:L1", [(f"{entry_ms}-0", {"payload": json.dumps({"pick_number": 4})})])]
 
     with patch.object(dm, "handle_pick_event", return_value=(_player("p1", "RB", 1.0), 5)), \
-         patch.object(dm, "_schedule_publish") as mock_schedule, \
-         patch.object(dm, "time") as mock_time:
-        mock_time.monotonic.return_value = 1234.5
+         patch.object(dm, "_schedule_publish") as mock_schedule:
+        before = time.monotonic()
         dm._process_entries(MagicMock(), "draft_picks:L1", "L1", 2026, 1, "7", 8, {}, entries)
+        after = time.monotonic()
 
-    assert mock_schedule.call_args.kwargs["clock_origin"] == 1234.5
+    origin = mock_schedule.call_args.kwargs["clock_origin"]
+    assert before - 61 <= origin <= after - 59
+
+
+def test_stream_entry_clock_origin_falls_back_to_now_for_an_unparseable_id():
+    # The DOM/REST tiers may write ids we did not mint. Falling back to "now" is only wrong
+    # in the generous direction and must never block a live pick.
+    assert dm._stream_entry_clock_origin("not-an-id", monotonic_fn=lambda: 500.0) == 500.0
+    assert dm._stream_entry_clock_origin(None, monotonic_fn=lambda: 500.0) == 500.0
+
+
+def test_stream_entry_clock_origin_ignores_a_future_dated_entry():
+    # Clock skew between the worker writing the entry and this process reading it must not
+    # push the deadline into the future and extend the clock.
+    future_ms = int((time.time() + 30) * 1000)
+    assert dm._stream_entry_clock_origin(f"{future_ms}-0", monotonic_fn=lambda: 500.0) == 500.0
 
 
 # ---------------------------------------------------------------------------

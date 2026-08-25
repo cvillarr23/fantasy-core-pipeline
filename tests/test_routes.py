@@ -123,6 +123,71 @@ def test_trigger_draft_pick_success(client):
     assert body["tracking_id"] in publish_kwargs["body"]
 
 
+def test_trigger_draft_pick_idempotency_key_blocks_a_duplicate_enqueue(client):
+    """A publish that fails ambiguously - read timeout, or a reset after the bytes went out -
+    may already have committed a durable message. Without this the caller's retry queues a
+    second draft action and the worker clicks twice."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = MagicMock()
+    # First claim wins, second finds the key already held.
+    mock_redis.set.side_effect = [True, None]
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        first = client.post("/v1/trigger/draft-pick", json=payload)
+        second = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert first.status_code == 202 and first.json()["status"] == "accepted"
+    assert second.status_code == 202 and second.json()["status"] == "duplicate"
+    assert mock_channel.basic_publish.call_count == 1
+    assert mock_redis.set.call_args.kwargs["nx"] is True
+
+
+def test_trigger_draft_pick_without_an_idempotency_key_never_touches_redis(client):
+    mock_connection = MagicMock()
+    mock_redis = MagicMock()
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "position": "RB", "pro_team": "KC"}
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    mock_redis.set.assert_not_called()
+
+
+def test_trigger_draft_pick_fails_open_when_redis_is_unavailable(client):
+    """A duplicate SELECT for a player we already hold is rejected by ESPN; a missed pick
+    hands the roster spot to autodraft. Given an unprovable claim, take the recoverable
+    failure."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", side_effect=Exception("redis down")), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    mock_channel.basic_publish.assert_called_once()
+
+
 def test_trigger_draft_pick_broker_failure(client):
     payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "position": "RB", "pro_team": "KC"}
 

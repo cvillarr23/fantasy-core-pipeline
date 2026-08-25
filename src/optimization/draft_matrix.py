@@ -508,7 +508,7 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -533,6 +533,10 @@ def publish_draft_target(team_id: str, target: dict) -> None:
             "name": target["name"],
             "position": target["position"],
             "pro_team": target["team"],
+            # Stable across every retry of this pick, so an ambiguous failure (a read
+            # timeout, or a reset after the request was sent) cannot enqueue the same draft
+            # action twice and have the worker click twice.
+            "idempotency_key": idempotency_key,
         },
         headers=headers,
         timeout=10,
@@ -611,11 +615,12 @@ def hold_and_publish(
     captured by _schedule_publish before spawning this thread, and must be explicitly
     re-attached here or the eventual publish span silently starts a disconnected trace.
 
-    clock_origin is a monotonic reading taken when the *upstream* pick was first observed
-    (see _process_entries). Starting the deadline here instead would exclude everything
-    handle_pick_event does synchronously first - persisting the pick, reloading the
-    undrafted pool, and solving the ILP - so a slow recompute would push the deadline past
-    the real clock and let us publish a target for a pick ESPN had already autodrafted."""
+    clock_origin is a monotonic reading anchored to when the *upstream* pick was written to
+    the Redis Stream (see _stream_entry_clock_origin). Starting the deadline at thread start
+    would exclude everything handle_pick_event does synchronously first - persisting the
+    pick, reloading the undrafted pool, and solving the ILP - and would also give a drained
+    backlog entry a fresh clock, so a slow recompute or a restart could publish a target for
+    a pick ESPN had already autodrafted."""
     token = context.attach(trace_context) if trace_context is not None else None
     try:
         with tracer.start_as_current_span("draft_pick.hold_and_publish", attributes={"team_id": team_id, "pick_number": pick_number}):
@@ -630,6 +635,9 @@ def hold_and_publish(
                     return
 
                 failure_surfaced = False
+                # Identifies this pick, not this attempt, so every retry claims the same key
+                # at the gateway and an ambiguous failure cannot enqueue the action twice.
+                idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
                 while True:
                     # Both guards are re-evaluated before *every* attempt, not just the
                     # first. The pause key and cancel_event are set by other threads and a
@@ -646,7 +654,7 @@ def hold_and_publish(
                     if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
                         return
                     try:
-                        publish_draft_target(team_id, target)
+                        publish_draft_target(team_id, target, idempotency_key=idempotency_key)
                         if failure_surfaced:
                             try:
                                 _write_listener_state(r_client, league_id, "Active")
@@ -654,16 +662,24 @@ def hold_and_publish(
                                 logger.error("Failed to clear listener error state for league %s: %s", league_id, state_error)
                         return
                     except Exception as error:
-                        if not failure_surfaced:
+                        retryable = _is_retryable_publish_error(error)
+                        # Surface the first failure, and again for whatever finally stops us.
+                        # Reporting only the first meant that a connection reset followed by a
+                        # 422 left /v1/draft/status and execution_log describing the reset -
+                        # a transient blip - while hiding the validation error that actually
+                        # ended the attempt and is the one a human needs to act on.
+                        if not failure_surfaced or not retryable:
                             _surface_publish_error(r_client, league_id, target, error)
                             failure_surfaced = True
-                        if not _is_retryable_publish_error(error):
+                        if not retryable:
                             logger.error(
                                 "Draft target publish for league %s pick %s failed permanently; not retrying: %s",
                                 league_id, pick_number, _publish_error_detail(error),
                             )
                             return
                         if monotonic_fn() + PUBLISH_RETRY_INTERVAL_SECONDS >= deadline:
+                            # Also terminal, and for a reason the first error does not convey.
+                            _surface_publish_error(r_client, league_id, target, error)
                             return
                         logger.warning(
                             "Draft target publish failed for league %s pick %s; retrying in %ss: %s",
@@ -884,15 +900,36 @@ def decode_pick_event(fields: dict) -> dict:
     return json.loads(payload)
 
 
+def _stream_entry_clock_origin(entry_id, monotonic_fn=time.monotonic, time_fn=time.time) -> float:
+    """Converts a Redis Stream id ("<unixMillis>-<seq>") into a monotonic origin.
+
+    The pick clock starts when the upstream pick landed, which for a backlog entry may be
+    minutes before this process even read it. Stamping monotonic() at read time gave every
+    drained entry a fresh clock, so a restart draining up to 100 old entries could publish
+    a target for a pick ESPN autodrafted long ago. Falls back to "now" when the id is not
+    parseable (the DOM/REST tiers may write ids we did not mint) - the old behaviour, which
+    is wrong only in the direction of being too generous, and never blocks a live pick.
+    """
+    now_monotonic = monotonic_fn()
+    try:
+        entry_ms = int(str(entry_id).split("-")[0])
+    except (ValueError, AttributeError, IndexError):
+        return now_monotonic
+    age_seconds = time_fn() - (entry_ms / 1000.0)
+    if age_seconds <= 0:
+        return now_monotonic
+    return now_monotonic - age_seconds
+
+
 def _process_entries(r_client, stream_key: str, league_id: str, season: int, week: int, team_id: str, delay_seconds: int, pending_state: dict, entries: list) -> None:
     with tracer.start_as_current_span("draft_listener.process_batch", attributes={"league_id": league_id}):
         for _stream, messages in entries:
             for entry_id, fields in messages:
-                # Taken before any work: our pick clock started when the upstream pick
-                # landed, not when we finished reacting to it. Persisting the pick and
-                # solving the ILP happen synchronously below, and anchoring the publish
-                # deadline after them would silently extend it by however long that took.
-                clock_origin = time.monotonic()
+                # Anchored to when the pick was written to the Stream, not to when we got
+                # round to it. Persisting the pick and solving the ILP happen synchronously
+                # below, and a restart may drain a backlog of entries that are already
+                # minutes old - both would otherwise silently extend the real clock.
+                clock_origin = _stream_entry_clock_origin(entry_id)
                 try:
                     result = handle_pick_event(r_client, league_id, season, week, team_id, decode_pick_event(fields))
                     if result is not None:

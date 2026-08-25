@@ -90,6 +90,15 @@ ESPN_LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
 # Draft-sync listener defaults to week 1 preseason projections (matches draft_matrix.py's
 # own --week CLI default) - draft config doesn't track a week, since a draft has none.
 DRAFT_SYNC_WEEK = 1
+# The publish-retry deadline in draft_matrix.hold_and_publish is bounded by the pick clock,
+# and the two modes do not share one: ESPN practice rooms run 30s while real drafts are 90s+.
+# Passed explicitly per Job rather than left to the module default, because the failure is
+# silent in the dangerous direction - a practice listener inheriting the 90s live default
+# keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
+DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
+    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "90")),
+    "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),
+}
 
 SSE_POLL_INTERVAL_SECONDS = 2
 DRAFT_STATUS_STALENESS_SECONDS = int(os.getenv("DRAFT_STATUS_STALENESS_SECONDS", "15"))
@@ -132,7 +141,7 @@ def _redis_client() -> redis.Redis:
     )
 
 
-def _draft_sync_env() -> list:
+def _draft_sync_env(mode: str = "live") -> list:
     """Explicit env for the draft-sync Job's Pod.
 
     The Job's Pod does not inherit this API Pod's environment, and draft_matrix.py imports
@@ -148,7 +157,11 @@ def _draft_sync_env() -> list:
                     key=DRAFT_SYNC_DB_SECRET_KEY,
                 )
             ),
-        )
+        ),
+        client.V1EnvVar(
+            name="DRAFT_PICK_CLOCK_SECONDS",
+            value=str(DRAFT_PICK_CLOCK_SECONDS_BY_MODE.get(mode, DRAFT_PICK_CLOCK_SECONDS_BY_MODE["live"])),
+        ),
     ]
     for name in DRAFT_SYNC_INHERITED_ENV_VARS:
         value = os.getenv(name)
@@ -894,7 +907,7 @@ def start_draft_sync(league_id: Optional[str] = None):
                                 client.V1EnvFromSource(config_map_ref=client.V1ConfigMapEnvSource(name=DRAFT_SYNC_ENV_CONFIGMAP)),
                                 client.V1EnvFromSource(secret_ref=client.V1SecretEnvSource(name=DRAFT_SYNC_ENV_SECRET)),
                             ],
-                            env=_draft_sync_env(),
+                            env=_draft_sync_env(mode),
                         )
                     ],
                 ),
