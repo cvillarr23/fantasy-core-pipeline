@@ -1549,3 +1549,24 @@ def test_resolve_player_id_looks_up_espn_id_only():
     assert dm.resolve_player_id(mock_conn, "12483") is None
     assert mock_cursor.execute.call_count == 1
     assert "espn_id" in mock_cursor.execute.call_args.args[0]
+
+
+# ---------------------------------------------------------------------------
+# run_draft_listener's Redis client construction (#87)
+# ---------------------------------------------------------------------------
+def test_run_draft_listener_sets_socket_timeout_above_the_block_duration():
+    """Regression test for #87: an unset socket_timeout defaults to 5s on redis-py 8.1,
+    colliding with the main loop's block=XREADGROUP_BLOCK_MS (also 5000ms) and raising a
+    client-side TimeoutError on any natural quiet gap between picks - reproduced live
+    against a real draft room. socket_timeout must stay comfortably larger than the block
+    duration so a quiet gap resolves as a clean nil, not an exception."""
+    with patch("src.optimization.draft_matrix.redis.Redis") as mock_redis_cls:
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = RuntimeError("boom")
+        mock_redis_cls.return_value = mock_client
+
+        with pytest.raises(RuntimeError):
+            dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
+
+    _, kwargs = mock_redis_cls.call_args
+    assert kwargs["socket_timeout"] * 1000 > dm.XREADGROUP_BLOCK_MS

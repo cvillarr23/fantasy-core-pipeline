@@ -77,6 +77,27 @@ RETRYABLE_PUBLISH_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # actually left, and an attempt is not started at all below the floor.
 PUBLISH_TIMEOUT_SECONDS = 10
 MIN_PUBLISH_WINDOW_SECONDS = 1
+# The main loop's XREADGROUP asks the *server* to hold the connection open for up to
+# XREADGROUP_BLOCK_MS before replying with a nil - but redis-py's own client-side socket
+# read timeout is a separate, independent setting, left unset here until now. This
+# repo's pinned requirements.txt (redis==5.0.4, confirmed installed in isolation) defaults
+# an unset socket_timeout to None - unbounded - so today a genuinely dropped connection
+# (not a normal quiet gap, which BLOCK already handles server-side) leaves the listener
+# hung forever with no exception, no log, and no chance for the consumer-group backlog
+# drain on restart (see run_draft_listener's docstring) to ever kick in, since the process
+# never actually dies. (Locally testing against this repo's documented unpinned-venv
+# workaround for newer Python - see CLAUDE.md's Testing section - happened to install
+# redis-py 8.1, whose *different* default of 5s collided with a 5000ms BLOCK and raised
+# a real, reproducible redis.exceptions.TimeoutError on any ~5s quiet gap; that specific
+# collision is a dev-venv artifact, not something the pinned 5.0.4 client does.)
+# Comfortably larger than the block duration either way: with 5.0.4 it turns an
+# undetectable infinite hang on a genuinely dropped connection into a loud, retried
+# condition instead of a silent one (the retry loop below still doesn't crash the process
+# for a transient TimeoutError/ConnectionError - see its own comment - but at least it's
+# now visible and retried instead of hanging with no signal at all); with a newer redis-py
+# it also avoids the 8.1-style collision.
+XREADGROUP_BLOCK_MS = 5000
+REDIS_SOCKET_TIMEOUT_SECONDS = 15
 # CORE-14 web UI wants to show the system's top-N alternatives, not just the one it would
 # auto-draft - see rank_recommended_targets/compute_draft_recommendation_candidates.
 TOP_CANDIDATES_LIMIT = 5
@@ -1097,7 +1118,10 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
     pending_state = {}
     with tracer.start_as_current_span("draft_listener.startup", attributes={"league_id": league_id, "team_id": team_id}):
         try:
-            r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r_client = redis.Redis(
+                host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+            )
             r_client.ping()
 
             stream_key = f"draft_picks:{league_id}"
@@ -1132,7 +1156,7 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
     logger.info(f"Listening on '{stream_key}' as consumer '{consumer_name}' for league {league_id}...")
     while True:
-        entries = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: ">"}, count=1, block=5000)
+        entries = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: ">"}, count=1, block=XREADGROUP_BLOCK_MS)
         if not entries:
             continue
         _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, entries)
