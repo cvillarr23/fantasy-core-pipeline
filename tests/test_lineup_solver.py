@@ -110,6 +110,44 @@ def test_build_and_solve_lineup_threads_defense_matchup_multiplier_through():
     assert starters["qb1"]["defense_matchup_multiplier"] == 1.07
 
 
+def test_build_and_solve_lineup_objective_actually_applies_the_multiplier():
+    # wr_boosted has lower raw vorp_score than wr_plain, but its 1.1 multiplier pushes its
+    # objective weight (6.0 * 1.1 = 6.6) above wr_plain's (6.5 * 1.0) - the flex slot must
+    # go to wr_boosted, proving the multiplier is actually applied to the objective, not
+    # just carried through on the output dict.
+    pool = [
+        _player("qb1", "QB", 10.0),
+        _player("rb1", "RB", 8.0), _player("rb2", "RB", 7.0),
+        _player("wr1", "WR", 9.0), _player("wr2", "WR", 8.0),
+        _player("te1", "TE", 4.0), _player("dst1", "D/ST", 3.0), _player("k1", "K", 2.0),
+        _player("wr_plain", "WR", 6.5, defense_matchup_multiplier=1.0),
+        _player("wr_boosted", "WR", 6.0, defense_matchup_multiplier=1.1),
+    ]
+    starters = {p["player_id"] for p in ls.build_and_solve_lineup(pool)}
+    assert "wr_boosted" in starters
+    assert "wr_plain" not in starters
+
+
+def test_build_and_solve_lineup_tolerates_pool_entries_missing_the_multiplier_key():
+    """season_replay.scoring builds naive/hindsight pools (spread from
+    load_roster_with_projected, which has no defense_matchup_multiplier key at all) and
+    feeds them straight into this solver - it must not KeyError."""
+    pool = [
+        {"player_id": "qb1", "name": "QB One", "position": "QB", "vorp_score": 10.0},
+        {"player_id": "rb1", "name": "RB One", "position": "RB", "vorp_score": 8.0},
+        {"player_id": "rb2", "name": "RB Two", "position": "RB", "vorp_score": 7.0},
+        {"player_id": "wr1", "name": "WR One", "position": "WR", "vorp_score": 6.0},
+        {"player_id": "wr2", "name": "WR Two", "position": "WR", "vorp_score": 5.0},
+        {"player_id": "wr3", "name": "WR Three", "position": "WR", "vorp_score": 4.5},
+        {"player_id": "te1", "name": "TE One", "position": "TE", "vorp_score": 4.0},
+        {"player_id": "dst1", "name": "DST One", "position": "D/ST", "vorp_score": 3.0},
+        {"player_id": "k1", "name": "K One", "position": "K", "vorp_score": 2.0},
+    ]
+    starters = ls.build_and_solve_lineup(pool)  # should not raise
+    assert len(starters) == 9
+    assert all(p["defense_matchup_multiplier"] == 1.0 for p in starters)
+
+
 # ---------------------------------------------------------------------------
 # load_roster_pool
 # ---------------------------------------------------------------------------

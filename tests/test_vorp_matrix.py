@@ -412,7 +412,7 @@ def test_empty_rosters_yields_all_scarcity_multipliers_of_one():
 
 
 # ---------------------------------------------------------------------------
-# compute_defense_matchup_multiplier / apply_defense_matchup_multiplier (#93)
+# compute_defense_matchup_multiplier (#93)
 # ---------------------------------------------------------------------------
 
 def _defense_frame(rows):
@@ -455,22 +455,16 @@ def test_defense_matchup_multiplier_neutral_when_column_absent():
     assert out["defense_matchup_multiplier"].to_list() == [1.0]
 
 
-def test_apply_defense_matchup_multiplier_scales_vorp_score():
-    df = _defense_frame([{"player_id": "a", "vorp_score": 10.0}])
-    df = df.with_columns(pl.lit(1.1).alias("defense_matchup_multiplier"))
-    out = vm.apply_defense_matchup_multiplier(df)
-    assert out["vorp_score"].item() == 11.0
-
-
 # ---------------------------------------------------------------------------
-# MATCHUP_WEIGHTING_ENABLED (#93) — off by default, byte-identical when disabled
+# MATCHUP_WEIGHTING_ENABLED + week gating (#93) — off by default, byte-identical when
+# disabled or off Week 1; vorp_score itself is never touched by this gate at all.
 # ---------------------------------------------------------------------------
 
-def _defense_matchup_step(df):
-    """Mirrors the MATCHUP_WEIGHTING_ENABLED-gated block in run_vorp_pipeline exactly."""
-    if vm.MATCHUP_WEIGHTING_ENABLED:
+def _defense_matchup_step(df, week):
+    """Mirrors the MATCHUP_WEIGHTING_ENABLED-and-week==1-gated block in run_vorp_pipeline
+    exactly. Never touches vorp_score - only ever produces defense_matchup_multiplier."""
+    if vm.MATCHUP_WEIGHTING_ENABLED and week == 1:
         df = vm.compute_defense_matchup_multiplier(df)
-        df = vm.apply_defense_matchup_multiplier(df)
     else:
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("defense_matchup_multiplier"))
     return df
@@ -485,20 +479,36 @@ def test_matchup_weighting_disabled_leaves_vorp_score_untouched_and_multiplier_n
     monkeypatch.setattr(vm, "MATCHUP_WEIGHTING_ENABLED", False)
     df = _defense_frame([{"player_id": "a", "vorp_score": 10.0, "defense_strength_z": 100.0}])
 
-    out = _defense_matchup_step(df)
+    out = _defense_matchup_step(df, week=1)
 
     assert out["vorp_score"].item() == 10.0
     assert out["defense_matchup_multiplier"].item() is None
 
 
-def test_matchup_weighting_enabled_applies_multiplier(monkeypatch):
+def test_matchup_weighting_enabled_week_one_computes_multiplier_without_touching_vorp_score(monkeypatch):
+    """vorp_score is the canonical season-long VORP other consumers (waiver_strategy.py,
+    trade/player APIs) read directly - this gate must only ever populate the separate
+    defense_matchup_multiplier column, never scale vorp_score in place."""
     monkeypatch.setattr(vm, "MATCHUP_WEIGHTING_ENABLED", True)
     df = _defense_frame([{"player_id": "a", "vorp_score": 10.0, "defense_strength_z": 100.0}])
 
-    out = _defense_matchup_step(df)
+    out = _defense_matchup_step(df, week=1)
 
     assert out["defense_matchup_multiplier"].item() == vm.DEFENSE_MATCHUP_BOUNDS[1]
-    assert out["vorp_score"].item() == 10.0 * vm.DEFENSE_MATCHUP_BOUNDS[1]
+    assert out["vorp_score"].item() == 10.0
+
+
+def test_matchup_weighting_enabled_but_not_week_one_leaves_multiplier_null(monkeypatch):
+    """Regression guard: season_replay.run_week calls run_vorp_pipeline once per week of a
+    backtest. defense_position_strength is a last-season proxy, meaningful only as a Week 1
+    cold-start signal - enabling the flag must not apply it to every week of a season."""
+    monkeypatch.setattr(vm, "MATCHUP_WEIGHTING_ENABLED", True)
+    df = _defense_frame([{"player_id": "a", "vorp_score": 10.0, "defense_strength_z": 100.0}])
+
+    out = _defense_matchup_step(df, week=5)
+
+    assert out["defense_matchup_multiplier"].item() is None
+    assert out["vorp_score"].item() == 10.0
 
 
 def test_persist_vorp_matrix_writes_defense_matchup_multiplier():

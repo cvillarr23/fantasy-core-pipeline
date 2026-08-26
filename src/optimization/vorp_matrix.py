@@ -294,6 +294,12 @@ def compute_defense_matchup_multiplier(df: pl.DataFrame) -> pl.DataFrame:
     points-allowed (sync_defense_strength.py), since Week 1 has no current-season data by
     definition. NULL strength_z (no ingested row yet, bye week, or non-skill position) is
     neutral: 1.0, not clamped toward either bound.
+
+    Deliberately does NOT multiply this into vorp_score: weekly_stats.vorp_score is the
+    canonical season-long VORP other consumers (waiver_strategy.py, trade/player APIs) read
+    directly - baking the Week 1 opponent nudge into it would silently distort every one of
+    those, not just Week 1 lineup selection. lineup_solver.py is the only place that
+    multiplies vorp_score by this column, and only for its own ILP objective.
     """
     if df.is_empty() or "defense_strength_z" not in df.columns:
         return df.with_columns(pl.lit(1.0).alias("defense_matchup_multiplier"))
@@ -302,16 +308,6 @@ def compute_defense_matchup_multiplier(df: pl.DataFrame) -> pl.DataFrame:
         .then(1.0)
         .otherwise((1 + W_DEFENSE * pl.col("defense_strength_z")).clip(*DEFENSE_MATCHUP_BOUNDS))
         .alias("defense_matchup_multiplier")
-    )
-
-
-def apply_defense_matchup_multiplier(df: pl.DataFrame) -> pl.DataFrame:
-    """Applied last, after scarcity: adjusted_vorp = vorp_score * multiplier, per the
-    issue's spec ("vorp", not "projected_points"). Deliberately the final step so the
-    +/-10% nudge can only break ties/nudge close calls within a tier already fixed by
-    baseline+scarcity math, never reorder which tier a player is in."""
-    return df.with_columns(
-        (pl.col("vorp_score") * pl.col("defense_matchup_multiplier")).alias("vorp_score")
     )
 
 
@@ -413,12 +409,17 @@ def run_vorp_pipeline(season: int, week: int) -> int:
                 df = apply_scarcity(df, multipliers)
 
             with tracer.start_as_current_span("vorp_pipeline.defense_matchup"):
-                # Off by default: vorp_score is untouched and the persisted multiplier is a
-                # real NULL (not 1.0) when the flag is unset - byte-identical to pre-#93
-                # behavior, per the issue's acceptance criteria.
-                if MATCHUP_WEIGHTING_ENABLED:
+                # Off by default: the persisted multiplier is a real NULL (not 1.0) when
+                # the flag is unset, or when week != 1 - byte-identical to pre-#93 behavior
+                # in both cases, per the issue's acceptance criteria. week == 1 specifically
+                # (not just the flag) because defense_position_strength is a last-season
+                # proxy, meaningful only as a Week 1 cold-start signal - this pipeline also
+                # runs once per week inside season_replay's backtest loop, and a bare flag
+                # check would have applied a stale prior-season multiplier to every week of
+                # a season, not just Week 1. vorp_score itself is never touched here - see
+                # compute_defense_matchup_multiplier's docstring.
+                if MATCHUP_WEIGHTING_ENABLED and week == 1:
                     df = compute_defense_matchup_multiplier(df)
-                    df = apply_defense_matchup_multiplier(df)
                 else:
                     df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("defense_matchup_multiplier"))
 

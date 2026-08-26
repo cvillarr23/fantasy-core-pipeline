@@ -38,8 +38,11 @@ class SwapInstruction(BaseModel):
         None,
         description=(
             "Opponent-defense-strength multiplier applied to the added player's VORP for "
-            "this week (#93), in [0.9, 1.1]; None when MATCHUP_WEIGHTING_ENABLED is off or "
-            "no defense-strength proxy row was available. Lets the UI explain a nudge."
+            "this week (#93), in [0.9, 1.1]. 1.0 (neutral) when MATCHUP_WEIGHTING_ENABLED "
+            "is off, the week isn't Week 1, or no defense-strength proxy row was "
+            "available - lineup_solver.py's optimizer always sends a concrete value, never "
+            "omits the field; None is only possible from a non-optimizer caller. Lets the "
+            "UI explain a nudge."
         ),
     )
 

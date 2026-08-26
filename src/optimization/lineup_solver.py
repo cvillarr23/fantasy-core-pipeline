@@ -125,8 +125,12 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
                 )
     by_id = {p["player_id"]: p for p in roster_pool}
 
+    # Week 1 opponent-defense nudge (#93) is applied here, to the objective weight only -
+    # weekly_stats.vorp_score itself stays canonical (vorp_matrix.py never overwrites it).
+    # .get(..., 1.0) so a roster_pool built without this key (e.g. season_replay's naive/
+    # hindsight pools) is unaffected rather than raising.
     prob += pulp.lpSum(
-        var * by_id[pid]["vorp_score"]
+        var * by_id[pid]["vorp_score"] * by_id[pid].get("defense_matchup_multiplier", 1.0)
         for (pid, _, _), var in player_vars.items()
     ), "Total_VORP"
 
@@ -160,7 +164,7 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
     return [
         {
             "player_id": pid, "name": by_id[pid]["name"], "position": by_id[pid]["position"],
-            "defense_matchup_multiplier": by_id[pid]["defense_matchup_multiplier"],
+            "defense_matchup_multiplier": by_id[pid].get("defense_matchup_multiplier", 1.0),
         }
         for pid in by_id
         if any(
