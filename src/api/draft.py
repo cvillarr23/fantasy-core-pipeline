@@ -7,7 +7,7 @@ internationally on the actual draft day. Sits alongside the hot path (browser-wo
 draft_matrix -> /trigger/draft-pick -> RabbitMQ -> click bot) as an out-of-band control/
 observability layer, not part of it.
 
-Two known gaps, both flagged rather than guessed at:
+Three known gaps, all flagged rather than guessed at:
   - /start's Job image and its DB/Redis/API env config come from required env vars with no
     defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
     this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
@@ -17,6 +17,10 @@ Two known gaps, both flagged rather than guessed at:
     practice/live configs always live under distinct league_ids (see CORE-18), a practice
     run's rows are naturally excluded from a live league's /status the same way its k8s Job
     and Redis keys already are, without needing a dedicated column.
+  - GET /logs (#68) calls CoreV1Api.list_namespaced_pod/read_namespaced_pod_log, which needs
+    `pods`/`pods/log` read RBAC on this API's service account - granting that role lives in
+    fantasy-infra, same cross-repo split as the two gaps above. Until it's granted, /logs
+    will 500 on a real cluster even though the code path itself is correct.
 
 Also hosts /practice/sync-job (cvillarr23/fantasy-web-ui#9): creates fantasy-browser-worker's
 draft_sync.js Job (the actual ESPN draft-room connector) against a practice/mock room URL a
@@ -132,6 +136,11 @@ PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 # report "unknown" instead of hanging.
 K8S_REQUEST_TIMEOUT_SECONDS = 10
 
+# GET /logs (#68) caps how much pod log a client can pull in one request - a crash traceback
+# is a handful of lines, not a reason to let a browser tab request an unbounded log dump.
+DRAFT_LOGS_DEFAULT_TAIL_LINES = 200
+DRAFT_LOGS_MAX_TAIL_LINES = 1000
+
 
 # Same reasoning as K8S_REQUEST_TIMEOUT_SECONDS: these calls run in synchronous endpoints on a
 # bounded threadpool, and redis-py defaults to waiting forever. A Redis that accepts the
@@ -200,6 +209,15 @@ def _batch_v1_api() -> client.BatchV1Api:
     except ConfigException:
         config.load_kube_config()
     return client.BatchV1Api()
+
+
+def _core_v1_api() -> client.CoreV1Api:
+    """Same in-cluster/kubeconfig fallback as _batch_v1_api, for pod (not Job) reads."""
+    try:
+        config.load_incluster_config()
+    except ConfigException:
+        config.load_kube_config()
+    return client.CoreV1Api()
 
 
 # ------------------------------------------------------------------------------
@@ -1262,6 +1280,95 @@ def resume_draft(payload: DraftPauseRequest):
         raise HTTPException(status_code=500, detail=f"Failed to publish resumed draft target: {str(e)}")
 
     return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number, "published": True, "player_id": target["player_id"], "name": target["name"]}
+
+
+# ------------------------------------------------------------------------------
+# GET /v1/draft/logs (cvillarr23/fantasy-core-pipeline#68)
+# ------------------------------------------------------------------------------
+# Best-effort line-level redaction, not a guarantee - these are the specific secret shapes
+# this file's own Jobs are known to inject (ESPN session cookies via _draft_sync_env/the
+# room-sync container's env, DB_PASSWORD via secretKeyRef) and that could plausibly surface
+# in a traceback or a debug log line. Case-insensitive; value can be quoted, bare, or
+# separated by '=' or ':'.
+_LOG_REDACTION_PATTERNS = [
+    re.compile(r"(?i)(espn_s2\s*[:=]\s*)['\"]?[^'\"\s,}]+"),
+    re.compile(r"(?i)(swid\s*[:=]\s*)['\"]?[^'\"\s,}]+"),
+    re.compile(r"(?i)(db_password\s*[:=]\s*)['\"]?[^'\"\s,}]+"),
+    re.compile(r"(?i)(authorization\s*[:=]\s*)['\"]?[^'\"\s,}]+"),
+]
+
+
+def _redact_log_line(line: str) -> str:
+    for pattern in _LOG_REDACTION_PATTERNS:
+        line = pattern.sub(r"\1[REDACTED]", line)
+    return line
+
+
+@draft_router.get("/logs")
+def get_draft_logs(league_id: str, job: Literal["listener", "room-sync"], tail: int = DRAFT_LOGS_DEFAULT_TAIL_LINES):
+    """Tail of the spawned Job's pod log, for diagnosing a crash without cluster access.
+
+    Resolves the pod via the same label selectors /status and /practice/sync-job/status
+    already use, then reads its log directly - this works even after the pod has
+    terminated (both Jobs run with backoff_limit=0/restart_policy=Never, so there is no
+    live-vs-previous-container ambiguity), as long as the pod object itself hasn't been
+    garbage-collected. The listener Job sets no ttl_seconds_after_finished, so its pod (and
+    log) sticks around indefinitely; the room-sync Job sets ttl_seconds_after_finished=3600
+    (see PracticeSyncJobRequest handling below), so its log becomes unavailable an hour
+    after it finishes - an infra-level tradeoff, not something this endpoint can work around.
+
+    job="room-sync" intentionally ignores league_id when resolving the pod: the room-sync
+    Job only carries a league-id label when the practice room URL happened to include a
+    leagueId query param, and every other room-sync query in this file (job state, delete)
+    already treats it as a global singleton instead - _practice_sync_job_state() is checked
+    before /practice/sync-job creates a new one, forbidding more than one Active room-sync
+    Job at a time. league_id stays a required query param for
+    consistency with job="listener", where it's the only way to find the right pod.
+    """
+    tail = max(1, min(tail, DRAFT_LOGS_MAX_TAIL_LINES))
+    label_selector = (
+        f"app=draft-sync,league-id={league_id}" if job == "listener"
+        else f"app={PRACTICE_SYNC_APP_LABEL}"
+    )
+
+    try:
+        core_api = _core_v1_api()
+        pods = core_api.list_namespaced_pod(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+    except Exception as e:
+        logger.error(f"Failed to list pods for {job} logs (league {league_id}): {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list pods for {job}: {str(e)}")
+
+    items = getattr(pods, "items", []) or []
+    if not items:
+        raise HTTPException(status_code=404, detail=f"No {job} pod found for league {league_id}")
+    pod = max(items, key=lambda p: p.metadata.creation_timestamp)
+
+    try:
+        raw_log = core_api.read_namespaced_pod_log(
+            pod.metadata.name,
+            K8S_NAMESPACE,
+            tail_lines=tail,
+            timestamps=True,
+            _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.error(f"Failed to read log for pod {pod.metadata.name} ({job}, league {league_id}): {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to read pod log: {str(e)}")
+
+    container_statuses = pod.status.container_statuses or []
+    terminated = None
+    if container_statuses:
+        terminated = getattr(container_statuses[0].state, "terminated", None)
+
+    return {
+        "league_id": league_id,
+        "job": job,
+        "pod_name": pod.metadata.name,
+        "pod_phase": pod.status.phase,
+        "container_exit_code": terminated.exit_code if terminated else None,
+        "container_reason": terminated.reason if terminated else None,
+        "lines": [_redact_log_line(line) for line in raw_log.splitlines()],
+    }
 
 
 # ------------------------------------------------------------------------------

@@ -2347,3 +2347,135 @@ def test_wait_for_jobs_gone_ignores_jobs_it_was_not_asked_about():
 
     assert _wait_for_jobs_gone(mock_batch_api, "app=draft-sync,mode=practice", ["draft-sync-practice-L2-1"]) is True
     assert mock_batch_api.list_namespaced_job.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/draft/logs (#68)
+# ---------------------------------------------------------------------------
+def _fake_pod(name, created, phase="Running", exit_code=None, reason=None):
+    pod = MagicMock()
+    pod.metadata.name = name
+    pod.metadata.creation_timestamp = created
+    pod.status.phase = phase
+    if exit_code is None and reason is None:
+        pod.status.container_statuses = [MagicMock(state=MagicMock(terminated=None))]
+    else:
+        terminated = MagicMock(exit_code=exit_code, reason=reason)
+        pod.status.container_statuses = [MagicMock(state=MagicMock(terminated=terminated))]
+    return pod
+
+
+def test_get_draft_logs_for_listener(client):
+    pod = _fake_pod("draft-sync-l1-1700000000", datetime(2026, 1, 1))
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    mock_core_api.read_namespaced_pod_log.return_value = "line one\nDB_PASSWORD=hunter2 leaked\n"
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pod_name"] == "draft-sync-l1-1700000000"
+    assert body["job"] == "listener"
+    assert body["lines"] == ["line one", "DB_PASSWORD=[REDACTED] leaked"]
+    assert body["container_exit_code"] is None
+    assert body["container_reason"] is None
+
+    assert mock_core_api.list_namespaced_pod.call_args.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
+
+
+def test_get_draft_logs_for_room_sync_ignores_league_id_in_selector(client):
+    """The room-sync Job only carries a league-id label when the practice room URL happened
+    to include one - every other room-sync query in this file treats it as a global
+    singleton instead, and /logs must match that or it silently finds no pod."""
+    pod = _fake_pod("practice-draft-sync-1700000000", datetime(2026, 1, 1))
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    mock_core_api.read_namespaced_pod_log.return_value = "connected to room\n"
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "room-sync"})
+
+    assert response.status_code == 200
+    selector = mock_core_api.list_namespaced_pod.call_args.kwargs["label_selector"]
+    assert selector == "app=practice-draft-sync"
+
+
+def test_get_draft_logs_picks_the_most_recent_pod(client):
+    older = _fake_pod("draft-sync-l1-1", datetime(2026, 1, 1))
+    newer = _fake_pod("draft-sync-l1-2", datetime(2026, 1, 2))
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[older, newer])
+    mock_core_api.read_namespaced_pod_log.return_value = "latest attempt\n"
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
+
+    assert response.json()["pod_name"] == "draft-sync-l1-2"
+
+
+def test_get_draft_logs_surfaces_terminated_container_state(client):
+    """The whole point of #68: the listener's crash reason must be readable after the pod
+    has already terminated, not just while it's still Running."""
+    pod = _fake_pod("draft-sync-l1-1", datetime(2026, 1, 1), phase="Failed", exit_code=1, reason="Error")
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    mock_core_api.read_namespaced_pod_log.return_value = "DB_PASSWORD environment variable is missing!\n"
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
+
+    body = response.json()
+    assert body["pod_phase"] == "Failed"
+    assert body["container_exit_code"] == 1
+    assert body["container_reason"] == "Error"
+    mock_core_api.read_namespaced_pod_log.assert_called_once()
+    assert mock_core_api.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == 200
+
+
+def test_get_draft_logs_no_pod_found_is_404(client):
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[])
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
+
+    assert response.status_code == 404
+
+
+def test_get_draft_logs_k8s_list_failure_is_500(client):
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.side_effect = RuntimeError("apiserver unreachable")
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
+
+    assert response.status_code == 500
+
+
+def test_get_draft_logs_tail_is_clamped_to_the_max(client):
+    pod = _fake_pod("draft-sync-l1-1", datetime(2026, 1, 1))
+    mock_core_api = MagicMock()
+    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    mock_core_api.read_namespaced_pod_log.return_value = ""
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener", "tail": 999999})
+
+    assert response.status_code == 200
+    assert mock_core_api.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == 1000
