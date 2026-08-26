@@ -1542,6 +1542,10 @@ def test_handle_pick_event_marks_draft_complete_at_final_pick():
     assert complete_calls
     assert complete_calls[-1].kwargs["mapping"]["recommended_player_id"] == ""
     assert complete_calls[-1].kwargs["mapping"]["top_candidates"] == "[]"
+    # Regression for a review comment on #82's first pass: leaving the earlier "Active"
+    # this same call already wrote on the board would have _listener_status keep reporting
+    # listener_state == "Active" forever, even once the Job exits and becomes Succeeded.
+    assert complete_calls[-1].kwargs["mapping"]["listener_state"] == "Complete"
 
 
 def test_handle_pick_event_returns_recommendation_after_opponent_pick():
@@ -1770,12 +1774,38 @@ def test_run_draft_listener_exits_cleanly_once_draft_is_complete():
         [],  # startup backlog drain: nothing pending
         [("draft_picks:L1", [("1-0", {"pick_number": "160"})])],
     ]
-    mock_client.hget.return_value = "complete"
+    # Not complete yet when the main loop's first iteration checks (top of loop, before
+    # that iteration's read) - only becomes complete once _process_entries has handled
+    # the batch above, which the next iteration's check must catch.
+    mock_client.hget.side_effect = [None, "complete"]
 
     with patch("src.optimization.draft_matrix.redis.Redis", return_value=mock_client), \
          patch("src.optimization.draft_matrix._process_entries") as mock_process:
         dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
 
     mock_process.assert_called_once()
-    # Exited right after that one batch - never polled again.
+    # Exited at the top of the second iteration - never issued a second real read.
     assert mock_client.xreadgroup.call_count == 2
+
+
+def test_run_draft_listener_exits_immediately_if_already_complete_on_startup():
+    """Regression for a review comment on #82's first pass: the completion check only ran
+    after processing a non-empty batch, so a draft already marked complete before this
+    process started (e.g. a restart right after the final pick, or completion detected
+    during the startup backlog drain above) was never caught - an empty main-loop poll's
+    `continue` skipped the check forever, leaving the Job Active against a socket that will
+    never send anything else. The check must run at the top of every iteration, including
+    the very first."""
+    mock_client = MagicMock()
+    mock_client.xreadgroup.side_effect = [
+        [],  # startup backlog drain: nothing pending
+    ]
+    mock_client.hget.return_value = "complete"
+
+    with patch("src.optimization.draft_matrix.redis.Redis", return_value=mock_client), \
+         patch("src.optimization.draft_matrix._process_entries") as mock_process:
+        dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
+
+    mock_process.assert_not_called()
+    # Never even attempted the main loop's real read.
+    assert mock_client.xreadgroup.call_count == 1

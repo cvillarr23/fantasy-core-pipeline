@@ -1048,7 +1048,7 @@ def test_get_draft_status_complete_is_healthy_not_degraded(client):
     mock_cursor.fetchone.side_effect = _fetchone
 
     mock_redis = MagicMock()
-    mock_redis.hgetall.return_value = {}
+    mock_redis.hgetall.return_value = {"listener_state": "Complete"}
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
@@ -1060,6 +1060,27 @@ def test_get_draft_status_complete_is_healthy_not_degraded(client):
     assert body["draft_state"] == "complete"
     assert body["pipeline_health"] == "healthy"
     assert body["on_the_clock_team_id"] is None
+    assert body["listener_state"] == "Complete"
+
+
+def test_get_draft_status_listener_state_stays_complete_once_the_job_is_gone(client):
+    """Regression for a review comment on #82's first pass: unlike a stale "Active"/
+    "Failed" from an old crashed run, "Complete" describes a real, permanent fact - the
+    listener Job being gone (reaped/GC'd after Succeeded) must not fall it back to
+    "Unknown" the way every other explicit listener_state does."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"listener_state": "Complete"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(None, True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["listener_state"] == "Complete"
 
 
 def test_get_draft_status_waiting_before_the_first_pick(client):

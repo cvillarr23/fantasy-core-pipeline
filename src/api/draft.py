@@ -246,9 +246,9 @@ class DraftStatusResponse(BaseModel):
         ),
     )
     recent_errors: List[dict] = Field(default_factory=list, description=f"Most recent draft-related error rows from execution_log (limit {RECENT_ERRORS_LIMIT})")
-    listener_state: Literal["Active", "Starting", "Failed", "Unknown"] = Field(
+    listener_state: Literal["Active", "Starting", "Failed", "Unknown", "Complete"] = Field(
         ...,
-        description="League-scoped listener lifecycle state derived from the draft board hash and Job status.",
+        description="League-scoped listener lifecycle state derived from the draft board hash and Job status. 'Complete' (#82) is the one terminal value the board's own explicit state - not job_state - can win with even though the Job is no longer Active.",
     )
     listener_last_event_at: Optional[str] = Field(
         None,
@@ -524,7 +524,7 @@ def _to_iso_timestamp(value) -> Optional[str]:
 
 def _listener_status(job_state: str, recommendation: dict, listener_job_absent: bool = False) -> tuple:
     explicit_state = recommendation.get("listener_state")
-    valid_states = {"Active", "Starting", "Failed", "Unknown"}
+    valid_states = {"Active", "Starting", "Failed", "Unknown", "Complete"}
     listener_state = explicit_state if explicit_state in valid_states else None
 
     listener_last_event_at = _to_iso_timestamp(
@@ -538,6 +538,14 @@ def _listener_status(job_state: str, recommendation: dict, listener_job_absent: 
         # state is how a long-finished run keeps showing a fatal banner with nothing running -
         # there is no listener left to overwrite the board, and it has no TTL. The timestamp
         # is kept because "last seen at" is still true; the state and error are not.
+        #
+        # "Complete" (#82) is the one exception: unlike a stale "Active"/"Failed", it
+        # describes a real, permanent fact about the run - the Job being gone (reaped/GC'd
+        # after Succeeded) does not make a finished draft any less finished, so it must
+        # survive here rather than fall back to "Unknown" the way every other explicit
+        # state does.
+        if listener_state == "Complete":
+            return "Complete", listener_last_event_at, None
         return "Unknown", listener_last_event_at, None
 
     if job_state == "Failed":
