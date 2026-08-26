@@ -4,7 +4,7 @@ import logging
 import uuid
 import time
 import pika
-from typing import List, Optional
+from typing import List, Literal, Optional
 from fastapi import APIRouter, HTTPException, status
 from opentelemetry import propagate
 from pydantic import BaseModel, Field
@@ -91,6 +91,18 @@ class DraftPickTriggerPayload(BaseModel):
             "can resume from a blocked broker call and queue a click long after the pick "
             "clock has run out - by then ESPN has autodrafted and the click lands on the "
             "next team's pick. Checked immediately before the message is published."
+        ),
+    )
+    mode: Optional[Literal["live", "practice"]] = Field(
+        None,
+        description=(
+            "Practice/live tag for this pick, forwarded to the click bot so it can safely "
+            "submit for real in a practice room even when DRY_RUN is unset (which otherwise "
+            "defaults to true everywhere, live included). Sourced from the caller's own "
+            "context - draft_matrix.py's listener already knows its mode from the Job's own "
+            "label/env, and the web UI knows it from the stored draft config - never guessed "
+            "downstream, since a live league misidentified as practice would defeat the "
+            "point of the safe default."
         ),
     )
 
@@ -435,13 +447,18 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         carrier: dict = {}
         propagate.inject(carrier)
 
-        # idempotency_key is gateway-only state. The click-bot does not participate in
-        # deduplication, so forwarding it (or a null for legacy callers) would change the
-        # draft_targets JSON contract for no consumer benefit.
+        # idempotency_key/expires_at/pick_number are gateway-only state with no consumer use
+        # today. league_id is NOT excluded (used to be, alongside those three) - the click bot
+        # needs it to know which league's draft it's acting on. It used to fall back silently to
+        # its own pod's ESPN_LEAGUE_ID env var for every message regardless of which league the
+        # target was actually for, which is safe only for a single-league deployment; a shared
+        # worker processing a practice league's target while configured for the live league would
+        # otherwise read/act against the wrong draft entirely (confirmed live: the worker's own
+        # log line named the live league while it was actually processing a practice message).
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"idempotency_key", "expires_at", "league_id", "pick_number"}),
+            **payload.model_dump(exclude={"idempotency_key", "expires_at", "pick_number"}),
         })
 
         # Last possible moment before the message becomes durable. Everything above can

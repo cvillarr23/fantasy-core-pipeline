@@ -449,6 +449,8 @@ def test_publish_draft_target_posts_expected_payload():
         "expires_at": None,
         "league_id": None,
         "pick_number": None,
+        # DRAFT_MODE env var, defaulting "live" - read once at import time.
+        "mode": "live",
     }
 
 

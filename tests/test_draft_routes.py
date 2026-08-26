@@ -232,8 +232,10 @@ def test_start_draft_sync_job_omits_unset_inherited_env(client):
     # DRAFT_PICK_CLOCK_SECONDS and AUTO_DRAFT_DELAY_SECONDS are always set, never inherited:
     # both are mode-derived, and a
     # practice listener silently falling back to the 90s live default would keep retrying
-    # long after the 30s practice clock expired.
-    assert env_names == {"DB_PASSWORD", "DRAFT_PICK_CLOCK_SECONDS", "AUTO_DRAFT_DELAY_SECONDS"}
+    # long after the 30s practice clock expired. DRAFT_MODE is always set too - it's read by
+    # publish_draft_target and forwarded on every draft_targets message so the click bot can
+    # tell a practice pick from a live one.
+    assert env_names == {"DB_PASSWORD", "DRAFT_PICK_CLOCK_SECONDS", "AUTO_DRAFT_DELAY_SECONDS", "DRAFT_MODE"}
 
 
 def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
@@ -550,7 +552,9 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
     )
     for call in mock_batch_api.list_namespaced_job.call_args_list:
         assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
-    mock_redis.delete.assert_called_once_with("draft:L1:board", "draft:L1:suggested", "draft:L1:pause:3")
+    mock_redis.delete.assert_called_once_with(
+        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft", "draft:L1:pause:3"
+    )
 
 
 def test_stop_draft_confirm_publisher_stopped_clears_pick_stream(client):
@@ -578,7 +582,8 @@ def test_stop_draft_confirm_publisher_stopped_clears_pick_stream(client):
     assert body["redis_keys_cleared"] == 4
     assert body["pick_stream_cleared"] is True
     mock_redis.delete.assert_called_once_with(
-        "draft:L1:board", "draft:L1:suggested", "draft:L1:picks", "draft:L1:health", "draft_picks:L1"
+        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft",
+        "draft:L1:picks", "draft:L1:health", "draft_picks:L1"
     )
 
 
@@ -758,7 +763,9 @@ def test_clear_league_draft_state_deletes_board_and_pause_flags():
     with patch("src.api.draft._redis_client", return_value=mock_redis):
         assert _clear_league_draft_state("L1") == 2
 
-    assert mock_redis.delete.call_args.args == ("draft:L1:board", "draft:L1:suggested", "draft:L1:pause:t1")
+    assert mock_redis.delete.call_args.args == (
+        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft", "draft:L1:pause:t1"
+    )
     # The pick Stream and ledger are NOT touched by default - the connector starts before the
     # listener, so a pick published in that window would be lost.
 
@@ -775,7 +782,8 @@ def test_clear_league_draft_state_drops_the_pick_ledger_and_stream_only_when_ask
         _clear_league_draft_state("L1", include_pick_stream=True)
 
     assert mock_redis.delete.call_args.args == (
-        "draft:L1:board", "draft:L1:suggested", "draft:L1:picks", "draft:L1:health", "draft_picks:L1",
+        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft",
+        "draft:L1:picks", "draft:L1:health", "draft_picks:L1",
     )
 
 
@@ -1792,7 +1800,10 @@ def test_get_draft_status_includes_connector_health_when_present(client):
     assert response.status_code == 200
     body = response.json()
     assert body["connector_health"] == health_snapshot
-    mock_redis.get.assert_called_with("draft:L1:health")
+    # assert_any_call, not assert_called_with: _build_status also reads
+    # draft:{league_id}:selecting/:autodraft now, so draft:L1:health is no longer necessarily
+    # the last .get() call.
+    mock_redis.get.assert_any_call("draft:L1:health")
 
 
 def test_get_draft_status_connector_health_is_none_when_key_missing(client):

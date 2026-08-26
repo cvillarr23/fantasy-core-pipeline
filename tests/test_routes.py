@@ -335,7 +335,12 @@ def test_trigger_draft_pick_publishes_when_the_slot_is_still_open(client):
 
     assert response.status_code == 202
     body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
-    assert "league_id" not in body and "pick_number" not in body
+    # league_id IS forwarded now (it wasn't before): the click bot needs it to know which
+    # league's draft it's acting on rather than trusting its own pod's static ESPN_LEAGUE_ID
+    # env var for every message regardless of which league the target is actually for.
+    # pick_number stays excluded - no consumer need for it downstream.
+    assert body["league_id"] == "L1"
+    assert "pick_number" not in body
 
 
 def test_trigger_draft_pick_releases_the_claim_on_a_pika_wrong_state_error(client):

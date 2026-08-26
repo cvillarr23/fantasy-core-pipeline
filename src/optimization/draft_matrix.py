@@ -67,6 +67,11 @@ PAUSE_POLL_INTERVAL_SECONDS = 1
 # after the clock it was meant to protect had already expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS = int(os.getenv("DRAFT_PICK_CLOCK_SECONDS", "90"))
 DRAFT_PUBLISH_SAFETY_SECONDS = 5
+# Set by _draft_sync_env() alongside DRAFT_PICK_CLOCK_SECONDS - the listener's own practice/live
+# tag, forwarded on every published target so fantasy-browser-worker's click bot can safely
+# submit for real in a practice room without needing its own DRY_RUN=false set (which would also,
+# and unsafely, apply to any live-league target the same worker pod ever processes).
+DRAFT_MODE = os.getenv("DRAFT_MODE", "live")
 PUBLISH_RETRY_INTERVAL_SECONDS = 2
 # Retry only what a retry can actually fix. A deterministic 4xx (notably the 422 that
 # motivated this work) returns the same result to a byte-identical request, so retrying it
@@ -602,6 +607,7 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             # rechecks these against the listener board immediately before publishing.
             "league_id": league_id,
             "pick_number": pick_number,
+            "mode": DRAFT_MODE,
         },
         headers=headers,
         timeout=timeout,
