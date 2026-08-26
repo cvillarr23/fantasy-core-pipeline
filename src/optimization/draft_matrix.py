@@ -229,6 +229,14 @@ def compute_draftable_roster_size(league_config: dict) -> tuple:
     return starting_total, max(0, bench_total)
 
 
+def compute_total_picks(team_count: int, league_config: dict) -> int:
+    """Expected total picks for a standard snake draft: every team drafts the same
+    roster shape, so this is just team_count * (starting + bench) slots (#82) - the
+    threshold a draft's pick_number must reach before anything should treat it as over."""
+    starting_total, bench_total = compute_draftable_roster_size(league_config)
+    return team_count * (starting_total + bench_total)
+
+
 def compute_position_caps(league_config: dict, drafted_by_us: dict) -> tuple:
     """Derives per-position draft caps from league_settings (not the issue's hardcoded
     QB>=1/RB>=3/WR>=3/TE>=1 thresholds) - starting slots + this league's FLEX share +
@@ -982,6 +990,28 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                     "listener_first_pick_observed league_id=%s team_id=%s pick_number=%s",
                     league_id, our_team_id, pick_number,
                 )
+            if team_count:
+                # #82: the draft is over once pick_number reaches every team's full
+                # roster - checked regardless of whose pick this was (including our own
+                # last pick), since a finished draft has no recommendation left to make
+                # either way. draft_state rides the same board hash the API already
+                # reads (_build_status), so both /status and /stream pick it up with no
+                # separate plumbing.
+                with conn.cursor() as cursor:
+                    league_config = load_league_config(cursor)
+                total_picks = compute_total_picks(team_count, league_config)
+                if pick_number >= total_picks:
+                    logger.info(
+                        "draft_complete league_id=%s team_id=%s pick_number=%s total_picks=%s",
+                        league_id, our_team_id, pick_number, total_picks,
+                    )
+                    r_client.hset(_listener_board_key(league_id), mapping={
+                        "draft_state": "complete",
+                        "recommended_player_id": "",
+                        "recommended_name": "",
+                        "top_candidates": "[]",
+                    })
+                    return None
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
@@ -1189,6 +1219,17 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
         if not entries:
             continue
         _process_entries(r_client, stream_key, league_id, season, week, team_id, delay_seconds, pending_state, entries)
+        if r_client.hget(_listener_board_key(league_id), "draft_state") == "complete":
+            # #82: a plain return, not a crash - the generated Job sets backoff_limit=0/
+            # restart_policy="Never" (see XREADGROUP_BLOCK_MS's comment above), so this is
+            # the only way the Job ever reaches a real terminal state (Active -> Succeeded)
+            # instead of running forever against an ESPN socket that has nothing left to
+            # send. Both existing "already active" guards in src/api/draft.py
+            # (_active_listeners_on_other_leagues, start_draft_sync's same-league check)
+            # key strictly off job_state == "Active", so Succeeded already unblocks the
+            # next practice run with no separate reaping step needed here.
+            logger.info("listener_stopping_draft_complete league_id=%s team_id=%s", league_id, team_id)
+            return
 
 
 if __name__ == "__main__":

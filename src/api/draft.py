@@ -47,7 +47,13 @@ from kubernetes.config.config_exception import ConfigException
 from pydantic import BaseModel, Field, field_validator
 
 from src.database import get_db_cursor
-from src.optimization.draft_matrix import compute_draft_recommendation, compute_on_the_clock_team, publish_draft_target
+from src.optimization.draft_matrix import (
+    compute_draft_recommendation,
+    compute_on_the_clock_team,
+    compute_total_picks,
+    load_league_config,
+    publish_draft_target,
+)
 
 logger = logging.getLogger("DraftControlPlane")
 draft_router = APIRouter()
@@ -225,8 +231,9 @@ class DraftStatusResponse(BaseModel):
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
     last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
     recent_picks: List[DraftPickSummary]
-    on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known")
-    pipeline_health: str = Field(..., description="'healthy' iff the draft-sync Job is Active, Postgres/Redis both respond, and the listener's last-processed timestamp is fresh, else 'degraded'")
+    on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
+    draft_state: Literal["waiting", "active", "complete"] = Field(..., description="'waiting' before the first pick, 'active' while picks remain, 'complete' once picks_seen reaches every team's full roster (#82) - independent of pipeline_health, so a finished draft is never rendered as a degraded connection")
+    pipeline_health: str = Field(..., description="'healthy' iff Postgres/Redis both respond and, while the draft is still active, the draft-sync Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its Job is expected to have exited, else 'degraded'")
     recent_errors: List[dict] = Field(default_factory=list, description=f"Most recent draft-related error rows from execution_log (limit {RECENT_ERRORS_LIMIT})")
     listener_state: Literal["Active", "Starting", "Failed", "Unknown"] = Field(
         ...,
@@ -596,32 +603,53 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     ]
 
 
-def _on_the_clock_team_id(cursor, league_id: str, season: int) -> Optional[str]:
-    # Mirrors draft_matrix.league_team_count's resolution order rather than reading
-    # league_settings alone: that table only ever holds the one real ESPN_LEAGUE_ID, so for a
-    # practice/mock room the count derived from pick arrivals is the only one there is, and
-    # reading only league_settings here would report "nobody on the clock" for every practice
-    # draft no matter how well the listener was working. The draft_config read is scoped to
-    # the season for the same reason as in draft_matrix: that table is keyed by league_id
-    # alone, so a room reused next season would otherwise inherit the old count.
+def _resolve_draft_size(cursor, league_id: str, season: int) -> tuple:
+    """(team_count, total_picks, picks_seen) for this league/season - resolved once here
+    instead of separately in _on_the_clock_team_id and _build_status's draft_state (#82).
+
+    team_count resolution mirrors draft_matrix.league_team_count's own order (the synced
+    ESPN value in league_settings, falling back to the season-scoped draft_config value a
+    practice/mock room derives from pick arrivals) rather than calling that function
+    directly - it takes a psycopg2 connection, not a cursor, and every caller here only
+    ever holds a cursor (see get_db_cursor). Not vorp_matrix.load_league_config's own
+    team_count field either, which is a hardcoded LIMIT-1 fallback (default 10) meant for
+    CORE-05's generic pre-draft VORP math, not per-league accuracy - using it here would
+    silently compute the wrong total_picks for any mock room that isn't exactly 10 teams.
+    total_picks is None whenever team_count is unknown - "unknown", not "zero", since a
+    None here must never be read as "already at zero picks needed"."""
     cursor.execute("SELECT team_count FROM league_settings WHERE league_id = %s;", (league_id,))
     row = cursor.fetchone()
     if row is None or not row[0]:
         cursor.execute("SELECT team_count FROM draft_config WHERE league_id = %s AND season = %s;", (league_id, season))
         row = cursor.fetchone()
-    if row is None or not row[0]:
+    team_count = row[0] if row and row[0] else None
+
+    total_picks = None
+    if team_count:
+        league_config = load_league_config(cursor)
+        total_picks = compute_total_picks(team_count, league_config)
+
+    cursor.execute("SELECT COALESCE(MAX(pick_number), 0) FROM draft_picks WHERE league_id = %s AND season = %s;", (league_id, season))
+    picks_seen = cursor.fetchone()[0]
+
+    return team_count, total_picks, picks_seen
+
+
+def _on_the_clock_team_id(cursor, league_id: str, season: int, team_count: Optional[int], total_picks: Optional[int], picks_seen: int) -> Optional[str]:
+    if team_count is None:
         return None
-    team_count = row[0]
+    if total_picks is not None and picks_seen >= total_picks:
+        # #82: the draft is over - there is no next pick to be "on the clock" for, and
+        # computing one anyway (the old behavior) is exactly what let a finished draft
+        # keep reporting a team id for a pick number that will never happen.
+        return None
 
     cursor.execute("SELECT team_id, slot_number FROM draft_slots WHERE league_id = %s AND season = %s;", (league_id, season))
     slot_map = {team_id: slot_number for team_id, slot_number in cursor.fetchall()}
     if not slot_map:
         return None
 
-    cursor.execute("SELECT COALESCE(MAX(pick_number), 0) FROM draft_picks WHERE league_id = %s AND season = %s;", (league_id, season))
-    latest_pick_number = cursor.fetchone()[0]
-
-    return compute_on_the_clock_team(latest_pick_number + 1, team_count, slot_map)
+    return compute_on_the_clock_team(picks_seen + 1, team_count, slot_map)
 
 
 def _recent_execution_errors(cursor, league_id: str, season: int, limit: int) -> list:
@@ -716,6 +744,10 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     on_the_clock_team_id = None
     recent_errors: list = []
     last_clicker_action = None
+    # Neither "picks have started" nor "the total is known" until proven otherwise - a
+    # failed read below must default draft_state to "waiting", not accidentally "complete".
+    total_picks = None
+    picks_seen = 0
     # "unknown" (not "live") is the pre-query default: a Postgres outage must not let a
     # practice run get silently reported as mode="live" just because the mode SELECT never
     # ran - that would route a practice run into live monitoring precisely when db_ok is
@@ -728,14 +760,29 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             mode_row = cursor.fetchone()
             mode = mode_row[0] if mode_row is not None else "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
-            on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season)
+            team_count, total_picks, picks_seen = _resolve_draft_size(cursor, league_id, season)
+            on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season, team_count, total_picks, picks_seen)
             recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots/mode for league {league_id}: {e}")
         db_ok = False
 
-    pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
+    # #82: "complete" is a first-class terminal state, not "degraded" - a finished draft's
+    # k8s Job is expected to no longer be Active (draft_matrix.run_draft_listener exits
+    # cleanly once it observes the same total_picks threshold), so requiring job_state ==
+    # "Active" here is exactly what used to make a normal finished run report "degraded".
+    if total_picks is not None and picks_seen >= total_picks:
+        draft_state = "complete"
+    elif picks_seen == 0:
+        draft_state = "waiting"
+    else:
+        draft_state = "active"
+
+    if draft_state == "complete":
+        pipeline_health = "healthy" if db_ok and redis_ok else "degraded"
+    else:
+        pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
     listener_job_absent = listener_job_query_ok and listener_job is None
     listener_state, listener_last_event_at, listener_error = _listener_status(
         job_state,
@@ -760,6 +807,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "last_clicker_action": last_clicker_action,
         "recent_picks": recent_picks,
         "on_the_clock_team_id": on_the_clock_team_id,
+        "draft_state": draft_state,
         "pipeline_health": pipeline_health,
         "recent_errors": recent_errors,
         "listener_state": listener_state,
