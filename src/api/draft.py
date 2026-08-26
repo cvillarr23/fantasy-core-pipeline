@@ -274,6 +274,10 @@ class DraftStatusResponse(BaseModel):
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
     last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
     recent_picks: List[DraftPickSummary]
+    team_ids: List[str] = Field(
+        default_factory=list,
+        description="Every team_id in the league, from draft_slots, in slot order - independent of who has picked so far. Unlike team_rosters/team_aggregates (which only ever gain a key once a team's first pick lands), this is the source of truth for rendering one comparison column per team, including teams with zero picks. Empty if draft_slots hasn't been synced yet.",
+    )
     team_rosters: dict[str, List[DraftPickSummary]] = Field(
         default_factory=dict,
         description="All draft picks grouped by team_id for full-roster rendering, ordered by pick_number ascending within each team",
@@ -776,6 +780,15 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     ]
 
 
+def _league_team_ids(cursor, league_id: str, season: int) -> list:
+    """Every team_id in the league, in draft-slot order - the only source that knows about a
+    team before its first pick lands. team_rosters/team_aggregates are built by grouping
+    draft_picks rows, so a team with zero picks so far never gets a key in either dict; this
+    is what lets the frontend still render a (empty) column for it."""
+    cursor.execute("SELECT team_id FROM draft_slots WHERE league_id = %s AND season = %s ORDER BY slot_number ASC;", (league_id, season))
+    return [row[0] for row in cursor.fetchall()]
+
+
 def _team_rosters(cursor, league_id: str, season: int) -> dict:
     """Same query/columns as _recent_picks (including the weekly_stats LATERAL join), just
     unbounded and grouped by team_id instead of limited and DESC - see that function's
@@ -1094,6 +1107,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
 
     db_ok = True
     recent_picks: list = []
+    team_ids: list = []
     team_rosters: dict = {}
     team_aggregates: dict = {}
     on_the_clock_team_id = None
@@ -1119,6 +1133,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             mode_row = cursor.fetchone()
             mode = mode_row[0] if mode_row is not None else "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
+            team_ids = _league_team_ids(cursor, league_id, season)
             team_rosters = _team_rosters(cursor, league_id, season)
             team_count, total_picks, picks_seen = _resolve_draft_size(cursor, league_id, season)
             team_aggregates = _team_aggregates(cursor, league_id, season, team_count)
@@ -1180,6 +1195,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "recommendation": recommendation,
         "last_clicker_action": last_clicker_action,
         "recent_picks": recent_picks,
+        "team_ids": team_ids,
         "team_rosters": team_rosters,
         "team_aggregates": team_aggregates,
         "on_the_clock_team_id": on_the_clock_team_id,
