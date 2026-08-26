@@ -102,8 +102,12 @@ DRAFT_SYNC_WEEK = 1
 # silent in the dangerous direction - a practice listener inheriting the 90s live default
 # keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
-    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "90")),
+    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "30")),
     "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),
+}
+AUTO_DRAFT_DELAY_SECONDS_BY_MODE = {
+    "live": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_LIVE", "20")),
+    "practice": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_PRACTICE", "20")),
 }
 
 SSE_POLL_INTERVAL_SECONDS = 2
@@ -167,6 +171,10 @@ def _draft_sync_env(mode: str = "live") -> list:
         client.V1EnvVar(
             name="DRAFT_PICK_CLOCK_SECONDS",
             value=str(DRAFT_PICK_CLOCK_SECONDS_BY_MODE.get(mode, DRAFT_PICK_CLOCK_SECONDS_BY_MODE["live"])),
+        ),
+        client.V1EnvVar(
+            name="AUTO_DRAFT_DELAY_SECONDS",
+            value=str(AUTO_DRAFT_DELAY_SECONDS_BY_MODE.get(mode, AUTO_DRAFT_DELAY_SECONDS_BY_MODE["live"])),
         ),
     ]
     for name in DRAFT_SYNC_INHERITED_ENV_VARS:
@@ -597,6 +605,14 @@ def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
         except (TypeError, ValueError):
             logger.error(f"Malformed top_candidates JSON on draft:{league_id}:board; dropping it.")
             board["top_candidates"] = []
+    for key in ("auto_publish_at", "pick_clock_expires_at"):
+        if key not in board:
+            continue
+        try:
+            board[key] = int(float(board[key]))
+        except (TypeError, ValueError):
+            logger.error(f"Malformed {key} value on draft:{league_id}:board; dropping it.")
+            board.pop(key, None)
     return board
 
 

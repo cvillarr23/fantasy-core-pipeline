@@ -838,6 +838,25 @@ def test_hold_and_publish_rechecks_operator_pause_between_retries():
     assert mock_publish.call_count == 1
 
 
+def test_hold_and_publish_long_delay_still_honors_pause():
+    mock_client = MagicMock()
+    pause_key = "draft:L1:pause:5"
+    paused = {"value": False}
+    mock_client.get.side_effect = lambda key: "1" if (key == pause_key and paused["value"]) else None
+    target = _player("p1", "RB", 10.0)
+
+    def _sleep(_seconds):
+        paused["value"] = True
+
+    with patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, target, delay_seconds=20,
+            sleep_fn=_sleep, monotonic_fn=lambda: 0.0, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+
+
 def test_hold_and_publish_never_publishes_after_the_clock_has_already_expired():
     """The deadline is anchored to when the upstream pick was observed, so a slow ILP solve
     can consume the entire clock before this thread even starts. Publishing then would send
@@ -1096,6 +1115,33 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary():
     finally:
         trace._TRACER_PROVIDER = original_provider
         trace._TRACER_PROVIDER_SET_ONCE = original_once
+
+
+def test_schedule_publish_clamps_delay_and_writes_absolute_deadlines():
+    mock_client = MagicMock()
+    pending_state = {}
+
+    monotonic_values = iter([100.0, 100.0])
+
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 5), \
+         patch("src.optimization.draft_matrix.threading.Thread") as mock_thread_cls, \
+         patch.object(dm.logger, "warning") as mock_warning:
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        dm._schedule_publish(
+            mock_client, "L1", "7", 5, _player("p1", "RB", 1.0), delay_seconds=99,
+            pending_state=pending_state, clock_origin=95.0,
+            monotonic_fn=lambda: next(monotonic_values), time_fn=lambda: 1000.0,
+        )
+
+    args = mock_thread_cls.call_args.kwargs["args"]
+    assert args[5] == 25
+    mock_warning.assert_called_once()
+    mock_client.hset.assert_called_once_with(
+        "draft:L1:board",
+        mapping={"auto_publish_at": 1020, "pick_clock_expires_at": 1025},
+    )
 
 
 # ---------------------------------------------------------------------------

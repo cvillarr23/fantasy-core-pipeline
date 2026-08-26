@@ -59,7 +59,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 CONSUMER_GROUP = "draft_matrix"
 DEFAULT_ROSTER_SIZE = 16
-DEFAULT_AUTO_DRAFT_DELAY_SECONDS = 8
+DEFAULT_AUTO_DRAFT_DELAY_SECONDS = int(os.getenv("AUTO_DRAFT_DELAY_SECONDS", "8"))
 PAUSE_POLL_INTERVAL_SECONDS = 1
 # The pick clock bounds how long a failed publish may keep retrying. It is deliberately
 # configurable rather than a constant: ESPN practice rooms run a 30s clock while real
@@ -1056,7 +1056,26 @@ def _cancel_pending_publish(pending_state: dict) -> None:
     pending_state.pop("pick_number", None)
 
 
-def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int, pending_state: dict, clock_origin: Optional[float] = None, season: Optional[int] = None) -> None:
+def _max_auto_publish_delay_seconds() -> int:
+    return max(0, DRAFT_PICK_CLOCK_SECONDS - DRAFT_PUBLISH_SAFETY_SECONDS)
+
+
+def _clamp_auto_draft_delay_seconds(delay_seconds: int) -> int:
+    max_delay = _max_auto_publish_delay_seconds()
+    if delay_seconds > max_delay:
+        logger.warning(
+            "Configured auto-draft delay %ss exceeds pick-clock window %ss; clamping to %ss.",
+            delay_seconds, max_delay, max_delay,
+        )
+        return max_delay
+    return delay_seconds
+
+
+def _schedule_publish(
+    r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
+    pending_state: dict, clock_origin: Optional[float] = None, season: Optional[int] = None,
+    monotonic_fn=time.monotonic, time_fn=time.time,
+) -> None:
     """Supersedes any still-pending hold-and-publish job (a newer pick means the old
     recommendation is stale) and schedules the new one on a background thread, so
     run_draft_listener's XREADGROUP loop keeps consuming instead of blocking through the
@@ -1067,6 +1086,19 @@ def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, 
     # The slot this pending target is for. _process_entries uses it to supersede the thread
     # the moment that slot is taken, without waiting for another recommendation.
     pending_state["pick_number"] = pick_number
+    clamped_delay_seconds = _clamp_auto_draft_delay_seconds(delay_seconds)
+    resolved_clock_origin = monotonic_fn() if clock_origin is None else clock_origin
+    now_monotonic = monotonic_fn()
+    now_epoch = time_fn()
+    auto_publish_at = int(now_epoch + ((resolved_clock_origin + clamped_delay_seconds) - now_monotonic))
+    pick_clock_expires_at = int(now_epoch + ((resolved_clock_origin + DRAFT_PICK_CLOCK_SECONDS) - now_monotonic))
+    r_client.hset(
+        _listener_board_key(league_id),
+        mapping={
+            "auto_publish_at": auto_publish_at,
+            "pick_clock_expires_at": pick_clock_expires_at,
+        },
+    )
 
     # Capture the calling thread's OTel context (this span, e.g. handle_pick_event's) so
     # hold_and_publish can re-attach it on the new OS thread - threading.Thread does not
@@ -1074,8 +1106,8 @@ def _schedule_publish(r_client, league_id: str, team_id: str, pick_number: int, 
     trace_context = context.get_current()
     threading.Thread(
         target=hold_and_publish,
-        args=(r_client, league_id, team_id, pick_number, target, delay_seconds, cancel_event, time.sleep, trace_context),
-        kwargs={"clock_origin": clock_origin, "season": season},
+        args=(r_client, league_id, team_id, pick_number, target, clamped_delay_seconds, cancel_event, time.sleep, trace_context),
+        kwargs={"clock_origin": resolved_clock_origin, "season": season},
         daemon=True,
     ).start()
 
@@ -1164,10 +1196,12 @@ def _process_entries(r_client, stream_key: str, league_id: str, season: int, wee
                     r_client.xack(stream_key, CONSUMER_GROUP, entry_id)
 
 
-def run_draft_listener(league_id: str, team_id: str, season: int, week: int, delay_seconds: int) -> None:
+def run_draft_listener(league_id: str, team_id: str, season: int, week: int, delay_seconds: Optional[int] = None) -> None:
     """Long-running entrypoint: consumes fantasy-browser-worker's
     draft_picks:{leagueId} Redis Stream via a consumer group so a restart resumes from the
     last acked pick instead of silently missing one."""
+    if delay_seconds is None:
+        delay_seconds = int(os.getenv("AUTO_DRAFT_DELAY_SECONDS", str(DEFAULT_AUTO_DRAFT_DELAY_SECONDS)))
     logger.info("listener_start_attempt league_id=%s team_id=%s season=%s week=%s", league_id, team_id, season, week)
     r_client = None
     stream_key = None
@@ -1251,7 +1285,7 @@ if __name__ == "__main__":
     parser.add_argument("--team-id", type=str, required=True, help="Our own team_id in the league")
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, default=1, help="weekly_stats week key holding preseason projections")
-    parser.add_argument("--auto-draft-delay-seconds", type=int, default=DEFAULT_AUTO_DRAFT_DELAY_SECONDS)
+    parser.add_argument("--auto-draft-delay-seconds", type=int, default=None)
     args = parser.parse_args()
     run_draft_listener(
         league_id=args.league_id,
