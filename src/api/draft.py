@@ -239,6 +239,10 @@ class DraftStatusResponse(BaseModel):
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
     last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
     recent_picks: List[DraftPickSummary]
+    team_rosters: dict[str, List[DraftPickSummary]] = Field(
+        default_factory=dict,
+        description="All draft picks grouped by team_id for full-roster rendering, ordered by pick_number ascending within each team",
+    )
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
     draft_state: Literal["waiting", "active", "complete"] = Field(..., description="'waiting' before the first pick, 'active' while picks remain, 'complete' once picks_seen reaches every team's full roster (#82) - independent of pipeline_health, so a finished draft is never rendered as a degraded connection")
     pipeline_health: str = Field(..., description="'healthy' iff Postgres/Redis both respond and, while the draft is still active, the draft-sync Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its Job is expected to have exited, else 'degraded'")
@@ -657,6 +661,34 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     ]
 
 
+def _team_rosters(cursor, league_id: str, season: int) -> dict:
+    cursor.execute("""
+        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position
+        FROM draft_picks d
+        LEFT JOIN players p ON d.player_id = p.player_id
+        WHERE d.league_id = %s AND d.season = %s
+        ORDER BY d.team_id ASC, d.pick_number ASC;
+    """, (league_id, season))
+
+    rosters: dict[str, list] = {}
+    for row in cursor.fetchall():
+        team_id = row[2]
+        if team_id not in rosters:
+            rosters[team_id] = []
+        rosters[team_id].append(
+            {
+                "pick_number": row[0],
+                "round": row[1],
+                "team_id": team_id,
+                "player_id": row[3],
+                "espn_player_id": row[4],
+                "name": row[5],
+                "position": row[6],
+            }
+        )
+    return rosters
+
+
 def _resolve_draft_size(cursor, league_id: str, season: int) -> tuple:
     """(team_count, total_picks, picks_seen) for this league/season - resolved once here
     instead of separately in _on_the_clock_team_id and _build_status's draft_state (#82).
@@ -805,6 +837,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
 
     db_ok = True
     recent_picks: list = []
+    team_rosters: dict = {}
     on_the_clock_team_id = None
     recent_errors: list = []
     last_clicker_action = None
@@ -824,6 +857,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             mode_row = cursor.fetchone()
             mode = mode_row[0] if mode_row is not None else "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
+            team_rosters = _team_rosters(cursor, league_id, season)
             team_count, total_picks, picks_seen = _resolve_draft_size(cursor, league_id, season)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season, team_count, total_picks, picks_seen)
             recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
@@ -870,6 +904,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "recommendation": recommendation,
         "last_clicker_action": last_clicker_action,
         "recent_picks": recent_picks,
+        "team_rosters": team_rosters,
         "on_the_clock_team_id": on_the_clock_team_id,
         "draft_state": draft_state,
         "pipeline_health": pipeline_health,

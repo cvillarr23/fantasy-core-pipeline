@@ -752,8 +752,10 @@ def test_get_draft_status_aggregates_expected_shape(client):
     mock_cursor.execute.side_effect = _execute
 
     def _fetchall():
-        if "draft_picks" in mock_cursor.last_query and "SELECT d.pick_number" in mock_cursor.last_query:
+        if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
             return [(2, 1, "3", "p1", "e1", "Player One", "RB"), (1, 1, "9", "p0", "e0", "Player Zero", "WR")]
+        if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
+            return [(1, 1, "9", "p0", "e0", "Player Zero", "WR"), (2, 1, "3", "p1", "e1", "Player One", "RB")]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
         if "SELECT transaction_type" in mock_cursor.last_query:
@@ -805,12 +807,92 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert len(body["recent_picks"]) == 2
     assert body["recent_picks"][0]["name"] == "Player One"
     assert body["recent_picks"][0]["position"] == "RB"
+    assert body["team_rosters"]["9"][0]["pick_number"] == 1
+    assert body["team_rosters"]["3"][0]["pick_number"] == 2
     assert body["draft_state"] == "active"
     assert body["pipeline_health"] == "healthy"
     assert body["recent_errors"][0]["transaction_type"] == "draft_sync"
     assert body["listener_state"] == "Active"
     assert body["listener_last_event_at"] == "1970-01-01T00:16:40Z"
     assert body["listener_error"] is None
+
+
+def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_player_id(client):
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    recent_rows = [
+        (12, 4, "A", "p12", "e12", "Player 12", "RB"),
+        (11, 4, "B", "p11", "e11", "Player 11", "WR"),
+        (10, 4, "A", "p10", "e10", "Player 10", "QB"),
+        (9, 3, "B", "p9", "e9", "Player 9", "TE"),
+        (8, 3, "A", "p8", "e8", "Player 8", "RB"),
+        (7, 3, "B", "p7", "e7", "Player 7", "WR"),
+        (6, 2, "A", "p6", "e6", "Player 6", "QB"),
+        (5, 2, "B", None, "e5", None, None),
+        (4, 2, "A", "p4", "e4", "Player 4", "RB"),
+        (3, 1, "B", "p3", "e3", "Player 3", "WR"),
+    ]
+    roster_rows = [
+        (1, 1, "A", "p1", "e1", "Player 1", "QB"),
+        (2, 1, "B", "p2", "e2", "Player 2", "WR"),
+        (3, 1, "B", "p3", "e3", "Player 3", "WR"),
+        (4, 2, "A", "p4", "e4", "Player 4", "RB"),
+        (5, 2, "B", None, "e5", None, None),
+        (6, 2, "A", "p6", "e6", "Player 6", "QB"),
+        (7, 3, "B", "p7", "e7", "Player 7", "WR"),
+        (8, 3, "A", "p8", "e8", "Player 8", "RB"),
+        (9, 3, "B", "p9", "e9", "Player 9", "TE"),
+        (10, 4, "A", "p10", "e10", "Player 10", "QB"),
+        (11, 4, "B", "p11", "e11", "Player 11", "WR"),
+        (12, 4, "A", "p12", "e12", "Player 12", "RB"),
+    ]
+
+    def _fetchall():
+        if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
+            return recent_rows
+        if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
+            return roster_rows
+        if "draft_slots" in mock_cursor.last_query:
+            return [("A", 1), ("B", 2), ("C", 3)]
+        return []
+
+    def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
+        if "lineup_slot_counts" in mock_cursor.last_query:
+            return (3, {"QB": 1, "BE": 0})
+        if "FROM league_settings" in mock_cursor.last_query:
+            return (3,)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (12,)
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["recent_picks"]) == 10
+    assert body["recent_picks"][0]["pick_number"] == 12
+    assert body["recent_picks"][-1]["pick_number"] == 3
+    assert [pick["pick_number"] for pick in body["team_rosters"]["A"]] == [1, 4, 6, 8, 10, 12]
+    assert [pick["pick_number"] for pick in body["team_rosters"]["B"]] == [2, 3, 5, 7, 9, 11]
+    assert body["team_rosters"].get("C", []) == []
+    null_id_pick = next(pick for pick in body["team_rosters"]["B"] if pick["pick_number"] == 5)
+    assert null_id_pick["player_id"] is None
+    assert null_id_pick["espn_player_id"] == "e5"
 
 
 def test_get_draft_status_reports_failed_clicker_action(client):
@@ -985,6 +1067,7 @@ def test_get_draft_status_returns_200_degraded_when_db_unavailable(client):
     body = response.json()
     assert body["pipeline_health"] == "degraded"
     assert body["recent_picks"] == []
+    assert body["team_rosters"] == {}
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert body["recent_errors"] == []
     assert body["last_clicker_action"] is None
@@ -1295,7 +1378,7 @@ def test_stream_draft_status_emits_first_event_then_stops_on_disconnect():
 
     payload = {
         "league_id": "L1", "season": 2026, "mode": "live", "job_state": "Active", "recommendation": {},
-        "last_clicker_action": None, "recent_picks": [], "on_the_clock_team_id": None,
+        "last_clicker_action": None, "recent_picks": [], "team_rosters": {}, "on_the_clock_team_id": None,
         "pipeline_health": "healthy", "listener_state": "Starting", "listener_last_event_at": None, "listener_error": None,
     }
     mock_request = MagicMock()
@@ -1310,6 +1393,7 @@ def test_stream_draft_status_emits_first_event_then_stops_on_disconnect():
     emitted = json_module.loads(events[0][len("data: "):].strip())
     assert emitted["league_id"] == "L1"
     assert emitted["job_state"] == "Active"
+    assert emitted["team_rosters"] == {}
     assert events[1].startswith("event: heartbeat\n")
 
 
