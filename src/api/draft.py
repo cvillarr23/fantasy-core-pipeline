@@ -234,6 +234,17 @@ class DraftStatusResponse(BaseModel):
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
     draft_state: Literal["waiting", "active", "complete"] = Field(..., description="'waiting' before the first pick, 'active' while picks remain, 'complete' once picks_seen reaches every team's full roster (#82) - independent of pipeline_health, so a finished draft is never rendered as a degraded connection")
     pipeline_health: str = Field(..., description="'healthy' iff Postgres/Redis both respond and, while the draft is still active, the draft-sync Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its Job is expected to have exited, else 'degraded'")
+    connector_health: Optional[dict] = Field(
+        None,
+        description=(
+            "fantasy-browser-worker's draft:{league_id}:health heartbeat, forwarded verbatim "
+            "(ws_connected, dom_observer, pick_silence_ms, last_pick_seen_at, picks_known, "
+            "ledger_stats, per-tier ingest counters). Deliberately independent of "
+            "pipeline_health - an evicted/blind connector and an unhealthy listener are "
+            "different failures that must stay separately visible. Null if the connector has "
+            "never written a heartbeat, its 1h TTL expired, or the key was malformed."
+        ),
+    )
     recent_errors: List[dict] = Field(default_factory=list, description=f"Most recent draft-related error rows from execution_log (limit {RECENT_ERRORS_LIMIT})")
     listener_state: Literal["Active", "Starting", "Failed", "Unknown"] = Field(
         ...,
@@ -581,6 +592,25 @@ def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
     return board
 
 
+def _connector_health(league_id: str) -> Optional[dict]:
+    """Reads fantasy-browser-worker's `draft:{league_id}:health` heartbeat (its issue #52,
+    this repo's #81) - a JSON string the room connector SETs on a fixed cadence with a 1h
+    TTL, describing WS/DOM/REST ingest-tier health (ws_connected, dom_observer, picks_known,
+    pick_silence_ms, last_pick_seen_at, ledger_stats, per-tier counters). Opaque pass-through:
+    nothing in this repo parses or depends on its internal shape, so a field the connector
+    adds shows up here with no schema change, the same way `recommendation` passes CORE-08's
+    board straight through. None is a normal state - never written yet, expired, or the
+    connector hasn't started - not an error; callers must not treat it as a Redis failure."""
+    raw = _redis_client().get(f"draft:{league_id}:health")
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        logger.error(f"Malformed connector health JSON on draft:{league_id}:health; dropping it.")
+        return None
+
+
 def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     """Left-joins players so the pick feed can render name/position without a separate
     per-pick lookup - LEFT JOIN (not INNER) so a pick still shows up even if its player
@@ -630,7 +660,8 @@ def _resolve_draft_size(cursor, league_id: str, season: int) -> tuple:
         total_picks = compute_total_picks(team_count, league_config)
 
     cursor.execute("SELECT COALESCE(MAX(pick_number), 0) FROM draft_picks WHERE league_id = %s AND season = %s;", (league_id, season))
-    picks_seen = cursor.fetchone()[0]
+    picks_seen_row = cursor.fetchone()
+    picks_seen = picks_seen_row[0] if picks_seen_row else 0
 
     return team_count, total_picks, picks_seen
 
@@ -739,6 +770,15 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         logger.error(f"Failed to read Redis recommendation board for league {league_id}: {e}")
         redis_ok = False
 
+    # Deliberately its own try/except, isolated from redis_ok/pipeline_health above: the
+    # connector and the listener fail independently, and conflating them is exactly what let
+    # #81 hide an evicted, blind connector behind an otherwise-healthy listener.
+    connector_health: Optional[dict] = None
+    try:
+        connector_health = _connector_health(league_id)
+    except Exception as e:
+        logger.error(f"Failed to read Redis connector health for league {league_id}: {e}")
+
     db_ok = True
     recent_picks: list = []
     on_the_clock_team_id = None
@@ -809,6 +849,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "on_the_clock_team_id": on_the_clock_team_id,
         "draft_state": draft_state,
         "pipeline_health": pipeline_health,
+        "connector_health": connector_health,
         "recent_errors": recent_errors,
         "listener_state": listener_state,
         "listener_last_event_at": listener_last_event_at,
