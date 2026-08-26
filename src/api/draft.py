@@ -102,11 +102,11 @@ DRAFT_SYNC_WEEK = 1
 # silent in the dangerous direction - a practice listener inheriting the 90s live default
 # keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
-    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "30")),
+    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "90")),
     "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),
 }
 AUTO_DRAFT_DELAY_SECONDS_BY_MODE = {
-    "live": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_LIVE", "20")),
+    "live": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_LIVE", "45")),
     "practice": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_PRACTICE", "20")),
 }
 
