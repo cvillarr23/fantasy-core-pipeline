@@ -7,7 +7,7 @@ internationally on the actual draft day. Sits alongside the hot path (browser-wo
 draft_matrix -> /trigger/draft-pick -> RabbitMQ -> click bot) as an out-of-band control/
 observability layer, not part of it.
 
-Three known gaps, all flagged rather than guessed at:
+Two known gaps, both flagged rather than guessed at:
   - /start's Job image and its DB/Redis/API env config come from required env vars with no
     defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
     this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
@@ -17,10 +17,11 @@ Three known gaps, all flagged rather than guessed at:
     practice/live configs always live under distinct league_ids (see CORE-18), a practice
     run's rows are naturally excluded from a live league's /status the same way its k8s Job
     and Redis keys already are, without needing a dedicated column.
-  - GET /logs (#68) calls CoreV1Api.list_namespaced_pod/read_namespaced_pod_log, which needs
-    `pods`/`pods/log` read RBAC on this API's service account - granting that role lives in
-    fantasy-infra, same cross-repo split as the two gaps above. Until it's granted, /logs
-    will 500 on a real cluster even though the code path itself is correct.
+
+GET /logs (#68) calls CoreV1Api.list_namespaced_pod/read_namespaced_pod_log, which needs
+`pods`/`pods/log` read RBAC on this API's service account - the fantasy-infra-managed
+`draft-sync-orchestrator` Role already grants both (verified live against the cluster, not
+guessed), so this is not a gap; no RBAC follow-up needed.
 
 Also hosts /practice/sync-job (cvillarr23/fantasy-web-ui#9): creates fantasy-browser-worker's
 draft_sync.js Job (the actual ESPN draft-room connector) against a practice/mock room URL a
