@@ -229,6 +229,14 @@ def compute_draftable_roster_size(league_config: dict) -> tuple:
     return starting_total, max(0, bench_total)
 
 
+def compute_total_picks(team_count: int, league_config: dict) -> int:
+    """Expected total picks for a standard snake draft: every team drafts the same
+    roster shape, so this is just team_count * (starting + bench) slots (#82) - the
+    threshold a draft's pick_number must reach before anything should treat it as over."""
+    starting_total, bench_total = compute_draftable_roster_size(league_config)
+    return team_count * (starting_total + bench_total)
+
+
 def compute_position_caps(league_config: dict, drafted_by_us: dict) -> tuple:
     """Derives per-position draft caps from league_settings (not the issue's hardcoded
     QB>=1/RB>=3/WR>=3/TE>=1 thresholds) - starting slots + this league's FLEX share +
@@ -982,6 +990,34 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                     "listener_first_pick_observed league_id=%s team_id=%s pick_number=%s",
                     league_id, our_team_id, pick_number,
                 )
+            if team_count:
+                # #82: the draft is over once pick_number reaches every team's full
+                # roster - checked regardless of whose pick this was (including our own
+                # last pick), since a finished draft has no recommendation left to make
+                # either way. draft_state rides the same board hash the API already
+                # reads (_build_status), so both /status and /stream pick it up with no
+                # separate plumbing.
+                with conn.cursor() as cursor:
+                    league_config = load_league_config(cursor)
+                total_picks = compute_total_picks(team_count, league_config)
+                if pick_number >= total_picks:
+                    logger.info(
+                        "draft_complete league_id=%s team_id=%s pick_number=%s total_picks=%s",
+                        league_id, our_team_id, pick_number, total_picks,
+                    )
+                    r_client.hset(_listener_board_key(league_id), mapping={
+                        "draft_state": "complete",
+                        # Otherwise the earlier "Active" this same call already wrote above
+                        # (and _listener_status's job_state == "Failed" check aside, trusts
+                        # verbatim) survives on the board even after the Job exits and
+                        # becomes Succeeded, reproducing #82's contradictory-status problem
+                        # in listener_state instead of draft_state.
+                        "listener_state": "Complete",
+                        "recommended_player_id": "",
+                        "recommended_name": "",
+                        "top_candidates": "[]",
+                    })
+                    return None
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
@@ -1177,6 +1213,22 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
     logger.info(f"Listening on '{stream_key}' as consumer '{consumer_name}' for league {league_id}...")
     while True:
+        # #82: checked at the top of every iteration - unconditionally, before blocking on
+        # the next read - not just after processing a non-empty batch. draft_state can
+        # already be "complete" the moment this loop is first reached (the startup backlog
+        # drain above processes entries too, and a restart can land after completion was
+        # already recorded), and once the draft is over no new entries ever arrive, so an
+        # empty poll's `continue` would otherwise skip this check forever. A plain return,
+        # not a crash - the generated Job sets backoff_limit=0/restart_policy="Never" (see
+        # XREADGROUP_BLOCK_MS's comment above), so this is the only way the Job ever reaches
+        # a real terminal state (Active -> Succeeded) instead of running forever against an
+        # ESPN socket that has nothing left to send. Both existing "already active" guards
+        # in src/api/draft.py (_active_listeners_on_other_leagues, start_draft_sync's
+        # same-league check) key strictly off job_state == "Active", so Succeeded already
+        # unblocks the next practice run with no separate reaping step needed here.
+        if r_client.hget(_listener_board_key(league_id), "draft_state") == "complete":
+            logger.info("listener_stopping_draft_complete league_id=%s team_id=%s", league_id, team_id)
+            return
         try:
             entries = r_client.xreadgroup(CONSUMER_GROUP, consumer_name, {stream_key: ">"}, count=1, block=XREADGROUP_BLOCK_MS)
         except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:

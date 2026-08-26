@@ -110,6 +110,20 @@ def test_compute_draftable_roster_size_falls_back_without_be_key():
     assert bench_total == dm.DEFAULT_ROSTER_SIZE - 7
 
 
+def test_compute_total_picks_is_team_count_times_roster_size():
+    """#82: the threshold a draft's pick_number must reach before anything treats it as
+    over - team_count * (starting + bench), same roster shape as compute_draftable_roster_size."""
+    config = {"team_count": 10, "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 6}}
+    # starting_total=7, bench_total=6 -> 13 per team, 10 teams -> 130.
+    assert dm.compute_total_picks(10, config) == 130
+
+
+def test_compute_total_picks_scales_with_team_count():
+    config = {"team_count": 12, "lineup_slot_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1}}
+    starting_total, bench_total = dm.compute_draftable_roster_size(config)
+    assert dm.compute_total_picks(12, config) == 12 * (starting_total + bench_total)
+
+
 # ---------------------------------------------------------------------------
 # build_and_solve_draft_pick
 # ---------------------------------------------------------------------------
@@ -1089,16 +1103,38 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary():
 # ---------------------------------------------------------------------------
 
 def _mock_conn_returning(inserted: bool, team_count: int = 10):
+    """Feeds handle_pick_event's own cursor lookups by matching on the executed SQL rather
+    than a fixed position: which of these actually run as real (non-mocked) queries varies
+    per test depending on which helper functions that test patches out, so a positional
+    list breaks the moment a new always-runs lookup (#82's load_league_config completion
+    check) is added."""
     mock_cursor = MagicMock()
-    insert_row = (1,) if inserted else None
-    if team_count is None:
-        # league_team_count falls through league_settings to draft_config before giving up.
-        lookups = [None, None]
-    else:
-        lookups = [(team_count,)]
-    # resolve_player_id's espn_id -> internal players.player_id lookup sits between the
-    # team-count lookup and the insert.
-    mock_cursor.fetchone.side_effect = lookups + [("internal-1",)] + [insert_row] + [None] * 8
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchone():
+        query = mock_cursor.last_query
+        if "lineup_slot_counts" in query:
+            # #82's completion check only needs the roster shape here - the team_count it
+            # uses is whatever handle_pick_event already resolved above, from whichever
+            # source, not this row's own team_count column.
+            return (10, {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 6})
+        if "FROM league_settings" in query:
+            return (team_count,) if team_count is not None else None
+        if "FROM draft_config" in query:
+            # Covers both league_team_count's fallback lookup and derive_team_count's mode
+            # read - every test needing a non-None answer from either mocks the function
+            # that would have issued it (derive_team_count itself, or team_count=10 short-
+            # circuits league_team_count before this query ever runs).
+            return None
+        if "FROM players" in query:
+            return ("internal-1",)
+        if "INSERT INTO draft_picks" in query:
+            return (1,) if inserted else None
+        return None
+    mock_cursor.fetchone.side_effect = _fetchone
     # backfill_missing_rounds' UPDATE ... RETURNING, and derive_team_count's pick scan;
     # nothing to repair and nothing to derive by default.
     mock_cursor.fetchall.return_value = []
@@ -1465,6 +1501,53 @@ def test_handle_pick_event_skips_recommendation_when_we_just_picked():
     assert mapping["last_processed_pick_number"] == 1
 
 
+def test_handle_pick_event_marks_draft_complete_at_final_pick():
+    """#82: pick_number reaching total_picks ends the draft, regardless of whose pick it
+    was - clears the recommendation (nothing left to recommend once picks run out) and
+    writes draft_state so run_draft_listener's main loop knows to exit."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchone():
+        query = mock_cursor.last_query
+        if "lineup_slot_counts" in query:
+            # 1-slot, no-bench league: starting_total=1, bench_total=0 -> 1 pick/team.
+            return (2, {"QB": 1, "BE": 0})
+        if "FROM league_settings" in query:
+            return (2,)
+        return None
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_cursor.fetchall.return_value = []
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_client = MagicMock()
+    event = {"pick_number": "2", "team_id": "3", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.resolve_player_id", return_value="internal-1"), \
+         patch("src.optimization.draft_matrix.persist_draft_pick", return_value=True), \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates") as mock_candidates:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_candidates.assert_not_called()
+    complete_calls = [
+        c for c in mock_client.hset.call_args_list
+        if c.kwargs.get("mapping", {}).get("draft_state") == "complete"
+    ]
+    assert complete_calls
+    assert complete_calls[-1].kwargs["mapping"]["recommended_player_id"] == ""
+    assert complete_calls[-1].kwargs["mapping"]["top_candidates"] == "[]"
+    # Regression for a review comment on #82's first pass: leaving the earlier "Active"
+    # this same call already wrote on the board would have _listener_status keep reporting
+    # listener_state == "Active" forever, even once the Job exits and becomes Succeeded.
+    assert complete_calls[-1].kwargs["mapping"]["listener_state"] == "Complete"
+
+
 def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     mock_conn, _ = _mock_conn_returning(inserted=True)
     mock_client = MagicMock()
@@ -1679,3 +1762,50 @@ def test_run_draft_listener_retries_transient_redis_errors_instead_of_dying():
     # unrelated RuntimeError that's expected to propagate.
     assert mock_sleep.call_count == 2
     assert mock_client.xreadgroup.call_count == 4
+
+
+def test_run_draft_listener_exits_cleanly_once_draft_is_complete():
+    """#82: a plain return once the board reports draft_state == 'complete' - not a crash
+    - is the only way the generated Job (backoff_limit=0/restart_policy='Never', see the
+    test above) ever reaches a real terminal state (Active -> Succeeded) instead of
+    running forever against an ESPN socket that has nothing left to send."""
+    mock_client = MagicMock()
+    mock_client.xreadgroup.side_effect = [
+        [],  # startup backlog drain: nothing pending
+        [("draft_picks:L1", [("1-0", {"pick_number": "160"})])],
+    ]
+    # Not complete yet when the main loop's first iteration checks (top of loop, before
+    # that iteration's read) - only becomes complete once _process_entries has handled
+    # the batch above, which the next iteration's check must catch.
+    mock_client.hget.side_effect = [None, "complete"]
+
+    with patch("src.optimization.draft_matrix.redis.Redis", return_value=mock_client), \
+         patch("src.optimization.draft_matrix._process_entries") as mock_process:
+        dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
+
+    mock_process.assert_called_once()
+    # Exited at the top of the second iteration - never issued a second real read.
+    assert mock_client.xreadgroup.call_count == 2
+
+
+def test_run_draft_listener_exits_immediately_if_already_complete_on_startup():
+    """Regression for a review comment on #82's first pass: the completion check only ran
+    after processing a non-empty batch, so a draft already marked complete before this
+    process started (e.g. a restart right after the final pick, or completion detected
+    during the startup backlog drain above) was never caught - an empty main-loop poll's
+    `continue` skipped the check forever, leaving the Job Active against a socket that will
+    never send anything else. The check must run at the top of every iteration, including
+    the very first."""
+    mock_client = MagicMock()
+    mock_client.xreadgroup.side_effect = [
+        [],  # startup backlog drain: nothing pending
+    ]
+    mock_client.hget.return_value = "complete"
+
+    with patch("src.optimization.draft_matrix.redis.Redis", return_value=mock_client), \
+         patch("src.optimization.draft_matrix._process_entries") as mock_process:
+        dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
+
+    mock_process.assert_not_called()
+    # Never even attempted the main loop's real read.
+    assert mock_client.xreadgroup.call_count == 1

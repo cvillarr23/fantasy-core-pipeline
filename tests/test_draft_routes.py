@@ -758,6 +758,10 @@ def test_get_draft_status_aggregates_expected_shape(client):
     def _fetchone():
         if "SELECT mode FROM draft_config" in mock_cursor.last_query:
             return ("practice",)
+        # More specific than the bare "team_count" check below: load_league_config's own
+        # query also selects team_count, but as a 2-column row.
+        if "lineup_slot_counts" in mock_cursor.last_query:
+            return (10, {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 6})
         if "team_count" in mock_cursor.last_query:
             return (10,)
         if "MAX(pick_number)" in mock_cursor.last_query:
@@ -792,6 +796,7 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert len(body["recent_picks"]) == 2
     assert body["recent_picks"][0]["name"] == "Player One"
     assert body["recent_picks"][0]["position"] == "RB"
+    assert body["draft_state"] == "active"
     assert body["pipeline_health"] == "healthy"
     assert body["recent_errors"][0]["transaction_type"] == "draft_sync"
     assert body["listener_state"] == "Active"
@@ -813,6 +818,10 @@ def test_get_draft_status_reports_failed_clicker_action(client):
     def _fetchone():
         if "SELECT player_name" in mock_cursor.last_query:
             return ("Breece Hall", "failure", "confirmation timed out", datetime(2026, 8, 21, 14, 32, 5))
+        # No team_count from either source, and no picks yet - the real "nothing synced,
+        # nothing drafted" shape this test is otherwise silent about.
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (0,)
         return None
 
     mock_cursor.fetchall.side_effect = _fetchall
@@ -1006,6 +1015,88 @@ def test_get_draft_status_degraded_when_listener_stale_while_active(client):
 
     assert response.status_code == 200
     assert response.json()["pipeline_health"] == "degraded"
+
+
+def test_get_draft_status_complete_is_healthy_not_degraded(client):
+    """#82: a finished draft's Job is expected to no longer be Active
+    (draft_matrix.run_draft_listener exits once it observes the same total_picks
+    threshold) - requiring job_state == "Active" here is exactly what used to make a
+    normal finished run report "degraded", and on_the_clock_team_id must go back to null
+    since there is no next pick to be on the clock for."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        return []
+
+    def _fetchone():
+        query = mock_cursor.last_query
+        if "SELECT mode FROM draft_config" in query:
+            return ("practice",)
+        if "lineup_slot_counts" in query:
+            return (10, {"QB": 1, "BE": 0})  # 1 pick/team
+        if "FROM league_settings" in query:
+            return (10,)
+        if "MAX(pick_number)" in query:
+            return (10,)  # 10 teams * 1 pick/team = 10 total picks, all seen
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"listener_state": "Complete"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Succeeded"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["draft_state"] == "complete"
+    assert body["pipeline_health"] == "healthy"
+    assert body["on_the_clock_team_id"] is None
+    assert body["listener_state"] == "Complete"
+
+
+def test_get_draft_status_listener_state_stays_complete_once_the_job_is_gone(client):
+    """Regression for a review comment on #82's first pass: unlike a stale "Active"/
+    "Failed" from an old crashed run, "Complete" describes a real, permanent fact - the
+    listener Job being gone (reaped/GC'd after Succeeded) must not fall it back to
+    "Unknown" the way every other explicit listener_state does."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"listener_state": "Complete"}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(None, True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["listener_state"] == "Complete"
+
+
+def test_get_draft_status_waiting_before_the_first_pick(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["draft_state"] == "waiting"
 
 
 def test_get_draft_status_includes_connector_health_when_present(client):
@@ -1227,6 +1318,24 @@ def test_stream_draft_status_skips_duplicate_payloads():
     assert len(events) == 3
     assert events[1].startswith("event: heartbeat\n")
     assert events[2].startswith("event: heartbeat\n")
+
+
+def test_stream_draft_status_carries_draft_state_through(client):
+    """#82: _draft_status_event_generator just re-serializes _build_status's own dict, so
+    draft_state needs no separate SSE-side plumbing - this proves that's actually true."""
+    import asyncio as asyncio_module
+    import json as json_module
+
+    payload = {"league_id": "L1", "season": 2026, "draft_state": "complete"}
+    mock_request = MagicMock()
+    mock_request.is_disconnected = AsyncMock(side_effect=[False, True])
+
+    with patch("src.api.draft._build_status", return_value=payload), \
+         patch("src.api.draft.asyncio.sleep", new_callable=AsyncMock):
+        events = asyncio_module.run(_collect_events(mock_request, "L1", 2026, 10))
+
+    emitted = json_module.loads(events[0][len("data: "):].strip())
+    assert emitted["draft_state"] == "complete"
 
 
 # ---------------------------------------------------------------------------
@@ -1917,69 +2026,62 @@ def test_end_practice_sync_job_k8s_failure(client):
 
 
 # ---------------------------------------------------------------------------
-# _on_the_clock_team_id (practice-mode team_count fallback)
+# _on_the_clock_team_id
+#
+# team_count resolution itself (league_settings preferred, draft_config practice-mode
+# fallback) now lives solely in _resolve_draft_size (#82), which mirrors the same order
+# draft_matrix.league_team_count uses - see test_get_draft_status_aggregates_expected_shape
+# and the other GET /v1/draft/status tests above for coverage of that resolution, plus
+# test_league_team_count_prefers_league_settings / test_league_team_count_falls_back_to_
+# draft_config in tests/test_draft_matrix.py for the equivalent draft_matrix-side logic.
+# These tests cover only what _on_the_clock_team_id itself still does with an
+# already-resolved team_count/total_picks/picks_seen.
 # ---------------------------------------------------------------------------
 
-def _on_the_clock_cursor(league_settings_row, draft_config_row, slot_rows, latest_pick):
-    """Feeds the helper's four queries in order: league_settings, draft_config (only when the
-    first came back empty), the slot map, then MAX(pick_number)."""
+def _on_the_clock_cursor(slot_rows):
     cursor = MagicMock()
-    fetchones = [league_settings_row]
-    if league_settings_row is None or not league_settings_row[0]:
-        fetchones.append(draft_config_row)
-    fetchones.append((latest_pick,))
-    cursor.fetchone.side_effect = fetchones
     cursor.fetchall.return_value = slot_rows
     return cursor
 
 
-def test_on_the_clock_team_id_uses_draft_config_when_league_settings_is_empty():
-    """Practice rooms are never synced into league_settings, so without this fallback every
-    practice draft reports nobody on the clock no matter how well the listener is working."""
+def test_on_the_clock_team_id_computes_next_slot():
     from src.api.draft import _on_the_clock_team_id
 
-    cursor = _on_the_clock_cursor(
-        league_settings_row=None,
-        draft_config_row=(3,),
-        slot_rows=[("a", 1), ("b", 2), ("c", 3)],
-        latest_pick=1,
-    )
+    cursor = _on_the_clock_cursor(slot_rows=[("a", 1), ("b", 2), ("c", 3)])
 
-    # Pick 2 of a 3-team draft is still round 1, so slot 2 is up.
-    assert _on_the_clock_team_id(cursor, "L1", 2026) == "b"
-    # The draft_config lookup must be season-scoped; that row is keyed by league_id alone.
-    assert cursor.execute.call_args_list[1][0][1] == ("L1", 2026)
+    # Pick 4 of a 3-team draft wraps into round 2, which reverses: slot 3 picks again.
+    assert _on_the_clock_team_id(cursor, "L1", 2026, team_count=3, total_picks=48, picks_seen=3) == "c"
 
 
-def test_on_the_clock_team_id_prefers_league_settings_over_draft_config():
-    """The synced ESPN value wins over a count derived from pick arrivals, and the derived
-    fallback must not even be queried when it does."""
+def test_on_the_clock_team_id_is_none_when_team_count_unknown():
     from src.api.draft import _on_the_clock_team_id
 
-    cursor = _on_the_clock_cursor(
-        league_settings_row=(3,),
-        draft_config_row=(99,),
-        slot_rows=[("a", 1), ("b", 2), ("c", 3)],
-        latest_pick=3,
-    )
+    cursor = _on_the_clock_cursor(slot_rows=[("a", 1)])
 
-    # Pick 4 wraps into round 2, which reverses: slot 3 picks again.
-    assert _on_the_clock_team_id(cursor, "L1", 2026) == "c"
-    queried = [call[0][0] for call in cursor.execute.call_args_list]
-    assert not any("draft_config" in sql for sql in queried)
+    assert _on_the_clock_team_id(cursor, "L1", 2026, team_count=None, total_picks=None, picks_seen=0) is None
+    # team_count unknown short-circuits before any slot-map query.
+    cursor.execute.assert_not_called()
 
 
-def test_on_the_clock_team_id_is_none_when_no_source_has_a_team_count():
+def test_on_the_clock_team_id_is_none_without_a_slot_map():
+    """Round 2+ before every team has made a round-1 pick - see compute_on_the_clock_team."""
     from src.api.draft import _on_the_clock_team_id
 
-    cursor = _on_the_clock_cursor(
-        league_settings_row=None,
-        draft_config_row=None,
-        slot_rows=[("a", 1)],
-        latest_pick=0,
-    )
+    cursor = _on_the_clock_cursor(slot_rows=[])
 
-    assert _on_the_clock_team_id(cursor, "L1", 2026) is None
+    assert _on_the_clock_team_id(cursor, "L1", 2026, team_count=3, total_picks=48, picks_seen=0) is None
+
+
+def test_on_the_clock_team_id_is_none_once_draft_is_complete():
+    """#82: there is no pick after the last one - the old behavior kept computing a
+    (meaningless) wrapped slot instead of recognizing the draft was over."""
+    from src.api.draft import _on_the_clock_team_id
+
+    cursor = _on_the_clock_cursor(slot_rows=[("a", 1), ("b", 2), ("c", 3)])
+
+    assert _on_the_clock_team_id(cursor, "L1", 2026, team_count=3, total_picks=48, picks_seen=48) is None
+    # Complete short-circuits before any slot-map query too.
+    cursor.execute.assert_not_called()
 
 
 def test_delete_practice_listener_jobs_propagates_delete_failure(client):
