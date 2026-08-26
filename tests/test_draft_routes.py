@@ -895,6 +895,82 @@ def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_playe
     null_id_pick = next(pick for pick in body["team_rosters"]["B"] if pick["pick_number"] == 5)
     assert null_id_pick["player_id"] is None
     assert null_id_pick["espn_player_id"] == "e5"
+    assert body["team_ids"] == ["A", "B", "C"]
+
+
+def test_get_draft_status_team_ids_includes_zero_pick_teams_in_slot_order(client):
+    """team_ids comes from draft_slots, independent of draft_picks - so a team that hasn't
+    picked yet still appears (in its assigned slot order), unlike team_rosters/team_aggregates
+    which only ever gain a key once a team's first pick lands."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
+            return [(1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None)]
+        if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
+            return [(1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None)]
+        if "GROUP BY d.team_id, p.position" in mock_cursor.last_query:
+            return [("A", "QB", 1, 5.0, 40.0)]
+        # Slot order is deliberately not alphabetical, to prove team_ids preserves it rather
+        # than re-sorting.
+        if "draft_slots" in mock_cursor.last_query:
+            return [("C", 1), ("A", 2), ("B", 3)]
+        return []
+
+    def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
+        if "lineup_slot_counts" in mock_cursor.last_query:
+            return (3, {"QB": 1, "BE": 0})
+        if "team_count" in mock_cursor.last_query:
+            return (3,)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (1,)
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["team_ids"] == ["C", "A", "B"]
+    # B and C have zero picks - absent from team_rosters/team_aggregates, but still present
+    # in team_ids so the frontend can render an empty column for them.
+    assert "B" not in body["team_rosters"]
+    assert "C" not in body["team_rosters"]
+    assert "B" not in body["team_aggregates"]
+    assert "C" not in body["team_aggregates"]
+
+
+def test_get_draft_status_team_ids_empty_when_draft_slots_unsynced(client):
+    """draft_slots hasn't been synced yet (e.g. before ESPN publishes slot order) - team_ids
+    degrades to an empty list rather than erroring, same as every other _build_status field's
+    empty-database default."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    assert response.json()["team_ids"] == []
 
 
 def test_get_draft_status_picks_carry_current_weekly_stats_value_fields(client):
