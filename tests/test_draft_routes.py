@@ -229,10 +229,11 @@ def test_start_draft_sync_job_omits_unset_inherited_env(client):
     assert response.status_code == 202
     _, job = mock_batch_api.create_namespaced_job.call_args[0]
     env_names = {e.name for e in job.spec.template.spec.containers[0].env}
-    # DRAFT_PICK_CLOCK_SECONDS is always set, never inherited: it is mode-derived, and a
+    # DRAFT_PICK_CLOCK_SECONDS and AUTO_DRAFT_DELAY_SECONDS are always set, never inherited:
+    # both are mode-derived, and a
     # practice listener silently falling back to the 90s live default would keep retrying
     # long after the 30s practice clock expired.
-    assert env_names == {"DB_PASSWORD", "DRAFT_PICK_CLOCK_SECONDS"}
+    assert env_names == {"DB_PASSWORD", "DRAFT_PICK_CLOCK_SECONDS", "AUTO_DRAFT_DELAY_SECONDS"}
 
 
 def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
@@ -265,8 +266,10 @@ def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
     # A practice room's clock is 30s, not the 90s a real draft gets. Inheriting the live
     # default would let the publish-retry loop run for a full minute after the clock it is
     # meant to protect had already expired and autodrafted.
-    clock = {e.name: e.value for e in container.env}["DRAFT_PICK_CLOCK_SECONDS"]
+    env = {e.name: e.value for e in container.env}
+    clock = env["DRAFT_PICK_CLOCK_SECONDS"]
     assert clock == "30"
+    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "20"
 
 
 def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
@@ -287,7 +290,9 @@ def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
     assert response.status_code == 202
     _, job = mock_batch_api.create_namespaced_job.call_args[0]
     container = job.spec.template.spec.containers[0]
-    assert {e.name: e.value for e in container.env}["DRAFT_PICK_CLOCK_SECONDS"] == "90"
+    env = {e.name: e.value for e in container.env}
+    assert env["DRAFT_PICK_CLOCK_SECONDS"] == "90"
+    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "45"
 
 
 def test_start_draft_sync_selector_picks_named_league(client):
@@ -779,6 +784,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
         "recommended_name": "Best Back",
         "pick_number": "3",
         "last_processed_pick_at": "1000",
+        "auto_publish_at": "1724257205",
+        "pick_clock_expires_at": "1724257240",
     }
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
@@ -793,6 +800,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert body["mode"] == "practice"
     assert body["last_clicker_action"] == "Drafted Breece Hall at 14:32:05"
     assert body["recommendation"]["recommended_player_id"] == "p2"
+    assert body["recommendation"]["auto_publish_at"] == 1724257205
+    assert body["recommendation"]["pick_clock_expires_at"] == 1724257240
     assert len(body["recent_picks"]) == 2
     assert body["recent_picks"][0]["name"] == "Player One"
     assert body["recent_picks"][0]["position"] == "RB"
