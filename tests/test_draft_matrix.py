@@ -1885,3 +1885,55 @@ def test_run_draft_listener_exits_immediately_if_already_complete_on_startup():
     mock_process.assert_not_called()
     # Never even attempted the main loop's real read.
     assert mock_client.xreadgroup.call_count == 1
+
+
+def test_run_draft_listener_seeds_vorp_lookup_before_draining_backlog():
+    """CORE-19/#97 review: the ESPN-suggested-pick lookup must exist before this listener
+    starts consuming picks, not just after the first opponent pick - see
+    seed_initial_vorp_lookup's header. Order matters: seeding after the drain would leave
+    the same window open for any pick processed during the drain itself."""
+    mock_client = MagicMock()
+    mock_client.hget.return_value = "complete"  # exit immediately after startup
+
+    call_order = []
+    mock_client.xreadgroup.side_effect = lambda *a, **k: call_order.append("drain") or []
+
+    with patch("src.optimization.draft_matrix.redis.Redis", return_value=mock_client), \
+         patch("src.optimization.draft_matrix.seed_initial_vorp_lookup", side_effect=lambda *a, **k: call_order.append("seed")):
+        dm.run_draft_listener(league_id="L1", team_id="7", season=2026, week=1, delay_seconds=1)
+
+    assert call_order == ["seed", "drain"]
+
+
+def test_seed_initial_vorp_lookup_writes_full_pool_scores():
+    """Unit-level: given a scored undrafted pool, writes vorp_by_espn_id keyed by espn_id
+    (dropping the espn_id-less row, same as handle_pick_event's own lookup) directly to the
+    board hash - no top_candidates/recommendation computed, since there's no pick to react
+    to yet."""
+    mock_client = MagicMock()
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    fake_pool_df = dm.pl.DataFrame({"espn_id": ["e-1", "e-2", None], "vorp_score": [5.0, 3.0, 1.0]})
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.load_league_config", return_value=LEAGUE_CONFIG), \
+         patch("src.optimization.draft_matrix.load_undrafted_pool") as mock_load_pool, \
+         patch("src.optimization.draft_matrix.recompute_scarcity_vorp", return_value=fake_pool_df):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.seed_initial_vorp_lookup(mock_client, "L1", 2026, 1)
+
+    mock_load_pool.assert_called_once_with(mock_cursor, "L1", 2026, 1)
+    hset_kwargs = mock_client.hset.call_args.kwargs
+    assert json.loads(hset_kwargs["mapping"]["vorp_by_espn_id"]) == {"e-1": 5.0, "e-2": 3.0}
+
+
+def test_seed_initial_vorp_lookup_is_best_effort_on_db_failure():
+    """Must not block the listener from starting - the per-pick recompute in
+    handle_pick_event still catches up once the first opponent pick lands."""
+    mock_client = MagicMock()
+
+    with patch("src.optimization.draft_matrix.get_db_connection", side_effect=RuntimeError("db down")):
+        dm.seed_initial_vorp_lookup(mock_client, "L1", 2026, 1)  # must not raise
+
+    mock_client.hset.assert_not_called()

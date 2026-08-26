@@ -1054,10 +1054,10 @@ def test_get_draft_status_includes_espn_suggestion_with_vorp_match(client):
         "vorp_by_espn_id": json.dumps({"4362249": 12.5}),
         "last_processed_pick_at": "1000",
     }
-    mock_redis.get.return_value = json.dumps({
+    mock_redis.get.side_effect = lambda key: json.dumps({
         "league_id": "L1", "player_id": 4362249, "name": "Best Back",
         "position_id": 2, "pro_team_id": 12, "timestamp": "2026-08-25T00:00:00Z",
-    })
+    }) if key == "draft:L1:suggested" else None
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
@@ -1090,10 +1090,10 @@ def test_get_draft_status_espn_suggestion_falls_back_when_unmatched(client):
         "top_candidates": "[]",
         "last_processed_pick_at": "1000",
     }
-    mock_redis.get.return_value = json.dumps({
+    mock_redis.get.side_effect = lambda key: json.dumps({
         "league_id": "L1", "player_id": 9999999, "name": "Unmatched Guy",
         "position_id": 16, "pro_team_id": 28, "timestamp": "2026-08-25T00:00:00Z",
-    })
+    }) if key == "draft:L1:suggested" else None
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
@@ -1146,6 +1146,119 @@ def test_get_draft_status_drops_malformed_espn_suggestion_json(client):
 
     assert response.status_code == 200
     assert "espn_suggestion" not in response.json()["recommendation"]
+
+
+def test_get_draft_status_drops_non_object_espn_suggestion_json(client):
+    """Reviewer-caught (PR #97): json.loads happily accepts a bare list/string/number as
+    valid JSON, so a decode success alone doesn't mean _resolve_espn_suggestion can safely
+    call raw.get() on the result - a non-object payload must be treated the same as
+    malformed JSON, not staged and left to blow up the Postgres read block later."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"recommended_player_id": "p2", "top_candidates": "[]", "last_processed_pick_at": "1000"}
+    # Only draft:L1:suggested gets the non-object payload - draft:L1:health (connector
+    # health, a separate key) must stay None so it isn't collateral damage of this test.
+    mock_redis.get.side_effect = lambda key: "[1, 2, 3]" if key == "draft:L1:suggested" else None
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         patch("src.api.draft.time.time", return_value=1005):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["pipeline_health"] != "degraded"
+    assert "espn_suggestion" not in body["recommendation"]
+
+
+def test_get_draft_status_drops_non_object_vorp_by_espn_id_json(client):
+    """Same class of bug as the suggestion payload itself - a non-object vorp_by_espn_id
+    must not reach _resolve_espn_suggestion's .get() call either."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchone():
+        if "FROM players WHERE espn_id" in mock_cursor.last_query:
+            return ("p9", "Best Back", "RB", "KC")
+        return None
+
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.side_effect = _fetchone
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {
+        "recommended_player_id": "p2", "top_candidates": "[]",
+        "vorp_by_espn_id": "42", "last_processed_pick_at": "1000",
+    }
+    mock_redis.get.side_effect = lambda key: json.dumps({
+        "league_id": "L1", "player_id": 4362249, "name": "Best Back",
+        "position_id": 2, "pro_team_id": 12, "timestamp": "2026-08-25T00:00:00Z",
+    }) if key == "draft:L1:suggested" else None
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         patch("src.api.draft.time.time", return_value=1005):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["pipeline_health"] != "degraded"
+    assert body["recommendation"]["espn_suggestion"]["vorp_score"] is None
+
+
+def test_get_draft_status_omits_espn_suggestion_once_draft_is_complete(client):
+    """Reviewer-caught (PR #97): draft:{league_id}:suggested has no TTL and isn't touched by
+    draft completion, only by /start or /stop - so once the draft is over, showing ESPN's
+    last-seen suggestion (and VORP) as though still current would be actively misleading,
+    not merely stale. Unlike top_candidates/recommended_player_id (a real record of the last
+    recommendation, left as-is on completion), this must be omitted."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+    mock_cursor.execute.side_effect = _execute
+
+    mock_cursor.fetchall.return_value = []
+
+    def _fetchone():
+        query = mock_cursor.last_query
+        if "SELECT mode FROM draft_config" in query:
+            return ("practice",)
+        if "lineup_slot_counts" in query:
+            return (10, {"QB": 1, "BE": 0})  # 1 pick/team
+        if "FROM league_settings" in query:
+            return (10,)
+        if "MAX(pick_number)" in query:
+            return (10,)  # 10 teams * 1 pick/team = 10 total picks, all seen
+        if "FROM players WHERE espn_id" in query:
+            return ("p9", "Best Back", "RB", "KC")
+        return None
+    mock_cursor.fetchone.side_effect = _fetchone
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"listener_state": "Complete", "top_candidates": "[]"}
+    mock_redis.get.side_effect = lambda key: json.dumps({
+        "league_id": "L1", "player_id": 4362249, "name": "Best Back",
+        "position_id": 2, "pro_team_id": 12, "timestamp": "2026-08-25T00:00:00Z",
+    }) if key == "draft:L1:suggested" else None
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Succeeded"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["draft_state"] == "complete"
+    assert "espn_suggestion" not in body["recommendation"]
 
 
 def test_get_draft_status_degraded_when_job_not_active(client):

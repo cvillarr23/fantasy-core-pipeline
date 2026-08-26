@@ -637,12 +637,23 @@ def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
         raw_vorp = board.pop("vorp_by_espn_id")
         try:
             vorp_by_espn_id = json.loads(raw_vorp)
+            if not isinstance(vorp_by_espn_id, dict):
+                raise TypeError(f"expected an object, got {type(vorp_by_espn_id).__name__}")
         except (TypeError, ValueError):
             logger.error(f"Malformed vorp_by_espn_id JSON on draft:{league_id}:board; dropping it.")
+            vorp_by_espn_id = {}
 
+    # json.loads happily accepts a bare list/string/number as valid JSON - not just a
+    # malformed string - so a decode success alone doesn't guarantee _resolve_espn_suggestion
+    # can safely call .get()/["player_id"] on the result. Reviewer-caught (PR #97): without
+    # this isinstance check, a non-object payload staged here would raise AttributeError
+    # inside _build_status's Postgres try block, which misreports pipeline_health="degraded"
+    # as though the database had failed rather than dropping the one malformed field.
     try:
         raw_suggested = r_client.get(f"draft:{league_id}:suggested")
         suggested = json.loads(raw_suggested) if raw_suggested else None
+        if suggested is not None and not isinstance(suggested, dict):
+            raise TypeError(f"expected an object, got {type(suggested).__name__}")
     except (TypeError, ValueError):
         logger.error(f"Malformed ESPN-suggested-pick JSON on draft:{league_id}:suggested; dropping it.")
         suggested = None
@@ -964,6 +975,15 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
 
     if draft_state == "complete":
         pipeline_health = "healthy" if db_ok and redis_ok else "degraded"
+        # Unlike top_candidates/recommended_player_id (a real record of the last thing this
+        # pipeline recommended, harmless to keep showing after the draft ends), ESPN's
+        # suggested pick is an artifact of its live draft-room UI specifically saying "here's
+        # who's up next" - and nothing ever clears draft:{league_id}:suggested once the draft
+        # is over (it has no TTL and isn't touched by draft completion, only by /start or
+        # /stop - reviewer-caught, PR #97). Once complete, there is no "next" anymore, so
+        # showing the last-seen suggestion (and its VORP) as though still current is actively
+        # misleading rather than merely stale.
+        recommendation.pop("espn_suggestion", None)
     else:
         pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
     listener_job_absent = listener_job_query_ok and listener_job is None
