@@ -536,7 +536,13 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"status": "stopped", "league_id": "L1", "job_deleted": True, "redis_keys_cleared": 2}
+    assert body == {
+        "status": "stopped",
+        "league_id": "L1",
+        "job_deleted": True,
+        "redis_keys_cleared": 2,
+        "pick_stream_cleared": False,
+    }
 
     mock_batch_api.delete_namespaced_job.assert_called_once_with(
         name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
@@ -545,6 +551,57 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
     for call in mock_batch_api.list_namespaced_job.call_args_list:
         assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
     mock_redis.delete.assert_called_once_with("draft:L1:board", "draft:L1:suggested", "draft:L1:pause:3")
+
+
+def test_stop_draft_confirm_publisher_stopped_clears_pick_stream(client):
+    """confirm_publisher_stopped=True opts into the same pick-ledger/Stream clear practice
+    teardown does automatically once it can prove the connector is gone (issue #77) - the
+    caller is asserting that proof by other means for a live league, since core-pipeline has
+    no Job of its own to wait out for the external publisher."""
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    mock_redis.delete.return_value = 4
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post(
+            "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["redis_keys_cleared"] == 4
+    assert body["pick_stream_cleared"] is True
+    mock_redis.delete.assert_called_once_with(
+        "draft:L1:board", "draft:L1:suggested", "draft:L1:picks", "draft:L1:health", "draft_picks:L1"
+    )
+
+
+def test_stop_draft_confirm_publisher_stopped_redis_failure_returns_500(client):
+    """The confirmed clear must fail hard, not swallow the error like _clear_league_draft_state's
+    default tolerance - silently keeping the stale ledger/Stream here is exactly the bug #77
+    exists to fix, so a Redis hiccup mid-clear must surface rather than report false success."""
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
+
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    mock_redis.delete.side_effect = Exception("redis unreachable")
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis):
+        response = client.post(
+            "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
+        )
+
+    assert response.status_code == 500
 
 
 def test_stop_draft_no_job_still_clears_redis_and_returns_200(client):
