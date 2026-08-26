@@ -34,6 +34,14 @@ class SwapInstruction(BaseModel):
     drop_player_id: str = Field(..., description="Unique ESPN/Sleeper tracking ID to bench or cut")
     add_player_id: str = Field(..., description="Unique ESPN/Sleeper tracking ID to elevate to active lineup")
     slot: str = Field(..., description="Target lineup position frame (e.g., RB1, WR2, FLEX)")
+    matchup_multiplier: Optional[float] = Field(
+        None,
+        description=(
+            "Opponent-defense-strength multiplier applied to the added player's VORP for "
+            "this week (#93), in [0.9, 1.1]; None when MATCHUP_WEIGHTING_ENABLED is off or "
+            "no defense-strength proxy row was available. Lets the UI explain a nudge."
+        ),
+    )
 
 class LineupTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")

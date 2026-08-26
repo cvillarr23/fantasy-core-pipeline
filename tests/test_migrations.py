@@ -65,6 +65,26 @@ def test_run_migrations_executes_llm_call_metrics_ddl_before_indices():
     assert llm_metrics_idx < indices_idx
 
 
+def test_run_migrations_executes_defense_position_strength_ddl_before_indices():
+    """#93 adds defense_matchup_multiplier to weekly_stats and the new
+    defense_position_strength table. Lock in that both execute, and the table's CREATE runs
+    before CREATE_INDICES, same ordering convention as the other ledger tables' tests above."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    assert any("defense_matchup_multiplier" in stmt for stmt in executed)
+    defense_strength_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "CREATE TABLE IF NOT EXISTS defense_position_strength" in s
+    )
+    indices_idx = next(i for i, s in enumerate(executed) if "CREATE INDEX" in s)
+    assert defense_strength_idx < indices_idx
+
+
 def test_run_migrations_raises_when_weekly_stats_pk_migration_was_skipped():
     """
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (a Postgres NOTICE, not an error) if

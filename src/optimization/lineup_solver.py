@@ -47,7 +47,8 @@ def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
     somehow missing a CORE-05 vorp_score by treating them as replacement-level rather
     than crashing."""
     query = """
-        SELECT p.player_id, p.name, p.position, COALESCE(s.vorp_score, 0.0) AS vorp_score
+        SELECT p.player_id, p.name, p.position, COALESCE(s.vorp_score, 0.0) AS vorp_score,
+               COALESCE(s.defense_matchup_multiplier, 1.0) AS defense_matchup_multiplier
         FROM players p
         JOIN league_rosters r ON p.player_id = r.player_id
         JOIN weekly_stats s ON p.player_id = s.player_id
@@ -56,8 +57,11 @@ def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
     """
     cursor.execute(query, (team_id, season, week))
     return [
-        {"player_id": pid, "name": name, "position": pos, "vorp_score": vorp_score}
-        for pid, name, pos, vorp_score in cursor.fetchall()
+        {
+            "player_id": pid, "name": name, "position": pos, "vorp_score": vorp_score,
+            "defense_matchup_multiplier": defense_matchup_multiplier,
+        }
+        for pid, name, pos, vorp_score, defense_matchup_multiplier in cursor.fetchall()
     ]
 
 
@@ -154,7 +158,10 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
         return []
 
     return [
-        {"player_id": pid, "name": by_id[pid]["name"], "position": by_id[pid]["position"]}
+        {
+            "player_id": pid, "name": by_id[pid]["name"], "position": by_id[pid]["position"],
+            "defense_matchup_multiplier": by_id[pid]["defense_matchup_multiplier"],
+        }
         for pid in by_id
         if any(
             var.varValue == 1.0
@@ -210,6 +217,10 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
             "drop_player_id": drop_id,
             "add_player_id": add_player["player_id"],
             "slot": current_starters[drop_id]["slot_position"],
+            # Opponent-defense-strength multiplier applied to the added player's VORP this
+            # week (#93); 1.0/neutral when the feature is off or add_player predates this
+            # field (e.g. a caller building starter dicts without it).
+            "matchup_multiplier": add_player.get("defense_matchup_multiplier", 1.0),
         })
 
     return swaps

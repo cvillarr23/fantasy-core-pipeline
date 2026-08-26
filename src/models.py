@@ -101,6 +101,16 @@ ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS vorp_base REAL;
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS scarcity_multiplier REAL;
 """
 
+# Backfills the opponent-defense-strength multiplier (#93) on weekly_stats tables created
+# before this migration existed. Distinct from matchup_coefficient above (which is the
+# player's own team implied-total / individual-signal based multiplier) - this one is
+# opponent-defense based, computed only when MATCHUP_WEIGHTING_ENABLED=true. Nullable with
+# no DEFAULT, same "not computed yet must be a real NULL" rationale as the VORP audit
+# columns: a 0.0/1.0 default would be indistinguishable from "computed and neutral".
+ADD_WEEKLY_STATS_DEFENSE_MATCHUP_COLUMN = """
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS defense_matchup_multiplier REAL;
+"""
+
 # Re-keys weekly_stats on (player_id, season, week) so week 1 of one season no longer
 # collides with week 1 of another. Idempotent: if the constraint has already been migrated,
 # the DROP/ADD pair is skipped. Also skips (with a NOTICE, not an error) if existing rows
@@ -350,6 +360,25 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     our_draft_points REAL,
     pure_adp_draft_points REAL,
     summary_json JSONB
+);
+"""
+
+# Cold-start defensive-strength-vs-position proxy (#93): last season's points-allowed by
+# (defense_team, position), z-scored within position, used only when
+# MATCHUP_WEIGHTING_ENABLED=true to nudge Week 1 lineup VORP. season is the upcoming season
+# this row is used FOR (matches the join key vorp_matrix.py filters on); source_season is
+# season - 1, the season the data is actually derived from, kept alongside the z-score for
+# auditability. Composite natural key mirrors weekly_stats' own PK shape.
+CREATE_DEFENSE_POSITION_STRENGTH_TABLE = """
+CREATE TABLE IF NOT EXISTS defense_position_strength (
+    defense_team VARCHAR(10) NOT NULL,
+    position VARCHAR(10) NOT NULL,
+    season INT NOT NULL,
+    source_season INT NOT NULL,
+    points_allowed_per_game REAL,
+    strength_z REAL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (defense_team, position, season)
 );
 """
 

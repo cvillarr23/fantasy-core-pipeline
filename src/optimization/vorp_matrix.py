@@ -8,6 +8,7 @@ already factors into where the replacement line sits.
 """
 import argparse
 import logging
+import os
 from collections import defaultdict
 
 import polars as pl
@@ -25,6 +26,15 @@ W_MARKET = 0.06
 W_SIGNAL = 0.03
 Z_CLAMP = 2.0
 COEFFICIENT_BOUNDS = (0.85, 1.15)
+# Off by default (#93): behavior must be byte-identical to pre-#93 vorp_score when unset.
+# String-equality against "true", same style as telemetry.py's OTEL_CONSOLE_EXPORT flag -
+# no shared boolean-env-parsing helper exists in this repo.
+MATCHUP_WEIGHTING_ENABLED = os.getenv("MATCHUP_WEIGHTING_ENABLED", "false") == "true"
+W_DEFENSE = 0.05
+# Distinct from COEFFICIENT_BOUNDS (0.85, 1.15) above, which bounds matchup_coefficient - an
+# unrelated, own-team-signal-based multiplier. This bound is #93's opponent-defense-based
+# defense_matchup_multiplier.
+DEFENSE_MATCHUP_BOUNDS = (0.9, 1.1)
 FLEX_DEFAULT_WEIGHTS = {"RB": 0.5, "WR": 0.4, "TE": 0.1}
 SCARCITY_DEPTH_FACTOR = 0.5
 SCARCITY_MAX_MULTIPLIER = 1.35
@@ -275,13 +285,44 @@ def apply_scarcity(df: pl.DataFrame, multipliers: dict) -> pl.DataFrame:
     )
 
 
+def compute_defense_matchup_multiplier(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Opponent-defense-strength multiplier (#93), clamped to DEFENSE_MATCHUP_BOUNDS
+    [0.9, 1.1]. Distinct from compute_matchup_coefficient (own-team/own-signal based) -
+    keyed off the opponent's defense_position_strength.strength_z (positive = weaker
+    defense = good for the offense), itself derived from LAST season's positional
+    points-allowed (sync_defense_strength.py), since Week 1 has no current-season data by
+    definition. NULL strength_z (no ingested row yet, bye week, or non-skill position) is
+    neutral: 1.0, not clamped toward either bound.
+    """
+    if df.is_empty() or "defense_strength_z" not in df.columns:
+        return df.with_columns(pl.lit(1.0).alias("defense_matchup_multiplier"))
+    return df.with_columns(
+        pl.when(pl.col("defense_strength_z").is_null())
+        .then(1.0)
+        .otherwise((1 + W_DEFENSE * pl.col("defense_strength_z")).clip(*DEFENSE_MATCHUP_BOUNDS))
+        .alias("defense_matchup_multiplier")
+    )
+
+
+def apply_defense_matchup_multiplier(df: pl.DataFrame) -> pl.DataFrame:
+    """Applied last, after scarcity: adjusted_vorp = vorp_score * multiplier, per the
+    issue's spec ("vorp", not "projected_points"). Deliberately the final step so the
+    +/-10% nudge can only break ties/nudge close calls within a tier already fixed by
+    baseline+scarcity math, never reorder which tier a player is in."""
+    return df.with_columns(
+        (pl.col("vorp_score") * pl.col("defense_matchup_multiplier")).alias("vorp_score")
+    )
+
+
 def persist_vorp_matrix(conn, rows: list) -> int:
     if not rows:
         return 0
     update_query = """
         UPDATE weekly_stats
         SET matchup_coefficient = %s, adjusted_projected_points = %s,
-            vorp_base = %s, scarcity_multiplier = %s, vorp_score = %s
+            vorp_base = %s, scarcity_multiplier = %s, vorp_score = %s,
+            defense_matchup_multiplier = %s
         WHERE player_id = %s AND season = %s AND week = %s;
     """
     with conn.cursor() as cursor:
@@ -324,24 +365,31 @@ def run_vorp_pipeline(season: int, week: int) -> int:
 
             with tracer.start_as_current_span("vorp_pipeline.load_stats"):
                 with conn.cursor() as cursor:
+                    # LEFT JOIN defense_position_strength is always present, regardless of
+                    # MATCHUP_WEIGHTING_ENABLED - the table exists post-migration and is empty
+                    # pre-ingestion, so this stays NULL rather than requiring a second SQL path.
                     cursor.execute("""
                         SELECT p.player_id, p.position, s.projected_points, s.team_implied_total,
                                s.avg_separation, s.pressure_rate_allowed, s.depth_chart_delta, s.team,
-                               (r.player_id IS NOT NULL) AS is_rostered, r.is_starter
+                               s.opponent, (r.player_id IS NOT NULL) AS is_rostered, r.is_starter,
+                               d.strength_z AS defense_strength_z
                         FROM players p
                         JOIN weekly_stats s ON p.player_id = s.player_id
                         LEFT JOIN (
                             SELECT DISTINCT ON (player_id) player_id, is_starter FROM league_rosters
                         ) r ON p.player_id = r.player_id
+                        LEFT JOIN defense_position_strength d
+                            ON d.defense_team = s.opponent AND d.position = p.position AND d.season = %s
                         WHERE s.season = %s AND s.week = %s;
-                    """, (season, week))
+                    """, (season, season, week))
                     rows = cursor.fetchall()
 
                 schema = {
                     "player_id": pl.Utf8, "position": pl.Utf8, "projected_points": pl.Float64,
                     "team_implied_total": pl.Float64, "avg_separation": pl.Float64,
                     "pressure_rate_allowed": pl.Float64, "depth_chart_delta": pl.Int64,
-                    "team": pl.Utf8, "is_rostered": pl.Boolean, "is_starter": pl.Boolean,
+                    "team": pl.Utf8, "opponent": pl.Utf8, "is_rostered": pl.Boolean, "is_starter": pl.Boolean,
+                    "defense_strength_z": pl.Float64,
                 }
                 df = pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
                 if df.is_empty():
@@ -364,11 +412,22 @@ def run_vorp_pipeline(season: int, week: int) -> int:
                 multipliers = compute_scarcity_multipliers(df, rank_at)
                 df = apply_scarcity(df, multipliers)
 
+            with tracer.start_as_current_span("vorp_pipeline.defense_matchup"):
+                # Off by default: vorp_score is untouched and the persisted multiplier is a
+                # real NULL (not 1.0) when the flag is unset - byte-identical to pre-#93
+                # behavior, per the issue's acceptance criteria.
+                if MATCHUP_WEIGHTING_ENABLED:
+                    df = compute_defense_matchup_multiplier(df)
+                    df = apply_defense_matchup_multiplier(df)
+                else:
+                    df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("defense_matchup_multiplier"))
+
             with tracer.start_as_current_span("vorp_pipeline.persist"):
                 persist_rows = [
                     (
                         r["matchup_coefficient"], r["adjusted_projected_points"], r["vorp_base"],
-                        r["scarcity_multiplier"], r["vorp_score"], r["player_id"], season, week,
+                        r["scarcity_multiplier"], r["vorp_score"], r["defense_matchup_multiplier"],
+                        r["player_id"], season, week,
                     )
                     for r in df.iter_rows(named=True)
                 ]
