@@ -36,6 +36,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from math import ceil
 from typing import List, Literal, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -97,10 +98,12 @@ ESPN_LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
 # own --week CLI default) - draft config doesn't track a week, since a draft has none.
 DRAFT_SYNC_WEEK = 1
 # The publish-retry deadline in draft_matrix.hold_and_publish is bounded by the pick clock,
-# and the two modes do not share one: ESPN practice rooms run 30s while real drafts are 90s+.
-# Passed explicitly per Job rather than left to the module default, because the failure is
-# silent in the dangerous direction - a practice listener inheriting the 90s live default
-# keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
+# and the two modes are configured independently (DRAFT_PICK_CLOCK_SECONDS_LIVE/_PRACTICE)
+# even though both default to 30s today - ESPN's live draft clock and a practice/mock room's
+# clock can still be set to diverge in a given deployment. Passed explicitly per Job rather
+# than left to the module default, because the failure is silent in the dangerous direction -
+# a listener inheriting the wrong mode's clock keeps retrying past the deadline it was meant
+# to protect, after the real clock has already expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
     "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "30")),
     "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),
@@ -229,6 +232,19 @@ class DraftPickSummary(BaseModel):
     )
     name: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
     position: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
+    vorp_score: Optional[float] = Field(None, description="Player's most recent weekly_stats.vorp_score - a CURRENT pipeline value, not a snapshot frozen at pick time. Null if the player has no weekly_stats row (e.g. no crosswalk entry) or has no VORP computed yet.")
+    projected_points: Optional[float] = Field(None, description="Player's most recent weekly_stats.projected_points, same current-value caveat as vorp_score.")
+    scarcity_multiplier: Optional[float] = Field(None, description="Player's most recent weekly_stats.scarcity_multiplier, same current-value caveat as vorp_score.")
+    matchup_coefficient: Optional[float] = Field(None, description="Player's most recent weekly_stats.matchup_coefficient, same current-value caveat as vorp_score.")
+
+
+class TeamAggregate(BaseModel):
+    total_vorp: float = Field(..., description="Sum of vorp_score across this team's drafted players with a weekly_stats row, using each player's most recent row - a CURRENT snapshot recomputed on every /status call, not a running total frozen pick-by-pick.")
+    total_projected_points: float = Field(..., description="Sum of projected_points across this team's drafted players, same current-snapshot caveat as total_vorp.")
+    position_counts: dict[str, int] = Field(default_factory=dict, description="Drafted player count per position (e.g. {'RB': 3, 'WR': 4}). Players with no players-table match (K/D-ST with no crosswalk entry) are omitted, not bucketed under a synthetic key.")
+    most_recent_pick_value_alert: bool = Field(False, description="True if this team's single most recent pick landed VALUE_ROUND_THRESHOLD or more rounds later than its overall-VORP-rank would predict (see most_recent_pick_expected_round) - a 'great value' signal, not a claim the pick was objectively good.")
+    most_recent_pick_vorp_rank: Optional[int] = Field(None, description="Overall vorp_score rank (1 = highest) of this team's most recent pick, across every player with a weekly_stats row - drafted or not. Null if that player has no vorp_score.")
+    most_recent_pick_expected_round: Optional[int] = Field(None, description="ceil(most_recent_pick_vorp_rank / team_count) - the round a player at this VORP rank would be expected to go in a straight VORP-order draft. Null if vorp_rank or team_count is unavailable.")
 
 
 class DraftStatusResponse(BaseModel):
@@ -242,6 +258,10 @@ class DraftStatusResponse(BaseModel):
     team_rosters: dict[str, List[DraftPickSummary]] = Field(
         default_factory=dict,
         description="All draft picks grouped by team_id for full-roster rendering, ordered by pick_number ascending within each team",
+    )
+    team_aggregates: dict[str, TeamAggregate] = Field(
+        default_factory=dict,
+        description="Per-team VORP/projected-points totals, position breakdown, and a value-pick alert for that team's most recent pick - keyed by team_id, same keys as team_rosters.",
     )
     on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
     draft_state: Literal["waiting", "active", "complete"] = Field(..., description="'waiting' before the first pick, 'active' while picks remain, 'complete' once picks_seen reaches every team's full roster (#82) - independent of pipeline_health, so a finished draft is never rendered as a degraded connection")
@@ -639,33 +659,63 @@ def _connector_health(league_id: str) -> Optional[dict]:
         return None
 
 
+# Same "most recent weekly_stats row per player" LATERAL pattern as players.py's
+# search_players - vorp_score/scarcity_multiplier/matchup_coefficient are only ever stored
+# per (player, season, week), so "current value" means the latest row that exists, not a
+# value scoped to the draft's own season/week (a draft happens before that week's stats do).
+_WEEKLY_STATS_LATERAL_JOIN = """
+    LEFT JOIN LATERAL (
+        SELECT vorp_score, projected_points, scarcity_multiplier, matchup_coefficient
+        FROM weekly_stats
+        WHERE player_id = p.player_id
+        ORDER BY season DESC, week DESC
+        LIMIT 1
+    ) w ON true
+"""
+
+
 def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     """Left-joins players so the pick feed can render name/position without a separate
     per-pick lookup - LEFT JOIN (not INNER) so a pick still shows up even if its player
     row is somehow missing, just with name/position null rather than the whole pick
     vanishing from the feed. That is the normal case for K and D/ST, which the players
     table doesn't carry at all: espn_player_id is returned alongside so the feed can still
-    identify the pick when the crosswalk has nothing to join to."""
-    cursor.execute("""
-        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position
+    identify the pick when the crosswalk has nothing to join to.
+
+    Also LATERAL-joins weekly_stats for vorp_score/projected_points/scarcity_multiplier/
+    matchup_coefficient - these are each player's most recent computed values (CURRENT
+    pipeline state), not a snapshot frozen at the moment this pick happened. Null for any
+    pick whose player has no weekly_stats row (same K/D-ST case as above, or a player with
+    no VORP computed yet)."""
+    cursor.execute(f"""
+        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position,
+               w.vorp_score, w.projected_points, w.scarcity_multiplier, w.matchup_coefficient
         FROM draft_picks d
         LEFT JOIN players p ON d.player_id = p.player_id
+        {_WEEKLY_STATS_LATERAL_JOIN}
         WHERE d.league_id = %s AND d.season = %s
         ORDER BY d.pick_number DESC
         LIMIT %s;
     """, (league_id, season, limit))
     return [
         {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3],
-         "espn_player_id": row[4], "name": row[5], "position": row[6]}
+         "espn_player_id": row[4], "name": row[5], "position": row[6],
+         "vorp_score": row[7], "projected_points": row[8],
+         "scarcity_multiplier": row[9], "matchup_coefficient": row[10]}
         for row in cursor.fetchall()
     ]
 
 
 def _team_rosters(cursor, league_id: str, season: int) -> dict:
-    cursor.execute("""
-        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position
+    """Same query/columns as _recent_picks (including the weekly_stats LATERAL join), just
+    unbounded and grouped by team_id instead of limited and DESC - see that function's
+    docstring for the join rationale and the current-vs-historical-value caveat."""
+    cursor.execute(f"""
+        SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position,
+               w.vorp_score, w.projected_points, w.scarcity_multiplier, w.matchup_coefficient
         FROM draft_picks d
         LEFT JOIN players p ON d.player_id = p.player_id
+        {_WEEKLY_STATS_LATERAL_JOIN}
         WHERE d.league_id = %s AND d.season = %s
         ORDER BY d.team_id ASC, d.pick_number ASC;
     """, (league_id, season))
@@ -684,9 +734,93 @@ def _team_rosters(cursor, league_id: str, season: int) -> dict:
                 "espn_player_id": row[4],
                 "name": row[5],
                 "position": row[6],
+                "vorp_score": row[7],
+                "projected_points": row[8],
+                "scarcity_multiplier": row[9],
+                "matchup_coefficient": row[10],
             }
         )
     return rosters
+
+
+# A pick landing this many rounds later than its overall-VORP-rank would predict counts as
+# a "great value" alert. Module-level constant so it's one tunable spot, not a magic number
+# buried in the query below.
+VALUE_ROUND_THRESHOLD = 2
+
+
+def _team_aggregates(cursor, league_id: str, season: int, team_count: Optional[int]) -> dict:
+    """Per-team VORP/projected-points totals, position counts, and a value-pick alert for
+    each team's single most recent pick.
+
+    All three are read in one shot: a position-count/sum GROUP BY, a pool-wide VORP rank
+    (drafted or not, so a pick can be ranked against the whole player pool without re-running
+    the live scarcity/ILP recompute draft_matrix.py uses for recommendations - that pipeline
+    answers "what should we draft next", not "how good, historically, was any given pick"),
+    and each team's MAX(pick_number) to find "most recent". team_count is None whenever
+    _resolve_draft_size couldn't determine it (see that function) - the value alert is
+    skipped in that case (expected_round is undefined without it) rather than guessing.
+    """
+    cursor.execute(f"""
+        SELECT d.team_id, p.position, COUNT(*) AS player_count,
+               COALESCE(SUM(w.vorp_score), 0.0) AS position_vorp,
+               COALESCE(SUM(w.projected_points), 0.0) AS position_projected_points
+        FROM draft_picks d
+        LEFT JOIN players p ON d.player_id = p.player_id
+        {_WEEKLY_STATS_LATERAL_JOIN}
+        WHERE d.league_id = %s AND d.season = %s
+        GROUP BY d.team_id, p.position;
+    """, (league_id, season))
+
+    aggregates: dict[str, dict] = {}
+    for team_id, position, player_count, position_vorp, position_projected_points in cursor.fetchall():
+        team = aggregates.setdefault(team_id, {
+            "total_vorp": 0.0,
+            "total_projected_points": 0.0,
+            "position_counts": {},
+            "most_recent_pick_value_alert": False,
+            "most_recent_pick_vorp_rank": None,
+            "most_recent_pick_expected_round": None,
+        })
+        team["total_vorp"] += float(position_vorp)
+        team["total_projected_points"] += float(position_projected_points)
+        if position is not None:
+            team["position_counts"][position] = player_count
+
+    if team_count:
+        cursor.execute(f"""
+            WITH ranked_pool AS (
+                SELECT p.player_id, RANK() OVER (ORDER BY w.vorp_score DESC) AS vorp_rank
+                FROM players p
+                {_WEEKLY_STATS_LATERAL_JOIN}
+                WHERE w.vorp_score IS NOT NULL
+            ),
+            most_recent_picks AS (
+                SELECT DISTINCT ON (d.team_id) d.team_id, d.round, d.player_id
+                FROM draft_picks d
+                WHERE d.league_id = %s AND d.season = %s
+                ORDER BY d.team_id, d.pick_number DESC
+            )
+            SELECT mrp.team_id, mrp.round, r.vorp_rank
+            FROM most_recent_picks mrp
+            JOIN ranked_pool r ON r.player_id = mrp.player_id;
+        """, (league_id, season))
+        for team_id, pick_round, vorp_rank in cursor.fetchall():
+            team = aggregates.setdefault(team_id, {
+                "total_vorp": 0.0,
+                "total_projected_points": 0.0,
+                "position_counts": {},
+                "most_recent_pick_value_alert": False,
+                "most_recent_pick_vorp_rank": None,
+                "most_recent_pick_expected_round": None,
+            })
+            expected_round = ceil(vorp_rank / team_count)
+            team["most_recent_pick_vorp_rank"] = vorp_rank
+            team["most_recent_pick_expected_round"] = expected_round
+            if pick_round is not None:
+                team["most_recent_pick_value_alert"] = (pick_round - expected_round) >= VALUE_ROUND_THRESHOLD
+
+    return aggregates
 
 
 def _resolve_draft_size(cursor, league_id: str, season: int) -> tuple:
@@ -838,6 +972,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     db_ok = True
     recent_picks: list = []
     team_rosters: dict = {}
+    team_aggregates: dict = {}
     on_the_clock_team_id = None
     recent_errors: list = []
     last_clicker_action = None
@@ -859,6 +994,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             team_rosters = _team_rosters(cursor, league_id, season)
             team_count, total_picks, picks_seen = _resolve_draft_size(cursor, league_id, season)
+            team_aggregates = _team_aggregates(cursor, league_id, season, team_count)
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season, team_count, total_picks, picks_seen)
             recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
@@ -905,6 +1041,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "last_clicker_action": last_clicker_action,
         "recent_picks": recent_picks,
         "team_rosters": team_rosters,
+        "team_aggregates": team_aggregates,
         "on_the_clock_team_id": on_the_clock_team_id,
         "draft_state": draft_state,
         "pipeline_health": pipeline_health,
