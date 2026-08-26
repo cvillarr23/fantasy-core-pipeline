@@ -663,9 +663,19 @@ def _connector_health(league_id: str) -> Optional[dict]:
 # search_players - vorp_score/scarcity_multiplier/matchup_coefficient are only ever stored
 # per (player, season, week), so "current value" means the latest row that exists, not a
 # value scoped to the draft's own season/week (a draft happens before that week's stats do).
+#
+# vorp_score and projected_points both DEFAULT 0.0 in the schema, so a row the projection
+# ingester created but the VORP pipeline hasn't reached yet reads as a real, if terrible,
+# score rather than "not computed" - a materially different claim. scarcity_multiplier has
+# no default and is written by that same VORP update, so it's null exactly until computation
+# completes; gating on it (rather than trusting the raw score) turns "not computed yet" back
+# into a genuine null instead of a misleading zero.
 _WEEKLY_STATS_LATERAL_JOIN = """
     LEFT JOIN LATERAL (
-        SELECT vorp_score, projected_points, scarcity_multiplier, matchup_coefficient
+        SELECT
+            CASE WHEN scarcity_multiplier IS NOT NULL THEN vorp_score END AS vorp_score,
+            CASE WHEN scarcity_multiplier IS NOT NULL THEN projected_points END AS projected_points,
+            scarcity_multiplier, matchup_coefficient
         FROM weekly_stats
         WHERE player_id = p.player_id
         ORDER BY season DESC, week DESC
@@ -788,12 +798,20 @@ def _team_aggregates(cursor, league_id: str, season: int, team_count: Optional[i
             team["position_counts"][position] = player_count
 
     if team_count:
+        # ranked_pool is scoped to this draft's own (season, DRAFT_SYNC_WEEK) row per player -
+        # the same (season, week) load_undrafted_pool and compute_draft_recommendation use for
+        # draft-time projections - rather than each player's all-time most recent weekly_stats
+        # row. The shared _WEEKLY_STATS_LATERAL_JOIN deliberately ignores season for per-pick
+        # display (showing a drafted player's current value), but reusing that here would pull
+        # in a retired or otherwise-absent player's stale historical VORP as if it were live,
+        # inflating the ranked pool and skewing every expected_round calculation that follows.
+        # scarcity_multiplier IS NOT NULL excludes rows the VORP pipeline hasn't reached yet,
+        # for the same reason _WEEKLY_STATS_LATERAL_JOIN gates on it above.
         cursor.execute(f"""
             WITH ranked_pool AS (
-                SELECT p.player_id, RANK() OVER (ORDER BY w.vorp_score DESC) AS vorp_rank
-                FROM players p
-                {_WEEKLY_STATS_LATERAL_JOIN}
-                WHERE w.vorp_score IS NOT NULL
+                SELECT player_id, RANK() OVER (ORDER BY vorp_score DESC) AS vorp_rank
+                FROM weekly_stats
+                WHERE season = %s AND week = %s AND scarcity_multiplier IS NOT NULL
             ),
             most_recent_picks AS (
                 SELECT DISTINCT ON (d.team_id) d.team_id, d.round, d.player_id
@@ -804,7 +822,7 @@ def _team_aggregates(cursor, league_id: str, season: int, team_count: Optional[i
             SELECT mrp.team_id, mrp.round, r.vorp_rank
             FROM most_recent_picks mrp
             JOIN ranked_pool r ON r.player_id = mrp.player_id;
-        """, (league_id, season))
+        """, (season, DRAFT_SYNC_WEEK, league_id, season))
         for team_id, pick_round, vorp_rank in cursor.fetchall():
             team = aggregates.setdefault(team_id, {
                 "total_vorp": 0.0,

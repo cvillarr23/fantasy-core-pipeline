@@ -954,7 +954,9 @@ def test_get_draft_status_picks_carry_current_weekly_stats_value_fields(client):
 def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
     """total_vorp/total_projected_points sum across a team's positions, position_counts
     tallies drafted players per position, and a player with no players-table match (the
-    K/D-ST case - position is null) contributes to the sums without a synthetic position key."""
+    K/D-ST case - position is null) contributes zero to the sums without a synthetic
+    position key - with no players match, p.player_id is null, so the weekly_stats LATERAL
+    join (keyed on player_id = p.player_id) can never find a row for it either."""
     mock_cursor = MagicMock()
 
     def _execute(query, params=None):
@@ -967,7 +969,7 @@ def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
             return [
                 ("A", "RB", 2, 25.0, 200.0),
                 ("A", "WR", 1, 10.0, 90.0),
-                ("A", None, 1, 3.0, 40.0),   # K/D-ST: no players-table match, no weekly_stats
+                ("A", None, 1, 0.0, 0.0),   # K/D-ST: no players-table match, no weekly_stats
                 ("B", "QB", 1, 5.0, 300.0),
             ]
         if "WITH ranked_pool" in mock_cursor.last_query:
@@ -1000,8 +1002,8 @@ def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
     assert response.status_code == 200
     body = response.json()
     team_a = body["team_aggregates"]["A"]
-    assert team_a["total_vorp"] == 38.0
-    assert team_a["total_projected_points"] == 330.0
+    assert team_a["total_vorp"] == 35.0
+    assert team_a["total_projected_points"] == 290.0
     assert team_a["position_counts"] == {"RB": 2, "WR": 1}
     team_b = body["team_aggregates"]["B"]
     assert team_b["total_vorp"] == 5.0
