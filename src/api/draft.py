@@ -1400,7 +1400,7 @@ def _wait_for_job_termination(batch_api: client.BatchV1Api, label_selector: str)
 
 
 @draft_router.post("/stop", status_code=status.HTTP_200_OK)
-def stop_draft(league_id: str):
+def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
     """Tears down a draft-sync Job and its Redis state for one league - mode-agnostic
     (works for both live and practice). Does NOT delete the draft_config row: /status and
     a later /start re-launch both still need it, and there is no other stored copy of
@@ -1410,7 +1410,20 @@ def stop_draft(league_id: str):
     workload that happens to share the league-id label. Waits for the Job's Pods to fully
     terminate (Foreground propagation + polling) before clearing Redis - a still-running
     listener could otherwise recreate the recommendation board or publish a target after
-    this endpoint has already reported "stopped"."""
+    this endpoint has already reported "stopped".
+
+    That wait only proves *this repo's own* listener Job is gone. It says nothing about a
+    live league's pick-stream publisher (fantasy-browser-worker's draft_sync.js), which
+    core-pipeline never creates and has no lifecycle signal for (issue #77) - unlike the
+    practice connector, which is a Job this repo owns and can itself wait out. So by default
+    draft:{league}:picks/health and draft_picks:{league} are left alone here, exactly like
+    today: clearing them while that publisher might still be running risks losing a live
+    pick or letting it recreate the keys right after this endpoint clears them.
+    confirm_publisher_stopped=True is the caller manually asserting - by whatever means they
+    verified it outside this API - that the publisher is truly stopped, opting in to the
+    same pick-ledger/Stream clear practice teardown does automatically once it can prove the
+    connector is gone. Without this, restarting a listener against a reused live league id
+    replays the previous draft's picks and silently drops the new ones as duplicates."""
     label_selector = f"app=draft-sync,league-id={league_id}"
     deleted_job = False
     try:
@@ -1438,18 +1451,21 @@ def stop_draft(league_id: str):
         logger.error(f"Failed to delete draft-sync Job(s) for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete draft-sync Job: {str(e)}")
 
-    cleared_keys = 0
     try:
-        r_client = _redis_client()
-        keys_to_delete = [f"draft:{league_id}:board", f"draft:{league_id}:suggested"]
-        keys_to_delete.extend(r_client.scan_iter(match=f"draft:{_redis_glob_escape(league_id)}:pause:*"))
-        if keys_to_delete:
-            cleared_keys = r_client.delete(*keys_to_delete)
+        cleared_keys = _clear_league_draft_state(
+            league_id, include_pick_stream=confirm_publisher_stopped, raise_on_error=True
+        )
     except Exception as e:
         logger.error(f"Failed to clear Redis draft state for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to clear Redis draft state: {str(e)}")
 
-    return {"status": "stopped", "league_id": league_id, "job_deleted": deleted_job, "redis_keys_cleared": cleared_keys}
+    return {
+        "status": "stopped",
+        "league_id": league_id,
+        "job_deleted": deleted_job,
+        "redis_keys_cleared": cleared_keys,
+        "pick_stream_cleared": confirm_publisher_stopped,
+    }
 
 
 @draft_router.get("/status", response_model=DraftStatusResponse)
