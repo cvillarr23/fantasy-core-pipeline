@@ -100,12 +100,10 @@ ESPN_LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
 # own --week CLI default) - draft config doesn't track a week, since a draft has none.
 DRAFT_SYNC_WEEK = 1
 # The publish-retry deadline in draft_matrix.hold_and_publish is bounded by the pick clock,
-# and the two modes are configured independently (DRAFT_PICK_CLOCK_SECONDS_LIVE/_PRACTICE)
-# even though both default to 30s today - ESPN's live draft clock and a practice/mock room's
-# clock can still be set to diverge in a given deployment. Passed explicitly per Job rather
-# than left to the module default, because the failure is silent in the dangerous direction -
-# a listener inheriting the wrong mode's clock keeps retrying past the deadline it was meant
-# to protect, after the real clock has already expired and autodrafted.
+# and the two modes do not share one: ESPN practice rooms run 30s while real drafts are 90s+.
+# Passed explicitly per Job rather than left to the module default, because the failure is
+# silent in the dangerous direction - a practice listener inheriting the 90s live default
+# keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
     "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "90")),
     "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),

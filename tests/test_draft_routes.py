@@ -291,8 +291,8 @@ def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
     _, job = mock_batch_api.create_namespaced_job.call_args[0]
     container = job.spec.template.spec.containers[0]
     env = {e.name: e.value for e in container.env}
-    assert env["DRAFT_PICK_CLOCK_SECONDS"] == "30"
-    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "20"
+    assert env["DRAFT_PICK_CLOCK_SECONDS"] == "90"
+    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "45"
 
 
 def test_start_draft_sync_selector_picks_named_league(client):
