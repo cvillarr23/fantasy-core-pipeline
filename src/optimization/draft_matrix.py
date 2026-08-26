@@ -857,10 +857,17 @@ def hold_and_publish(
 # ------------------------------------------------------------------------------
 # Orchestration
 # ------------------------------------------------------------------------------
-def compute_draft_recommendation_candidates(cursor, league_id: str, season: int, week: int, team_id: str, limit: int = TOP_CANDIDATES_LIMIT) -> list:
+def compute_draft_recommendation_candidates(cursor, league_id: str, season: int, week: int, team_id: str, limit: int = TOP_CANDIDATES_LIMIT, pool_out: Optional[list] = None) -> list:
     """One full recompute pass: undrafted pool -> scarcity VORP -> ILP -> up to `limit`
     ranked recommended targets. Returns [] if the pool is empty or no feasible selection
-    exists."""
+    exists.
+
+    pool_out, if given, is extended in place with the full scored undrafted pool (every
+    candidate, not just the ILP's top picks) - an output param rather than a second return
+    value so every existing caller/mock (draft_simulator.py, this module's own test suite,
+    which mocks this function with plain candidate lists) keeps working unchanged. Only
+    handle_pick_event passes it, to publish a VORP lookup covering any undrafted player, not
+    just the handful the ILP recommends for our own roster."""
     league_config = load_league_config(cursor)
     pool_df = load_undrafted_pool(cursor, league_id, season, week)
     pool_df = recompute_scarcity_vorp(pool_df, league_config)
@@ -876,6 +883,8 @@ def compute_draft_recommendation_candidates(cursor, league_id: str, season: int,
         {"player_id": r["player_id"], "espn_id": r["espn_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"], "team": r["team"]}
         for r in pool_df.iter_rows(named=True)
     ]
+    if pool_out is not None:
+        pool_out.extend(undrafted_pool)
     selected = build_and_solve_draft_pick(undrafted_pool, position_caps, remaining_picks)
     return rank_recommended_targets(selected, starting_needs, limit)
 
@@ -1021,8 +1030,9 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
+            undrafted_pool: list = []
             with conn.cursor() as cursor:
-                candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, our_team_id)
+                candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, our_team_id, pool_out=undrafted_pool)
 
         if not candidates:
             logger.info("No feasible draft recommendation for the current undrafted pool.")
@@ -1044,6 +1054,12 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             # winner - redis hashes are flat string->string, so the ranked candidates ride
             # as a JSON-encoded field rather than their own set of hash keys.
             "top_candidates": json.dumps(candidates),
+            # CORE-19's ESPN-suggested-pick column needs a VORP score for whichever player
+            # ESPN suggests, which is frequently NOT one of the roster-constrained
+            # top_candidates above. undrafted_pool already carries every scored candidate
+            # from this same recompute - keyed by espn_id here (not the internal player_id)
+            # because that's the only id the ESPN suggestion itself carries.
+            "vorp_by_espn_id": json.dumps({r["espn_id"]: r["vorp_score"] for r in undrafted_pool if r["espn_id"]}),
         })
         return target, next_pick_number
 

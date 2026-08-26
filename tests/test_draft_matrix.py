@@ -1616,6 +1616,36 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     assert [c["player_id"] for c in top_candidates] == ["p2", "p3"]
 
 
+def test_handle_pick_event_publishes_vorp_by_espn_id_for_the_full_undrafted_pool():
+    """CORE-19/#80: the ESPN-suggested-pick column needs a VORP score for whichever player
+    ESPN suggests, which is frequently NOT one of the roster-constrained top_candidates -
+    so handle_pick_event also publishes a lookup covering every scored undrafted candidate
+    (via compute_draft_recommendation_candidates' pool_out param), keyed by espn_id since
+    that's the only id the ESPN suggestion itself carries."""
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    event = {"pick_number": "1", "team_id": "3", "player_id": "p1"}
+    target = _player("p2", "RB", 10.0, name="Best Back", espn_id="e-2")
+    runner_up = _player("p3", "WR", 8.0, name="Second Choice", espn_id="e-3")
+    # Didn't make the ILP's top picks, but is still in the full scored pool - exactly the
+    # case a lookup built only from top_candidates would miss.
+    long_shot = _player("p4", "TE", 1.0, name="Deep Sleeper", espn_id="e-4")
+
+    def fake_candidates(cursor, league_id, season, week, team_id, limit=5, pool_out=None):
+        if pool_out is not None:
+            pool_out.extend([target, runner_up, long_shot])
+        return [target, runner_up]
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", side_effect=fake_candidates):
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    hset_kwargs = mock_client.hset.call_args_list[-1].kwargs
+    vorp_by_espn_id = json.loads(hset_kwargs["mapping"]["vorp_by_espn_id"])
+    assert vorp_by_espn_id == {"e-2": 10.0, "e-3": 8.0, "e-4": 1.0}
+
+
 def test_process_entries_marks_listener_failed_on_handler_exception():
     mock_client = MagicMock()
     entries = [("draft_picks:L1", [("1-0", {"pick_number": "1"})])]

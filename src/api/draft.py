@@ -40,6 +40,7 @@ from typing import List, Literal, Optional
 from urllib.parse import parse_qs, urlparse
 
 import redis
+from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from kubernetes import client, config
@@ -47,6 +48,7 @@ from kubernetes.config.config_exception import ConfigException
 from pydantic import BaseModel, Field, field_validator
 
 from src.database import get_db_cursor
+from src.ingestion.sync_kicker_dst import ESPN_TO_INTERNAL_TEAM
 from src.optimization.draft_matrix import (
     compute_draft_recommendation,
     compute_on_the_clock_team,
@@ -102,11 +104,11 @@ DRAFT_SYNC_WEEK = 1
 # silent in the dangerous direction - a practice listener inheriting the 90s live default
 # keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
-    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "30")),
+    "live": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_LIVE", "90")),
     "practice": int(os.getenv("DRAFT_PICK_CLOCK_SECONDS_PRACTICE", "30")),
 }
 AUTO_DRAFT_DELAY_SECONDS_BY_MODE = {
-    "live": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_LIVE", "20")),
+    "live": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_LIVE", "45")),
     "practice": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_PRACTICE", "20")),
 }
 
@@ -407,9 +409,13 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False,
     The board holds listener_state, listener_error and the last recommendation, with no TTL.
     Nothing expires it, so once a run ends its final state sits there indefinitely and the UI
     reports a finished run's fatal error, and its stale top-picks, as though they were current.
-    Callers here are cleanup and startup paths, where a Redis hiccup must not abort the
-    operation itself - refusing to start a draft because leftover state could not be cleared
-    would be worse than starting with it. Logged loudly and reported instead.
+    draft:{league_id}:suggested (fantasy-browser-worker's scraped ESPN-suggested-pick status
+    key, issue #80) has the exact same no-TTL, single-overwrite shape and the same staleness
+    risk, so it's cleared alongside the board rather than left to leak the previous run's
+    suggestion into a new one. Callers here are cleanup and startup paths, where a Redis
+    hiccup must not abort the operation itself - refusing to start a draft because leftover
+    state could not be cleared would be worse than starting with it. Logged loudly and
+    reported instead.
 
     include_pick_stream additionally drops the connector's pick ledger, its health key and the
     pick Stream itself. Those are only safe to remove once the run is definitively over: the
@@ -427,7 +433,7 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False,
     """
     try:
         r_client = _redis_client()
-        keys = [f"draft:{league_id}:board"]
+        keys = [f"draft:{league_id}:board", f"draft:{league_id}:suggested"]
         keys.extend(r_client.scan_iter(match=f"draft:{_redis_glob_escape(league_id)}:pause:*"))
         if include_pick_stream:
             keys.extend([f"draft:{league_id}:picks", f"draft:{league_id}:health", f"draft_picks:{league_id}"])
@@ -601,7 +607,15 @@ def _room_connected(league_id: Optional[str]) -> bool:
 def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
     """top_candidates rides the board hash as a JSON string (redis hashes are flat
     string->string) - decode it back into a real list here so API consumers get actual
-    JSON, not a JSON-encoded string inside JSON."""
+    JSON, not a JSON-encoded string inside JSON.
+
+    Also picks up two more pieces for CORE-19's ESPN-suggested-pick column: the board's own
+    `vorp_by_espn_id` lookup (also JSON-encoded, written by draft_matrix.py's
+    handle_pick_event alongside top_candidates) and fantasy-browser-worker's separately-keyed
+    `draft:{league_id}:suggested` status snapshot. Resolving the suggestion into a real
+    espn_suggestion object needs a `players` join this function has no DB cursor for, so it's
+    only staged here (under a private key popped before the response is built) and finished
+    by _resolve_espn_suggestion in _build_status, which does have one."""
     board = r_client.hgetall(f"draft:{league_id}:board") or {}
     if "top_candidates" in board:
         try:
@@ -617,6 +631,24 @@ def _recommendation(r_client: redis.Redis, league_id: str) -> dict:
         except (TypeError, ValueError):
             logger.error(f"Malformed {key} value on draft:{league_id}:board; dropping it.")
             board.pop(key, None)
+
+    vorp_by_espn_id = {}
+    if "vorp_by_espn_id" in board:
+        raw_vorp = board.pop("vorp_by_espn_id")
+        try:
+            vorp_by_espn_id = json.loads(raw_vorp)
+        except (TypeError, ValueError):
+            logger.error(f"Malformed vorp_by_espn_id JSON on draft:{league_id}:board; dropping it.")
+
+    try:
+        raw_suggested = r_client.get(f"draft:{league_id}:suggested")
+        suggested = json.loads(raw_suggested) if raw_suggested else None
+    except (TypeError, ValueError):
+        logger.error(f"Malformed ESPN-suggested-pick JSON on draft:{league_id}:suggested; dropping it.")
+        suggested = None
+
+    if suggested is not None:
+        board["_espn_suggestion_staging"] = {"raw": suggested, "vorp_by_espn_id": vorp_by_espn_id}
     return board
 
 
@@ -809,6 +841,51 @@ def _is_stale(job_state: str, recommendation: dict) -> bool:
         return True
 
 
+def _resolve_espn_suggestion(cursor, staging: dict) -> Optional[dict]:
+    """Joins fantasy-browser-worker's scraped ESPN suggested-pick (issue #80) against our own
+    players/VORP data - the "API half" of CORE-19. staging is
+    {"raw": <worker's draft:{league_id}:suggested payload>, "vorp_by_espn_id": {...}}; raw
+    always carries at least an ESPN player_id, but its name/position_id/pro_team_id degrade
+    to null if the worker's own player-pool lookup failed (see that repo's
+    handleAutosuggestFrame) - handled the same way here, by falling through to the
+    espn_id-less branch below.
+
+    A `players` match (the common case - the worker's catalog uses ESPN's own ids, the same
+    ones players.espn_id already carries) wins over the worker's own fields, since our row is
+    authoritative. No match (K/D-ST, or any player the crosswalk hasn't caught up to) falls
+    back to translating ESPN's numeric position_id/pro_team_id ourselves - reusing
+    espn_api's own POSITION_MAP/PRO_TEAM_MAP and sync_kicker_dst's WSH->WAS normalization,
+    the same way sync_league.py/sync_kicker_dst.py already do - rather than dropping the
+    suggestion the issue asks to keep (null score, not a missing row).
+    """
+    raw = staging["raw"]
+    espn_player_id = raw.get("player_id")
+    if espn_player_id is None:
+        return None
+    espn_player_id = str(espn_player_id)
+
+    cursor.execute("SELECT player_id, name, position, team FROM players WHERE espn_id = %s;", (espn_player_id,))
+    row = cursor.fetchone()
+    if row:
+        player_id, name, position, team = row
+    else:
+        player_id = None
+        name = raw.get("name")
+        position = POSITION_MAP.get(raw.get("position_id"))
+        pro_team = PRO_TEAM_MAP.get(raw.get("pro_team_id"))
+        team = ESPN_TO_INTERNAL_TEAM.get(pro_team, pro_team)
+
+    return {
+        "espn_player_id": espn_player_id,
+        "player_id": player_id,
+        "name": name,
+        "position": position,
+        "team": team,
+        "vorp_score": staging["vorp_by_espn_id"].get(espn_player_id),
+        "suggested_at": raw.get("timestamp"),
+    }
+
+
 def _build_status(league_id: str, season: int, limit: int) -> dict:
     """Every datastore read is isolated in its own try/except: a Postgres or Redis outage
     must surface as pipeline_health="degraded" in a normal 200 response (so the browser can
@@ -845,6 +922,10 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     # failed read below must default draft_state to "waiting", not accidentally "complete".
     total_picks = None
     picks_seen = 0
+    # Popped here (unconditionally, before the DB block below can fail) rather than inside
+    # the try, so this internal staging key can never leak into the response regardless of
+    # whether the players join that resolves it succeeds.
+    espn_suggestion_staging = recommendation.pop("_espn_suggestion_staging", None)
     # "unknown" (not "live") is the pre-query default: a Postgres outage must not let a
     # practice run get silently reported as mode="live" just because the mode SELECT never
     # ran - that would route a practice run into live monitoring precisely when db_ok is
@@ -862,6 +943,10 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season, team_count, total_picks, picks_seen)
             recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
+            if espn_suggestion_staging is not None:
+                espn_suggestion = _resolve_espn_suggestion(cursor, espn_suggestion_staging)
+                if espn_suggestion is not None:
+                    recommendation["espn_suggestion"] = espn_suggestion
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots/mode for league {league_id}: {e}")
         db_ok = False
@@ -1148,7 +1233,7 @@ def stop_draft(league_id: str):
     cleared_keys = 0
     try:
         r_client = _redis_client()
-        keys_to_delete = [f"draft:{league_id}:board"]
+        keys_to_delete = [f"draft:{league_id}:board", f"draft:{league_id}:suggested"]
         keys_to_delete.extend(r_client.scan_iter(match=f"draft:{_redis_glob_escape(league_id)}:pause:*"))
         if keys_to_delete:
             cleared_keys = r_client.delete(*keys_to_delete)
