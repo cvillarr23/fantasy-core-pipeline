@@ -189,6 +189,9 @@ def _draft_sync_env(mode: str = "live") -> list:
             name="AUTO_DRAFT_DELAY_SECONDS",
             value=str(AUTO_DRAFT_DELAY_SECONDS_BY_MODE.get(mode, AUTO_DRAFT_DELAY_SECONDS_BY_MODE["live"])),
         ),
+        # Read by draft_matrix.py's publish_draft_target and forwarded on every draft_targets
+        # message, so fantasy-browser-worker's click bot knows practice vs live without guessing.
+        client.V1EnvVar(name="DRAFT_MODE", value=mode),
     ]
     for name in DRAFT_SYNC_INHERITED_ENV_VARS:
         value = os.getenv(name)
@@ -286,7 +289,8 @@ class DraftStatusResponse(BaseModel):
         default_factory=dict,
         description="Per-team VORP/projected-points totals, position breakdown, and a value-pick alert for that team's most recent pick - keyed by team_id, same keys as team_rosters.",
     )
-    on_the_clock_team_id: Optional[str] = Field(None, description="Null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
+    on_the_clock_team_id: Optional[str] = Field(None, description="fantasy-browser-worker's live SELECTING WS frame when available (real-time, no chicken-and-egg gap for a team's own round-1 pick); falls back to our own snake-draft derivation, which is null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
+    autodraft_active_team_id: Optional[str] = Field(None, description="Team whose ESPN autodraft is currently toggled on, from fantasy-browser-worker's live AUTODRAFT WS frame. Null if no team currently has it active or the signal hasn't been seen yet - this is a live toggle state, not a history of past autodrafted picks")
     draft_state: Literal["waiting", "active", "complete"] = Field(..., description="'waiting' before the first pick, 'active' while picks remain, 'complete' once picks_seen reaches every team's full roster (#82) - independent of pipeline_health, so a finished draft is never rendered as a degraded connection")
     pipeline_health: str = Field(..., description="'healthy' iff Postgres/Redis both respond and, while the draft is still active, the draft-sync Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its Job is expected to have exited, else 'degraded'")
     connector_health: Optional[dict] = Field(
@@ -453,7 +457,10 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False,
     draft:{league_id}:suggested (fantasy-browser-worker's scraped ESPN-suggested-pick status
     key, issue #80) has the exact same no-TTL, single-overwrite shape and the same staleness
     risk, so it's cleared alongside the board rather than left to leak the previous run's
-    suggestion into a new one. Callers here are cleanup and startup paths, where a Redis
+    suggestion into a new one. draft:{league_id}:selecting/:autodraft (ESPN's live on-the-clock
+    and autodraft-toggle signals) are the same shape again - cleared here for the same reason,
+    otherwise a new run could open showing a team as on the clock or autodrafting from a draft
+    that already ended. Callers here are cleanup and startup paths, where a Redis
     hiccup must not abort the operation itself - refusing to start a draft because leftover
     state could not be cleared would be worse than starting with it. Logged loudly and
     reported instead.
@@ -474,7 +481,12 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False,
     """
     try:
         r_client = _redis_client()
-        keys = [f"draft:{league_id}:board", f"draft:{league_id}:suggested"]
+        keys = [
+            f"draft:{league_id}:board",
+            f"draft:{league_id}:suggested",
+            f"draft:{league_id}:selecting",
+            f"draft:{league_id}:autodraft",
+        ]
         keys.extend(r_client.scan_iter(match=f"draft:{_redis_glob_escape(league_id)}:pause:*"))
         if include_pick_stream:
             keys.extend([f"draft:{league_id}:picks", f"draft:{league_id}:health", f"draft_picks:{league_id}"])
@@ -720,6 +732,44 @@ def _connector_health(league_id: str) -> Optional[dict]:
         return json.loads(raw)
     except (TypeError, ValueError):
         logger.error(f"Malformed connector health JSON on draft:{league_id}:health; dropping it.")
+        return None
+
+
+def _espn_selecting_team_id(league_id: str) -> Optional[str]:
+    """Reads fantasy-browser-worker's `draft:{league_id}:selecting` status snapshot - ESPN's own
+    live SELECTING <teamId> <clockMs> WS turn-notification, forwarded verbatim as JSON. This is
+    the authoritative on-the-clock signal where available: unlike our own snake-draft derivation
+    (_on_the_clock_team_id, which needs every earlier team's round-1 slot already recorded),
+    ESPN tells us directly and in real time, so there is no chicken-and-egg gap for a team's own
+    first pick. None is a normal state (older worker version, key not written yet), not an error."""
+    raw = _redis_client().get(f"draft:{league_id}:selecting")
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return str(parsed["team_id"])
+    except (TypeError, ValueError, KeyError):
+        logger.error(f"Malformed on-the-clock JSON on draft:{league_id}:selecting; dropping it.")
+        return None
+
+
+def _espn_autodraft_active_team_id(league_id: str) -> Optional[str]:
+    """Reads fantasy-browser-worker's `draft:{league_id}:autodraft` status snapshot - ESPN's own
+    live AUTODRAFT <teamId> <bool> WS toggle broadcast. There was previously no live signal for
+    this at all: the only existing autodraft detection (draft_pick_ledger's classifyPickOrigin)
+    only tells you a pick already happened via autodraft, after the fact - too late for a UI
+    warning meant to fire before a team's own clock runs out. `active: false` (a team's autodraft
+    being explicitly turned back off) reports as None here, same as never having seen the frame -
+    both mean "no team's autodraft is on right now," which is the only state this field means to
+    capture."""
+    raw = _redis_client().get(f"draft:{league_id}:autodraft")
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return str(parsed["team_id"]) if parsed.get("active") else None
+    except (TypeError, ValueError, KeyError):
+        logger.error(f"Malformed autodraft JSON on draft:{league_id}:autodraft; dropping it.")
         return None
 
 
@@ -1019,6 +1069,11 @@ def _last_clicker_action(cursor, league_id: str, season: int) -> Optional[str]:
     player_name, row_status, error_message, executed_at = row
     if row_status == "success":
         return f"Drafted {player_name} at {executed_at:%H:%M:%S}"
+    if row_status == "skipped_dry_run":
+        # Was previously indistinguishable from silence: DRY_RUN wrote no row at all, so a
+        # skipped pick looked exactly like nothing had happened yet. Surfacing it here is the
+        # whole point - this status exists so a DRY_RUN skip is never mistaken for a timeout.
+        return f"Skipped {player_name} at {executed_at:%H:%M:%S} - DRY_RUN was on, no submission was attempted"
     return f"Failed to draft {player_name}: {error_message}"
 
 
@@ -1105,6 +1160,17 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     except Exception as e:
         logger.error(f"Failed to read Redis connector health for league {league_id}: {e}")
 
+    # Isolated from redis_ok/pipeline_health for the same reason connector_health is: a read
+    # failure here must not misreport the whole pipeline as degraded over a signal that's
+    # allowed to simply be absent (older worker version, or the frame hasn't arrived yet).
+    espn_selecting_team_id: Optional[str] = None
+    autodraft_active_team_id: Optional[str] = None
+    try:
+        espn_selecting_team_id = _espn_selecting_team_id(league_id)
+        autodraft_active_team_id = _espn_autodraft_active_team_id(league_id)
+    except Exception as e:
+        logger.error(f"Failed to read Redis on-the-clock/autodraft state for league {league_id}: {e}")
+
     db_ok = True
     recent_picks: list = []
     team_ids: list = []
@@ -1137,7 +1203,15 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
             team_rosters = _team_rosters(cursor, league_id, season)
             team_count, total_picks, picks_seen = _resolve_draft_size(cursor, league_id, season)
             team_aggregates = _team_aggregates(cursor, league_id, season, team_count)
-            on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season, team_count, total_picks, picks_seen)
+            # ESPN's own live signal wins when present - see _espn_selecting_team_id's header
+            # for why it's authoritative where our own derivation has a structural gap. Only
+            # falls back to the derived value when the draft is still active (not "complete"):
+            # ESPN's key has no TTL and nothing clears it once a draft ends the same way
+            # draft:{league_id}:suggested didn't before PR #97, so trusting it unconditionally
+            # here would resurrect a finished draft's last-known "on the clock" team forever.
+            on_the_clock_team_id = espn_selecting_team_id if picks_seen < (total_picks or float("inf")) else None
+            if on_the_clock_team_id is None:
+                on_the_clock_team_id = _on_the_clock_team_id(cursor, league_id, season, team_count, total_picks, picks_seen)
             recent_errors = _recent_execution_errors(cursor, league_id, season, RECENT_ERRORS_LIMIT)
             last_clicker_action = _last_clicker_action(cursor, league_id, season)
             if espn_suggestion_staging is not None:
@@ -1199,6 +1273,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "team_rosters": team_rosters,
         "team_aggregates": team_aggregates,
         "on_the_clock_team_id": on_the_clock_team_id,
+        "autodraft_active_team_id": autodraft_active_team_id if draft_state != "complete" else None,
         "draft_state": draft_state,
         "pipeline_health": pipeline_health,
         "connector_health": connector_health,
