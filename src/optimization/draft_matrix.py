@@ -857,10 +857,17 @@ def hold_and_publish(
 # ------------------------------------------------------------------------------
 # Orchestration
 # ------------------------------------------------------------------------------
-def compute_draft_recommendation_candidates(cursor, league_id: str, season: int, week: int, team_id: str, limit: int = TOP_CANDIDATES_LIMIT) -> list:
+def compute_draft_recommendation_candidates(cursor, league_id: str, season: int, week: int, team_id: str, limit: int = TOP_CANDIDATES_LIMIT, pool_out: Optional[list] = None) -> list:
     """One full recompute pass: undrafted pool -> scarcity VORP -> ILP -> up to `limit`
     ranked recommended targets. Returns [] if the pool is empty or no feasible selection
-    exists."""
+    exists.
+
+    pool_out, if given, is extended in place with the full scored undrafted pool (every
+    candidate, not just the ILP's top picks) - an output param rather than a second return
+    value so every existing caller/mock (draft_simulator.py, this module's own test suite,
+    which mocks this function with plain candidate lists) keeps working unchanged. Only
+    handle_pick_event passes it, to publish a VORP lookup covering any undrafted player, not
+    just the handful the ILP recommends for our own roster."""
     league_config = load_league_config(cursor)
     pool_df = load_undrafted_pool(cursor, league_id, season, week)
     pool_df = recompute_scarcity_vorp(pool_df, league_config)
@@ -876,6 +883,8 @@ def compute_draft_recommendation_candidates(cursor, league_id: str, season: int,
         {"player_id": r["player_id"], "espn_id": r["espn_id"], "name": r["name"], "position": r["position"], "vorp_score": r["vorp_score"], "team": r["team"]}
         for r in pool_df.iter_rows(named=True)
     ]
+    if pool_out is not None:
+        pool_out.extend(undrafted_pool)
     selected = build_and_solve_draft_pick(undrafted_pool, position_caps, remaining_picks)
     return rank_recommended_targets(selected, starting_needs, limit)
 
@@ -885,6 +894,39 @@ def compute_draft_recommendation(cursor, league_id: str, season: int, week: int,
     used by callers (e.g. /v1/draft/resume) that only need the one winning pick."""
     candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, team_id, limit=1)
     return candidates[0] if candidates else None
+
+
+def _vorp_by_espn_id_json(undrafted_pool: list) -> str:
+    """CORE-19's ESPN-suggested-pick column needs a VORP score for whichever player ESPN
+    suggests, which is frequently NOT one of the roster-constrained top_candidates - so this
+    rides the board hash as its own JSON-encoded lookup covering the full scored pool, keyed
+    by espn_id (not the internal player_id) because that's the only id the ESPN suggestion
+    itself carries."""
+    return json.dumps({r["espn_id"]: r["vorp_score"] for r in undrafted_pool if r["espn_id"]})
+
+
+def seed_initial_vorp_lookup(r_client, league_id: str, season: int, week: int) -> None:
+    """Populates draft:{league_id}:board's vorp_by_espn_id before any pick has landed
+    (reviewer-caught, PR #97): handle_pick_event only (re)publishes this lookup when an
+    OPPONENT pick triggers a recompute - our own picks return early with no board write - so
+    if our team is on the clock first, any ESPN suggestion surfaced before that first
+    opponent pick would resolve against a lookup that doesn't exist yet and report a null
+    VORP score despite the player being in a fully scored pool.
+
+    Deliberately computes only the VORP lookup, not top_candidates/a recommendation: there is
+    no pick to react to yet, and the very first handle_pick_event call already (re)computes
+    those correctly. Best-effort - a failure here must not block the listener from starting,
+    since the per-pick recompute still catches up as soon as the first opponent pick lands."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                league_config = load_league_config(cursor)
+                pool_df = load_undrafted_pool(cursor, league_id, season, week)
+                pool_df = recompute_scarcity_vorp(pool_df, league_config)
+        undrafted_pool = [{"espn_id": r["espn_id"], "vorp_score": r["vorp_score"]} for r in pool_df.iter_rows(named=True)]
+        r_client.hset(_listener_board_key(league_id), mapping={"vorp_by_espn_id": _vorp_by_espn_id_json(undrafted_pool)})
+    except Exception as e:
+        logger.warning(f"Could not seed initial vorp_by_espn_id for league {league_id}; it will populate after the first opponent pick: {e}")
 
 
 def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team_id: str, event: dict) -> Optional[tuple]:
@@ -1021,8 +1063,9 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
+            undrafted_pool: list = []
             with conn.cursor() as cursor:
-                candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, our_team_id)
+                candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, our_team_id, pool_out=undrafted_pool)
 
         if not candidates:
             logger.info("No feasible draft recommendation for the current undrafted pool.")
@@ -1044,6 +1087,7 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             # winner - redis hashes are flat string->string, so the ranked candidates ride
             # as a JSON-encoded field rather than their own set of hash keys.
             "top_candidates": json.dumps(candidates),
+            "vorp_by_espn_id": _vorp_by_espn_id_json(undrafted_pool),
         })
         return target, next_pick_number
 
@@ -1225,6 +1269,10 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
             _write_listener_state(r_client, league_id, "Starting")
             logger.info("listener_start_success league_id=%s team_id=%s consumer=%s", league_id, team_id, consumer_name)
+            # Before consuming any picks - see seed_initial_vorp_lookup's header for why an
+            # opponent-pick-triggered recompute alone leaves a gap when our team is on the
+            # clock first.
+            seed_initial_vorp_lookup(r_client, league_id, season, week)
 
             # Drain this consumer's own unacked backlog first (crash/restart recovery): reading
             # only ">" returns brand-new entries and would treat anything delivered-but-never-
