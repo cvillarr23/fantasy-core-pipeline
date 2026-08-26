@@ -7,6 +7,7 @@ from src.models import (
     CREATE_WEEKLY_STATS_TABLE,
     ADD_WEEKLY_STATS_ADVANCED_COLUMNS,
     ADD_WEEKLY_STATS_VORP_COLUMNS,
+    ADD_WEEKLY_STATS_DEFENSE_MATCHUP_COLUMN,
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON,
     CREATE_LEAGUE_ROSTERS_TABLE,
     ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
@@ -24,6 +25,7 @@ from src.models import (
     CREATE_RAW_SIGNALS_TABLE,
     CREATE_LLM_CALL_METRICS_TABLE,
     CREATE_BACKTEST_RESULTS_TABLE,
+    CREATE_DEFENSE_POSITION_STRENGTH_TABLE,
     CREATE_INDICES
 )
 
@@ -48,6 +50,7 @@ def run_migrations():
             cursor.execute(CREATE_WEEKLY_STATS_TABLE)
             cursor.execute(ADD_WEEKLY_STATS_ADVANCED_COLUMNS)
             cursor.execute(ADD_WEEKLY_STATS_VORP_COLUMNS)
+            cursor.execute(ADD_WEEKLY_STATS_DEFENSE_MATCHUP_COLUMN)
             cursor.execute(MIGRATE_WEEKLY_STATS_PK_ADD_SEASON)
             # MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (via a Postgres NOTICE, not
             # an error) if pre-existing rows have a NULL season. If that happened, the CORE-04
@@ -105,6 +108,10 @@ def run_migrations():
             # 4f. Execute historical backtest results ledger (CORE-15)
             logger.info("Validating 'backtest_results' ledger...")
             cursor.execute(CREATE_BACKTEST_RESULTS_TABLE)
+
+            # 4g. Execute defense-vs-position strength ledger (#93)
+            logger.info("Validating 'defense_position_strength' ledger...")
+            cursor.execute(CREATE_DEFENSE_POSITION_STRENGTH_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
