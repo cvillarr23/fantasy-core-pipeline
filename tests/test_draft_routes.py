@@ -753,9 +753,11 @@ def test_get_draft_status_aggregates_expected_shape(client):
 
     def _fetchall():
         if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
-            return [(2, 1, "3", "p1", "e1", "Player One", "RB"), (1, 1, "9", "p0", "e0", "Player Zero", "WR")]
+            return [(2, 1, "3", "p1", "e1", "Player One", "RB", None, None, None, None),
+                    (1, 1, "9", "p0", "e0", "Player Zero", "WR", None, None, None, None)]
         if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
-            return [(1, 1, "9", "p0", "e0", "Player Zero", "WR"), (2, 1, "3", "p1", "e1", "Player One", "RB")]
+            return [(1, 1, "9", "p0", "e0", "Player Zero", "WR", None, None, None, None),
+                    (2, 1, "3", "p1", "e1", "Player One", "RB", None, None, None, None)]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
         if "SELECT transaction_type" in mock_cursor.last_query:
@@ -826,30 +828,30 @@ def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_playe
     mock_cursor.execute.side_effect = _execute
 
     recent_rows = [
-        (12, 4, "A", "p12", "e12", "Player 12", "RB"),
-        (11, 4, "B", "p11", "e11", "Player 11", "WR"),
-        (10, 4, "A", "p10", "e10", "Player 10", "QB"),
-        (9, 3, "B", "p9", "e9", "Player 9", "TE"),
-        (8, 3, "A", "p8", "e8", "Player 8", "RB"),
-        (7, 3, "B", "p7", "e7", "Player 7", "WR"),
-        (6, 2, "A", "p6", "e6", "Player 6", "QB"),
-        (5, 2, "B", None, "e5", None, None),
-        (4, 2, "A", "p4", "e4", "Player 4", "RB"),
-        (3, 1, "B", "p3", "e3", "Player 3", "WR"),
+        (12, 4, "A", "p12", "e12", "Player 12", "RB", None, None, None, None),
+        (11, 4, "B", "p11", "e11", "Player 11", "WR", None, None, None, None),
+        (10, 4, "A", "p10", "e10", "Player 10", "QB", None, None, None, None),
+        (9, 3, "B", "p9", "e9", "Player 9", "TE", None, None, None, None),
+        (8, 3, "A", "p8", "e8", "Player 8", "RB", None, None, None, None),
+        (7, 3, "B", "p7", "e7", "Player 7", "WR", None, None, None, None),
+        (6, 2, "A", "p6", "e6", "Player 6", "QB", None, None, None, None),
+        (5, 2, "B", None, "e5", None, None, None, None, None, None),
+        (4, 2, "A", "p4", "e4", "Player 4", "RB", None, None, None, None),
+        (3, 1, "B", "p3", "e3", "Player 3", "WR", None, None, None, None),
     ]
     roster_rows = [
-        (1, 1, "A", "p1", "e1", "Player 1", "QB"),
-        (2, 1, "B", "p2", "e2", "Player 2", "WR"),
-        (3, 1, "B", "p3", "e3", "Player 3", "WR"),
-        (4, 2, "A", "p4", "e4", "Player 4", "RB"),
-        (5, 2, "B", None, "e5", None, None),
-        (6, 2, "A", "p6", "e6", "Player 6", "QB"),
-        (7, 3, "B", "p7", "e7", "Player 7", "WR"),
-        (8, 3, "A", "p8", "e8", "Player 8", "RB"),
-        (9, 3, "B", "p9", "e9", "Player 9", "TE"),
-        (10, 4, "A", "p10", "e10", "Player 10", "QB"),
-        (11, 4, "B", "p11", "e11", "Player 11", "WR"),
-        (12, 4, "A", "p12", "e12", "Player 12", "RB"),
+        (1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None),
+        (2, 1, "B", "p2", "e2", "Player 2", "WR", None, None, None, None),
+        (3, 1, "B", "p3", "e3", "Player 3", "WR", None, None, None, None),
+        (4, 2, "A", "p4", "e4", "Player 4", "RB", None, None, None, None),
+        (5, 2, "B", None, "e5", None, None, None, None, None, None),
+        (6, 2, "A", "p6", "e6", "Player 6", "QB", None, None, None, None),
+        (7, 3, "B", "p7", "e7", "Player 7", "WR", None, None, None, None),
+        (8, 3, "A", "p8", "e8", "Player 8", "RB", None, None, None, None),
+        (9, 3, "B", "p9", "e9", "Player 9", "TE", None, None, None, None),
+        (10, 4, "A", "p10", "e10", "Player 10", "QB", None, None, None, None),
+        (11, 4, "B", "p11", "e11", "Player 11", "WR", None, None, None, None),
+        (12, 4, "A", "p12", "e12", "Player 12", "RB", None, None, None, None),
     ]
 
     def _fetchall():
@@ -893,6 +895,221 @@ def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_playe
     null_id_pick = next(pick for pick in body["team_rosters"]["B"] if pick["pick_number"] == 5)
     assert null_id_pick["player_id"] is None
     assert null_id_pick["espn_player_id"] == "e5"
+
+
+def test_get_draft_status_picks_carry_current_weekly_stats_value_fields(client):
+    """vorp_score/projected_points/scarcity_multiplier/matchup_coefficient ride along on
+    both recent_picks and team_rosters rows via the weekly_stats LATERAL join - null when
+    the joined player has no weekly_stats row at all (same case as a missing player row)."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
+            return [(2, 1, "A", "p2", "e2", "Player Two", "WR", 12.5, 145.0, 1.1, 0.95),
+                    (1, 1, "B", "p1", "e1", "Player One", "RB", None, None, None, None)]
+        if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
+            return [(1, 1, "B", "p1", "e1", "Player One", "RB", None, None, None, None),
+                    (2, 1, "A", "p2", "e2", "Player Two", "WR", 12.5, 145.0, 1.1, 0.95)]
+        if "draft_slots" in mock_cursor.last_query:
+            return [("A", 1), ("B", 2)]
+        return []
+
+    def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
+        if "team_count" in mock_cursor.last_query:
+            return (2,)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (2,)
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    pick_two = next(p for p in body["recent_picks"] if p["pick_number"] == 2)
+    assert pick_two["vorp_score"] == 12.5
+    assert pick_two["projected_points"] == 145.0
+    assert pick_two["scarcity_multiplier"] == 1.1
+    assert pick_two["matchup_coefficient"] == 0.95
+    pick_one = next(p for p in body["recent_picks"] if p["pick_number"] == 1)
+    assert pick_one["vorp_score"] is None
+    roster_pick_two = next(p for p in body["team_rosters"]["A"] if p["pick_number"] == 2)
+    assert roster_pick_two["vorp_score"] == 12.5
+
+
+def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
+    """total_vorp/total_projected_points sum across a team's positions, position_counts
+    tallies drafted players per position, and a player with no players-table match (the
+    K/D-ST case - position is null) contributes zero to the sums without a synthetic
+    position key - with no players match, p.player_id is null, so the weekly_stats LATERAL
+    join (keyed on player_id = p.player_id) can never find a row for it either."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        if "GROUP BY d.team_id, p.position" in mock_cursor.last_query:
+            return [
+                ("A", "RB", 2, 25.0, 200.0),
+                ("A", "WR", 1, 10.0, 90.0),
+                ("A", None, 1, 0.0, 0.0),   # K/D-ST: no players-table match, no weekly_stats
+                ("B", "QB", 1, 5.0, 300.0),
+            ]
+        if "WITH ranked_pool" in mock_cursor.last_query:
+            return []
+        return []
+
+    def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
+        # More specific than the bare "team_count" check below: load_league_config's own
+        # query also selects team_count, but as a 2-column row.
+        if "lineup_slot_counts" in mock_cursor.last_query:
+            return (2, {"QB": 1, "BE": 0})
+        if "team_count" in mock_cursor.last_query:
+            return (2,)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (0,)
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    team_a = body["team_aggregates"]["A"]
+    assert team_a["total_vorp"] == 35.0
+    assert team_a["total_projected_points"] == 290.0
+    assert team_a["position_counts"] == {"RB": 2, "WR": 1}
+    team_b = body["team_aggregates"]["B"]
+    assert team_b["total_vorp"] == 5.0
+    assert team_b["position_counts"] == {"QB": 1}
+    # A team with zero picks (not returned by GROUP BY at all) must not KeyError - it's
+    # simply absent from team_aggregates, same as it's absent from team_rosters today.
+    assert "C" not in body["team_aggregates"]
+
+
+def test_get_draft_status_value_alert_fires_only_past_the_round_threshold(client):
+    """A pick landing >= VALUE_ROUND_THRESHOLD rounds later than its overall-VORP-rank
+    predicts sets most_recent_pick_value_alert; a pick roughly on-curve (or drafted ahead
+    of its rank) does not."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        if "GROUP BY d.team_id, p.position" in mock_cursor.last_query:
+            return []
+        if "WITH ranked_pool" in mock_cursor.last_query:
+            # team_count=4: rank 2 -> expected_round 1; rank 5 -> expected_round 2
+            return [("A", 6, 2), ("B", 1, 5)]
+        return []
+
+    def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
+        # More specific than the bare "team_count" check below: load_league_config's own
+        # query also selects team_count, but as a 2-column row.
+        if "lineup_slot_counts" in mock_cursor.last_query:
+            return (4, {"QB": 1, "BE": 0})
+        if "team_count" in mock_cursor.last_query:
+            return (4,)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (6,)
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    team_a = body["team_aggregates"]["A"]
+    assert team_a["most_recent_pick_vorp_rank"] == 2
+    assert team_a["most_recent_pick_expected_round"] == 1
+    assert team_a["most_recent_pick_value_alert"] is True  # round 6 vs expected round 1
+    team_b = body["team_aggregates"]["B"]
+    assert team_b["most_recent_pick_expected_round"] == 2
+    assert team_b["most_recent_pick_value_alert"] is False  # round 1 vs expected round 2
+
+
+def test_get_draft_status_team_aggregates_skip_value_alert_when_team_count_unknown(client):
+    """team_count None (unresolvable via league_settings/draft_config) must skip the whole
+    ranked_pool/most_recent_picks query rather than guess an expected_round - the aggregates
+    still degrade to present-but-empty per team, same shape as an unresolvable draft size
+    already produces for on_the_clock_team_id."""
+    mock_cursor = MagicMock()
+    executed_queries = []
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+        executed_queries.append(query)
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        if "GROUP BY d.team_id, p.position" in mock_cursor.last_query:
+            return [("A", "RB", 1, 8.0, 60.0)]
+        return []
+
+    def _fetchone():
+        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
+            return ("practice",)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (0,)
+        return None  # no team_count from either league_settings or draft_config
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    team_a = body["team_aggregates"]["A"]
+    assert team_a["most_recent_pick_value_alert"] is False
+    assert team_a["most_recent_pick_vorp_rank"] is None
+    assert team_a["most_recent_pick_expected_round"] is None
+    assert not any("WITH ranked_pool" in q for q in executed_queries), \
+        "ranked_pool query must not run when team_count is unknown"
 
 
 def test_get_draft_status_reports_failed_clicker_action(client):
