@@ -548,7 +548,7 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
 
     mock_batch_api.delete_namespaced_job.assert_called_once_with(
         name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
-        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+        grace_period_seconds=5, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
     )
     for call in mock_batch_api.list_namespaced_job.call_args_list:
         assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
@@ -2518,6 +2518,8 @@ def test_get_practice_sync_job_status_not_active_skips_redis(client):
 
 
 def test_end_practice_sync_job_deletes_latest(client):
+    from src.api.draft import PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
+
     older = MagicMock()
     older.metadata.name = "practice-draft-sync-100"
     older.metadata.creation_timestamp = datetime(2026, 8, 21, 10, 0, 0)
@@ -2540,6 +2542,7 @@ def test_end_practice_sync_job_deletes_latest(client):
     # it must actually be gone first, not merely marked for deletion.
     mock_batch_api.delete_namespaced_job.assert_any_call(
         "practice-draft-sync-200", "default", propagation_policy="Foreground",
+        grace_period_seconds=PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS,
         _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
     )
 
