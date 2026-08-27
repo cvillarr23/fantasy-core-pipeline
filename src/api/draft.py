@@ -1459,6 +1459,14 @@ def start_draft_sync(league_id: Optional[str] = None):
 STOP_JOB_TERMINATION_MAX_POLLS = 15
 STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS = 2
 
+# Kubernetes' default pod grace period is 30s, which is the *entire* termination budget the
+# polls above allow - so a connector that ignores SIGTERM (the browser worker runs Node as PID
+# 1 with no SIGTERM handler, so it only dies on the kubelet's SIGKILL at the end of the grace
+# period) reliably outlives the poll and trips the "did not terminate in time" path on every
+# room switch. The connector holds nothing that needs a graceful flush, so cut the grace period
+# well under the poll budget and let it be SIGKILLed instead.
+PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS = 5
+
 
 def _wait_for_job_termination(batch_api: client.BatchV1Api, label_selector: str) -> bool:
     """Foreground-propagation deletion doesn't complete synchronously - the Job object (and
@@ -1997,7 +2005,13 @@ def _teardown_practice_run(strict_cleanup: bool = False) -> dict:
                 # them. Background returns while the Pod is still running, so it could publish
                 # into - or recreate - those keys after they were cleared, contaminating the next
                 # run with the previous one's picks.
-                batch_api.delete_namespaced_job(job.metadata.name, K8S_NAMESPACE, propagation_policy="Foreground", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+                batch_api.delete_namespaced_job(
+                    job.metadata.name,
+                    K8S_NAMESPACE,
+                    propagation_policy="Foreground",
+                    grace_period_seconds=PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS,
+                    _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+                )
             except Exception as e:
                 logger.error(f"Failed to delete practice draft-sync Job {job.metadata.name}: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
