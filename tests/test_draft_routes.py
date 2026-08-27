@@ -2672,6 +2672,37 @@ def test_end_practice_sync_job_also_deletes_the_listener(client):
     assert deleted == ["practice-draft-sync-1", "draft-sync-practice-L2-1"]
 
 
+def test_end_practice_sync_job_forces_a_short_connector_grace_period(client):
+    """Without an explicit grace period the connector gets Kubernetes' 30s default, which is
+    the whole termination poll budget - and since it ignores SIGTERM it only dies at the
+    kubelet's SIGKILL, so the wait times out on every room switch."""
+    from src.api.draft import PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS, \
+        STOP_JOB_TERMINATION_MAX_POLLS, STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS
+
+    connector = MagicMock()
+    connector.metadata.name = "practice-draft-sync-1"
+    connector.metadata.creation_timestamp = 1
+
+    mock_batch_api = MagicMock()
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[connector]),
+        MagicMock(items=[]),
+    ]
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.delete("/v1/draft/practice/sync-job")
+
+    assert response.status_code == 200
+    kwargs = mock_batch_api.delete_namespaced_job.call_args_list[0].kwargs
+    assert kwargs["grace_period_seconds"] == PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
+    assert kwargs["propagation_policy"] == "Foreground"
+    assert PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS < \
+        STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS
+
+
 def test_delete_practice_listener_jobs_never_touches_live_listeners(client):
     """The label selector is the only thing standing between practice cleanup and an
     in-progress real draft."""
