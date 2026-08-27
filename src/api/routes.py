@@ -441,6 +441,14 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
             params.blocked_connection_timeout = budget
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
+        # Without this, basic_publish below is fire-and-forget: it writes the frame to the
+        # socket and returns immediately, before the broker has actually received/routed it.
+        # _close_broker_connection() below then tears the connection down right after, which
+        # can race the broker's own processing and silently drop the message - the gateway
+        # logs success, draft_matrix.py logs "Published", and the click bot never sees it.
+        # Confirms make basic_publish block for and validate the broker's ack, turning that
+        # silent drop into a raised exception the except block below already retries.
+        channel.confirm_delivery()
 
         channel.queue_declare(queue="draft_targets", durable=True)
 
