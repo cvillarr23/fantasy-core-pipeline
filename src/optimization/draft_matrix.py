@@ -381,11 +381,58 @@ def league_team_count(conn, league_id: str, season: int) -> Optional[int]:
     return int(row[0]) if row and row[0] else None
 
 
-def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
-    """Infers the team count from pick arrivals. A snake draft turns around at the round-1/2
-    boundary: the last team of round 1 picks again immediately, so picks team_count and
-    team_count + 1 belong to the same team. That back-to-back pair is the signature this
-    looks for, and it is the only thing it will accept.
+def _connector_expected_total_picks(r_client, league_id: str) -> Optional[int]:
+    """Reads draft_sync.js connector health and returns expected_total_picks when valid."""
+    if r_client is None:
+        return None
+    raw = r_client.get(f"draft:{league_id}:health")
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode()
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring malformed connector health for league %s while deriving team_count.", league_id)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expected_total_picks = payload.get("expected_total_picks")
+    try:
+        parsed = int(expected_total_picks)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _team_count_from_connector_health(conn, r_client, league_id: str) -> Optional[int]:
+    """Converts connector health's expected_total_picks into a team count."""
+    expected_total_picks = _connector_expected_total_picks(r_client, league_id)
+    if expected_total_picks is None:
+        return None
+    with conn.cursor() as cursor:
+        league_config = load_league_config(cursor)
+    per_team_slots = sum(compute_draftable_roster_size(league_config))
+    if per_team_slots <= 0 or expected_total_picks % per_team_slots != 0:
+        logger.warning(
+            "Ignoring connector expected_total_picks=%s for league %s; roster slots per team=%s are incompatible.",
+            expected_total_picks, league_id, per_team_slots,
+        )
+        return None
+    team_count = expected_total_picks // per_team_slots
+    return team_count if team_count >= 2 else None
+
+
+def derive_team_count(conn, league_id: str, season: int, r_client=None) -> Optional[int]:
+    """Infers the team count for practice drafts.
+
+    Prefers fantasy-browser-worker's authoritative connector-health signal
+    (`draft:{league_id}:health.expected_total_picks`) when available, converting it into a
+    team count using this league's draftable roster size. Falls back to a pick-sequence
+    heuristic only when that signal is absent/unusable.
+
+    The fallback heuristic uses pick arrivals: a snake draft turns around at the round-1/2
+    boundary, so picks team_count and team_count + 1 belong to the same team.
 
     Restricted to practice/mock rooms. ESPN forbids trading picks in a mock room, so round-1
     ownership there is guaranteed to be one pick per team and the turnaround is unambiguous.
@@ -410,6 +457,10 @@ def derive_team_count(conn, league_id: str, season: int) -> Optional[int]:
         row = cursor.fetchone()
         if row is None or row[0] != "practice":
             return None
+    connector_team_count = _team_count_from_connector_health(conn, r_client, league_id)
+    if connector_team_count is not None:
+        return connector_team_count
+    with conn.cursor() as cursor:
         cursor.execute("""
             SELECT pick_number, team_id FROM draft_picks
              WHERE league_id = %s AND season = %s
@@ -999,7 +1050,7 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                 # Derived *after* the insert, because the pick that reveals the count is the
                 # snake turnaround - which may well be this one. Returns None for anything
                 # that isn't a practice room; an unsynced live league has to stay unknown.
-                team_count = derive_team_count(conn, league_id, season)
+                team_count = derive_team_count(conn, league_id, season, r_client=r_client)
                 if team_count:
                     logger.info(f"Derived team_count={team_count} for league {league_id} from round-1 pick arrivals.")
                     persist_derived_team_count(conn, league_id, season, team_count)

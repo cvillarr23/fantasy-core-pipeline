@@ -1369,6 +1369,37 @@ def test_derive_team_count_refuses_back_to_back_picks_at_the_very_start():
     assert dm.derive_team_count(_mock_conn_with_picks(picks), "L1", 2026) is None
 
 
+def test_derive_team_count_prefers_connector_health_over_ambiguous_adjacent_repeat():
+    """Regression for league 1447332236: picks 1-6 were 8,2,10,10,2,8 (adjacent repeat at
+    3-4), but connector health already knew expected_total_picks=160 => 10 teams."""
+    mode_cursor = MagicMock()
+    mode_cursor.fetchone.return_value = ("practice",)
+    config_cursor = MagicMock()
+    config_cursor.fetchone.return_value = (
+        10,
+        {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 9},
+    )
+    mode_ctx = MagicMock()
+    mode_ctx.__enter__.return_value = mode_cursor
+    mode_ctx.__exit__.return_value = False
+    config_ctx = MagicMock()
+    config_ctx.__enter__.return_value = config_cursor
+    config_ctx.__exit__.return_value = False
+    mock_conn = MagicMock()
+    # If derive_team_count tries to continue to the pick-heuristic path here, this test will
+    # fail with StopIteration; with valid connector health it should return from the first
+    # two cursors and never accept the (3,4) adjacent repeat as team_count=3.
+    mock_conn.cursor.side_effect = [mode_ctx, config_ctx]
+    mock_client = MagicMock()
+    mock_client.get.return_value = json.dumps({
+        "expected_total_picks": 160,
+        "picks_known": 6,
+        "sample_sequence": [8, 2, 10, 10, 2, 8],
+    })
+
+    assert dm.derive_team_count(mock_conn, "1447332236", 2026, r_client=mock_client) == 10
+
+
 def test_handle_pick_event_derives_and_persists_team_count_for_unsynced_league():
     """Practice/mock rooms are never touched by sync_league, so league_settings has nothing
     for them; without this the round stays NULL and on_the_clock_team is never known."""
@@ -1386,7 +1417,7 @@ def test_handle_pick_event_derives_and_persists_team_count_for_unsynced_league()
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
-    mock_derive.assert_called_once_with(mock_conn, "L1", 2026)
+    mock_derive.assert_called_once_with(mock_conn, "L1", 2026, r_client=mock_client)
     mock_persist_count.assert_called_once_with(mock_conn, "L1", 2026, 4)
     # Repairs every round left NULL while the count was unknown, this pick included.
     mock_backfill.assert_called_once_with(mock_conn, "L1", 2026, 4)
