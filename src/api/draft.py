@@ -1930,6 +1930,13 @@ def _start_practice_sync_job_locked(payload: PracticeSyncJobRequest, force: bool
                                         secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="swid")
                                     ),
                                 ),
+                                # TEMPORARY (issue #71 follow-up): connector-goes-silent-forever
+                                # investigation needs draft_sync.js's new debug-level tracing
+                                # (openSockets/isDead() operands, context "page" reassignment,
+                                # delegated-command state) captured on the next live/practice
+                                # reproduction. Revert once that capture is in hand - this is not a
+                                # permanent logging default for the practice connector.
+                                client.V1EnvVar(name="LOG_LEVEL", value="debug"),
                             ],
                         )
                     ],

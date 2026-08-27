@@ -2056,6 +2056,9 @@ def test_start_practice_sync_job_creates_job(client):
     assert env_by_name["ESPN_S2"].value_from.secret_key_ref.name == "espn-session-secrets"
     assert env_by_name["ESPN_S2"].value_from.secret_key_ref.key == "espn_s2"
     assert env_by_name["SWID"].value_from.secret_key_ref.key == "swid"
+    # Temporary (issue #71 follow-up): debug tracing enabled for the silent-forever-reconnect
+    # investigation - see the matching comment at the env var's definition in draft.py.
+    assert env_by_name["LOG_LEVEL"].value == "debug"
     # Without this the kubelet 401s pulling the private GHCR image and the Pod sits in
     # ImagePullBackOff forever - job_state still reports "Active" the whole time (the Job
     # controller considers it pending, not failed), so this silently looks like it's
