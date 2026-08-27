@@ -97,6 +97,29 @@ def test_a_race_that_already_ended_the_run_is_not_an_error():
     mock_delete.assert_called_once()
 
 
+def test_a_stale_leftover_alongside_a_healthy_session_is_not_torn_down():
+    """Confirmed live 2026-08-27: _teardown_practice_run has no per-league scoping - it always
+    retires everything currently registered. A leftover Job from an earlier session, not yet
+    reaped after a room switch, sitting alongside a healthy active session killed that live
+    session as collateral. Must require every listed league_id to be stale, not just one."""
+    mock_batch_api = MagicMock()
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[_job("practice-draft-sync-1", "12345"), _job("practice-draft-sync-2", "999")]),
+        MagicMock(items=[]),
+    ]
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
+        # league 12345 is a stale leftover (no heartbeat); 999 is the healthy, currently-active
+        # session (heartbeat present) - must not be torn down as collateral.
+        mock_redis_cls.return_value.exists.side_effect = lambda key: 0 if "12345" in key else 1
+        sweep()
+
+    mock_delete.assert_not_called()
+
+
 def test_listener_only_job_with_expired_heartbeat_also_triggers_teardown():
     """The connector carries ttl_seconds_after_finished and can already be gone while the
     listener (which blocks on its Redis Stream forever) is still up - must not require both

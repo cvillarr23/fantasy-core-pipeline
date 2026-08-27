@@ -91,9 +91,23 @@ def sweep() -> None:
         )
         return
 
-    # Only one practice run is ever active, so any stale league_id here means the *current*
-    # run is dead - retire all of it rather than trying to selectively tear down individual
-    # Jobs the way _teardown_practice_run itself doesn't support.
+    # _teardown_practice_run has no per-league scoping - it always retires *everything*
+    # currently registered. Confirmed live 2026-08-27: a leftover connector/listener Job from
+    # an earlier session, not yet reaped after a room switch ("did not terminate in time" is
+    # a known warning for exactly this), sat alongside a healthy, currently-active session at
+    # list time. Tearing down on *any* stale league_id killed the live session as collateral.
+    # Only act when EVERY currently-registered league_id is stale - i.e. nothing healthy is
+    # running right now. A mix of stale-and-healthy is exactly the ambiguous "something is
+    # mid-cleanup" case; leave it alone and let the next sweep tick re-evaluate once the
+    # leftover has actually finished terminating.
+    if len(stale_league_ids) != len(league_ids):
+        logger.info(
+            "Practice draft-sync Job(s) for league(s) %s have no live heartbeat, but league(s) %s "
+            "do - not tearing down a mix of stale and healthy; leaving this for the next sweep tick.",
+            sorted(stale_league_ids), sorted(set(league_ids) - set(stale_league_ids)),
+        )
+        return
+
     logger.warning(
         "Practice draft-sync Job(s) for league(s) %s have no live heartbeat (TTL expired); "
         "tearing down the current practice run.",
