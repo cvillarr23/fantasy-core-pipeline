@@ -840,6 +840,53 @@ def test_hold_and_publish_rechecks_operator_pause_between_retries():
     assert mock_publish.call_count == 1
 
 
+def test_hold_and_publish_abandons_when_espn_reports_a_different_team_on_the_clock():
+    """#107: our own snake-draft-derived schedule assumed it would be team 7's turn by now,
+    but ESPN's real-time SELECTING broadcast says team 3 is actually up - a practice room can
+    let the same team pick twice in a row, which our math doesn't model. Must not publish."""
+    mock_client = MagicMock()
+    selecting_key = "draft:L1:selecting"
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": 3}) if key == selecting_key else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda _s: None)
+
+    mock_publish.assert_not_called()
+
+
+def test_hold_and_publish_publishes_when_espn_confirms_our_team_on_the_clock():
+    mock_client = MagicMock()
+    selecting_key = "draft:L1:selecting"
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": 7}) if key == selecting_key else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda _s: None)
+
+    mock_publish.assert_called_once()
+
+
+def test_hold_and_publish_publishes_when_espn_selecting_signal_is_unavailable():
+    """None (older worker version, key not written yet) must not block a publish that would
+    otherwise be correct - only a *positive* contradiction should abandon it."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda _s: None)
+
+    mock_publish.assert_called_once()
+
+
 def test_hold_and_publish_long_delay_still_honors_pause():
     mock_client = MagicMock()
     pause_key = "draft:L1:pause:5"

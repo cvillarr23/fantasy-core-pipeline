@@ -547,6 +547,32 @@ def compute_on_the_clock_team(next_pick_number: int, team_count: int, slot_map: 
     return by_slot.get(slot)
 
 
+def _espn_selecting_team_id(r_client, league_id: str) -> Optional[str]:
+    """Reads fantasy-browser-worker's `draft:{league_id}:selecting` status snapshot - ESPN's
+    own live SELECTING <teamId> <clockMs> WS turn-notification, forwarded verbatim as JSON.
+    Mirrors src/api/draft.py's helper of the same name (not imported from there: api imports
+    FROM this module, so the reverse import would be circular) - kept here too because
+    hold_and_publish needs to re-check who is actually on the clock immediately before
+    publishing, not just for display.
+
+    This is the fix for #107: our own snake-draft math assumes team_count teams pick in
+    strict rotation, one pick apart. Confirmed live 2026-08-27 that ESPN's practice/mock
+    rooms do not reliably honor that - the same team can pick twice in a row - so a
+    recommendation scheduled after the *previous* opponent pick can still fire for the wrong
+    team if a different team (not us) was actually up next. None is a normal state (older
+    worker version, key not written yet, or the frame hasn't arrived yet this draft) - callers
+    must treat it as "unknown, proceed" rather than "confirmed not our turn."""
+    raw = r_client.get(f"draft:{league_id}:selecting")
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return str(parsed["team_id"])
+    except (TypeError, ValueError, KeyError):
+        logger.error(f"Malformed on-the-clock JSON on draft:{league_id}:selecting; dropping it.")
+        return None
+
+
 # ------------------------------------------------------------------------------
 # Draft pick persistence
 # ------------------------------------------------------------------------------
@@ -842,6 +868,24 @@ def hold_and_publish(
                     # error in Redis and execution_log - when the retry was stopped on
                     # purpose because the slot was filled or the operator intervened.
                     if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
+                        return
+                    # #107: re-checked on every attempt, same reasoning as the pause/cancel
+                    # guard above - ESPN's own real-time turn signal, when available, wins
+                    # over the schedule this thread was given. Our snake-draft math assumes
+                    # strict one-team-per-pick rotation; ESPN's practice rooms don't reliably
+                    # honor that, so "it's been long enough since the last opponent pick" is
+                    # not proof it's actually our turn. Only abandon on a *positive*
+                    # contradiction (a different team confirmed on the clock) - None means the
+                    # signal isn't available yet, which must not block a publish that would
+                    # otherwise be correct.
+                    espn_selecting = _espn_selecting_team_id(r_client, league_id)
+                    if espn_selecting is not None and espn_selecting != str(team_id):
+                        logger.warning(
+                            "Abandoning draft target for league %s pick %s: ESPN reports team %s on "
+                            "the clock, not us (team %s) - our own schedule was wrong about when "
+                            "this pick would come up.",
+                            league_id, pick_number, espn_selecting, team_id,
+                        )
                         return
                     if monotonic_fn() >= deadline:
                         logger.warning(
