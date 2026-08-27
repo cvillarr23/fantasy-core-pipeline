@@ -19,6 +19,8 @@ import argparse
 import json
 import logging
 import os
+import signal
+import sys
 import threading
 import time
 import uuid
@@ -1332,6 +1334,17 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
 
 
 if __name__ == "__main__":
+    # This process runs as container PID 1 (the k8s Job's only container, no tini/--init
+    # wrapper), which does not get the default terminate-on-SIGTERM disposition unless a
+    # handler installs one - so fantasy-core-pipeline's own teardown (_teardown_practice_run
+    # and the /v1/draft/stop path) was sending a graceful SIGTERM this process silently
+    # ignored, only dying once kubelet escalated to SIGKILL at the end of the grace period
+    # (same root cause as fantasy-browser-worker's draft_sync.js, #103). Safe to exit
+    # immediately rather than draining anything: the main loop below reads via a Redis
+    # consumer group (XREADGROUP) specifically so a killed-mid-entry pick is redelivered and
+    # reprocessed from the backlog on the next run, per this module's own docstring.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+
     configure_tracing("draft-matrix")
 
     parser = argparse.ArgumentParser(description="Run the live draft-day board matrix listener.")

@@ -554,6 +554,12 @@ def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear
                 # listeners would then briefly share a Redis consumer group and split the
                 # pick stream between them - the very overlap this reclaim exists to avoid.
                 propagation_policy="Foreground",
+                # grace_period_seconds=5, not Kubernetes' 30s default: draft_matrix.py's main
+                # loop reads via a Redis consumer group specifically so a killed-mid-entry pick
+                # is redelivered and reprocessed from the backlog on the next run - nothing here
+                # needs a graceful flush. Without this, the pod's default 30s grace period was
+                # racing _wait_for_jobs_gone's own ~30s poll budget below (fantasy-core-pipeline#103).
+                grace_period_seconds=5,
                 _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
             deleted.append(job.metadata.name)
@@ -1517,6 +1523,10 @@ def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
                 name=job.metadata.name,
                 namespace=K8S_NAMESPACE,
                 propagation_policy="Foreground",  # blocks the Job's own deletion until its Pods are gone
+                # See the matching comment in _delete_practice_listener_jobs: draft_matrix.py's
+                # consumer-group read tolerates a kill mid-entry, so there's nothing to wait 30s
+                # (Kubernetes' default grace period) for here.
+                grace_period_seconds=5,
                 _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
             deleted_job = True
