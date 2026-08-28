@@ -1696,6 +1696,52 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
     assert [c["player_id"] for c in top_candidates] == ["p2", "p3"]
 
 
+# Confirmed live 2026-08-27 via the recommendation_compute_duration_ms timing added to
+# handle_pick_event: compute_draft_recommendation_candidates alone routinely takes
+# 550-950ms in a 10-team practice room, while ESPN bot picks land 0.5-1.5s apart.
+# Recomputing after every opponent pick (the previous, KNOWN-LIMITATION behavior) raced
+# the solve against 9 other teams' picks per round and lost often enough that a full
+# 160-pick practice draft produced zero successful publishes for our team - every single
+# one of our picks fell back to ESPN autodraft. These two tests cover the fix: gate the
+# recompute on the persisted draft_slots map so it only runs for the one opponent pick
+# right before our actual turn.
+def test_handle_pick_event_skips_recompute_when_slot_map_shows_not_our_turn():
+    mock_conn, mock_cursor = _mock_conn_returning(inserted=True, team_count=10)
+    mock_cursor.fetchall.side_effect = (
+        lambda: [("3", 6)] if "draft_slots" in mock_cursor.last_query else []
+    )
+    mock_client = MagicMock()
+    # Next pick (6) belongs to team "3" per the slot map below, not our team "7".
+    event = {"pick_number": "5", "team_id": "4", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates") as mock_candidates:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_candidates.assert_not_called()
+
+
+def test_handle_pick_event_still_recomputes_when_slot_map_confirms_our_turn():
+    mock_conn, mock_cursor = _mock_conn_returning(inserted=True, team_count=10)
+    mock_cursor.fetchall.side_effect = (
+        lambda: [("7", 6)] if "draft_slots" in mock_cursor.last_query else []
+    )
+    mock_client = MagicMock()
+    # Next pick (6) belongs to our own team "7" per the slot map below.
+    event = {"pick_number": "5", "team_id": "4", "player_id": "p1"}
+    target = _player("p2", "RB", 10.0, name="Best Back")
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.compute_draft_recommendation_candidates", return_value=[target]) as mock_candidates:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result == (target, 6)
+    mock_candidates.assert_called_once()
+
+
 def test_handle_pick_event_publishes_vorp_by_espn_id_for_the_full_undrafted_pool():
     """CORE-19/#80: the ESPN-suggested-pick column needs a VORP score for whichever player
     ESPN suggests, which is frequently NOT one of the roster-constrained top_candidates -

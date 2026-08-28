@@ -1040,14 +1040,20 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
     done here - see hold_and_publish - so this function stays fast and the Stream consumer
     loop is never blocked by the auto-draft delay window.
 
-    KNOWN LIMITATION: this always recomputes after any *other* team's pick, not
-    specifically "the pick right before our turn". Draft slots are modeled (see
-    persist_draft_slot) and the API uses them for turn order, but this handler does not
-    consult them before scheduling, so a hold-and-publish job gets scheduled once per
-    opponent pick rather than only once, right before we're actually on the clock. In
-    practice this is harmless: the recommendation stays continuously fresh, and each new
-    job supersedes the last via _schedule_publish's cancel_event, so only the freshest ever
-    actually publishes. Gating on the persisted slot map is a follow-up, not solved here."""
+    Gates the recompute on the persisted draft_slots map (see persist_draft_slot and
+    compute_on_the_clock_team) once team_count and every team's slot are known: recompute
+    only runs when the NEXT pick is actually ours. Confirmed live 2026-08-27 via
+    duration_ms timing (added below) that compute_draft_recommendation_candidates alone
+    routinely takes 550-950ms in a 10-team practice room, while ESPN mock/bot picks land
+    roughly 0.5-1.5s apart - so recomputing after *every* opponent pick (the previous
+    behavior) raced the ILP solve against 9 other teams' picks per round, and it lost that
+    race often enough that a 160-pick run produced zero successful publishes for our team.
+    Skipping the 9-out-of-10 opponent picks that aren't immediately before our turn gives
+    the solve a full round's worth of head start instead of a single opponent pick's worth.
+    Falls back to the old always-recompute behavior when the slot map is incomplete (e.g.
+    round 1, before every team has made its first pick) - the only case compute_on_the_clock_team
+    can't yet answer, and being wrong in the "keep recomputing" direction here has always
+    been safe, just wasteful."""
     with tracer.start_as_current_span("draft_pick.handle_event", attributes={"league_id": league_id, "team_id": our_team_id}):
         with get_db_connection() as conn:
             pick_number = int(event["pick_number"])
@@ -1166,16 +1172,38 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             if event["team_id"] == our_team_id:
                 logger.info("We just picked; no recommendation to compute until the next opponent pick.")
                 return None
+            next_pick_number = pick_number + 1
+            if team_count:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT team_id, slot_number FROM draft_slots WHERE league_id = %s AND season = %s;",
+                        (league_id, season),
+                    )
+                    slot_map = {team_id: slot_number for team_id, slot_number in cursor.fetchall()}
+                on_the_clock = compute_on_the_clock_team(next_pick_number, team_count, slot_map) if slot_map else None
+                if on_the_clock is not None and on_the_clock != our_team_id:
+                    logger.info(
+                        "Skipping recompute: pick %s is team %s's turn, not ours (%s) - saves the ILP "
+                        "solve for the one opponent pick right before our turn instead of racing it "
+                        "against every opponent pick.",
+                        next_pick_number, on_the_clock, our_team_id,
+                    )
+                    return None
             undrafted_pool: list = []
+            compute_started_at = time.monotonic()
             with conn.cursor() as cursor:
                 candidates = compute_draft_recommendation_candidates(cursor, league_id, season, week, our_team_id, pool_out=undrafted_pool)
+            duration_ms = int((time.monotonic() - compute_started_at) * 1000)
+            logger.info(
+                "recommendation_compute_duration_ms=%s league_id=%s team_id=%s pick_number=%s next_pick_number=%s",
+                duration_ms, league_id, our_team_id, pick_number, next_pick_number,
+            )
 
         if not candidates:
             logger.info("No feasible draft recommendation for the current undrafted pool.")
             return None
 
         target = candidates[0]
-        next_pick_number = int(event["pick_number"]) + 1
         now = int(time.time())
         r_client.hset(_listener_board_key(league_id), mapping={
             "recommended_player_id": target["player_id"],
