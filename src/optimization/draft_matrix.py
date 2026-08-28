@@ -97,6 +97,15 @@ PUBLISH_RETRY_INTERVAL_SECONDS = 2
 # motivated this work) returns the same result to a byte-identical request, so retrying it
 # just burns the clock and floods the log while the real fix is upstream.
 RETRYABLE_PUBLISH_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# Confirmed live 2026-08-28 (league 696093652): publish_draft_target only confirms the
+# gateway accepted the HTTP request, not that ESPN accepted the pick - ESPN's actual
+# ERROR/SELECTED response took ~7.8s to arrive in that incident. A single non-blocking
+# pubsub check performed in the same instant as the publish call will therefore always be
+# empty, making the draft_pick_rejected retry path unreachable in practice. This grace
+# window gives a real rejection wall-clock time to arrive before hold_and_publish declares
+# success and tears down its subscription.
+PICK_REJECTION_GRACE_SECONDS = float(os.getenv("PICK_REJECTION_GRACE_SECONDS", "10"))
+PICK_REJECTION_POLL_INTERVAL_SECONDS = 0.5
 # An attempt must finish inside the pick window, not merely start inside it: a request begun
 # a second before the deadline with a fixed 10s timeout could enqueue nine seconds after the
 # clock it was bounded by. The per-attempt timeout is therefore clamped to whatever window is
@@ -1049,8 +1058,46 @@ def hold_and_publish(
                     # waiting out the rest of this iteration's checks first. Only runs once
                     # we've actually published the current target at least once.
                     if published_current_target:
-                        rejection = pubsub.get_message(ignore_subscribe_messages=True, timeout=0)
-                        if rejection is not None and rejection.get("type") == "message":
+                        # #108 follow-up (confirmed live 2026-08-28, league 696093652): a
+                        # single non-blocking check performed here, in the same instant the
+                        # publish call just returned, is *always* empty - ESPN has not even
+                        # seen the click yet (observed ~7.8s real-world round trip). Poll for
+                        # up to PICK_REJECTION_GRACE_SECONDS, never past this pick's own
+                        # deadline, so a real rejection has actual wall-clock time to arrive
+                        # before we declare success and tear down the subscription.
+                        #
+                        # Bounded by an iteration count, not solely by monotonic_fn(): several
+                        # existing tests fake monotonic_fn as a constant (to model "N seconds
+                        # have already elapsed" for deadline assertions elsewhere in this
+                        # function), and a loop keyed only on "while monotonic_fn() <
+                        # grace_deadline" would spin forever against a clock that never
+                        # advances. Pacing itself goes through sleep_fn (default time.sleep),
+                        # the same seam PUBLISH_RETRY_INTERVAL_SECONDS already uses below, so
+                        # production actually sleeps between polls instead of busy-spinning,
+                        # while a test's no-op sleep_fn drains all max_polls near-instantly.
+                        grace_deadline = min(monotonic_fn() + PICK_REJECTION_GRACE_SECONDS, deadline)
+                        max_polls = int(PICK_REJECTION_GRACE_SECONDS // PICK_REJECTION_POLL_INTERVAL_SECONDS) + 1
+                        rejection_confirmed = False
+                        for _ in range(max_polls):
+                            if monotonic_fn() >= grace_deadline:
+                                break
+                            # Same "read fresh on every attempt" discipline as the pause/
+                            # cancel/kill-switch guards below - an operator override landing
+                            # mid-grace-window must not be stuck waiting behind it.
+                            if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
+                                return
+                            if _auto_publish_disabled(league_id):
+                                logger.info(
+                                    "Auto-publish disabled for league %s; abandoning scheduled publish for "
+                                    "pick %s (manual kill switch or circuit breaker) rather than sending an "
+                                    "automated pick.",
+                                    league_id, pick_number,
+                                )
+                                return
+                            rejection = pubsub.get_message(ignore_subscribe_messages=True, timeout=0)
+                            if rejection is None or rejection.get("type") != "message":
+                                sleep_fn(PICK_REJECTION_POLL_INTERVAL_SECONDS)
+                                continue
                             try:
                                 payload = json.loads(rejection["data"])
                             except (TypeError, ValueError, json.JSONDecodeError):
@@ -1061,8 +1108,10 @@ def hold_and_publish(
                             ):
                                 logger.warning(
                                     "Confirmed rejection for league %s pick %s target %s (%s); advancing to next "
-                                    "candidate rather than waiting out the normal retry/deadline path.",
+                                    "candidate rather than waiting out the normal retry/deadline path. "
+                                    "tracking_id=%s idempotency_key=%s",
                                     league_id, pick_number, target.get("name"), payload.get("error_message"),
+                                    payload.get("tracking_id"), idempotency_key,
                                 )
                                 candidate_index += 1
                                 if candidate_index >= len(candidates):
@@ -1080,8 +1129,25 @@ def hold_and_publish(
                                 target = candidates[candidate_index]
                                 idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
                                 published_current_target = False
-                                continue
-                        # Published and no confirmed rejection arrived - treat as accepted.
+                                rejection_confirmed = True
+                                break
+                            # A rejection for a *different* pick/target arrived on this
+                            # league's channel (a stale message, or one for a candidate we
+                            # already moved past) - previously this fell through
+                            # indistinguishably from "no message at all", which made a
+                            # silently-broken match condition impossible to tell apart from
+                            # a healthy "nothing rejected yet" in the logs.
+                            logger.info(
+                                "Rejection message received on %s but did not match currently-held pick %s "
+                                "(%s) - received pick_number=%s idempotency_key=%s tracking_id=%s",
+                                rejection_channel, pick_number, idempotency_key,
+                                payload.get("pick_number"), payload.get("idempotency_key"),
+                                payload.get("tracking_id"),
+                            )
+                        if rejection_confirmed:
+                            continue
+                        # Grace window (or the pick clock itself) elapsed with no confirmed
+                        # rejection arriving - treat as accepted.
                         _record_publish_outcome(r_client, league_id, succeeded=True)
                         return
                     # Both guards are re-evaluated before *every* attempt, not just the

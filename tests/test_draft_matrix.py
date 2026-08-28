@@ -669,7 +669,12 @@ def test_hold_and_publish_retries_transient_publish_failure():
         )
 
     assert mock_publish.call_count == 2
-    assert sleeps == [dm.PUBLISH_RETRY_INTERVAL_SECONDS]
+    # After the retry succeeds, hold_and_publish now polls for a confirmed rejection for up
+    # to PICK_REJECTION_GRACE_SECONDS (see draft_matrix.py) before declaring success - this
+    # mock_client never produces a matching rejection, so every poll falls through to a
+    # sleep_fn(PICK_REJECTION_POLL_INTERVAL_SECONDS) call.
+    max_grace_polls = int(dm.PICK_REJECTION_GRACE_SECONDS // dm.PICK_REJECTION_POLL_INTERVAL_SECONDS) + 1
+    assert sleeps == [dm.PUBLISH_RETRY_INTERVAL_SECONDS] + [dm.PICK_REJECTION_POLL_INTERVAL_SECONDS] * max_grace_polls
     mock_record.assert_called_once()
     # The retracting write is a compare-and-set on this thread's ownership token.
     assert mock_client.eval.call_args.args[0] == dm._CLEAR_PUBLISH_ERROR_LUA
@@ -852,7 +857,11 @@ def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick()
             sleep_fn=sleeps.append,
         )
 
-    assert sum(sleeps) == 8
+    # 8s of hold delay, plus hold_and_publish's post-publish grace-window polling (see
+    # PICK_REJECTION_GRACE_SECONDS) - this mock_client never produces a matching rejection,
+    # so every poll falls through to a sleep_fn(PICK_REJECTION_POLL_INTERVAL_SECONDS) call.
+    max_grace_polls = int(dm.PICK_REJECTION_GRACE_SECONDS // dm.PICK_REJECTION_POLL_INTERVAL_SECONDS) + 1
+    assert sum(sleeps) == 8 + max_grace_polls * dm.PICK_REJECTION_POLL_INTERVAL_SECONDS
     assert mock_publish.call_count == 1
     assert mock_publish.call_args.args == ("7", target)
     assert mock_publish.call_args.kwargs["idempotency_key"] == "L1:5:e-1"
@@ -1373,19 +1382,31 @@ class _FakePubSub:
     """Minimal stand-in for redis.Redis().pubsub(): records the channel(s) subscribed to
     and hands back a queue of canned messages one at a time via get_message, then None
     once the queue is drained - mirroring the real client's non-blocking
-    get_message(timeout=0) behavior once nothing new has arrived."""
+    get_message(timeout=0) behavior once nothing new has arrived.
 
-    def __init__(self, messages=None):
+    arrive_after_polls models a message that isn't visible on the very first poll - matching
+    hold_and_publish's real-world grace-window polling (see PICK_REJECTION_GRACE_SECONDS): a
+    value of 0 (the default) means "available on the first get_message() call", same as the
+    original immediate-delivery behavior; a value of N means the message is only handed back
+    once get_message() has been called at least N times, modeling an ESPN response that takes
+    a few polls' worth of wall-clock time to arrive."""
+
+    def __init__(self, messages=None, arrive_after_polls=None):
         self.subscribed_channels = []
-        self._messages = list(messages or [])
+        messages = list(messages or [])
+        delays = list(arrive_after_polls or [0] * len(messages))
+        self._pending = list(zip(messages, delays))
+        self._poll_count = 0
         self.closed = False
 
     def subscribe(self, channel):
         self.subscribed_channels.append(channel)
 
     def get_message(self, ignore_subscribe_messages=True, timeout=0):
-        if self._messages:
-            return self._messages.pop(0)
+        self._poll_count += 1
+        if self._pending and self._poll_count >= self._pending[0][1]:
+            message, _ = self._pending.pop(0)
+            return message
         return None
 
     def close(self):
@@ -1499,6 +1520,60 @@ def test_hold_and_publish_ignores_a_rejection_for_a_different_pick():
         )
 
     assert publish_calls == ["111"]
+
+
+def test_hold_and_publish_catches_rejection_that_arrives_after_publish_returns():
+    """Regression test for the bug confirmed live 2026-08-28 (league 696093652, team 8):
+    ESPN's rejection does not arrive in the same instant publish_draft_target returns - it
+    took ~7.8s in that incident, by which point a single non-blocking pubsub check (the
+    original implementation) had already declared success and closed the subscription.
+    hold_and_publish must keep polling for PICK_REJECTION_GRACE_SECONDS, not just once,
+    so a rejection that arrives a few polls later still triggers the next-candidate retry."""
+    candidates = [
+        _player("p1", "RB", 10.0, name="Player One", espn_id="111"),
+        _player("p2", "RB", 9.0, name="Player Two", espn_id="222"),
+    ]
+    publish_calls = []
+
+    def fake_publish_draft_target(_team_id, target, **_kwargs):
+        publish_calls.append(target["espn_id"])
+
+    # Not visible on the first poll - only after a few empty ones, modeling the real-world
+    # delay between "gateway accepted the publish" and "ESPN told us it rejected the pick".
+    pubsub = _FakePubSub(messages=[_rejection_message(5, "L1:5:111")], arrive_after_polls=[3])
+    mock_client = _rejection_client(pubsub)
+
+    with patch.object(dm, "publish_draft_target", side_effect=fake_publish_draft_target):
+        dm.hold_and_publish(
+            mock_client, "L1", "8", 5, candidates, delay_seconds=0,
+            sleep_fn=lambda s: None,
+        )
+
+    assert publish_calls == ["111", "222"]
+
+
+def test_hold_and_publish_logs_a_non_matching_rejection_instead_of_discarding_it_silently(caplog):
+    """A rejection that doesn't match the pick currently held must not be indistinguishable
+    from 'no message at all' in the logs - see the #108 follow-up fixing the retry-timing
+    bug, where a silently-discarded mismatch made a broken match condition impossible to
+    tell apart from a healthy 'nothing rejected yet'."""
+    candidates = [_player("p1", "RB", 10.0, name="Player One", espn_id="111")]
+
+    def fake_publish_draft_target(_team_id, target, **_kwargs):
+        return None
+
+    pubsub = _FakePubSub(messages=[_rejection_message(999, "L1:999:111")])
+    mock_client = _rejection_client(pubsub)
+
+    with patch.object(dm, "publish_draft_target", side_effect=fake_publish_draft_target), \
+         caplog.at_level("INFO", logger="DraftMatrix"):
+        dm.hold_and_publish(
+            mock_client, "L1", "8", 5, candidates, delay_seconds=0,
+            sleep_fn=lambda s: None,
+        )
+
+    assert "did not match currently-held pick" in caplog.text
+    assert "idempotency_key=L1:999:111" in caplog.text
 
 
 def test_hold_and_publish_returns_immediately_when_candidates_is_empty():
