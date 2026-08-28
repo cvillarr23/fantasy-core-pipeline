@@ -974,7 +974,7 @@ def _surface_clock_expired(r_client, league_id: str, target: dict, pick_number: 
 
 
 def hold_and_publish(
-    r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
+    r_client, league_id: str, team_id: str, pick_number: int, candidates: list, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
     trace_context: Optional[context.Context] = None,
     monotonic_fn=time.monotonic, clock_origin: Optional[float] = None, time_fn=time.time,
@@ -995,7 +995,18 @@ def hold_and_publish(
     would exclude everything handle_pick_event does synchronously first - persisting the
     pick, reloading the undrafted pool, and solving the ILP - and would also give a drained
     backlog entry a fresh clock, so a slow recompute or a restart could publish a target for
-    a pick ESPN had already autodrafted."""
+    a pick ESPN had already autodrafted.
+
+    candidates is the full ranked recommendation list (not just the winner): if
+    fantasy-browser-worker confirms a rejection of the target currently held (published on
+    draft_pick_rejected:{league_id} - see the pubsub subscription below), this immediately
+    republishes the next-best already-computed candidate instead of waiting out the normal
+    retry/deadline path, which would otherwise burn the rest of the pick clock re-sending a
+    selection ESPN has already told us it will not accept."""
+    if not candidates:
+        return
+    candidate_index = 0
+    target = candidates[candidate_index]
     token = context.attach(trace_context) if trace_context is not None else None
     try:
         with tracer.start_as_current_span("draft_pick.hold_and_publish", attributes={"team_id": team_id, "pick_number": pick_number}):
@@ -1005,6 +1016,13 @@ def hold_and_publish(
             # retracts only its own error. Two overlapping threads can record the identical
             # message, which makes the text alone useless as an ownership check.
             error_owner = f"publish:{league_id}:{pick_number}:{uuid.uuid4()}"
+            # Subscribed once for the whole hold/retry window (not re-subscribed per
+            # attempt), so a rejection published at any point - during the initial delay
+            # or between retries - is queued up by the client and observed on the very
+            # next non-blocking poll rather than only at subscribe time.
+            rejection_channel = f"draft_pick_rejected:{league_id}"
+            pubsub = r_client.pubsub()
+            pubsub.subscribe(rejection_channel)
             try:
                 should_publish = wait_for_pause_or_timeout(
                     r_client, league_id, pick_number, delay_seconds,
@@ -1017,7 +1035,55 @@ def hold_and_publish(
                 # Identifies this pick, not this attempt, so every retry claims the same key
                 # at the gateway and an ambiguous failure cannot enqueue the action twice.
                 idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
+                # Tracks whether the target currently held has already been published at
+                # least once - a rejection can only ever be *confirmed* for a target we
+                # actually sent, so this gates the rejection check below and keeps the
+                # very first attempt (nothing published yet) from ever matching a stale
+                # or premature message on the channel.
+                published_current_target = False
                 while True:
+                    # Checked first, before the pause/cancel/kill-switch/ESPN-selecting
+                    # guards below: a confirmed rejection is the most time-sensitive signal
+                    # in this loop - fantasy-browser-worker has already told us this exact
+                    # selection will not go through, so there is nothing to gain from
+                    # waiting out the rest of this iteration's checks first. Only runs once
+                    # we've actually published the current target at least once.
+                    if published_current_target:
+                        rejection = pubsub.get_message(ignore_subscribe_messages=True, timeout=0)
+                        if rejection is not None and rejection.get("type") == "message":
+                            try:
+                                payload = json.loads(rejection["data"])
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                payload = {}
+                            if (
+                                str(payload.get("pick_number")) == str(pick_number)
+                                and payload.get("idempotency_key") == idempotency_key
+                            ):
+                                logger.warning(
+                                    "Confirmed rejection for league %s pick %s target %s (%s); advancing to next "
+                                    "candidate rather than waiting out the normal retry/deadline path.",
+                                    league_id, pick_number, target.get("name"), payload.get("error_message"),
+                                )
+                                candidate_index += 1
+                                if candidate_index >= len(candidates):
+                                    logger.warning(
+                                        "No further candidates left for league %s pick %s after a confirmed "
+                                        "rejection; abandoning.", league_id, pick_number,
+                                    )
+                                    _surface_clock_expired(
+                                        r_client, league_id, target, pick_number,
+                                        "every candidate was rejected by ESPN",
+                                        owner=error_owner, season=season,
+                                    )
+                                    _record_publish_outcome(r_client, league_id, succeeded=False)
+                                    return
+                                target = candidates[candidate_index]
+                                idempotency_key = f"{league_id}:{pick_number}:{target.get('espn_id')}"
+                                published_current_target = False
+                                continue
+                        # Published and no confirmed rejection arrived - treat as accepted.
+                        _record_publish_outcome(r_client, league_id, succeeded=True)
+                        return
                     # Both guards are re-evaluated before *every* attempt, not just the
                     # first. The pause key and cancel_event are set by other threads and a
                     # retry sleep is a wide window for either to land; publishing a target
@@ -1097,8 +1163,12 @@ def hold_and_publish(
                         )
                         if failure_surfaced:
                             _clear_publish_error(r_client, league_id, error_owner)
-                        _record_publish_outcome(r_client, league_id, succeeded=True)
-                        return
+                        # Don't declare success yet - the publish call only confirms ESPN
+                        # accepted the request, not that the pick landed. Loop back so the
+                        # rejection check above gets one chance to observe a confirmed
+                        # rejection for this exact target before we report success.
+                        published_current_target = True
+                        continue
                     except Exception as error:
                         retryable = _is_retryable_publish_error(error)
                         # Surface the first failure, and again for whatever finally stops us.
@@ -1130,6 +1200,14 @@ def hold_and_publish(
             except Exception as error:
                 _surface_publish_error(r_client, league_id, target, error, owner=error_owner, season=season)
                 _record_publish_outcome(r_client, league_id, succeeded=False)
+            finally:
+                try:
+                    pubsub.close()
+                except Exception as pubsub_error:
+                    logger.warning(
+                        "Failed to close draft_pick_rejected pubsub for league %s: %s",
+                        league_id, pubsub_error,
+                    )
     finally:
         if token is not None:
             context.detach(token)
@@ -1213,10 +1291,12 @@ def seed_initial_vorp_lookup(r_client, league_id: str, season: int, week: int) -
 def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team_id: str, event: dict) -> Optional[tuple]:
     """Runs on every pick event off the Stream: persist it, then - unless it's a replayed
     duplicate or we're the team that just picked - recompute a recommendation and write it
-    to the Redis board. Returns (target, next_pick_number) for the caller to hold-and-
-    publish, or None if there's nothing to act on. The delay/publish is deliberately NOT
-    done here - see hold_and_publish - so this function stays fast and the Stream consumer
-    loop is never blocked by the auto-draft delay window.
+    to the Redis board. Returns (candidates, next_pick_number) - the full ranked candidate
+    list, not just the winner - for the caller to hold-and-publish (so a confirmed ESPN
+    rejection can advance to the next-best already-computed candidate), or None if there's
+    nothing to act on. The delay/publish is deliberately NOT done here - see
+    hold_and_publish - so this function stays fast and the Stream consumer loop is never
+    blocked by the auto-draft delay window.
 
     Gates the recompute on the persisted draft_slots map (see persist_draft_slot and
     compute_on_the_clock_team) once team_count and every team's slot are known: recompute
@@ -1422,7 +1502,12 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             "top_candidates": json.dumps(candidates),
             "vorp_by_espn_id": _vorp_by_espn_id_json(undrafted_pool),
         })
-        return target, next_pick_number
+        # The board still shows the first-choice recommendation above, but the caller gets
+        # the full ranked list, not just the winner - hold_and_publish (via
+        # _schedule_publish) needs every already-computed candidate on hand to retry with
+        # the next-best one immediately on a confirmed ESPN rejection, without waiting for
+        # a fresh recompute it has no time left in the pick clock to run.
+        return candidates, next_pick_number
 
 
 def _cancel_pending_publish(pending_state: dict) -> None:
@@ -1449,14 +1534,16 @@ def _clamp_auto_draft_delay_seconds(delay_seconds: int) -> int:
 
 
 def _schedule_publish(
-    r_client, league_id: str, team_id: str, pick_number: int, target: dict, delay_seconds: int,
+    r_client, league_id: str, team_id: str, pick_number: int, candidates: list, delay_seconds: int,
     pending_state: dict, clock_origin: Optional[float] = None, season: Optional[int] = None,
     monotonic_fn=time.monotonic, time_fn=time.time,
 ) -> None:
     """Supersedes any still-pending hold-and-publish job (a newer pick means the old
     recommendation is stale) and schedules the new one on a background thread, so
     run_draft_listener's XREADGROUP loop keeps consuming instead of blocking through the
-    delay window."""
+    delay window. candidates is the full ranked recommendation list, threaded straight
+    through to hold_and_publish so a confirmed ESPN rejection can advance to the next-best
+    candidate instead of just the single winning target."""
     _cancel_pending_publish(pending_state)
     cancel_event = threading.Event()
     pending_state["cancel_event"] = cancel_event
@@ -1483,7 +1570,7 @@ def _schedule_publish(
     trace_context = context.get_current()
     threading.Thread(
         target=hold_and_publish,
-        args=(r_client, league_id, team_id, pick_number, target, clamped_delay_seconds, cancel_event, time.sleep, trace_context),
+        args=(r_client, league_id, team_id, pick_number, candidates, clamped_delay_seconds, cancel_event, time.sleep, trace_context),
         kwargs={"clock_origin": resolved_clock_origin, "season": season},
         daemon=True,
     ).start()
@@ -1564,8 +1651,8 @@ def _process_entries(r_client, stream_key: str, league_id: str, season: int, wee
                     _supersede_pending_publish_if_stale(pending_state, event)
                     result = handle_pick_event(r_client, league_id, season, week, team_id, event)
                     if result is not None:
-                        target, next_pick_number = result
-                        _schedule_publish(r_client, league_id, team_id, next_pick_number, target, delay_seconds, pending_state, clock_origin=clock_origin, season=season)
+                        candidates, next_pick_number = result
+                        _schedule_publish(r_client, league_id, team_id, next_pick_number, candidates, delay_seconds, pending_state, clock_origin=clock_origin, season=season)
                 except Exception as e:
                     logger.error(f"Failed to process draft pick event {entry_id}: {e}")
                     _write_listener_state(r_client, league_id, "Failed", error=str(e))

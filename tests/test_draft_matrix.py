@@ -566,7 +566,7 @@ def test_hold_and_publish_publishes_when_not_cancelled():
 
     with patch("src.optimization.draft_matrix.requests.post") as mock_post:
         mock_post.return_value = MagicMock(status_code=202)
-        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda s: None)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None)
 
     mock_post.assert_called_once()
 
@@ -579,7 +579,7 @@ def test_hold_and_publish_skips_when_cancelled():
     target = _player("p1", "RB", 10.0)
 
     with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
 
     mock_post.assert_not_called()
 
@@ -599,7 +599,7 @@ def test_hold_and_publish_abandons_when_auto_publish_disabled():
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
          patch("src.optimization.draft_matrix.requests.post") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
-        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda s: None)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None)
 
     mock_post.assert_not_called()
     query, params = mock_cursor.execute.call_args.args
@@ -664,7 +664,7 @@ def test_hold_and_publish_retries_transient_publish_failure():
          patch.object(dm, "publish_draft_target", side_effect=[dm.requests.ConnectionError("unavailable"), None]) as mock_publish, \
          patch.object(dm, "_record_publish_error") as mock_record:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8,
             sleep_fn=sleeps.append,
         )
 
@@ -698,7 +698,7 @@ def test_hold_and_publish_does_not_clobber_a_newer_listener_error_on_retry_succe
          patch.object(dm, "publish_draft_target", side_effect=publish), \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8, sleep_fn=lambda _s: None,
         )
 
     assert mock_client.board["listener_error"] == "Listener died: connection refused"
@@ -712,7 +712,7 @@ def test_hold_and_publish_identifies_the_slot_so_the_gateway_can_revalidate():
     with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, sleep_fn=lambda _s: None,
         )
 
     assert mock_publish.call_args.kwargs["league_id"] == "L1"
@@ -730,7 +730,7 @@ def test_hold_and_publish_sends_an_absolute_deadline_to_the_gateway():
          patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, sleep_fn=lambda _s: None,
             monotonic_fn=lambda: 30.0, clock_origin=0.0, time_fn=lambda: 1_000.0,
         )
 
@@ -761,7 +761,7 @@ def test_hold_and_publish_will_not_retract_an_error_a_failed_listener_now_owns()
          patch.object(dm, "publish_draft_target", side_effect=publish), \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, sleep_fn=lambda _s: None,
         )
 
     assert mock_client.board["listener_error"] == "Listener crashed"
@@ -778,7 +778,7 @@ def test_hold_and_publish_leaves_a_failed_listeners_error_intact():
          patch.object(dm, "publish_draft_target", side_effect=RuntimeError("no espn_id")), \
          patch.object(dm, "_record_publish_error") as mock_record:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, sleep_fn=lambda _s: None,
         )
 
     assert mock_client.board["listener_state"] == "Failed"
@@ -805,7 +805,7 @@ def test_hold_and_publish_does_not_clear_an_identical_error_owned_by_another_pub
          patch.object(dm, "publish_draft_target", side_effect=publish), \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, sleep_fn=lambda _s: None,
         )
 
     assert mock_client.board["listener_error"] == "connection refused"
@@ -826,7 +826,7 @@ def test_hold_and_publish_surfaces_failure_after_clock_expires():
          patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
          patch.object(dm, "_record_publish_error") as mock_record:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=_sleep, monotonic_fn=lambda: now[0],
         )
 
@@ -848,7 +848,7 @@ def test_hold_and_publish_realistic_clock_is_not_superseded_without_a_new_pick()
 
     with patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8,
             sleep_fn=sleeps.append,
         )
 
@@ -879,7 +879,7 @@ def test_hold_and_publish_does_not_retry_a_deterministic_client_error():
          patch.object(dm, "publish_draft_target", side_effect=error) as mock_publish, \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=sleeps.append,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8, sleep_fn=sleeps.append,
         )
 
     assert mock_publish.call_count == 1
@@ -898,7 +898,7 @@ def test_hold_and_publish_does_not_retry_a_missing_crosswalk_entry():
          patch.object(dm, "publish_draft_target", side_effect=ValueError("no espn_id")) as mock_publish, \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=sleeps.append,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8, sleep_fn=sleeps.append,
         )
 
     assert mock_publish.call_count == 1
@@ -940,7 +940,7 @@ def test_hold_and_publish_rechecks_cancellation_between_retries():
          patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8,
             cancel_event=cancel_event, sleep_fn=_sleep,
         )
 
@@ -961,7 +961,7 @@ def test_hold_and_publish_rechecks_operator_pause_between_retries():
          patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=8, sleep_fn=_sleep,
+            mock_client, "L1", "7", 5, [target], delay_seconds=8, sleep_fn=_sleep,
         )
 
     assert mock_publish.call_count == 1
@@ -980,7 +980,7 @@ def test_hold_and_publish_abandons_when_espn_reports_a_different_team_on_the_clo
 
     with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
-        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda _s: None)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda _s: None)
 
     mock_publish.assert_not_called()
 
@@ -995,7 +995,7 @@ def test_hold_and_publish_publishes_when_espn_confirms_our_team_on_the_clock():
 
     with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
-        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda _s: None)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda _s: None)
 
     mock_publish.assert_called_once()
 
@@ -1009,7 +1009,7 @@ def test_hold_and_publish_publishes_when_espn_selecting_signal_is_unavailable():
 
     with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
-        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda _s: None)
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda _s: None)
 
     mock_publish.assert_called_once()
 
@@ -1026,7 +1026,7 @@ def test_hold_and_publish_long_delay_still_honors_pause():
 
     with patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=20,
+            mock_client, "L1", "7", 5, [target], delay_seconds=20,
             sleep_fn=_sleep, monotonic_fn=lambda: 0.0, clock_origin=0.0,
         )
 
@@ -1046,7 +1046,7 @@ def test_hold_and_publish_never_publishes_after_the_clock_has_already_expired():
          patch.object(dm, "publish_draft_target") as mock_publish, \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 100.0,
             clock_origin=0.0,  # the pick landed 100s ago; a 30s clock is long gone
         )
@@ -1074,7 +1074,7 @@ def test_hold_and_publish_uses_the_supplied_clock_origin_not_thread_start():
          patch.object(dm, "publish_draft_target", side_effect=dm.requests.ConnectionError("unavailable")) as mock_publish, \
          patch.object(dm, "_record_publish_error"):
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=_sleep, monotonic_fn=lambda: now[0], clock_origin=0.0,
         )
 
@@ -1096,7 +1096,7 @@ def test_hold_and_publish_clamps_the_request_timeout_to_the_remaining_window():
          patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 27.0, clock_origin=0.0,
         )
 
@@ -1113,7 +1113,7 @@ def test_hold_and_publish_uses_the_full_timeout_when_the_window_is_wide():
          patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 0.0, clock_origin=0.0,
         )
 
@@ -1130,7 +1130,7 @@ def test_hold_and_publish_does_not_start_an_attempt_that_cannot_finish():
          patch.object(dm, "_record_publish_error") as mock_record, \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 29.5, clock_origin=0.0,
         )
 
@@ -1157,7 +1157,7 @@ def test_hold_and_publish_does_not_report_a_cancellation_as_a_missed_pick():
          patch.object(dm, "_record_publish_error") as mock_record, \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, cancel_event=cancel_event,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, cancel_event=cancel_event,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
         )
 
@@ -1174,7 +1174,7 @@ def test_hold_and_publish_records_the_season_with_a_publish_failure():
          patch.object(dm, "publish_draft_target", side_effect=RuntimeError("no espn_id")), \
          patch.object(dm, "_record_publish_error") as mock_record:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0, sleep_fn=lambda _s: None,
             season=2026,
         )
 
@@ -1191,7 +1191,7 @@ def test_hold_and_publish_reports_a_pick_abandoned_at_the_deadline():
          patch.object(dm, "_record_publish_error") as mock_record, \
          patch.object(dm, "publish_draft_target") as mock_publish:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 5, target, delay_seconds=0,
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
         )
 
@@ -1249,7 +1249,7 @@ def test_hold_and_publish_trips_circuit_breaker_after_max_consecutive_failures(m
          patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
         for pick_number in (1, 2, 3):
             dm.hold_and_publish(
-                mock_client, "L1", "7", pick_number, target, delay_seconds=0,
+                mock_client, "L1", "7", pick_number, [target], delay_seconds=0,
                 sleep_fn=lambda _s: None,
             )
 
@@ -1272,7 +1272,7 @@ def test_hold_and_publish_does_not_trip_circuit_breaker_below_the_threshold():
          patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
         for pick_number in (1, 2):
             dm.hold_and_publish(
-                mock_client, "L1", "7", pick_number, target, delay_seconds=0,
+                mock_client, "L1", "7", pick_number, [target], delay_seconds=0,
                 sleep_fn=lambda _s: None,
             )
 
@@ -1296,22 +1296,22 @@ def test_hold_and_publish_successful_publish_resets_the_failure_counter():
          patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
         with patch.object(dm, "publish_draft_target", side_effect=error):
             dm.hold_and_publish(
-                mock_client, "L1", "7", 1, target, delay_seconds=0, sleep_fn=lambda _s: None,
+                mock_client, "L1", "7", 1, [target], delay_seconds=0, sleep_fn=lambda _s: None,
             )
             dm.hold_and_publish(
-                mock_client, "L1", "7", 2, target, delay_seconds=0, sleep_fn=lambda _s: None,
+                mock_client, "L1", "7", 2, [target], delay_seconds=0, sleep_fn=lambda _s: None,
             )
         assert mock_client.board["consecutive_publish_failures"] == 2
 
         with patch.object(dm, "publish_draft_target", return_value=None):
             dm.hold_and_publish(
-                mock_client, "L1", "7", 3, target, delay_seconds=0, sleep_fn=lambda _s: None,
+                mock_client, "L1", "7", 3, [target], delay_seconds=0, sleep_fn=lambda _s: None,
             )
         assert mock_client.board["consecutive_publish_failures"] == 0
 
         with patch.object(dm, "publish_draft_target", side_effect=error):
             dm.hold_and_publish(
-                mock_client, "L1", "7", 4, target, delay_seconds=0, sleep_fn=lambda _s: None,
+                mock_client, "L1", "7", 4, [target], delay_seconds=0, sleep_fn=lambda _s: None,
             )
         assert mock_client.board["consecutive_publish_failures"] == 1
         mock_set_enabled.assert_not_called()
@@ -1330,7 +1330,7 @@ def test_hold_and_publish_circuit_breaker_counts_a_clock_expiry_as_a_failure():
          patch.object(dm, "publish_draft_target") as mock_publish, \
          patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 1, target, delay_seconds=0,
+            mock_client, "L1", "7", 1, [target], delay_seconds=0,
             sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
         )
 
@@ -1351,7 +1351,7 @@ def test_hold_and_publish_does_not_count_a_pause_or_kill_switch_abandonment_as_a
          patch.object(dm, "publish_draft_target") as mock_publish, \
          patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
         dm.hold_and_publish(
-            mock_client, "L1", "7", 1, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            mock_client, "L1", "7", 1, [target], delay_seconds=0, sleep_fn=lambda _s: None,
         )
 
     mock_publish.assert_not_called()
@@ -1361,6 +1361,153 @@ def test_hold_and_publish_does_not_count_a_pause_or_kill_switch_abandonment_as_a
 
 def test_max_consecutive_publish_failures_defaults_to_three():
     assert dm.MAX_CONSECUTIVE_PUBLISH_FAILURES == 3
+
+
+# ---------------------------------------------------------------------------
+# hold_and_publish - retry with next-best candidate on confirmed rejection
+# (issue #108, Task B: fantasy-browser-worker publishes a confirmed ESPN pick
+# rejection on draft_pick_rejected:{league_id})
+# ---------------------------------------------------------------------------
+
+class _FakePubSub:
+    """Minimal stand-in for redis.Redis().pubsub(): records the channel(s) subscribed to
+    and hands back a queue of canned messages one at a time via get_message, then None
+    once the queue is drained - mirroring the real client's non-blocking
+    get_message(timeout=0) behavior once nothing new has arrived."""
+
+    def __init__(self, messages=None):
+        self.subscribed_channels = []
+        self._messages = list(messages or [])
+        self.closed = False
+
+    def subscribe(self, channel):
+        self.subscribed_channels.append(channel)
+
+    def get_message(self, ignore_subscribe_messages=True, timeout=0):
+        if self._messages:
+            return self._messages.pop(0)
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+def _rejection_client(pubsub):
+    client = MagicMock()
+    client.get.return_value = None
+    client.pubsub.return_value = pubsub
+    return client
+
+
+def _rejection_message(pick_number, idempotency_key, error_message="Invalid Selection."):
+    return {
+        "type": "message",
+        "data": json.dumps({
+            "league_id": "L1",
+            "pick_number": pick_number,
+            "idempotency_key": idempotency_key,
+            "team_id": "8",
+            "player_id": "111",
+            "error_code": "1",
+            "error_message": error_message,
+            "rejected_at": 1735300000.123,
+        }),
+    }
+
+
+def test_hold_and_publish_retries_next_candidate_on_confirmed_rejection():
+    """A rejection message matching the pick currently being held should trigger an
+    immediate republish of candidates[1], not wait out the normal deadline."""
+    candidates = [
+        _player("p1", "RB", 10.0, name="Player One", espn_id="111"),
+        _player("p2", "RB", 9.0, name="Player Two", espn_id="222"),
+    ]
+    publish_calls = []
+
+    def fake_publish_draft_target(_team_id, target, **_kwargs):
+        publish_calls.append(target["espn_id"])
+
+    pubsub = _FakePubSub(messages=[_rejection_message(5, "L1:5:111")])
+    mock_client = _rejection_client(pubsub)
+
+    with patch.object(dm, "publish_draft_target", side_effect=fake_publish_draft_target):
+        dm.hold_and_publish(
+            mock_client, "L1", "8", 5, candidates, delay_seconds=0,
+            sleep_fn=lambda s: None,
+        )
+
+    assert publish_calls == ["111", "222"]
+    assert pubsub.subscribed_channels == ["draft_pick_rejected:L1"]
+    assert pubsub.closed is True
+
+
+def test_hold_and_publish_gives_up_after_all_candidates_rejected():
+    """If every candidate in the list is rejected, hold_and_publish must surface a
+    terminal failure (not retry forever) once the list is exhausted."""
+    candidates = [
+        _player("p1", "RB", 10.0, name="Player One", espn_id="111"),
+        _player("p2", "RB", 9.0, name="Player Two", espn_id="222"),
+    ]
+    publish_calls = []
+
+    def fake_publish_draft_target(_team_id, target, **_kwargs):
+        publish_calls.append(target["espn_id"])
+
+    pubsub = _FakePubSub(messages=[
+        _rejection_message(5, "L1:5:111"),
+        _rejection_message(5, "L1:5:222"),
+    ])
+    mock_client = _rejection_client(pubsub)
+
+    with patch.object(dm, "publish_draft_target", side_effect=fake_publish_draft_target), \
+         patch.object(dm, "_surface_clock_expired") as mock_surface, \
+         patch.object(dm, "_record_publish_outcome") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "8", 5, candidates, delay_seconds=0,
+            sleep_fn=lambda s: None,
+        )
+
+    assert publish_calls == ["111", "222"]
+    mock_surface.assert_called_once()
+    assert mock_surface.call_args.args[0] is mock_client
+    assert mock_surface.call_args.args[1] == "L1"
+    assert mock_surface.call_args.args[3] == 5
+    mock_record.assert_called_once_with(mock_client, "L1", succeeded=False)
+
+
+def test_hold_and_publish_ignores_a_rejection_for_a_different_pick():
+    """A rejection for a pick/idempotency_key this thread isn't holding must not advance
+    the candidate index - it belongs to a different (already-superseded or unrelated)
+    publish attempt."""
+    candidates = [
+        _player("p1", "RB", 10.0, name="Player One", espn_id="111"),
+        _player("p2", "RB", 9.0, name="Player Two", espn_id="222"),
+    ]
+    publish_calls = []
+
+    def fake_publish_draft_target(_team_id, target, **_kwargs):
+        publish_calls.append(target["espn_id"])
+
+    # Mismatched pick_number - must be ignored, so only candidates[0] is ever published.
+    pubsub = _FakePubSub(messages=[_rejection_message(999, "L1:999:111")])
+    mock_client = _rejection_client(pubsub)
+
+    with patch.object(dm, "publish_draft_target", side_effect=fake_publish_draft_target):
+        dm.hold_and_publish(
+            mock_client, "L1", "8", 5, candidates, delay_seconds=0,
+            sleep_fn=lambda s: None,
+        )
+
+    assert publish_calls == ["111"]
+
+
+def test_hold_and_publish_returns_immediately_when_candidates_is_empty():
+    mock_client = MagicMock()
+
+    with patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(mock_client, "L1", "8", 5, [], delay_seconds=0, sleep_fn=lambda s: None)
+
+    mock_publish.assert_not_called()
 
 
 def test_process_entries_anchors_the_deadline_to_the_stream_entry_not_the_read_time():
@@ -1407,7 +1554,7 @@ def test_schedule_publish_cancels_previous_pending_job():
     with patch("src.optimization.draft_matrix.threading.Thread") as mock_thread_cls:
         mock_thread = MagicMock()
         mock_thread_cls.return_value = mock_thread
-        dm._schedule_publish(mock_client, "L1", "7", 5, _player("p1", "RB", 1.0), delay_seconds=8, pending_state=pending_state)
+        dm._schedule_publish(mock_client, "L1", "7", 5, [_player("p1", "RB", 1.0)], delay_seconds=8, pending_state=pending_state)
 
     assert old_event.is_set()
     assert pending_state["cancel_event"] is not old_event
@@ -1438,7 +1585,7 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary():
             with dm.tracer.start_as_current_span("draft_pick.handle_event") as parent_span:
                 parent_trace_id = parent_span.get_span_context().trace_id
                 dm._schedule_publish(
-                    mock_client, "L1", "7", 5, _player("p1", "RB", 1.0),
+                    mock_client, "L1", "7", 5, [_player("p1", "RB", 1.0)],
                     delay_seconds=0, pending_state=pending_state,
                 )
 
@@ -1470,7 +1617,7 @@ def test_schedule_publish_clamps_delay_and_writes_absolute_deadlines():
         mock_thread = MagicMock()
         mock_thread_cls.return_value = mock_thread
         dm._schedule_publish(
-            mock_client, "L1", "7", 5, _player("p1", "RB", 1.0), delay_seconds=99,
+            mock_client, "L1", "7", 5, [_player("p1", "RB", 1.0)], delay_seconds=99,
             pending_state=pending_state, clock_origin=95.0,
             monotonic_fn=lambda: next(monotonic_values), time_fn=lambda: 1000.0,
         )
@@ -2111,7 +2258,7 @@ def test_handle_pick_event_returns_recommendation_after_opponent_pick():
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
-    assert result == (target, 2)
+    assert result == ([target, runner_up], 2)
     assert mock_client.hset.call_count == 2
     hset_kwargs = mock_client.hset.call_args_list[-1].kwargs
     assert hset_kwargs["mapping"]["recommended_player_id"] == "p2"
@@ -2163,7 +2310,7 @@ def test_handle_pick_event_still_recomputes_when_slot_map_confirms_our_turn():
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
-    assert result == (target, 6)
+    assert result == ([target], 6)
     mock_candidates.assert_called_once()
 
 
