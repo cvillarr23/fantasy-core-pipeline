@@ -69,6 +69,17 @@ PAUSE_POLL_INTERVAL_SECONDS = 1
 # after the clock it was meant to protect had already expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS = int(os.getenv("DRAFT_PICK_CLOCK_SECONDS", "90"))
 DRAFT_PUBLISH_SAFETY_SECONDS = 5
+# Confirmed live 2026-08-27 (league 1683291251, practice mode, 30s clock, 20s configured
+# delay): the existing clamp only protected against a delay *larger than the whole clock* -
+# it let a 20s hold run right up against a 30s clock, leaving just 10s (5s once
+# DRAFT_PUBLISH_SAFETY_SECONDS is subtracted) for the actual publish. That was enough for a
+# clean SELECT/SELECTED round trip (~0.3s observed), but left nothing to recover from a
+# rejected SELECT (an "Invalid Selection" ERROR frame, ~0.35s) with a fresh target - the pick
+# clock simply ran out and ESPN autodrafted a different player for our own team. A practice
+# room's clock is short by design, so it needs proportionally *more* headroom after the hold,
+# not less: this floor guarantees at least this many seconds remain for the submit path
+# regardless of how AUTO_DRAFT_DELAY_SECONDS is configured for a given mode/room speed.
+MIN_AUTO_PUBLISH_WINDOW_SECONDS = int(os.getenv("MIN_AUTO_PUBLISH_WINDOW_SECONDS", "10"))
 # Set by _draft_sync_env() alongside DRAFT_PICK_CLOCK_SECONDS - the listener's own practice/live
 # tag, forwarded on every published target so fantasy-browser-worker's click bot can safely
 # submit for real in a practice room without needing its own DRY_RUN=false set (which would also,
@@ -647,7 +658,7 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None, mode: Optional[str] = None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -686,7 +697,13 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             # rechecks these against the listener board immediately before publishing.
             "league_id": league_id,
             "pick_number": pick_number,
-            "mode": DRAFT_MODE,
+            # DRAFT_MODE is a per-process env var, set correctly on the per-league draft-sync
+            # Job this function normally runs inside - but NOT on the FastAPI gateway
+            # Deployment, which also calls this (e.g. /resume) and would otherwise always
+            # default to "live" even for a practice league. Callers running outside that Job
+            # (anything in this same process as the gateway) must pass the league's actual
+            # stored mode explicitly rather than rely on this env var.
+            "mode": mode if mode is not None else DRAFT_MODE,
         },
         headers=headers,
         timeout=timeout,
@@ -1232,7 +1249,7 @@ def _cancel_pending_publish(pending_state: dict) -> None:
 
 
 def _max_auto_publish_delay_seconds() -> int:
-    return max(0, DRAFT_PICK_CLOCK_SECONDS - DRAFT_PUBLISH_SAFETY_SECONDS)
+    return max(0, DRAFT_PICK_CLOCK_SECONDS - DRAFT_PUBLISH_SAFETY_SECONDS - MIN_AUTO_PUBLISH_WINDOW_SECONDS)
 
 
 def _clamp_auto_draft_delay_seconds(delay_seconds: int) -> int:

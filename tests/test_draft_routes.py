@@ -268,10 +268,14 @@ def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
     # A practice room's clock is 30s, not the 90s a real draft gets. Inheriting the live
     # default would let the publish-retry loop run for a full minute after the clock it is
     # meant to protect had already expired and autodrafted.
+    #
+    # 15s (not 20s) mirrors live's ~50% hold-to-clock ratio (45/90): confirmed live
+    # 2026-08-27 that 20s left only 10s of the 30s clock for the actual publish, too little
+    # to recover from a rejected SELECT before ESPN autodrafted a different player for us.
     env = {e.name: e.value for e in container.env}
     clock = env["DRAFT_PICK_CLOCK_SECONDS"]
     assert clock == "30"
-    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "20"
+    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "15"
 
 
 def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
@@ -1910,7 +1914,7 @@ def test_resume_draft_deletes_pause_key_and_republishes(client):
     process. Resume must recompute a fresh recommendation and republish it directly."""
     mock_redis = MagicMock()
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("7", 2026)
+    mock_cursor.fetchone.return_value = ("7", 2026, "practice")
     target = {"player_id": "p2", "name": "Best Back", "position": "RB", "vorp_score": 10.0, "team": "KC"}
 
     with patch("src.api.draft._redis_client", return_value=mock_redis), \
@@ -1925,13 +1929,16 @@ def test_resume_draft_deletes_pause_key_and_republishes(client):
     assert body["player_id"] == "p2"
     mock_redis.delete.assert_called_once_with("draft:L1:pause:5")
     mock_compute.assert_called_once_with(mock_cursor, "L1", 2026, 1, "7")
-    mock_publish.assert_called_once_with("7", target)
+    # mode must be forwarded explicitly: this handler runs in the gateway process, which has
+    # no DRAFT_MODE env set, so publish_draft_target's own env-var default would otherwise
+    # always resolve to "live" here even for a practice league's resume.
+    mock_publish.assert_called_once_with("7", target, mode="practice")
 
 
 def test_resume_draft_no_feasible_recommendation(client):
     mock_redis = MagicMock()
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("7", 2026)
+    mock_cursor.fetchone.return_value = ("7", 2026, "practice")
 
     with patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \

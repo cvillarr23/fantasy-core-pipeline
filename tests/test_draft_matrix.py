@@ -454,6 +454,32 @@ def test_publish_draft_target_posts_expected_payload():
     }
 
 
+def test_publish_draft_target_mode_override_takes_precedence_over_env_default():
+    """DRAFT_MODE is a per-process env var, correctly set on the per-league draft-sync Job
+    this function normally runs inside - but never set on the FastAPI gateway Deployment,
+    which also calls this (e.g. /resume) and would otherwise always send "live" even for a
+    practice league's resume. An explicit mode= argument must win over that env default."""
+    target = _player("p1", "RB", 12.0, name="Some Back")
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post, \
+         patch("src.optimization.draft_matrix.DRAFT_MODE", "live"):
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.publish_draft_target("7", target, mode="practice")
+
+    assert mock_post.call_args[1]["json"]["mode"] == "practice"
+
+
+def test_publish_draft_target_falls_back_to_env_default_when_mode_not_given():
+    target = _player("p1", "RB", 12.0, name="Some Back")
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post, \
+         patch("src.optimization.draft_matrix.DRAFT_MODE", "practice"):
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.publish_draft_target("7", target)
+
+    assert mock_post.call_args[1]["json"]["mode"] == "practice"
+
+
 def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
     """182 of 1027 players have no espn_id. Posting a null id would either time out in the
     draft room or be coerced into clicking a different player - never silently proceed."""
@@ -1174,6 +1200,7 @@ def test_schedule_publish_clamps_delay_and_writes_absolute_deadlines():
 
     with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
          patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 5), \
+         patch.object(dm, "MIN_AUTO_PUBLISH_WINDOW_SECONDS", 0), \
          patch("src.optimization.draft_matrix.threading.Thread") as mock_thread_cls, \
          patch.object(dm.logger, "warning") as mock_warning:
         mock_thread = MagicMock()
@@ -1191,6 +1218,31 @@ def test_schedule_publish_clamps_delay_and_writes_absolute_deadlines():
         "draft:L1:board",
         mapping={"auto_publish_at": 1020, "pick_clock_expires_at": 1025},
     )
+
+
+def test_clamp_auto_draft_delay_reserves_min_publish_window_even_when_under_the_full_clock():
+    """Confirmed live 2026-08-27 (league 1683291251): a configured delay smaller than the
+    whole clock (20s of a 30s practice clock) still isn't automatically safe - it can still
+    leave too little of the clock for the actual publish attempt (and any recovery from a
+    rejected SELECT) once DRAFT_PUBLISH_SAFETY_SECONDS is subtracted. The floor must clamp
+    even a delay that the old (pre-floor) check would have accepted outright."""
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 30), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 5), \
+         patch.object(dm, "MIN_AUTO_PUBLISH_WINDOW_SECONDS", 10), \
+         patch.object(dm.logger, "warning") as mock_warning:
+        assert dm._clamp_auto_draft_delay_seconds(20) == 15
+
+    mock_warning.assert_called_once()
+
+
+def test_clamp_auto_draft_delay_leaves_a_delay_already_inside_the_window_untouched():
+    with patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 90), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 5), \
+         patch.object(dm, "MIN_AUTO_PUBLISH_WINDOW_SECONDS", 10), \
+         patch.object(dm.logger, "warning") as mock_warning:
+        assert dm._clamp_auto_draft_delay_seconds(45) == 45
+
+    mock_warning.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -115,7 +115,12 @@ DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
 }
 AUTO_DRAFT_DELAY_SECONDS_BY_MODE = {
     "live": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_LIVE", "45")),
-    "practice": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_PRACTICE", "20")),
+    # Confirmed live 2026-08-27: 20s (66% of the 30s practice clock) left only 10s for the
+    # actual publish - draft_matrix.py's own clamp now enforces a floor via
+    # MIN_AUTO_PUBLISH_WINDOW_SECONDS regardless of this value, but this default is fixed to
+    # match live's ~50% hold ratio too, so a practice room isn't *relying* on that clamp
+    # (and the clamp's own warning log) just to get a sane starting point.
+    "practice": int(os.getenv("AUTO_DRAFT_DELAY_SECONDS_PRACTICE", "15")),
 }
 
 SSE_POLL_INTERVAL_SECONDS = 2
@@ -1629,7 +1634,13 @@ def resume_draft(payload: DraftPauseRequest):
     - draft_matrix.py runs in a separate Job Pod this API process has no other channel into.
     So /resume recomputes a fresh recommendation and republishes it immediately - the human
     already decided to proceed, so there's no cancellable delay window to wait through this
-    time, unlike the normal auto-draft path."""
+    time, unlike the normal auto-draft path.
+
+    Passes the league's stored draft_config.mode explicitly to publish_draft_target: this
+    handler runs in the FastAPI gateway process, which (unlike the per-league draft-sync
+    Job) never has DRAFT_MODE set in its own env, so publish_draft_target's env-var default
+    would otherwise always resolve to "live" here - silently defaulting a practice-league
+    resume to DRY_RUN in draft_clicker.js with no error surfaced anywhere."""
     r_client = _redis_client()
     pick_number = payload.pick_number
     if pick_number is None:
@@ -1642,11 +1653,11 @@ def resume_draft(payload: DraftPauseRequest):
 
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT team_id, season FROM draft_config WHERE league_id = %s;", (payload.league_id,))
+            cursor.execute("SELECT team_id, season, mode FROM draft_config WHERE league_id = %s;", (payload.league_id,))
             row = cursor.fetchone()
             if row is None:
                 raise HTTPException(status_code=400, detail="No draft config stored for this league - POST /v1/draft/config first.")
-            team_id, season = row
+            team_id, season, mode = row
             target = compute_draft_recommendation(cursor, payload.league_id, season, DRAFT_SYNC_WEEK, team_id)
     except HTTPException:
         raise
@@ -1658,7 +1669,7 @@ def resume_draft(payload: DraftPauseRequest):
         return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number, "published": False, "detail": "No feasible recommendation for the current undrafted pool."}
 
     try:
-        publish_draft_target(team_id, target)
+        publish_draft_target(team_id, target, mode=mode)
     except Exception as e:
         logger.error(f"Failed to publish resumed draft target for league {payload.league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to publish resumed draft target: {str(e)}")
