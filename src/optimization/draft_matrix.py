@@ -724,6 +724,37 @@ def _record_publish_outcome(r_client, league_id: str, succeeded: bool) -> None:
         logger.error("Failed to record publish outcome for league %s: %s", league_id, error)
 
 
+def _maybe_recover_circuit_breaker(r_client, conn, league_id: str) -> None:
+    """Called once per new pick event (handle_pick_event's normal "a new pick cycle
+    has started" signal) - the simplest viable recovery point: rather than trying to
+    positively verify the underlying failure has cleared (e.g. a synthetic probe
+    publish, which would need its own separate clock/target and add real complexity for
+    a guardrail whose only job is to fail safe), just give the circuit breaker one fresh
+    shot on the next cycle. If it trips again, the circuit breaker re-disables it after
+    another MAX_CONSECUTIVE_PUBLISH_FAILURES. A manual disable (disabled_by == 'manual')
+    is left completely untouched here - only 'circuit_breaker' is eligible for this
+    reset.
+
+    Best-effort, like _record_publish_outcome and the rest of this module's board
+    bookkeeping: a failure here must never block persisting the pick that triggered it."""
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT auto_publish_disabled_by FROM draft_config WHERE league_id = %s;",
+                (league_id,),
+            )
+            row = cursor.fetchone()
+        if row is not None and row[0] == "circuit_breaker":
+            logger.info(
+                "Re-enabling auto-publish for league %s: a new pick cycle has started "
+                "since the circuit breaker tripped.", league_id,
+            )
+            _set_auto_publish_enabled(league_id, True)
+            r_client.hset(_listener_board_key(league_id), "consecutive_publish_failures", 0)
+    except Exception as error:
+        logger.error("Failed to check/recover circuit breaker for league %s: %s", league_id, error)
+
+
 def wait_for_pause_or_timeout(
     r_client, league_id: str, pick_number: int, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
@@ -1241,6 +1272,11 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
             if not inserted:
                 logger.info(f"Pick {event['pick_number']} already recorded; skipping (replayed Stream entry).")
                 return None
+            # A genuinely new pick event - opponent or our own - marks the start of a new
+            # pick cycle, which is this circuit breaker's recovery signal (see
+            # _maybe_recover_circuit_breaker). Must run before the recompute-gating logic
+            # below so a re-enable takes effect even on a pick that skips recompute entirely.
+            _maybe_recover_circuit_breaker(r_client, conn, league_id)
             if team_count is None:
                 # Practice/mock rooms are never synced by sync_league.py, so league_settings
                 # has nothing for them and this is the only way they ever get a team count.

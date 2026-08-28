@@ -1999,6 +1999,59 @@ def test_handle_pick_event_flags_was_autodrafted_true_when_no_attempt_was_record
     mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, True)
 
 
+def _mock_conn_with_disabled_by(disabled_by, inserted: bool = True, team_count: int = 10):
+    """Extends _mock_conn_returning's query-routed fetchone with an answer for
+    _maybe_recover_circuit_breaker's own SELECT auto_publish_disabled_by lookup, without
+    disturbing any of the other "FROM draft_config" routes that helper already covers
+    (league_team_count's fallback, derive_team_count's mode read)."""
+    mock_conn, mock_cursor = _mock_conn_returning(inserted=inserted, team_count=team_count)
+    base_fetchone = mock_cursor.fetchone.side_effect
+
+    def _fetchone():
+        query = mock_cursor.last_query
+        if "auto_publish_disabled_by" in query:
+            return (disabled_by,)
+        return base_fetchone()
+    mock_cursor.fetchone.side_effect = _fetchone
+    return mock_conn, mock_cursor
+
+
+def test_handle_pick_event_does_not_reenable_manual_disable_on_opponent_pick():
+    """A manually-disabled league (auto_publish_disabled_by='manual') must stay disabled
+    across opponent pick events - only a circuit-breaker trip self-heals."""
+    mock_conn, _ = _mock_conn_with_disabled_by("manual", inserted=True)
+    mock_client = MagicMock()
+    mock_client.hget.return_value = None
+    event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag"), \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_set_enabled.assert_not_called()
+
+
+def test_handle_pick_event_reenables_circuit_breaker_disable_on_next_opponent_pick():
+    """A circuit-breaker-disabled league (auto_publish_disabled_by='circuit_breaker')
+    must automatically re-enable on the very next new pick event observed for that
+    league, and consecutive_publish_failures must reset to 0."""
+    mock_conn, _ = _mock_conn_with_disabled_by("circuit_breaker", inserted=True)
+    mock_client = MagicMock()
+    mock_client.hget.return_value = None
+    event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag"), \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    mock_set_enabled.assert_called_once_with("L1", True)
+    mock_client.hset.assert_any_call("draft:L1:board", "consecutive_publish_failures", 0)
+
+
 def test_handle_pick_event_marks_draft_complete_at_final_pick():
     """#82: pick_number reaching total_picks ends the draft, regardless of whose pick it
     was - clears the recommendation (nothing left to recommend once picks run out) and
