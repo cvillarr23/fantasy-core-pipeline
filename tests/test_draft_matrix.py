@@ -1023,6 +1023,89 @@ def test_hold_and_publish_publishes_when_espn_selecting_signal_is_unavailable():
     mock_publish.assert_called_once()
 
 
+def test_hold_and_publish_shortens_initial_hold_when_espn_reports_less_time():
+    """Regression test for the bug confirmed live 2026-08-28 (league 1986717528):
+    DRAFT_PICK_CLOCK_SECONDS/AUTO_DRAFT_DELAY_SECONDS are hardcoded per-mode guesses -
+    ESPN autodrafted our own pick out from under us on every single attempt because the
+    system held its full 15s delay while ESPN's real clock for our team was only 10s. When
+    ESPN confirms it's genuinely our turn with clock_ms=10000 (5s of headroom reserved via
+    DRAFT_PUBLISH_SAFETY_SECONDS), the hold must shrink to 5s, not stay at 15."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": "7", "clock_ms": 10000}) if key == "draft:L1:selecting" else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True) as mock_wait, \
+         patch.object(dm, "publish_draft_target"):
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=15, sleep_fn=lambda _s: None)
+
+    assert mock_wait.call_args.args[3] == 5  # 10s real clock - 5s DRAFT_PUBLISH_SAFETY_SECONDS
+
+
+def test_hold_and_publish_never_extends_initial_hold_past_the_configured_delay():
+    """Shrink-only: ESPN reporting *more* real time than our own delay must never make the
+    hold wait longer than the operator/mode configured - only ever tighten toward reality."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": "7", "clock_ms": 60000}) if key == "draft:L1:selecting" else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True) as mock_wait, \
+         patch.object(dm, "publish_draft_target"):
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=15, sleep_fn=lambda _s: None)
+
+    assert mock_wait.call_args.args[3] == 15
+
+
+def test_hold_and_publish_ignores_clock_ms_for_a_different_teams_selecting_signal():
+    """clock_ms only means something when ESPN confirms it's genuinely OUR turn - a different
+    team's clock reading must not shrink (or otherwise affect) our own hold."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": "3", "clock_ms": 1000}) if key == "draft:L1:selecting" else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    # team_id 3 != our team (7), so hold_and_publish abandons before ever reaching
+    # wait_for_pause_or_timeout - this asserts that abandonment, not a shortened hold.
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True) as mock_wait, \
+         patch.object(dm, "publish_draft_target") as mock_publish:
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=15, sleep_fn=lambda _s: None)
+
+    mock_wait.assert_called_once()
+    assert mock_wait.call_args.args[3] == 15
+    mock_publish.assert_not_called()
+
+
+def test_hold_and_publish_tightens_retry_deadline_when_espn_reports_less_time():
+    """Same clock-trusting fix, applied on every loop iteration (not just the initial hold):
+    if a retry is still in flight and ESPN's real clock for us is shorter than our own
+    DRAFT_PICK_CLOCK_SECONDS-derived deadline, the deadline must shrink to match - so a
+    too-tight-for-us real clock is detected and abandoned instead of over-retrying past it."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": "7", "clock_ms": 500}) if key == "draft:L1:selecting" else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish, \
+         patch.object(dm, "_surface_clock_expired") as mock_surface, \
+         patch.object(dm, "_record_publish_outcome") as mock_record:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, [target], delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 0.0, clock_origin=0.0,
+        )
+
+    # clock_ms=500 (0.5s) minus DRAFT_PUBLISH_SAFETY_SECONDS (5s) is negative - the tightened
+    # deadline is already in the past, so the target must never be published.
+    mock_publish.assert_not_called()
+    mock_surface.assert_called_once()
+    mock_record.assert_called_once_with(mock_client, "L1", succeeded=False)
+
+
 def test_hold_and_publish_long_delay_still_honors_pause():
     mock_client = MagicMock()
     pause_key = "draft:L1:pause:5"

@@ -600,6 +600,39 @@ def _espn_selecting_team_id(r_client, league_id: str) -> Optional[str]:
         return None
 
 
+def _espn_selecting_state(r_client, league_id: str) -> "tuple[Optional[str], Optional[int]]":
+    """Same read and same fail-open contract as _espn_selecting_team_id, but also surfaces
+    ESPN's own real remaining-time (clock_ms) for whoever is on the clock - a separate
+    function rather than changing that one's return shape, since it has its own callers and
+    its own "mirrors api/draft.py" contract to keep simple.
+
+    Confirmed live 2026-08-28 (league 1986717528): DRAFT_PICK_CLOCK_SECONDS_PRACTICE is a
+    hardcoded per-mode guess (30s) that can be wildly wrong for a room running a much faster
+    real clock - our system held its normal delay while ESPN autodrafted our own pick out
+    from under it roughly 13+ seconds early, every single time, for a whole draft. ESPN
+    already tells us the real number over the WS (draft_sync.js's parseSelectingFrame /
+    parseClockFrame, both feeding this same Redis key) - hold_and_publish uses this to trust
+    that over its own guess whenever it's actually available, instead of continuing to guess
+    when the ground truth is sitting right there.
+
+    clock_ms is best-effort, matching parseSelectingFrame/parseClockFrame's own "not load-
+    bearing the way team_id is" stance - a missing/malformed value degrades to None, same as
+    the key being absent entirely, never to a dropped read of team_id itself."""
+    raw = r_client.get(f"draft:{league_id}:selecting")
+    if raw is None:
+        return None, None
+    try:
+        parsed = json.loads(raw)
+        team_id = str(parsed["team_id"])
+    except (TypeError, ValueError, KeyError):
+        logger.error(f"Malformed on-the-clock JSON on draft:{league_id}:selecting; dropping it.")
+        return None, None
+    clock_ms = parsed.get("clock_ms")
+    if not isinstance(clock_ms, (int, float)):
+        clock_ms = None
+    return team_id, clock_ms
+
+
 # ------------------------------------------------------------------------------
 # Draft pick persistence
 # ------------------------------------------------------------------------------
@@ -1033,6 +1066,26 @@ def hold_and_publish(
             pubsub = r_client.pubsub()
             pubsub.subscribe(rejection_channel)
             try:
+                # Confirmed live 2026-08-28 (league 1986717528): this hold is scheduled the
+                # instant handle_pick_event decides next_pick_number is ours - the same moment
+                # ESPN's own SELECTING/CLOCK frame for our team typically just arrived, so this
+                # read is usually fresh. delay_seconds is a deliberate, hardcoded wait (per-mode
+                # AUTO_DRAFT_DELAY_SECONDS) with no idea what ESPN's *actual* clock for this
+                # room is - in that incident it held the full 15s while ESPN's real clock for
+                # our team was far shorter, autodrafting our own pick out from under us before
+                # the hold even finished. Shrink-only, same reasoning as the deadline tightening
+                # below: never wait past what ESPN just told us is actually left.
+                espn_selecting_now, espn_clock_ms_now = _espn_selecting_state(r_client, league_id)
+                if espn_selecting_now == str(team_id) and espn_clock_ms_now is not None:
+                    real_delay_seconds = max(0, int(espn_clock_ms_now / 1000.0) - DRAFT_PUBLISH_SAFETY_SECONDS)
+                    if real_delay_seconds < delay_seconds:
+                        logger.info(
+                            "ESPN reports only %.1fs actually left for league %s pick %s "
+                            "(vs. our own %ss hold) - shortening the hold to match ESPN's real "
+                            "clock instead of our per-mode guess.",
+                            espn_clock_ms_now / 1000.0, league_id, pick_number, delay_seconds,
+                        )
+                        delay_seconds = real_delay_seconds
                 should_publish = wait_for_pause_or_timeout(
                     r_client, league_id, pick_number, delay_seconds,
                     cancel_event=cancel_event, sleep_fn=sleep_fn,
@@ -1182,7 +1235,7 @@ def hold_and_publish(
                     # contradiction (a different team confirmed on the clock) - None means the
                     # signal isn't available yet, which must not block a publish that would
                     # otherwise be correct.
-                    espn_selecting = _espn_selecting_team_id(r_client, league_id)
+                    espn_selecting, espn_clock_ms = _espn_selecting_state(r_client, league_id)
                     if espn_selecting is not None and espn_selecting != str(team_id):
                         logger.warning(
                             "Abandoning draft target for league %s pick %s: ESPN reports team %s on "
@@ -1191,6 +1244,25 @@ def hold_and_publish(
                             league_id, pick_number, espn_selecting, team_id,
                         )
                         return
+                    # Confirmed live 2026-08-28 (league 1986717528): DRAFT_PICK_CLOCK_SECONDS
+                    # is a hardcoded per-mode guess that can be far longer than a room's real
+                    # clock - ESPN autodrafted our own pick out from under us on every attempt
+                    # because we kept holding against an assumed 30s window while its actual
+                    # clock for us was much shorter. When ESPN confirms it's genuinely our
+                    # turn AND tells us the real remaining time, trust that over the guess -
+                    # but only to shrink the deadline, never to extend it past what
+                    # DRAFT_PICK_CLOCK_SECONDS already established, so a stale or
+                    # unexpectedly-large clock_ms can't make this wait longer than intended.
+                    if espn_selecting == str(team_id) and espn_clock_ms is not None:
+                        espn_deadline = monotonic_fn() + (espn_clock_ms / 1000.0) - DRAFT_PUBLISH_SAFETY_SECONDS
+                        if espn_deadline < deadline:
+                            logger.info(
+                                "ESPN reports only %.1fs actually left for league %s pick %s "
+                                "(vs. our own %.1fs-remaining assumption) - tightening the deadline "
+                                "to match ESPN's real clock instead of our per-mode guess.",
+                                espn_clock_ms / 1000.0, league_id, pick_number, deadline - monotonic_fn(),
+                            )
+                            deadline = espn_deadline
                     if monotonic_fn() >= deadline:
                         logger.warning(
                             "Pick clock expired before the draft target for league %s pick %s could be published; "
