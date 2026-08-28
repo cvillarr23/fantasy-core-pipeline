@@ -1200,6 +1200,169 @@ def test_hold_and_publish_reports_a_pick_abandoned_at_the_deadline():
     assert "Pick clock expired" in mock_client.board["listener_error"]
 
 
+# ---------------------------------------------------------------------------
+# hold_and_publish - automatic circuit breaker (issue #108, Task D)
+# ---------------------------------------------------------------------------
+
+def _failure_counter_client(**initial_board):
+    """A Redis mock whose hincrby/hset on `draft:{league}:board` fields actually persist
+    across separate hold_and_publish calls, so a test can drive several invocations in a
+    row and observe the real, accumulating consecutive_publish_failures counter - the same
+    "fake the two hash operations against a plain dict" approach _board_client already uses
+    for the Lua-script fields."""
+    board = dict(initial_board)
+
+    def fake_hincrby(_key, field, amount=1):
+        board[field] = board.get(field, 0) + amount
+        return board[field]
+
+    def fake_hset(_key, *args, **kwargs):
+        if "mapping" in kwargs:
+            board.update(kwargs["mapping"])
+        elif len(args) == 2:
+            board[args[0]] = args[1]
+
+    client = MagicMock()
+    client.get.return_value = None
+    client.hincrby.side_effect = fake_hincrby
+    client.hset.side_effect = fake_hset
+    client.board = board
+    return client
+
+
+def test_hold_and_publish_trips_circuit_breaker_after_max_consecutive_failures(monkeypatch):
+    """Three consecutive terminal publish failures for the same league (not necessarily the
+    same pick - the counter is per-league, not per-pick) must flip auto_publish_enabled to
+    False with auto_publish_disabled_by='circuit_breaker' (NOT 'manual' - a future
+    auto-recovery task depends on this distinction) and stop attempting further
+    auto-publishes."""
+    mock_client = _failure_counter_client()
+    target = _player("p1", "RB", 10.0)
+    error = dm.requests.HTTPError(
+        "422 Client Error",
+        response=type("Resp", (), {"status_code": 422, "text": "bad request"})(),
+    )
+
+    with patch.object(dm, "MAX_CONSECUTIVE_PUBLISH_FAILURES", 3), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=error), \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        for pick_number in (1, 2, 3):
+            dm.hold_and_publish(
+                mock_client, "L1", "7", pick_number, target, delay_seconds=0,
+                sleep_fn=lambda _s: None,
+            )
+
+    assert mock_client.board["consecutive_publish_failures"] == 3
+    mock_set_enabled.assert_called_once_with("L1", False, disabled_by="circuit_breaker")
+    assert "3 consecutive publish" in mock_client.board["listener_error"]
+
+
+def test_hold_and_publish_does_not_trip_circuit_breaker_below_the_threshold():
+    mock_client = _failure_counter_client()
+    target = _player("p1", "RB", 10.0)
+    error = dm.requests.HTTPError(
+        "422 Client Error",
+        response=type("Resp", (), {"status_code": 422, "text": "bad request"})(),
+    )
+
+    with patch.object(dm, "MAX_CONSECUTIVE_PUBLISH_FAILURES", 3), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target", side_effect=error), \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        for pick_number in (1, 2):
+            dm.hold_and_publish(
+                mock_client, "L1", "7", pick_number, target, delay_seconds=0,
+                sleep_fn=lambda _s: None,
+            )
+
+    assert mock_client.board["consecutive_publish_failures"] == 2
+    mock_set_enabled.assert_not_called()
+
+
+def test_hold_and_publish_successful_publish_resets_the_failure_counter():
+    """A successful publish in between two failures must reset the streak to 0, so the
+    circuit breaker only trips on a genuinely *consecutive* run of failures, not a lifetime
+    total."""
+    mock_client = _failure_counter_client()
+    target = _player("p1", "RB", 10.0)
+    error = dm.requests.HTTPError(
+        "422 Client Error",
+        response=type("Resp", (), {"status_code": 422, "text": "bad request"})(),
+    )
+
+    with patch.object(dm, "MAX_CONSECUTIVE_PUBLISH_FAILURES", 3), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        with patch.object(dm, "publish_draft_target", side_effect=error):
+            dm.hold_and_publish(
+                mock_client, "L1", "7", 1, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            )
+            dm.hold_and_publish(
+                mock_client, "L1", "7", 2, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            )
+        assert mock_client.board["consecutive_publish_failures"] == 2
+
+        with patch.object(dm, "publish_draft_target", return_value=None):
+            dm.hold_and_publish(
+                mock_client, "L1", "7", 3, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            )
+        assert mock_client.board["consecutive_publish_failures"] == 0
+
+        with patch.object(dm, "publish_draft_target", side_effect=error):
+            dm.hold_and_publish(
+                mock_client, "L1", "7", 4, target, delay_seconds=0, sleep_fn=lambda _s: None,
+            )
+        assert mock_client.board["consecutive_publish_failures"] == 1
+        mock_set_enabled.assert_not_called()
+
+
+def test_hold_and_publish_circuit_breaker_counts_a_clock_expiry_as_a_failure():
+    """A deadline-reached abandonment is a terminal failure too, not just an HTTP error - it
+    means ESPN autodrafted the slot instead of us, exactly like a publish that errored out."""
+    mock_client = _failure_counter_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "MAX_CONSECUTIVE_PUBLISH_FAILURES", 3), \
+         patch.object(dm, "DRAFT_PICK_CLOCK_SECONDS", 5), \
+         patch.object(dm, "DRAFT_PUBLISH_SAFETY_SECONDS", 0), \
+         patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target") as mock_publish, \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 1, target, delay_seconds=0,
+            sleep_fn=lambda _s: None, monotonic_fn=lambda: 45.0, clock_origin=0.0,
+        )
+
+    mock_publish.assert_not_called()
+    mock_set_enabled.assert_not_called()
+    assert mock_client.board["consecutive_publish_failures"] == 1
+
+
+def test_hold_and_publish_does_not_count_a_pause_or_kill_switch_abandonment_as_a_failure():
+    """Abandoning a pick because an operator paused it, or because auto-publish was already
+    disabled (manually or by a prior circuit-breaker trip), is a deliberate non-attempt, not
+    a failure - it must not feed the counter that would otherwise re-trip or extend an
+    already-tripped breaker."""
+    mock_client = _failure_counter_client()
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=False), \
+         patch.object(dm, "publish_draft_target") as mock_publish, \
+         patch.object(dm, "_set_auto_publish_enabled") as mock_set_enabled:
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 1, target, delay_seconds=0, sleep_fn=lambda _s: None,
+        )
+
+    mock_publish.assert_not_called()
+    mock_set_enabled.assert_not_called()
+    assert "consecutive_publish_failures" not in mock_client.board
+
+
+def test_max_consecutive_publish_failures_defaults_to_three():
+    assert dm.MAX_CONSECUTIVE_PUBLISH_FAILURES == 3
+
+
 def test_process_entries_anchors_the_deadline_to_the_stream_entry_not_the_read_time():
     # Redis Stream id is "<unixMillis>-<seq>". This entry was written 60s ago, so its clock
     # origin must be 60s in the past - not "now", which is what a fresh monotonic() reading

@@ -80,6 +80,13 @@ DRAFT_PUBLISH_SAFETY_SECONDS = 5
 # not less: this floor guarantees at least this many seconds remain for the submit path
 # regardless of how AUTO_DRAFT_DELAY_SECONDS is configured for a given mode/room speed.
 MIN_AUTO_PUBLISH_WINDOW_SECONDS = int(os.getenv("MIN_AUTO_PUBLISH_WINDOW_SECONDS", "10"))
+# Issue #108's automatic circuit breaker: a run of this many consecutive *terminal*
+# hold_and_publish failures for one league (deadline reached, a non-retryable error, or
+# retries that ran out of clock - see _record_publish_outcome) trips
+# draft_config.auto_publish_enabled off via _set_auto_publish_enabled(disabled_by=
+# "circuit_breaker"), rather than letting a systemic problem (a dead browser-worker pod, an
+# expired ESPN session) burn through every remaining pick in the draft one at a time.
+MAX_CONSECUTIVE_PUBLISH_FAILURES = int(os.getenv("MAX_CONSECUTIVE_PUBLISH_FAILURES", "3"))
 # Set by _draft_sync_env() alongside DRAFT_PICK_CLOCK_SECONDS - the listener's own practice/live
 # tag, forwarded on every published target so fantasy-browser-worker's click bot can safely
 # submit for real in a practice room without needing its own DRY_RUN=false set (which would also,
@@ -674,6 +681,49 @@ def _auto_publish_disabled(league_id: str) -> bool:
         return False
 
 
+def _record_publish_outcome(r_client, league_id: str, succeeded: bool) -> None:
+    """Tracks consecutive *terminal* hold_and_publish failures per league (not per pick - a
+    different target failing on a later pick still counts toward the same streak, since the
+    underlying cause - e.g. a stale browser session or a dead worker pod - is usually
+    league-wide, not pick-specific) on the same draft:{league_id}:board hash the rest of this
+    module already reads/writes for listener state (see _listener_board_key).
+
+    Resets the counter to 0 on every successful publish, and increments it on every terminal
+    failure (deadline reached, a non-retryable error, or retries that ran out of clock -
+    never a pause/cancel/kill-switch abandonment, which are operator/system decisions, not
+    failures). Trips the circuit breaker at MAX_CONSECUTIVE_PUBLISH_FAILURES by disabling
+    draft_config.auto_publish_enabled with disabled_by="circuit_breaker" (issue #108's shared
+    _set_auto_publish_enabled helper) - distinct from a manual disable ("manual") specifically
+    so a future auto-recovery feature can tell "our own safety net tripped, and may self-heal"
+    apart from "a human turned this off on purpose, leave it alone."
+
+    Best-effort, like the rest of this module's board bookkeeping (_surface_publish_failure,
+    _clear_publish_error): a Redis hiccup here must not raise out of hold_and_publish and
+    turn a normal publish failure/success into an unhandled exception of its own.
+    """
+    key = _listener_board_key(league_id)
+    try:
+        if succeeded:
+            r_client.hset(key, "consecutive_publish_failures", 0)
+            return
+        count = r_client.hincrby(key, "consecutive_publish_failures", 1)
+        if count >= MAX_CONSECUTIVE_PUBLISH_FAILURES:
+            logger.error(
+                "League %s hit %s consecutive publish failures; disabling auto-publish until "
+                "the circuit breaker recovers or an operator re-enables it manually.",
+                league_id, count,
+            )
+            _set_auto_publish_enabled(league_id, False, disabled_by="circuit_breaker")
+            r_client.hset(
+                key, "listener_error",
+                f"Auto-publish disabled automatically after {count} consecutive publish "
+                "failures. Will retry automatically on the next opponent pick; use the "
+                "web-ui toggle to re-enable immediately.",
+            )
+    except Exception as error:
+        logger.error("Failed to record publish outcome for league %s: %s", league_id, error)
+
+
 def wait_for_pause_or_timeout(
     r_client, league_id: str, pick_number: int, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
@@ -988,6 +1038,7 @@ def hold_and_publish(
                             r_client, league_id, target, pick_number, "deadline reached",
                             owner=error_owner, season=season,
                         )
+                        _record_publish_outcome(r_client, league_id, succeeded=False)
                         return
                     # Clamp the attempt to the window that is actually left. Starting one is
                     # not enough - a request begun just inside the deadline with the full
@@ -1004,6 +1055,7 @@ def hold_and_publish(
                             f"only {remaining:.1f}s left, below the {MIN_PUBLISH_WINDOW_SECONDS}s minimum request window",
                             owner=error_owner, season=season,
                         )
+                        _record_publish_outcome(r_client, league_id, succeeded=False)
                         return
                     try:
                         publish_draft_target(
@@ -1014,6 +1066,7 @@ def hold_and_publish(
                         )
                         if failure_surfaced:
                             _clear_publish_error(r_client, league_id, error_owner)
+                        _record_publish_outcome(r_client, league_id, succeeded=True)
                         return
                     except Exception as error:
                         retryable = _is_retryable_publish_error(error)
@@ -1030,10 +1083,12 @@ def hold_and_publish(
                                 "Draft target publish for league %s pick %s failed permanently; not retrying: %s",
                                 league_id, pick_number, _publish_error_detail(error),
                             )
+                            _record_publish_outcome(r_client, league_id, succeeded=False)
                             return
                         if monotonic_fn() + PUBLISH_RETRY_INTERVAL_SECONDS >= deadline:
                             # Also terminal, and for a reason the first error does not convey.
                             _surface_publish_error(r_client, league_id, target, error, owner=error_owner, season=season)
+                            _record_publish_outcome(r_client, league_id, succeeded=False)
                             return
                         logger.warning(
                             "Draft target publish failed for league %s pick %s; retrying in %ss: %s",
@@ -1043,6 +1098,7 @@ def hold_and_publish(
                         sleep_fn(PUBLISH_RETRY_INTERVAL_SECONDS)
             except Exception as error:
                 _surface_publish_error(r_client, league_id, target, error, owner=error_owner, season=season)
+                _record_publish_outcome(r_client, league_id, succeeded=False)
     finally:
         if token is not None:
             context.detach(token)
