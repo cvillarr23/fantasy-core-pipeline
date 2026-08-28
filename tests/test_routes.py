@@ -338,9 +338,11 @@ def test_trigger_draft_pick_publishes_when_the_slot_is_still_open(client):
     # league_id IS forwarded now (it wasn't before): the click bot needs it to know which
     # league's draft it's acting on rather than trusting its own pod's static ESPN_LEAGUE_ID
     # env var for every message regardless of which league the target is actually for.
-    # pick_number stays excluded - no consumer need for it downstream.
+    # pick_number IS forwarded too now (issue #108): the click bot echoes it back on a
+    # confirmed ESPN rejection via draft_pick_rejected:{leagueId}, so hold_and_publish can
+    # match the rejection to the pick it's currently holding.
     assert body["league_id"] == "L1"
-    assert "pick_number" not in body
+    assert body["pick_number"] == 6
 
 
 def test_trigger_draft_pick_releases_the_claim_on_a_pika_wrong_state_error(client):
@@ -423,9 +425,12 @@ def test_trigger_draft_pick_release_does_not_drop_a_retrys_fresh_claim(client):
     assert mock_redis.store["draft:trigger:idempotency:L1:5:4046"] == "pending:someone-else"
 
 
-def test_trigger_draft_pick_does_not_leak_the_idempotency_key_onto_the_queue(client):
-    """idempotency_key is gateway-only state; the click-bot does not deduplicate. Forwarding
-    it would change the draft_targets JSON contract for no consumer benefit."""
+def test_trigger_draft_pick_forwards_idempotency_key_and_pick_number_onto_the_queue(client):
+    """idempotency_key and pick_number USED to be gateway-only state stripped before the queue
+    (see git history) - issue #108 needs the click bot to echo both back on a confirmed ESPN
+    rejection (draft_pick_rejected:{leagueId}) so hold_and_publish can match the rejection to
+    the pick it's currently holding. expires_at remains gateway-only and is still stripped: the
+    click bot has no use for the caller's HTTP deadline."""
     mock_channel = MagicMock()
     mock_connection = MagicMock()
     mock_connection.channel.return_value = mock_channel
@@ -433,6 +438,7 @@ def test_trigger_draft_pick_does_not_leak_the_idempotency_key_onto_the_queue(cli
     payload = {
         "team_id": "7", "player_id": "4046", "name": "Some Back",
         "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+        "pick_number": 5, "expires_at": time.time() + 3600,
     }
 
     with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
@@ -442,7 +448,9 @@ def test_trigger_draft_pick_does_not_leak_the_idempotency_key_onto_the_queue(cli
 
     assert response.status_code == 202
     body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
-    assert "idempotency_key" not in body
+    assert body["idempotency_key"] == "L1:5:4046"
+    assert body["pick_number"] == 5
+    assert "expires_at" not in body
     assert body["player_id"] == "4046"
 
 

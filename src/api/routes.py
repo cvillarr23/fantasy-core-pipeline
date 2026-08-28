@@ -455,18 +455,24 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         carrier: dict = {}
         propagate.inject(carrier)
 
-        # idempotency_key/expires_at/pick_number are gateway-only state with no consumer use
-        # today. league_id is NOT excluded (used to be, alongside those three) - the click bot
-        # needs it to know which league's draft it's acting on. It used to fall back silently to
-        # its own pod's ESPN_LEAGUE_ID env var for every message regardless of which league the
-        # target was actually for, which is safe only for a single-league deployment; a shared
-        # worker processing a practice league's target while configured for the live league would
-        # otherwise read/act against the wrong draft entirely (confirmed live: the worker's own
-        # log line named the live league while it was actually processing a practice message).
+        # expires_at is gateway-only state with no consumer use today - the click bot has no
+        # deadline concept of its own. idempotency_key and pick_number USED to be excluded
+        # alongside it (comment used to read "gateway-only state with no consumer use"), but
+        # issue #108's draft_pick_rejected feedback channel needs the click bot to echo both
+        # back on a confirmed ESPN rejection, so fantasy-core-pipeline's hold_and_publish can
+        # match the rejection to the pick it's currently holding - forwarding them is required,
+        # not merely harmless. league_id is likewise NOT excluded (used to be, alongside those
+        # three) - the click bot needs it to know which league's draft it's acting on. It used
+        # to fall back silently to its own pod's ESPN_LEAGUE_ID env var for every message
+        # regardless of which league the target was actually for, which is safe only for a
+        # single-league deployment; a shared worker processing a practice league's target while
+        # configured for the live league would otherwise read/act against the wrong draft
+        # entirely (confirmed live: the worker's own log line named the live league while it was
+        # actually processing a practice message).
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"idempotency_key", "expires_at", "pick_number"}),
+            **payload.model_dump(exclude={"expires_at"}),
         })
 
         # Last possible moment before the message becomes durable. Everything above can
