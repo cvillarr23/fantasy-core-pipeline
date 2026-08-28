@@ -1498,7 +1498,13 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                         "top_candidates": "[]",
                     })
                     return None
-            if event["team_id"] == our_team_id:
+            # Confirmed live 2026-08-28 (leagues 369361154, 696093652): event["team_id"] comes
+            # from decode_pick_event's json.loads of fantasy-browser-worker's payload, where
+            # draft_sync.js sets team_id via Number(teamId) - a JSON number, decoded here as a
+            # Python int. our_team_id is str (argparse's --team-id). "8 == '8'" is False, so an
+            # unguarded == silently never matched - this branch never ran for any league, ever,
+            # leaving was_autodrafted permanently NULL even for genuinely successful publishes.
+            if str(event["team_id"]) == str(our_team_id):
                 # Compares the landed pick against the last target we actually attempted to
                 # publish for this exact pick_number (see publish_draft_target's r_client
                 # write), to detect ESPN autodrafting on our behalf when our recommendation

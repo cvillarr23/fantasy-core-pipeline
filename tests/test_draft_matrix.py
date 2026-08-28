@@ -2221,6 +2221,29 @@ def test_handle_pick_event_flags_was_autodrafted_true_when_no_attempt_was_record
     mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, True)
 
 
+def test_handle_pick_event_matches_team_id_across_the_json_int_str_boundary(monkeypatch):
+    """Regression test for the bug confirmed live 2026-08-28 (leagues 369361154, 696093652):
+    decode_pick_event's json.loads decodes fantasy-browser-worker's team_id (written via
+    JS's Number(teamId)) as a Python int, while our_team_id is always str (argparse's
+    --team-id). An unguarded == between event["team_id"] and our_team_id is therefore False
+    even when they represent the same team, permanently unreachable in production - was_
+    autodrafted stayed NULL forever, even for genuinely successful publishes, because this
+    whole branch (and its logging) never ran. Every other test in this file constructs
+    event["team_id"] as a pre-typed string, which is exactly why this shipped broken."""
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    mock_client.hget.return_value = json.dumps({"espn_id": "p1", "name": "Some Back"})
+    event = {"pick_number": "1", "team_id": 7, "player_id": "p1"}  # int, matching json.loads
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag") as mock_persist_flag:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, False)
+
+
 def _mock_conn_with_disabled_by(disabled_by, inserted: bool = True, team_count: int = 10):
     """Extends _mock_conn_returning's query-routed fetchone with an answer for
     _maybe_recover_circuit_breaker's own SELECT auto_publish_disabled_by lookup, without
