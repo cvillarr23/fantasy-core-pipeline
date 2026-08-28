@@ -888,6 +888,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
     body = response.json()
     assert body["job_state"] == "Active"
     assert body["mode"] == "practice"
+    assert body["auto_publish_enabled"] is True
+    assert body["auto_publish_disabled_by"] is None
     assert body["last_clicker_action"] == "Drafted Breece Hall at 14:32:05"
     assert body["recommendation"]["recommended_player_id"] == "p2"
     assert body["recommendation"]["auto_publish_at"] == 1724257205
@@ -903,6 +905,38 @@ def test_get_draft_status_aggregates_expected_shape(client):
     assert body["listener_state"] == "Active"
     assert body["listener_last_event_at"] == "1970-01-01T00:16:40Z"
     assert body["listener_error"] is None
+
+
+def test_draft_status_surfaces_auto_publish_enabled_and_disabled_by(client):
+    """#108/#109: /status must surface the draft_config row's kill-switch state exactly,
+    including a manually-disabled league's reason string."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+    mock_cursor.fetchall.return_value = []
+
+    def _fetchone():
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("live", False, "manual")
+        return None
+
+    mock_cursor.fetchone.side_effect = _fetchone
+
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["auto_publish_enabled"] is False
+    assert body["auto_publish_disabled_by"] == "manual"
 
 
 def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_player_id(client):
@@ -2034,6 +2068,36 @@ def test_resume_draft_requires_config_stored_first(client):
         response = client.post("/v1/draft/resume", json={"league_id": "L1", "pick_number": 5})
 
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/draft/auto-publish
+# ---------------------------------------------------------------------------
+def test_auto_publish_toggle_endpoint_disables_and_reenables(client):
+    """#108/#109: disabling records disabled_by='manual' (the only path allowed to write
+    that reason); re-enabling clears it back to null."""
+    with patch("src.api.draft._set_auto_publish_enabled") as mock_set:
+        response = client.post("/v1/draft/auto-publish", json={"league_id": "L1", "enabled": False})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"status": "updated", "league_id": "L1", "auto_publish_enabled": False, "auto_publish_disabled_by": "manual"}
+    mock_set.assert_called_once_with("L1", False, disabled_by="manual")
+
+    with patch("src.api.draft._set_auto_publish_enabled") as mock_set:
+        response = client.post("/v1/draft/auto-publish", json={"league_id": "L1", "enabled": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"status": "updated", "league_id": "L1", "auto_publish_enabled": True, "auto_publish_disabled_by": None}
+    mock_set.assert_called_once_with("L1", True, disabled_by=None)
+
+
+def test_auto_publish_toggle_endpoint_surfaces_db_failure(client):
+    with patch("src.api.draft._set_auto_publish_enabled", side_effect=Exception("connection refused")):
+        response = client.post("/v1/draft/auto-publish", json={"league_id": "L1", "enabled": False})
+
+    assert response.status_code == 500
 
 
 # ---------------------------------------------------------------------------
