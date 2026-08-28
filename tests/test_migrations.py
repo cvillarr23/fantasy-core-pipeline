@@ -85,6 +85,54 @@ def test_run_migrations_executes_defense_position_strength_ddl_before_indices():
     assert defense_strength_idx < indices_idx
 
 
+def test_run_migrations_executes_draft_picks_was_autodrafted_column_before_indices():
+    """Issue #108 (Task F, fantasy-core-pipeline#110): draft_picks needs a nullable
+    was_autodrafted boolean column so handle_pick_event can flag our own team's picks
+    that landed on a different player than the last target we attempted to publish.
+    Lock in that the ADD COLUMN runs, alongside the existing espn_player_id column
+    addition, and before CREATE_INDICES like the other draft_picks column additions."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    was_autodrafted_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "ADD COLUMN IF NOT EXISTS was_autodrafted" in s
+    )
+    indices_idx = next(i for i, s in enumerate(executed) if "CREATE INDEX" in s)
+    assert was_autodrafted_idx < indices_idx
+
+
+def test_run_migrations_executes_auto_publish_kill_switch_columns():
+    """Issue #108/#109: draft_config gets auto_publish_enabled (boolean, defaults true so
+    every pre-existing row keeps today's always-on behavior) and auto_publish_disabled_by
+    (nullable text, recording 'manual' vs a future 'circuit_breaker' reason) - both must run
+    after CREATE_DRAFT_CONFIG_TABLE, same ordering convention as mode/team_count above."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    enabled_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "ADD COLUMN IF NOT EXISTS auto_publish_enabled BOOLEAN NOT NULL DEFAULT true" in s
+    )
+    disabled_by_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "ADD COLUMN IF NOT EXISTS auto_publish_disabled_by VARCHAR(32)" in s
+    )
+    draft_config_idx = next(
+        i for i, s in enumerate(executed) if "CREATE TABLE IF NOT EXISTS draft_config" in s
+    )
+    assert draft_config_idx < enabled_idx < disabled_by_idx
+
+
 def test_run_migrations_raises_when_weekly_stats_pk_migration_was_skipped():
     """
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (a Postgres NOTICE, not an error) if

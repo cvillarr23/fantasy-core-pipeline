@@ -508,6 +508,36 @@ def test_publish_draft_target_logs_error_response_body(caplog):
     assert "Input should be a valid string" in caplog.text
 
 
+def test_publish_draft_target_records_last_attempted_target(monkeypatch):
+    """Every publish_draft_target call (successful HTTP response, regardless of what
+    ESPN ultimately does with it) must record what we attempted for this pick_number,
+    so a later opponent-side pick event for our own team can be compared against it
+    in handle_pick_event (issue #108, Task F)."""
+    target = _player("p1", "RB", 12.0, name="Some Back", espn_id="e-1")
+    mock_client = MagicMock()
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.publish_draft_target(
+            "7", target, league_id="L1", pick_number=5, r_client=mock_client,
+        )
+
+    mock_client.hset.assert_called_once_with(
+        "draft:L1:last_attempted_target", "5", json.dumps({"espn_id": "e-1", "name": "Some Back"}),
+    )
+
+
+def test_publish_draft_target_skips_recording_without_r_client_league_id_or_pick_number():
+    """A direct call missing any of r_client/league_id/pick_number (e.g. /v1/draft/resume,
+    which does not thread a Redis client through) must not attempt the hset - there is
+    nothing meaningful to key it on."""
+    target = _player("p1", "RB", 12.0, name="Some Back", espn_id="e-1")
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.publish_draft_target("7", target)  # no r_client, league_id, or pick_number
+
+
 def test_record_publish_error_writes_status_visible_execution_log_row():
     mock_cursor = MagicMock()
     mock_conn = MagicMock()
@@ -552,6 +582,77 @@ def test_hold_and_publish_skips_when_cancelled():
         dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
 
     mock_post.assert_not_called()
+
+
+def test_hold_and_publish_abandons_when_auto_publish_disabled():
+    """A false auto_publish_enabled must stop hold_and_publish before it ever calls
+    publish_draft_target, exactly like an operator pause (#108/#109)."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0)
+
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (False,)
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm.hold_and_publish(mock_client, "L1", "7", 5, target, delay_seconds=1, sleep_fn=lambda s: None)
+
+    mock_post.assert_not_called()
+    query, params = mock_cursor.execute.call_args.args
+    assert "auto_publish_enabled" in query
+    assert params == ("L1",)
+
+
+def test_auto_publish_disabled_reads_fresh_each_call():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (True,)
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        assert dm._auto_publish_disabled("L1") is False
+
+
+def test_auto_publish_disabled_fails_open_on_db_error():
+    """A DB hiccup reading auto_publish_enabled must not silently convert every league
+    into permanent manual-only mode - fail open (not disabled)."""
+    with patch("src.optimization.draft_matrix.get_db_connection", side_effect=RuntimeError("db down")):
+        assert dm._auto_publish_disabled("L1") is False
+
+
+def test_set_auto_publish_enabled_disables_and_records_reason():
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm._set_auto_publish_enabled("L1", False, disabled_by="manual")
+
+    query, params = mock_cursor.execute.call_args.args
+    assert "auto_publish_enabled" in query
+    assert "auto_publish_disabled_by" in query
+    assert params == (False, "manual", "L1")
+
+
+def test_set_auto_publish_enabled_clears_disabled_by_when_reenabled():
+    """Re-enabling always clears disabled_by to NULL, regardless of what the caller passes -
+    a re-enabled league has no active disabled reason."""
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        dm._set_auto_publish_enabled("L1", True, disabled_by="manual")
+
+    query, params = mock_cursor.execute.call_args.args
+    assert params == (True, None, "L1")
 
 
 def test_hold_and_publish_retries_transient_publish_failure():
@@ -1666,17 +1767,73 @@ def test_process_entries_decodes_payload_before_handling():
 def test_handle_pick_event_skips_recommendation_when_we_just_picked():
     mock_conn, _ = _mock_conn_returning(inserted=True)
     mock_client = MagicMock()
+    mock_client.hget.return_value = None
     event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
 
-    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn:
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag") as mock_persist_flag:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
 
     assert result is None
-    mock_client.hset.assert_called_once()
-    mapping = mock_client.hset.call_args.kwargs["mapping"]
+    mapping = mock_client.hset.call_args_list[0].kwargs["mapping"]
     assert mapping["listener_state"] == "Active"
     assert mapping["last_processed_pick_number"] == 1
+    # No attempt was ever recorded for this pick, so it must count as autodrafted.
+    mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, True)
+
+
+def test_handle_pick_event_flags_was_autodrafted_on_mismatch(monkeypatch):
+    """Our own team's pick landing with a different espn_player_id than the last target
+    we attempted for that pick_number must be recorded as was_autodrafted=True."""
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    mock_client.hget.return_value = json.dumps({"espn_id": "other-player", "name": "Someone Else"})
+    event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag") as mock_persist_flag:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_client.hget.assert_called_once_with("draft:L1:last_attempted_target", "1")
+    mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, True)
+
+
+def test_handle_pick_event_flags_not_autodrafted_on_match(monkeypatch):
+    """The landed player matching the last target we attempted for that pick_number means
+    our own recommendation actually went through - was_autodrafted must be False."""
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    mock_client.hget.return_value = json.dumps({"espn_id": "p1", "name": "Some Back"})
+    event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag") as mock_persist_flag:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, False)
+
+
+def test_handle_pick_event_flags_was_autodrafted_true_when_no_attempt_was_recorded(monkeypatch):
+    """No recorded attempt at all (e.g. auto-publish was off, or the recompute never
+    produced a feasible candidate) also counts as autodrafted - we did not choose this
+    player, regardless of the reason."""
+    mock_conn, _ = _mock_conn_returning(inserted=True)
+    mock_client = MagicMock()
+    mock_client.hget.return_value = None
+    event = {"pick_number": "1", "team_id": "7", "player_id": "p1"}
+
+    with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.draft_matrix.persist_pick_autodraft_flag") as mock_persist_flag:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        result = dm.handle_pick_event(mock_client, "L1", 2026, 1, our_team_id="7", event=event)
+
+    assert result is None
+    mock_persist_flag.assert_called_once_with(mock_conn, "L1", 2026, 1, True)
 
 
 def test_handle_pick_event_marks_draft_complete_at_final_pick():

@@ -635,6 +635,45 @@ def _is_paused_or_cancelled(r_client, league_id: str, pick_number: int, cancel_e
     return False
 
 
+def _set_auto_publish_enabled(league_id: str, enabled: bool, disabled_by: Optional[str] = None) -> None:
+    """Single write path for draft_config.auto_publish_enabled/auto_publish_disabled_by -
+    used by both the manual web-ui/API toggle (disabled_by='manual') and (in a future task)
+    an automatic circuit breaker (disabled_by='circuit_breaker'). Keeping this as the only
+    writer is what lets a future auto-recovery feature trust auto_publish_disabled_by as an
+    accurate record of which of the two turned it off last. disabled_by is only ever
+    persisted when disabling - re-enabling always clears it back to NULL, regardless of what
+    the caller passed, since a re-enabled league has no active "disabled by" reason."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE draft_config SET auto_publish_enabled = %s, "
+                "auto_publish_disabled_by = %s WHERE league_id = %s;",
+                (enabled, disabled_by if not enabled else None, league_id),
+            )
+
+
+def _auto_publish_disabled(league_id: str) -> bool:
+    """Reads draft_config.auto_publish_enabled fresh on every attempt (never cached at
+    thread-start) so an operator's manual kill switch - or a future automatic circuit
+    breaker - takes effect immediately, even mid-retry, not just for the next pick's
+    thread. Mirrors _is_paused_or_cancelled's "read first, on every attempt" pattern above.
+
+    Fails open (treats a read failure as enabled/not-disabled): a DB hiccup here must not
+    silently convert every league into permanent manual-only mode."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT auto_publish_enabled FROM draft_config WHERE league_id = %s;",
+                    (league_id,),
+                )
+                row = cursor.fetchone()
+                return row is not None and row[0] is False
+    except Exception as error:
+        logger.error(f"Failed to read auto_publish_enabled for league {league_id}: {error}")
+        return False
+
+
 def wait_for_pause_or_timeout(
     r_client, league_id: str, pick_number: int, delay_seconds: int,
     cancel_event: Optional[threading.Event] = None, sleep_fn=time.sleep,
@@ -658,7 +697,19 @@ def wait_for_pause_or_timeout(
     return not _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event)
 
 
-def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None, mode: Optional[str] = None) -> None:
+def persist_pick_autodraft_flag(conn, league_id: str, season: int, pick_number: int, value: bool) -> None:
+    """Records whether our own team's pick landed on a player we did not actually attempt
+    to publish (issue #108, Task F) - see handle_pick_event's comparison against
+    draft:{league_id}:last_attempted_target. Only ever called for our own team's picks;
+    opponent picks keep the column's NULL default."""
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            UPDATE draft_picks SET was_autodrafted = %s
+             WHERE league_id = %s AND season = %s AND pick_number = %s;
+        """, (value, league_id, season, pick_number))
+
+
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None, mode: Optional[str] = None, r_client=None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -715,6 +766,17 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
         )
     response.raise_for_status()
     logger.info(f"Published draft target for Team {team_id}: {target['name']} ({target['position']}).")
+    # Records what we actually attempted for this pick_number (issue #108, Task F), so a
+    # later pick event landing on our own team's slot can be compared against it in
+    # handle_pick_event to detect an ESPN autodraft that overrode our recommendation.
+    # r_client is optional: /v1/draft/resume calls this function directly and does not have
+    # a Redis client threaded through its request handler, so a resumed/manual pick simply
+    # gets no autodraft comparison - an acceptable, explicitly-documented gap for that one path.
+    if r_client is not None and league_id is not None and pick_number is not None:
+        r_client.hset(
+            f"draft:{league_id}:last_attempted_target", str(pick_number),
+            json.dumps({"espn_id": target["espn_id"], "name": target["name"]}),
+        )
 
 
 def _publish_error_detail(error: Exception) -> str:
@@ -886,6 +948,18 @@ def hold_and_publish(
                     # purpose because the slot was filled or the operator intervened.
                     if _is_paused_or_cancelled(r_client, league_id, pick_number, cancel_event):
                         return
+                    # #108/#109: same "read fresh on every attempt" reasoning as the pause/
+                    # cancel guard above - a manual kill switch flip (or a future circuit
+                    # breaker) must take effect immediately, mid-retry, not just for the
+                    # next pick's thread. Treated as an operator-abandoned pick, exactly like
+                    # a pause, rather than a publish failure.
+                    if _auto_publish_disabled(league_id):
+                        logger.info(
+                            "Auto-publish disabled for league %s; abandoning scheduled publish for pick %s "
+                            "(manual kill switch or circuit breaker) rather than sending an automated pick.",
+                            league_id, pick_number,
+                        )
+                        return
                     # #107: re-checked on every attempt, same reasoning as the pause/cancel
                     # guard above - ESPN's own real-time turn signal, when available, wins
                     # over the schedule this thread was given. Our snake-draft math assumes
@@ -936,7 +1010,7 @@ def hold_and_publish(
                             team_id, target, idempotency_key=idempotency_key,
                             timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
                             expires_at=time_fn() + remaining,
-                            league_id=league_id, pick_number=pick_number,
+                            league_id=league_id, pick_number=pick_number, r_client=r_client,
                         )
                         if failure_surfaced:
                             _clear_publish_error(r_client, league_id, error_owner)
@@ -1187,7 +1261,26 @@ def handle_pick_event(r_client, league_id: str, season: int, week: int, our_team
                     })
                     return None
             if event["team_id"] == our_team_id:
-                logger.info("We just picked; no recommendation to compute until the next opponent pick.")
+                # Compares the landed pick against the last target we actually attempted to
+                # publish for this exact pick_number (see publish_draft_target's r_client
+                # write), to detect ESPN autodrafting on our behalf when our recommendation
+                # never landed - e.g. the pick clock ran out, auto-publish was off, or the
+                # recompute never produced a feasible candidate. A mismatch, or no recorded
+                # attempt at all, both count as autodrafted: either way we did not choose
+                # this player.
+                attempted_raw = r_client.hget(f"draft:{league_id}:last_attempted_target", str(pick_number))
+                was_autodrafted = True
+                if attempted_raw:
+                    try:
+                        attempted = json.loads(attempted_raw)
+                        was_autodrafted = str(attempted.get("espn_id")) != espn_player_id
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        was_autodrafted = True
+                persist_pick_autodraft_flag(conn, league_id, season, pick_number, was_autodrafted)
+                logger.info(
+                    "We just picked (pick %s); was_autodrafted=%s. No recommendation to compute "
+                    "until the next opponent pick.", pick_number, was_autodrafted,
+                )
                 return None
             next_pick_number = pick_number + 1
             if team_count:

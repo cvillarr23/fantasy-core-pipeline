@@ -262,6 +262,23 @@ ADD_DRAFT_CONFIG_TEAM_COUNT_COLUMN = """
 ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS team_count INT;
 """
 
+# Manual auto-publish kill switch (issue #108/#109). Defaults every pre-existing row to
+# true so hold_and_publish's behavior is unchanged for leagues configured before this
+# migration ran - it is an operator opt-out, not an opt-in.
+ADD_DRAFT_CONFIG_AUTO_PUBLISH_ENABLED_COLUMN = """
+ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS auto_publish_enabled BOOLEAN NOT NULL DEFAULT true;
+"""
+
+# 'manual' (an operator used the web-ui/API toggle) or 'circuit_breaker' (draft_matrix.py
+# tripped it automatically after repeated publish failures). NULL means auto-publish has
+# never been disabled for this league. This distinction is what lets a future auto-recovery
+# feature tell "a human turned this off on purpose, leave it alone" apart from "our own code
+# turned this off as a safety net, and may turn it back on once the draft looks healthy again"
+# - without it, both cases are indistinguishable from a single bool.
+ADD_DRAFT_CONFIG_AUTO_PUBLISH_DISABLED_BY_COLUMN = """
+ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS auto_publish_disabled_by VARCHAR(32);
+"""
+
 # The raw ESPN player id every draft pick arrives with.
 #
 # players.player_id is Sleeper's id - it is the PK four other tables reference, and the whole
@@ -281,6 +298,21 @@ ALTER TABLE draft_config ADD COLUMN IF NOT EXISTS team_count INT;
 # lost and unresolved ones can be backfilled as crosswalk coverage improves.
 ADD_DRAFT_PICKS_ESPN_PLAYER_ID_COLUMN = """
 ALTER TABLE draft_picks ADD COLUMN IF NOT EXISTS espn_player_id VARCHAR(20);
+"""
+
+# Whether a pick landed on a player we did NOT actually attempt to publish (issue #108, Task F).
+#
+# handle_pick_event compares an incoming pick event on our own team's slot against
+# draft:{league_id}:last_attempted_target - the last player we actually tried to publish for
+# that pick_number via publish_draft_target. A mismatch (or no recorded attempt at all, e.g.
+# auto-publish was off or the recompute never produced a feasible candidate) means ESPN's
+# clock ran out and the room autodrafted on our behalf instead of our recommendation landing.
+#
+# Only ever meaningful for our own team's picks - opponent picks have no "target we attempted"
+# concept, so this stays NULL for them rather than false, which would misleadingly imply we
+# evaluated and ruled out autodraft for a pick we never controlled.
+ADD_DRAFT_PICKS_WAS_AUTODRAFTED_COLUMN = """
+ALTER TABLE draft_picks ADD COLUMN IF NOT EXISTS was_autodrafted BOOLEAN DEFAULT NULL;
 """
 
 # Per-team round-1 draft slot (CORE-10), inferred live from round-1 pick arrival order in

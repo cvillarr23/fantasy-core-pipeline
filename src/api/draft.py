@@ -56,6 +56,7 @@ from pydantic import BaseModel, Field, field_validator
 from src.database import get_db_cursor
 from src.ingestion.sync_kicker_dst import ESPN_TO_INTERNAL_TEAM
 from src.optimization.draft_matrix import (
+    _set_auto_publish_enabled,
     compute_draft_recommendation,
     compute_on_the_clock_team,
     compute_total_picks,
@@ -240,6 +241,12 @@ class DraftConfigPayload(BaseModel):
     team_id: str = Field(..., description="Our own team_id within that league")
     season: int = Field(..., description="Season year, e.g. 2026")
     mode: Literal["live", "practice"] = Field("live", description="'practice' for ESPN mock draft rooms; tags the Job/status so a practice run is never mistaken for the real Draft Day")
+    auto_publish_enabled: bool = Field(True, description="Manual kill switch (#108/#109) for hold_and_publish's auto-publish. Defaults True so existing callers that never send this field see no behavior change.")
+
+
+class DraftAutoPublishRequest(BaseModel):
+    league_id: str = Field(..., description="League whose auto-publish kill switch should be toggled")
+    enabled: bool = Field(..., description="False disables auto-publish (recorded as disabled_by='manual'); true re-enables it (clears disabled_by)")
 
 
 class DraftPickSummary(BaseModel):
@@ -256,6 +263,10 @@ class DraftPickSummary(BaseModel):
     espn_player_id: Optional[str] = Field(
         None,
         description="ESPN's own player id, as it arrived on the draft stream. Null only on picks recorded before this column existed.",
+    )
+    was_autodrafted: Optional[bool] = Field(
+        None,
+        description="True if this pick landed on a different player than the last target we actually attempted to publish for its pick_number (or no attempt was ever recorded, e.g. auto-publish was off) - i.e. ESPN's clock ran out and the room picked on our behalf rather than our recommendation landing. Only ever meaningful for our own team's picks; always null for opponent picks, since the concept of 'a target we attempted' does not apply to them.",
     )
     name: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
     position: Optional[str] = Field(None, description="Joined from players; null if the player row is missing")
@@ -278,6 +289,8 @@ class DraftStatusResponse(BaseModel):
     league_id: str
     season: int
     mode: str = Field(..., description="'live' or 'practice', sourced from the draft_config row for this league")
+    auto_publish_enabled: bool = Field(True, description="Manual kill switch (#108/#109) for hold_and_publish's auto-publish; True (fail-open) when the draft_config row is unavailable")
+    auto_publish_disabled_by: Optional[str] = Field(None, description="'manual' if an operator disabled auto-publish via POST /v1/draft/auto-publish, 'circuit_breaker' if a future automatic safety net tripped it, null if auto-publish has never been disabled for this league")
     job_state: str = Field(..., description="Active/Succeeded/Failed/Unknown, from the k8s Job's own status")
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
     last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
@@ -824,7 +837,7 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
     no VORP computed yet)."""
     cursor.execute(f"""
         SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position,
-               w.vorp_score, w.projected_points, w.scarcity_multiplier, w.matchup_coefficient
+               w.vorp_score, w.projected_points, w.scarcity_multiplier, w.matchup_coefficient, d.was_autodrafted
         FROM draft_picks d
         LEFT JOIN players p ON d.player_id = p.player_id
         {_WEEKLY_STATS_LATERAL_JOIN}
@@ -836,7 +849,8 @@ def _recent_picks(cursor, league_id: str, season: int, limit: int) -> list:
         {"pick_number": row[0], "round": row[1], "team_id": row[2], "player_id": row[3],
          "espn_player_id": row[4], "name": row[5], "position": row[6],
          "vorp_score": row[7], "projected_points": row[8],
-         "scarcity_multiplier": row[9], "matchup_coefficient": row[10]}
+         "scarcity_multiplier": row[9], "matchup_coefficient": row[10],
+         "was_autodrafted": row[11]}
         for row in cursor.fetchall()
     ]
 
@@ -856,7 +870,7 @@ def _team_rosters(cursor, league_id: str, season: int) -> dict:
     docstring for the join rationale and the current-vs-historical-value caveat."""
     cursor.execute(f"""
         SELECT d.pick_number, d.round, d.team_id, d.player_id, d.espn_player_id, p.name, p.position,
-               w.vorp_score, w.projected_points, w.scarcity_multiplier, w.matchup_coefficient
+               w.vorp_score, w.projected_points, w.scarcity_multiplier, w.matchup_coefficient, d.was_autodrafted
         FROM draft_picks d
         LEFT JOIN players p ON d.player_id = p.player_id
         {_WEEKLY_STATS_LATERAL_JOIN}
@@ -882,6 +896,7 @@ def _team_rosters(cursor, league_id: str, season: int) -> dict:
                 "projected_points": row[8],
                 "scarcity_multiplier": row[9],
                 "matchup_coefficient": row[10],
+                "was_autodrafted": row[11],
             }
         )
     return rosters
@@ -1204,11 +1219,19 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     # already about to go false. Only a successful query that finds no draft_config row
     # falls back to "live" (today's pre-CORE-18 default for an unconfigured league).
     mode = "unknown"
+    auto_publish_enabled = True
+    auto_publish_disabled_by = None
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT mode FROM draft_config WHERE league_id = %s;", (league_id,))
+            cursor.execute(
+                "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config WHERE league_id = %s;",
+                (league_id,),
+            )
             mode_row = cursor.fetchone()
-            mode = mode_row[0] if mode_row is not None else "live"
+            if mode_row is not None:
+                mode, auto_publish_enabled, auto_publish_disabled_by = mode_row
+            else:
+                mode = "live"
             recent_picks = _recent_picks(cursor, league_id, season, limit)
             team_ids = _league_team_ids(cursor, league_id, season)
             team_rosters = _team_rosters(cursor, league_id, season)
@@ -1276,6 +1299,8 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         "league_id": league_id,
         "season": season,
         "mode": mode,
+        "auto_publish_enabled": auto_publish_enabled,
+        "auto_publish_disabled_by": auto_publish_disabled_by,
         "job_state": job_state,
         "recommendation": recommendation,
         "last_clicker_action": last_clicker_action,
@@ -1310,21 +1335,22 @@ def set_draft_config(payload: DraftConfigPayload):
     try:
         with get_db_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO draft_config (league_id, team_id, season, mode)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO draft_config (league_id, team_id, season, mode, auto_publish_enabled)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (league_id) DO UPDATE
                 SET team_id = EXCLUDED.team_id, season = EXCLUDED.season, mode = EXCLUDED.mode,
+                    auto_publish_enabled = EXCLUDED.auto_publish_enabled,
                     -- A derived team count belongs to the season it was derived from. Reusing
                     -- a room for a new season must start over rather than inherit it.
                     team_count = CASE WHEN draft_config.season IS DISTINCT FROM EXCLUDED.season
                                       THEN NULL ELSE draft_config.team_count END,
                     updated_at = CURRENT_TIMESTAMP;
-            """, (payload.league_id, payload.team_id, payload.season, payload.mode))
+            """, (payload.league_id, payload.team_id, payload.season, payload.mode, payload.auto_publish_enabled))
     except Exception as e:
         logger.error(f"Failed to persist draft config for league {payload.league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to store draft config: {str(e)}")
 
-    return {"status": "stored", "league_id": payload.league_id, "team_id": payload.team_id, "season": payload.season, "mode": payload.mode}
+    return {"status": "stored", "league_id": payload.league_id, "team_id": payload.team_id, "season": payload.season, "mode": payload.mode, "auto_publish_enabled": payload.auto_publish_enabled}
 
 
 @draft_router.post("/start", status_code=status.HTTP_202_ACCEPTED)
@@ -1675,6 +1701,31 @@ def resume_draft(payload: DraftPauseRequest):
         raise HTTPException(status_code=500, detail=f"Failed to publish resumed draft target: {str(e)}")
 
     return {"status": "resumed", "league_id": payload.league_id, "pick_number": pick_number, "published": True, "player_id": target["player_id"], "name": target["name"]}
+
+
+@draft_router.post("/auto-publish", status_code=status.HTTP_200_OK)
+def set_auto_publish(payload: DraftAutoPublishRequest):
+    """Manual kill switch (#108/#109): flips draft_config.auto_publish_enabled so
+    hold_and_publish abandons a scheduled auto-publish instead of sending it, without
+    touching the pause/resume mechanism above (a paused pick can still be resumed manually
+    even while auto-publish is globally off for the league).
+
+    Delegates the actual write to _set_auto_publish_enabled in draft_matrix.py rather than
+    running its own SQL - the same shared helper (in a later task) a circuit breaker will
+    call with disabled_by='circuit_breaker'. This endpoint is the only caller allowed to
+    pass disabled_by='manual', since it is the one path an actual human clicked."""
+    try:
+        _set_auto_publish_enabled(payload.league_id, payload.enabled, disabled_by="manual" if not payload.enabled else None)
+    except Exception as e:
+        logger.error(f"Failed to update auto_publish_enabled for league {payload.league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update auto-publish setting: {str(e)}")
+
+    return {
+        "status": "updated",
+        "league_id": payload.league_id,
+        "auto_publish_enabled": payload.enabled,
+        "auto_publish_disabled_by": "manual" if not payload.enabled else None,
+    }
 
 
 # ------------------------------------------------------------------------------

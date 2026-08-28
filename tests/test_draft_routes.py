@@ -36,10 +36,27 @@ def test_set_draft_config_upserts(client):
         response = client.post("/v1/draft/config", json=payload)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "stored", "league_id": "L1", "team_id": "7", "season": 2026, "mode": "live"}
+    assert response.json() == {"status": "stored", "league_id": "L1", "team_id": "7", "season": 2026, "mode": "live", "auto_publish_enabled": True}
     query, params = mock_cursor.execute.call_args[0]
     assert "ON CONFLICT (league_id) DO UPDATE" in query
-    assert params == ("L1", "7", 2026, "live")
+    assert params == ("L1", "7", 2026, "live", True)
+
+
+def test_set_draft_config_persists_auto_publish_enabled_default_true(client):
+    """#108/#109: a caller that never sends auto_publish_enabled must still get true
+    persisted (and returned), so existing web-ui/API callers see no behavior change."""
+    mock_cursor = MagicMock()
+    payload = {"league_id": "L1", "team_id": "7", "season": 2026}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        response = client.post("/v1/draft/config", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["auto_publish_enabled"] is True
+    query, params = mock_cursor.execute.call_args[0]
+    assert "auto_publish_enabled" in query
+    assert params[-1] is True
 
 
 def test_set_draft_config_resets_team_count_only_when_the_season_changes(client):
@@ -92,7 +109,7 @@ def test_set_draft_config_practice_mode_allows_distinct_league_id(client):
     assert body["mode"] == "practice"
     assert body["league_id"] == "MOCK123"
     query, params = mock_cursor.execute.call_args[0]
-    assert params == ("MOCK123", "8", 2026, "practice")
+    assert params == ("MOCK123", "8", 2026, "practice", True)
 
 
 def test_set_draft_config_practice_mode_skips_check_when_espn_league_id_unset(client):
@@ -822,11 +839,11 @@ def test_get_draft_status_aggregates_expected_shape(client):
 
     def _fetchall():
         if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
-            return [(2, 1, "3", "p1", "e1", "Player One", "RB", None, None, None, None),
-                    (1, 1, "9", "p0", "e0", "Player Zero", "WR", None, None, None, None)]
+            return [(2, 1, "3", "p1", "e1", "Player One", "RB", None, None, None, None, None),
+                    (1, 1, "9", "p0", "e0", "Player Zero", "WR", None, None, None, None, None)]
         if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
-            return [(1, 1, "9", "p0", "e0", "Player Zero", "WR", None, None, None, None),
-                    (2, 1, "3", "p1", "e1", "Player One", "RB", None, None, None, None)]
+            return [(1, 1, "9", "p0", "e0", "Player Zero", "WR", None, None, None, None, None),
+                    (2, 1, "3", "p1", "e1", "Player One", "RB", None, None, None, None, None)]
         if "draft_slots" in mock_cursor.last_query:
             return [("9", 1), ("3", 2)]
         if "SELECT transaction_type" in mock_cursor.last_query:
@@ -834,8 +851,8 @@ def test_get_draft_status_aggregates_expected_shape(client):
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         # More specific than the bare "team_count" check below: load_league_config's own
         # query also selects team_count, but as a 2-column row.
         if "lineup_slot_counts" in mock_cursor.last_query:
@@ -897,30 +914,30 @@ def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_playe
     mock_cursor.execute.side_effect = _execute
 
     recent_rows = [
-        (12, 4, "A", "p12", "e12", "Player 12", "RB", None, None, None, None),
-        (11, 4, "B", "p11", "e11", "Player 11", "WR", None, None, None, None),
-        (10, 4, "A", "p10", "e10", "Player 10", "QB", None, None, None, None),
-        (9, 3, "B", "p9", "e9", "Player 9", "TE", None, None, None, None),
-        (8, 3, "A", "p8", "e8", "Player 8", "RB", None, None, None, None),
-        (7, 3, "B", "p7", "e7", "Player 7", "WR", None, None, None, None),
-        (6, 2, "A", "p6", "e6", "Player 6", "QB", None, None, None, None),
-        (5, 2, "B", None, "e5", None, None, None, None, None, None),
-        (4, 2, "A", "p4", "e4", "Player 4", "RB", None, None, None, None),
-        (3, 1, "B", "p3", "e3", "Player 3", "WR", None, None, None, None),
+        (12, 4, "A", "p12", "e12", "Player 12", "RB", None, None, None, None, None),
+        (11, 4, "B", "p11", "e11", "Player 11", "WR", None, None, None, None, None),
+        (10, 4, "A", "p10", "e10", "Player 10", "QB", None, None, None, None, None),
+        (9, 3, "B", "p9", "e9", "Player 9", "TE", None, None, None, None, None),
+        (8, 3, "A", "p8", "e8", "Player 8", "RB", None, None, None, None, None),
+        (7, 3, "B", "p7", "e7", "Player 7", "WR", None, None, None, None, None),
+        (6, 2, "A", "p6", "e6", "Player 6", "QB", None, None, None, None, None),
+        (5, 2, "B", None, "e5", None, None, None, None, None, None, None),
+        (4, 2, "A", "p4", "e4", "Player 4", "RB", None, None, None, None, None),
+        (3, 1, "B", "p3", "e3", "Player 3", "WR", None, None, None, None, None),
     ]
     roster_rows = [
-        (1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None),
-        (2, 1, "B", "p2", "e2", "Player 2", "WR", None, None, None, None),
-        (3, 1, "B", "p3", "e3", "Player 3", "WR", None, None, None, None),
-        (4, 2, "A", "p4", "e4", "Player 4", "RB", None, None, None, None),
-        (5, 2, "B", None, "e5", None, None, None, None, None, None),
-        (6, 2, "A", "p6", "e6", "Player 6", "QB", None, None, None, None),
-        (7, 3, "B", "p7", "e7", "Player 7", "WR", None, None, None, None),
-        (8, 3, "A", "p8", "e8", "Player 8", "RB", None, None, None, None),
-        (9, 3, "B", "p9", "e9", "Player 9", "TE", None, None, None, None),
-        (10, 4, "A", "p10", "e10", "Player 10", "QB", None, None, None, None),
-        (11, 4, "B", "p11", "e11", "Player 11", "WR", None, None, None, None),
-        (12, 4, "A", "p12", "e12", "Player 12", "RB", None, None, None, None),
+        (1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None, None),
+        (2, 1, "B", "p2", "e2", "Player 2", "WR", None, None, None, None, None),
+        (3, 1, "B", "p3", "e3", "Player 3", "WR", None, None, None, None, None),
+        (4, 2, "A", "p4", "e4", "Player 4", "RB", None, None, None, None, None),
+        (5, 2, "B", None, "e5", None, None, None, None, None, None, None),
+        (6, 2, "A", "p6", "e6", "Player 6", "QB", None, None, None, None, None),
+        (7, 3, "B", "p7", "e7", "Player 7", "WR", None, None, None, None, None),
+        (8, 3, "A", "p8", "e8", "Player 8", "RB", None, None, None, None, None),
+        (9, 3, "B", "p9", "e9", "Player 9", "TE", None, None, None, None, None),
+        (10, 4, "A", "p10", "e10", "Player 10", "QB", None, None, None, None, None),
+        (11, 4, "B", "p11", "e11", "Player 11", "WR", None, None, None, None, None),
+        (12, 4, "A", "p12", "e12", "Player 12", "RB", None, None, None, None, None),
     ]
 
     def _fetchall():
@@ -933,8 +950,8 @@ def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_playe
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         if "lineup_slot_counts" in mock_cursor.last_query:
             return (3, {"QB": 1, "BE": 0})
         if "FROM league_settings" in mock_cursor.last_query:
@@ -980,9 +997,9 @@ def test_get_draft_status_team_ids_includes_zero_pick_teams_in_slot_order(client
 
     def _fetchall():
         if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
-            return [(1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None)]
+            return [(1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None, None)]
         if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
-            return [(1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None)]
+            return [(1, 1, "A", "p1", "e1", "Player 1", "QB", None, None, None, None, None)]
         if "GROUP BY d.team_id, p.position" in mock_cursor.last_query:
             return [("A", "QB", 1, 5.0, 40.0)]
         # Slot order is deliberately not alphabetical, to prove team_ids preserves it rather
@@ -992,8 +1009,8 @@ def test_get_draft_status_team_ids_includes_zero_pick_teams_in_slot_order(client
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         if "lineup_slot_counts" in mock_cursor.last_query:
             return (3, {"QB": 1, "BE": 0})
         if "team_count" in mock_cursor.last_query:
@@ -1055,18 +1072,18 @@ def test_get_draft_status_picks_carry_current_weekly_stats_value_fields(client):
 
     def _fetchall():
         if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
-            return [(2, 1, "A", "p2", "e2", "Player Two", "WR", 12.5, 145.0, 1.1, 0.95),
-                    (1, 1, "B", "p1", "e1", "Player One", "RB", None, None, None, None)]
+            return [(2, 1, "A", "p2", "e2", "Player Two", "WR", 12.5, 145.0, 1.1, 0.95, None),
+                    (1, 1, "B", "p1", "e1", "Player One", "RB", None, None, None, None, None)]
         if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
-            return [(1, 1, "B", "p1", "e1", "Player One", "RB", None, None, None, None),
-                    (2, 1, "A", "p2", "e2", "Player Two", "WR", 12.5, 145.0, 1.1, 0.95)]
+            return [(1, 1, "B", "p1", "e1", "Player One", "RB", None, None, None, None, None),
+                    (2, 1, "A", "p2", "e2", "Player Two", "WR", 12.5, 145.0, 1.1, 0.95, None)]
         if "draft_slots" in mock_cursor.last_query:
             return [("A", 1), ("B", 2)]
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         if "team_count" in mock_cursor.last_query:
             return (2,)
         if "MAX(pick_number)" in mock_cursor.last_query:
@@ -1096,6 +1113,62 @@ def test_get_draft_status_picks_carry_current_weekly_stats_value_fields(client):
     assert roster_pick_two["vorp_score"] == 12.5
 
 
+def test_get_draft_status_picks_carry_was_autodrafted_flag(client):
+    """Issue #108 (Task F, fantasy-core-pipeline#110): was_autodrafted rides along on both
+    recent_picks and team_rosters rows, straight off draft_picks.was_autodrafted - True for
+    an ESPN-autodrafted pick, False for one that matched our attempted target, and null for
+    an opponent pick or a pick recorded before the column existed."""
+    mock_cursor = MagicMock()
+
+    def _execute(query, params=None):
+        mock_cursor.last_query = query
+
+    mock_cursor.execute.side_effect = _execute
+
+    def _fetchall():
+        if "ORDER BY d.pick_number DESC" in mock_cursor.last_query:
+            return [(3, 1, "A", "p3", "e3", "Player Three", "RB", None, None, None, None, True),
+                    (2, 1, "A", "p2", "e2", "Player Two", "WR", None, None, None, None, False),
+                    (1, 1, "B", "p1", "e1", "Player One", "QB", None, None, None, None, None)]
+        if "ORDER BY d.team_id ASC, d.pick_number ASC" in mock_cursor.last_query:
+            return [(1, 1, "B", "p1", "e1", "Player One", "QB", None, None, None, None, None),
+                    (2, 1, "A", "p2", "e2", "Player Two", "WR", None, None, None, None, False),
+                    (3, 1, "A", "p3", "e3", "Player Three", "RB", None, None, None, None, True)]
+        if "draft_slots" in mock_cursor.last_query:
+            return [("A", 1), ("B", 2)]
+        return []
+
+    def _fetchone():
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
+        if "team_count" in mock_cursor.last_query:
+            return (2,)
+        if "MAX(pick_number)" in mock_cursor.last_query:
+            return (3,)
+        return None
+
+    mock_cursor.fetchall.side_effect = _fetchall
+    mock_cursor.fetchone.side_effect = _fetchone
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    assert response.status_code == 200
+    body = response.json()
+    pick_three = next(p for p in body["recent_picks"] if p["pick_number"] == 3)
+    pick_two = next(p for p in body["recent_picks"] if p["pick_number"] == 2)
+    pick_one = next(p for p in body["recent_picks"] if p["pick_number"] == 1)
+    assert pick_three["was_autodrafted"] is True
+    assert pick_two["was_autodrafted"] is False
+    assert pick_one["was_autodrafted"] is None
+    roster_pick_three = next(p for p in body["team_rosters"]["A"] if p["pick_number"] == 3)
+    assert roster_pick_three["was_autodrafted"] is True
+
+
 def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
     """total_vorp/total_projected_points sum across a team's positions, position_counts
     tallies drafted players per position, and a player with no players-table match (the
@@ -1122,8 +1195,8 @@ def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         # More specific than the bare "team_count" check below: load_league_config's own
         # query also selects team_count, but as a 2-column row.
         if "lineup_slot_counts" in mock_cursor.last_query:
@@ -1178,8 +1251,8 @@ def test_get_draft_status_value_alert_fires_only_past_the_round_threshold(client
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         # More specific than the bare "team_count" check below: load_league_config's own
         # query also selects team_count, but as a 2-column row.
         if "lineup_slot_counts" in mock_cursor.last_query:
@@ -1231,8 +1304,8 @@ def test_get_draft_status_team_aggregates_skip_value_alert_when_team_count_unkno
         return []
 
     def _fetchone():
-        if "SELECT mode FROM draft_config" in mock_cursor.last_query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in mock_cursor.last_query:
+            return ("practice", True, None)
         if "MAX(pick_number)" in mock_cursor.last_query:
             return (0,)
         return None  # no team_count from either league_settings or draft_config
@@ -1592,8 +1665,8 @@ def test_get_draft_status_omits_espn_suggestion_once_draft_is_complete(client):
 
     def _fetchone():
         query = mock_cursor.last_query
-        if "SELECT mode FROM draft_config" in query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in query:
+            return ("practice", True, None)
         if "lineup_slot_counts" in query:
             return (10, {"QB": 1, "BE": 0})  # 1 pick/team
         if "FROM league_settings" in query:
@@ -1721,8 +1794,8 @@ def test_get_draft_status_complete_is_healthy_not_degraded(client):
 
     def _fetchone():
         query = mock_cursor.last_query
-        if "SELECT mode FROM draft_config" in query:
-            return ("practice",)
+        if "SELECT mode, auto_publish_enabled, auto_publish_disabled_by FROM draft_config" in query:
+            return ("practice", True, None)
         if "lineup_slot_counts" in query:
             return (10, {"QB": 1, "BE": 0})  # 1 pick/team
         if "FROM league_settings" in query:
