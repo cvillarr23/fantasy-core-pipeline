@@ -633,6 +633,30 @@ def _espn_selecting_state(r_client, league_id: str) -> "tuple[Optional[str], Opt
     return team_id, clock_ms
 
 
+def _espn_autodraft_active_team_id(r_client, league_id: str) -> Optional[str]:
+    """Mirrors src/api/draft.py's helper of the same name (same reasoning as
+    _espn_selecting_team_id for why it's a separate copy, not a shared import) - reads
+    fantasy-browser-worker's `draft:{league_id}:autodraft` snapshot, ESPN's own live
+    AUTODRAFT <teamId> <bool> WS toggle broadcast.
+
+    Confirmed live 2026-08-28: a team whose ESPN autodraft toggle is ON gets picked for
+    instantly - no real per-pick clock exists for that seat at all, so clock_ms tightening
+    (see _espn_selecting_state) has nothing to trust and no delay, however short, can ever
+    win that race. hold_and_publish uses this to skip its artificial hold entirely rather
+    than lose the same way every single time. `active: false` reports as None here, same as
+    never having seen the frame - both mean autodraft is not known to be on for this team
+    right now."""
+    raw = r_client.get(f"draft:{league_id}:autodraft")
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return str(parsed["team_id"]) if parsed.get("active") else None
+    except (TypeError, ValueError, KeyError):
+        logger.error(f"Malformed autodraft JSON on draft:{league_id}:autodraft; dropping it.")
+        return None
+
+
 # ------------------------------------------------------------------------------
 # Draft pick persistence
 # ------------------------------------------------------------------------------
@@ -1066,26 +1090,44 @@ def hold_and_publish(
             pubsub = r_client.pubsub()
             pubsub.subscribe(rejection_channel)
             try:
-                # Confirmed live 2026-08-28 (league 1986717528): this hold is scheduled the
-                # instant handle_pick_event decides next_pick_number is ours - the same moment
-                # ESPN's own SELECTING/CLOCK frame for our team typically just arrived, so this
-                # read is usually fresh. delay_seconds is a deliberate, hardcoded wait (per-mode
-                # AUTO_DRAFT_DELAY_SECONDS) with no idea what ESPN's *actual* clock for this
-                # room is - in that incident it held the full 15s while ESPN's real clock for
-                # our team was far shorter, autodrafting our own pick out from under us before
-                # the hold even finished. Shrink-only, same reasoning as the deadline tightening
-                # below: never wait past what ESPN just told us is actually left.
-                espn_selecting_now, espn_clock_ms_now = _espn_selecting_state(r_client, league_id)
-                if espn_selecting_now == str(team_id) and espn_clock_ms_now is not None:
-                    real_delay_seconds = max(0, int(espn_clock_ms_now / 1000.0) - DRAFT_PUBLISH_SAFETY_SECONDS)
-                    if real_delay_seconds < delay_seconds:
+                # Confirmed live 2026-08-28 (two separate incidents): delay_seconds is a
+                # deliberate, hardcoded wait (per-mode AUTO_DRAFT_DELAY_SECONDS) with no idea
+                # what ESPN's *actual* state for this room/seat is. Real drafts land anywhere
+                # between "full manual clock" and "instant" - watch ESPN's own live signals and
+                # adapt, rather than assume either extreme. Checked in order of how decisive
+                # each signal is:
+                #   1. ESPN's own AUTODRAFT toggle is ON for our team (league 298899823,
+                #      autopick enabled on our seat): there is no clock at all in that state,
+                #      ESPN fills it instantly, and no delay - however short - can ever win
+                #      that race. Skip the hold entirely rather than lose it the same way
+                #      every time.
+                #   2. Otherwise, ESPN's real remaining time (SELECTING/CLOCK, league
+                #      1986717528: our own 15s hold outlasted a much shorter real clock).
+                #      Shrink-only, same reasoning as the deadline tightening below: never
+                #      wait past what ESPN just told us is actually left.
+                espn_autodraft_active = _espn_autodraft_active_team_id(r_client, league_id)
+                if espn_autodraft_active == str(team_id):
+                    if delay_seconds > 0:
                         logger.info(
-                            "ESPN reports only %.1fs actually left for league %s pick %s "
-                            "(vs. our own %ss hold) - shortening the hold to match ESPN's real "
-                            "clock instead of our per-mode guess.",
-                            espn_clock_ms_now / 1000.0, league_id, pick_number, delay_seconds,
+                            "ESPN's own autodraft toggle is ON for league %s team %s (pick %s) - "
+                            "it fills this team's picks instantly regardless of any clock, so "
+                            "skipping our own %ss hold entirely rather than losing the same race "
+                            "every time.",
+                            league_id, team_id, pick_number, delay_seconds,
                         )
-                        delay_seconds = real_delay_seconds
+                    delay_seconds = 0
+                else:
+                    espn_selecting_now, espn_clock_ms_now = _espn_selecting_state(r_client, league_id)
+                    if espn_selecting_now == str(team_id) and espn_clock_ms_now is not None:
+                        real_delay_seconds = max(0, int(espn_clock_ms_now / 1000.0) - DRAFT_PUBLISH_SAFETY_SECONDS)
+                        if real_delay_seconds < delay_seconds:
+                            logger.info(
+                                "ESPN reports only %.1fs actually left for league %s pick %s "
+                                "(vs. our own %ss hold) - shortening the hold to match ESPN's real "
+                                "clock instead of our per-mode guess.",
+                                espn_clock_ms_now / 1000.0, league_id, pick_number, delay_seconds,
+                            )
+                            delay_seconds = real_delay_seconds
                 should_publish = wait_for_pause_or_timeout(
                     r_client, league_id, pick_number, delay_seconds,
                     cancel_event=cancel_event, sleep_fn=sleep_fn,

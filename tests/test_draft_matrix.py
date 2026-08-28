@@ -1023,6 +1023,64 @@ def test_hold_and_publish_publishes_when_espn_selecting_signal_is_unavailable():
     mock_publish.assert_called_once()
 
 
+def test_hold_and_publish_skips_hold_entirely_when_espn_autodraft_is_on_for_our_team():
+    """Regression test for the bug confirmed live 2026-08-28 (league 298899823): ESPN's own
+    per-team AUTODRAFT toggle was ON for our seat - there is no clock at all in that state,
+    ESPN fills the pick instantly, and no hold delay, however short, can ever win that race.
+    The hold must be skipped entirely (delay_seconds=0), not merely shortened."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": "7", "active": True}) if key == "draft:L1:autodraft" else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True) as mock_wait, \
+         patch.object(dm, "publish_draft_target"):
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=15, sleep_fn=lambda _s: None)
+
+    assert mock_wait.call_args.args[3] == 0
+
+
+def test_hold_and_publish_ignores_autodraft_active_for_a_different_team():
+    """ESPN's autodraft toggle being on for someone else's seat says nothing about ours -
+    must not affect our own hold delay."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = lambda key: (
+        json.dumps({"team_id": "3", "active": True}) if key == "draft:L1:autodraft" else None
+    )
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True) as mock_wait, \
+         patch.object(dm, "publish_draft_target"):
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=15, sleep_fn=lambda _s: None)
+
+    assert mock_wait.call_args.args[3] == 15
+
+
+def test_hold_and_publish_prefers_autodraft_active_signal_over_clock_ms():
+    """When ESPN reports both signals at once (autodraft toggled on for our team, plus a
+    stale/irrelevant clock_ms elsewhere), the autodraft signal - the more decisive one, since
+    it means no clock exists at all - must win: skip the hold entirely rather than merely
+    shrink it to whatever clock_ms happened to say."""
+    mock_client = MagicMock()
+
+    def _get(key):
+        if key == "draft:L1:autodraft":
+            return json.dumps({"team_id": "7", "active": True})
+        if key == "draft:L1:selecting":
+            return json.dumps({"team_id": "7", "clock_ms": 10000})
+        return None
+
+    mock_client.get.side_effect = _get
+    target = _player("p1", "RB", 10.0)
+
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True) as mock_wait, \
+         patch.object(dm, "publish_draft_target"):
+        dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=15, sleep_fn=lambda _s: None)
+
+    assert mock_wait.call_args.args[3] == 0
+
+
 def test_hold_and_publish_shortens_initial_hold_when_espn_reports_less_time():
     """Regression test for the bug confirmed live 2026-08-28 (league 1986717528):
     DRAFT_PICK_CLOCK_SECONDS/AUTO_DRAFT_DELAY_SECONDS are hardcoded per-mode guesses -
