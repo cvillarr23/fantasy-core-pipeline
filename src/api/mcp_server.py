@@ -24,9 +24,8 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from src.database import get_db_cursor
-from src.optimization.draft_matrix import compute_position_caps
-from src.optimization.vorp_matrix import SKILL_POSITIONS, load_league_config
+from src.services.roster_service import compute_roster_deficits
+from src.services.trade_service import evaluate_trade
 
 logger = logging.getLogger("MCPEngine")
 
@@ -134,53 +133,7 @@ def get_league_roster_deficits(season: int, week: int) -> dict:
     week. Only `net_vorp` is actually scoped to the requested season/week (via
     weekly_stats). Requesting a past week's VORP still combines it with today's rosters.
     """
-    with get_db_cursor() as cursor:
-        league_config = load_league_config(cursor)
-        _, starting_requirements = compute_position_caps(league_config, drafted_by_us={})
-
-        cursor.execute("SELECT DISTINCT team_id FROM league_rosters;")
-        team_ids = [row[0] for row in cursor.fetchall()]
-
-        cursor.execute(
-            """
-            SELECT r.team_id, p.position, COUNT(*) AS player_count,
-                   COALESCE(SUM(s.vorp_score), 0.0) AS net_vorp
-            FROM league_rosters r
-            JOIN players p ON r.player_id = p.player_id
-            LEFT JOIN weekly_stats s
-                ON s.player_id = r.player_id AND s.season = %s AND s.week = %s
-            WHERE p.position = ANY(%s)
-            GROUP BY r.team_id, p.position;
-            """,
-            (season, week, SKILL_POSITIONS),
-        )
-        rows = cursor.fetchall()
-
-    # Every team/position pair is initialized up front (zero rostered = full deficit)
-    # before overlaying real rows, so a team with zero players at a position - the exact
-    # structural gap this tool exists to surface - doesn't just silently disappear from
-    # the grouped query's output instead of showing up as a deficit.
-    deficits: dict = {
-        team_id: {
-            position: {
-                "rostered": 0,
-                "starters_required": starting_requirements.get(position, 0),
-                "deficit": starting_requirements.get(position, 0),
-                "net_vorp": 0.0,
-            }
-            for position in SKILL_POSITIONS
-        }
-        for team_id in team_ids
-    }
-    for team_id, position, player_count, net_vorp in rows:
-        required = starting_requirements.get(position, 0)
-        deficits[team_id][position] = {
-            "rostered": player_count,
-            "starters_required": required,
-            "deficit": max(0, required - player_count),
-            "net_vorp": net_vorp,
-        }
-    return {"season": season, "week": week, "roster_snapshot": "current", "teams": deficits}
+    return compute_roster_deficits(season, week)
 
 
 @mcp.tool()
@@ -200,36 +153,7 @@ def evaluate_proposed_trade(
     sides - an LLM-generated malformed trade proposal must fail loudly here rather than
     silently produce a valid-looking but impossible score.
     """
-    incoming_set, outgoing_set = set(incoming_player_ids), set(outgoing_player_ids)
-    if len(incoming_set) != len(incoming_player_ids):
-        raise ValueError("incoming_player_ids contains duplicate player_id(s).")
-    if len(outgoing_set) != len(outgoing_player_ids):
-        raise ValueError("outgoing_player_ids contains duplicate player_id(s).")
-    overlap = incoming_set & outgoing_set
-    if overlap:
-        raise ValueError(f"player_id(s) {sorted(overlap)} cannot appear on both sides of a trade.")
-
-    all_ids = list(incoming_set | outgoing_set)
-    with get_db_cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT player_id, vorp_score FROM weekly_stats
-            WHERE season = %s AND week = %s AND player_id = ANY(%s);
-            """,
-            (season, week, all_ids),
-        )
-        vorp_by_player = dict(cursor.fetchall())
-
-    missing_player_ids = [pid for pid in all_ids if pid not in vorp_by_player]
-    incoming_total = sum(vorp_by_player.get(pid, 0.0) for pid in incoming_player_ids)
-    outgoing_total = sum(vorp_by_player.get(pid, 0.0) for pid in outgoing_player_ids)
-
-    return {
-        "incoming_total": incoming_total,
-        "outgoing_total": outgoing_total,
-        "delta_vorp": incoming_total - outgoing_total,
-        "missing_player_ids": missing_player_ids,
-    }
+    return evaluate_trade(incoming_player_ids, outgoing_player_ids, season, week)
 
 
 mcp_asgi_app = mcp.streamable_http_app()
