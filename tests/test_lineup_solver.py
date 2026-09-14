@@ -3,6 +3,10 @@ from unittest.mock import MagicMock, patch
 from src.optimization import lineup_solver as ls
 
 
+def test_core_api_base_url_defaults_to_core_pipeline_service():
+    assert ls.CORE_API_BASE_URL == "http://fantasy-core-pipeline.core.svc.cluster.local:8000"
+
+
 def _player(pid, position, vorp_score, name=None, defense_matchup_multiplier=1.0):
     return {
         "player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score,

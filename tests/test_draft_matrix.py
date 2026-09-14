@@ -18,6 +18,10 @@ LEAGUE_CONFIG = {
 }
 
 
+def test_core_api_base_url_defaults_to_core_pipeline_service():
+    assert dm.CORE_API_BASE_URL == "http://fantasy-core-pipeline.core.svc.cluster.local:8000"
+
+
 def _player(pid, position, vorp_score, name=None, team="KC", espn_id="e-1"):
     return {"player_id": pid, "espn_id": espn_id, "name": name or pid, "position": position,
             "vorp_score": vorp_score, "team": team}
