@@ -1,6 +1,8 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+from src.api.stats import DEFAULT_VORP_LIMIT
+
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
@@ -22,6 +24,23 @@ VORP_ROW = (
     1.1,
     0.98,
     4.62,
+)
+
+VORP_ROW_NULL_METRICS = (
+    "p2",
+    "Bye Week Guy",
+    "WR",
+    None,
+    2026,
+    3,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
 )
 
 
@@ -54,7 +73,8 @@ def test_browse_vorp_filters_and_defaults_to_vorp_sort(client):
     query, params = cursor.execute.call_args.args
     assert "s.season = %s AND s.week = %s AND p.position = %s" in query
     assert "ORDER BY s.vorp_score DESC NULLS LAST" in query
-    assert params == (2026, 3, "RB")
+    assert "LIMIT %s" in query
+    assert params == (2026, 3, "RB", DEFAULT_VORP_LIMIT)
 
 
 def test_browse_vorp_supports_season_trend_sort(client):
@@ -68,12 +88,74 @@ def test_browse_vorp_supports_season_trend_sort(client):
     assert response.json() == []
     query, params = cursor.execute.call_args.args
     assert "ORDER BY s.season, s.week, p.name" in query
-    assert params == (2026,)
+    assert params == (2026, DEFAULT_VORP_LIMIT)
+
+
+def test_browse_vorp_supports_projected_points_sort(client):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [VORP_ROW]
+
+    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.get("/v1/stats/vorp?sort=projected_points")
+
+    assert response.status_code == 200
+    query, params = cursor.execute.call_args.args
+    assert "ORDER BY s.projected_points DESC NULLS LAST" in query
+    assert params == (DEFAULT_VORP_LIMIT,)
+
+
+def test_browse_vorp_supports_actual_points_sort(client):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [VORP_ROW]
+
+    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.get("/v1/stats/vorp?sort=actual_points")
+
+    assert response.status_code == 200
+    query, params = cursor.execute.call_args.args
+    assert "ORDER BY s.actual_points DESC NULLS LAST" in query
+    assert params == (DEFAULT_VORP_LIMIT,)
+
+
+def test_browse_vorp_serializes_null_metrics(client):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [VORP_ROW_NULL_METRICS]
+
+    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.get("/v1/stats/vorp")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "player_id": "p2",
+            "name": "Bye Week Guy",
+            "position": "WR",
+            "team": None,
+            "season": 2026,
+            "week": 3,
+            "projected_points": None,
+            "actual_points": None,
+            "matchup_coefficient": None,
+            "adjusted_projected_points": None,
+            "vorp_base": None,
+            "scarcity_multiplier": None,
+            "defense_matchup_multiplier": None,
+            "vorp_score": None,
+        }
+    ]
 
 
 def test_browse_vorp_rejects_unknown_sort(client):
     with patch("src.api.stats.get_db_cursor") as get_cursor:
         response = client.get("/v1/stats/vorp?sort=player_id")
+
+    assert response.status_code == 422
+    get_cursor.assert_not_called()
+
+
+def test_browse_vorp_rejects_limit_out_of_bounds(client):
+    with patch("src.api.stats.get_db_cursor") as get_cursor:
+        response = client.get("/v1/stats/vorp?limit=0")
 
     assert response.status_code == 422
     get_cursor.assert_not_called()
@@ -89,3 +171,4 @@ def test_browse_vorp_db_failure_returns_500(client):
         response = client.get("/v1/stats/vorp")
 
     assert response.status_code == 500
+    assert "connection refused" not in response.text

@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter
 from fastapi import HTTPException
+from fastapi import Query
 from pydantic import BaseModel
 
 from src.database import get_db_cursor
@@ -43,6 +44,11 @@ SORT_CLAUSES = {
     VorpSort.week: "s.season, s.week, p.name",
 }
 
+# Every filter is optional, so an unscoped request must still be bounded - weekly_stats
+# grows every player/week/season and has no other cap on rows returned.
+DEFAULT_VORP_LIMIT = 200
+MAX_VORP_LIMIT = 1000
+
 
 @stats_router.get("/vorp", response_model=List[VorpStat])
 def browse_vorp(
@@ -50,6 +56,7 @@ def browse_vorp(
     week: Optional[int] = None,
     position: Optional[str] = None,
     sort: VorpSort = VorpSort.vorp,
+    limit: int = Query(DEFAULT_VORP_LIMIT, ge=1, le=MAX_VORP_LIMIT),
 ):
     filters = []
     params = []
@@ -64,6 +71,7 @@ def browse_vorp(
         params.append(position.upper())
 
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(limit)
     try:
         with get_db_cursor() as cursor:
             cursor.execute(
@@ -75,16 +83,15 @@ def browse_vorp(
                 FROM weekly_stats s
                 JOIN players p ON p.player_id = s.player_id
                 {where_clause}
-                ORDER BY {SORT_CLAUSES[sort]};
+                ORDER BY {SORT_CLAUSES[sort]}
+                LIMIT %s;
             """,
                 tuple(params),
             )
             rows = cursor.fetchall()
     except Exception as e:
         logger.error(f"Failed to browse VORP stats: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to browse VORP stats: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="Failed to browse VORP stats.")
 
     return [
         {
