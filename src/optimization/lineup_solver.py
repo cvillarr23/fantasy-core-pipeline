@@ -21,7 +21,7 @@ configure_trace_logging()
 logger = logging.getLogger("LineupSolver")
 tracer = trace.get_tracer("lineup_solver")
 
-CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-api.core.svc.cluster.local:8000")
+CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
 BENCH_AND_IR_SLOT_NAMES = {"BE", "Bench", "IR"}
 FLEX_SLOT_ELIGIBLE_POSITIONS = {
     "RB/WR/TE": ("RB", "WR", "TE"),
