@@ -136,6 +136,11 @@ BROWSER_WORKER_IMAGE = os.getenv("BROWSER_WORKER_IMAGE")
 # there's nothing to guess here the way there is for DRAFT_SYNC_ENV_SECRET/CONFIGMAP.
 ESPN_SESSION_SECRET_NAME = "espn-session-secrets"
 PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
+# Mirrors PRACTICE_SYNC_APP_LABEL, but for a live league's draft_sync.js connector (issue #66,
+# fantasy-browser-worker). Unlike practice, a live connector needs no manually-joined room URL
+# (it navigates straight to ESPN_LEAGUE_ID/ESPN_TEAM_ID), so /start can create it directly
+# instead of needing its own POST endpoint the way practice does.
+LIVE_SYNC_APP_LABEL = "live-draft-sync"
 
 # Every Kubernetes call in this module is made from a synchronous FastAPI endpoint, which runs
 # on a bounded threadpool. The kubernetes client applies no timeout of its own, so a control
@@ -392,6 +397,24 @@ def _job_state(league_id: str) -> str:
     if job is None:
         return "Unknown"
     return _job_phase(job.status)
+
+
+def _live_publisher_job_state(league_id: str) -> str:
+    """Same shape as _job_state, but for the live connector Job (LIVE_SYNC_APP_LABEL) rather
+    than the listener - used by /start to avoid creating a second connector for a league whose
+    first one is still Active."""
+    try:
+        batch_api = _batch_v1_api()
+        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={LIVE_SYNC_APP_LABEL},league-id={league_id}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+    except Exception as e:
+        logger.error(f"Failed to query live connector Job status for league {league_id}: {e}")
+        return "Unknown"
+
+    items = getattr(jobs, "items", []) or []
+    if not items:
+        return "Unknown"
+    latest = max(items, key=lambda j: j.metadata.creation_timestamp)
+    return _job_phase(latest.status)
 
 
 def _practice_sync_job_state() -> str:
@@ -1354,16 +1377,25 @@ def set_draft_config(payload: DraftConfigPayload):
 
 
 @draft_router.post("/start", status_code=status.HTTP_202_ACCEPTED)
-def start_draft_sync(league_id: Optional[str] = None):
+def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = False):
     """Creates the draft-sync Job (a wrapper around draft_matrix.py's listener) from a
     stored /config, replacing the manual `kubectl apply` step. If `league_id` is omitted,
     falls back to the most recently stored config (today's behavior, unchanged) - pass it
     explicitly to pick a specific stored config, e.g. to launch a practice room without
-    disturbing whichever config was updated last."""
+    disturbing whichever config was updated last.
+
+    with_publisher=True additionally launches fantasy-browser-worker's draft_sync.js as a
+    LIVE_SYNC_APP_LABEL-labeled connector Job alongside the listener (issue #66) - only valid
+    for a live config, since practice already has its own dedicated launch path
+    (/practice/sync-job) for the room URL a human has to join by hand first. Without this,
+    a live league's connector has no discoverable Job, and /stop has no lifecycle signal to
+    key an automatic pick-ledger/Stream clear off of."""
     if not DRAFT_SYNC_IMAGE:
         raise HTTPException(status_code=500, detail="DRAFT_SYNC_IMAGE is not configured - the draft-sync container image ref must be supplied via env var.")
     if not DRAFT_SYNC_ENV_SECRET or not DRAFT_SYNC_ENV_CONFIGMAP:
         raise HTTPException(status_code=500, detail="DRAFT_SYNC_ENV_SECRET and DRAFT_SYNC_ENV_CONFIGMAP must both be configured - the Job's Pod does not inherit this API Pod's own DB/Redis/API environment.")
+    if with_publisher and not BROWSER_WORKER_IMAGE:
+        raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
 
     try:
         with get_db_cursor() as cursor:
@@ -1379,6 +1411,15 @@ def start_draft_sync(league_id: Optional[str] = None):
     if row is None:
         raise HTTPException(status_code=400, detail="No draft config stored yet - POST /v1/draft/config first.")
     league_id, team_id, season, mode = row
+
+    if with_publisher and mode == "practice":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "with_publisher is only valid for a live config - a practice connector needs a "
+                "manually-joined room URL, so use POST /v1/draft/practice/sync-job instead."
+            ),
+        )
 
     # A second listener for the same league would share the browser-worker's Redis Stream
     # consumer name (draft-matrix-{team_id}) but keep an entirely separate in-process
@@ -1482,10 +1523,80 @@ def start_draft_sync(league_id: Optional[str] = None):
         logger.error(f"Failed to create draft-sync Job for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create draft-sync Job: {str(e)}")
 
+    publisher_job_name = None
+    if with_publisher:
+        # Defensive: the listener's own Active check above already returned early in the
+        # overwhelmingly common case, but the listener and connector aren't a single unit - a
+        # listener that already exited (or was never started) doesn't prove the connector is
+        # gone too. Skip rather than double-publish into the same league's pick Stream.
+        if _live_publisher_job_state(league_id) == "Active":
+            logger.info(f"Live connector already Active for league {league_id}; not starting a second one.")
+        else:
+            publisher_job_name = f"live-draft-sync-{_dns1123_slug(league_id)}-{int(time.time())}"
+            publisher_labels = {"app": LIVE_SYNC_APP_LABEL, "league-id": league_id}
+            publisher_job = client.V1Job(
+                metadata=client.V1ObjectMeta(name=publisher_job_name, labels=publisher_labels),
+                spec=client.V1JobSpec(
+                    backoff_limit=0,
+                    template=client.V1PodTemplateSpec(
+                        metadata=client.V1ObjectMeta(labels=publisher_labels),
+                        spec=client.V1PodSpec(
+                            restart_policy="Never",
+                            image_pull_secrets=[client.V1LocalObjectReference(name="ghcr-pull-secret")],
+                            containers=[
+                                client.V1Container(
+                                    name="draft-sync",
+                                    image=BROWSER_WORKER_IMAGE,
+                                    command=["node", "src/bots/draft_sync.js"],
+                                    env=[
+                                        # Live mode navigates straight to the league/team, unlike
+                                        # practice's DRAFT_ROOM_URL - see enterDraftRoom's live
+                                        # branch in fantasy-browser-worker's draft_sync.js.
+                                        client.V1EnvVar(name="ESPN_LEAGUE_ID", value=str(league_id)),
+                                        client.V1EnvVar(name="ESPN_TEAM_ID", value=str(team_id)),
+                                        client.V1EnvVar(name="CURRENT_YEAR", value=str(season)),
+                                        client.V1EnvVar(name="REDIS_HOST", value=REDIS_HOST),
+                                        client.V1EnvVar(name="REDIS_PORT", value=str(REDIS_PORT)),
+                                        client.V1EnvVar(
+                                            name="ESPN_S2",
+                                            value_from=client.V1EnvVarSource(
+                                                secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="espn_s2")
+                                            ),
+                                        ),
+                                        client.V1EnvVar(
+                                            name="SWID",
+                                            value_from=client.V1EnvVarSource(
+                                                secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="swid")
+                                            ),
+                                        ),
+                                    ],
+                                )
+                            ],
+                        ),
+                    ),
+                ),
+            )
+            try:
+                batch_api.create_namespaced_job(K8S_NAMESPACE, publisher_job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+            except Exception as e:
+                # Not rolled back: the listener above is already live and consuming a Stream
+                # that has a connector on the way one way or another. Surfacing this loudly (not
+                # silently returning "accepted") is what lets the caller retry just the
+                # connector instead of tearing down and restarting the whole league.
+                logger.error(f"Listener started but failed to create live connector Job for league {league_id}: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"draft-sync listener {job_name} started, but the live connector Job could not be "
+                        f"created: {e}. Retry with with_publisher=true, or launch it manually."
+                    ),
+                )
+
     return {
         "status": "accepted",
         "already_running": False,
         "job_name": job_name,
+        "publisher_job_name": publisher_job_name,
         "league_id": league_id,
         "team_id": team_id,
         "season": season,
@@ -1532,20 +1643,25 @@ def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
     listener could otherwise recreate the recommendation board or publish a target after
     this endpoint has already reported "stopped".
 
-    That wait only proves *this repo's own* listener Job is gone. It says nothing about a
-    live league's pick-stream publisher (fantasy-browser-worker's draft_sync.js), which
-    core-pipeline never creates and has no lifecycle signal for (issue #77) - unlike the
-    practice connector, which is a Job this repo owns and can itself wait out. So by default
-    draft:{league}:picks/health and draft_picks:{league} are left alone here, exactly like
-    today: clearing them while that publisher might still be running risks losing a live
-    pick or letting it recreate the keys right after this endpoint clears them.
-    confirm_publisher_stopped=True is the caller manually asserting - by whatever means they
-    verified it outside this API - that the publisher is truly stopped, opting in to the
-    same pick-ledger/Stream clear practice teardown does automatically once it can prove the
-    connector is gone. Without this, restarting a listener against a reused live league id
-    replays the previous draft's picks and silently drops the new ones as duplicates."""
+    That wait proves *this repo's own* listener Job is gone, and - since issue #66 - the same
+    wait now also covers a live league's connector (fantasy-browser-worker's draft_sync.js), if
+    it was launched via /start?with_publisher=true and so carries the LIVE_SYNC_APP_LABEL this
+    endpoint can discover. A connector started out-of-band instead (a manual `kubectl apply` of
+    fantasy-browser-worker/k8s/test-draft-sync-job.yaml) carries no such label and is invisible
+    here, exactly like before #66. So draft:{league}:picks/health and draft_picks:{league} are
+    only cleared automatically when this call itself found and confirmed the connector's death;
+    otherwise clearing them while an unknown connector might still be running risks losing a
+    live pick or letting it recreate the keys right after this endpoint clears them.
+    confirm_publisher_stopped=True remains the fallback for that out-of-band case: the caller
+    manually asserting - by whatever means they verified it outside this API - that the
+    publisher is truly stopped. Without one or the other, restarting a listener against a
+    reused live league id replays the previous draft's picks and silently drops the new ones
+    as duplicates."""
     label_selector = f"app=draft-sync,league-id={league_id}"
+    publisher_label_selector = f"app={LIVE_SYNC_APP_LABEL},league-id={league_id}"
     deleted_job = False
+    publisher_found = False
+    publisher_gone = True
     try:
         batch_api = _batch_v1_api()
         jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
@@ -1569,15 +1685,50 @@ def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
                        f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s - "
                        "Redis state was NOT cleared; retry /stop or check the Job manually.",
             )
+
+        publisher_jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=publisher_label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+        deleted_publishers = []
+        for job in publisher_jobs.items:
+            batch_api.delete_namespaced_job(
+                name=job.metadata.name,
+                namespace=K8S_NAMESPACE,
+                propagation_policy="Foreground",  # same reasoning as _teardown_practice_run: the
+                # connector is the publisher for draft:{league}:picks/draft_picks:{league}, and
+                # Background would let it keep publishing into (or recreate) those keys right
+                # after the clear below.
+                grace_period_seconds=PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS,
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+            )
+            deleted_publishers.append(job.metadata.name)
+
+        if deleted_publishers:
+            publisher_found = True
+            publisher_gone = _wait_for_jobs_gone(batch_api, publisher_label_selector, deleted_publishers)
+            if not publisher_gone:
+                # Unlike the listener's own timeout above, this must not fall through to a
+                # confirm_publisher_stopped-gated clear below - a live connector we ourselves
+                # just tried (and failed) to kill is the exact case that flag can't safely
+                # override, since the caller who set it can't have verified a state we just
+                # disproved.
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Live connector Job for league {league_id} did not terminate within "
+                           f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s - "
+                           "Redis state was NOT cleared; retry /stop or check the Job manually.",
+                )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to delete draft-sync Job(s) for league {league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete draft-sync Job: {str(e)}")
 
+    # A connector this call found, deleted, and confirmed gone is proof enough on its own -
+    # confirm_publisher_stopped stays available as the fallback for one started out-of-band,
+    # which this call has no way to see at all (publisher_found stays False for it).
+    pick_stream_cleared = confirm_publisher_stopped or (publisher_found and publisher_gone)
     try:
         cleared_keys = _clear_league_draft_state(
-            league_id, include_pick_stream=confirm_publisher_stopped, raise_on_error=True
+            league_id, include_pick_stream=pick_stream_cleared, raise_on_error=True
         )
     except Exception as e:
         logger.error(f"Failed to clear Redis draft state for league {league_id}: {e}")
@@ -1587,8 +1738,9 @@ def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
         "status": "stopped",
         "league_id": league_id,
         "job_deleted": deleted_job,
+        "publisher_job_deleted": publisher_found,
         "redis_keys_cleared": cleared_keys,
-        "pick_stream_cleared": confirm_publisher_stopped,
+        "pick_stream_cleared": pick_stream_cleared,
     }
 
 

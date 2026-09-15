@@ -9,7 +9,7 @@ import pytest
 from kubernetes import client as k8s_client
 from kubernetes.config.config_exception import ConfigException
 
-from src.api.draft import K8S_REQUEST_TIMEOUT_SECONDS
+from src.api.draft import K8S_REQUEST_TIMEOUT_SECONDS, PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
 
 
 @contextmanager
@@ -318,6 +318,114 @@ def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
     assert env["AUTO_DRAFT_DELAY_SECONDS"] == "45"
 
 
+def test_start_draft_sync_with_publisher_creates_live_connector_job(client):
+    """Issue #66: with_publisher=true launches fantasy-browser-worker's draft_sync.js
+    alongside the listener, labeled so /stop can discover and tear it down automatically."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
+         patch("src.api.draft._live_publisher_job_state", return_value="Unknown"), \
+         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start", params={"with_publisher": True})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["publisher_job_name"].startswith("live-draft-sync-l1-")
+
+    assert mock_batch_api.create_namespaced_job.call_count == 2
+    _, listener_job = mock_batch_api.create_namespaced_job.call_args_list[0][0]
+    _, publisher_job = mock_batch_api.create_namespaced_job.call_args_list[1][0]
+    assert listener_job.metadata.labels["app"] == "draft-sync"
+    assert publisher_job.metadata.labels == {"app": "live-draft-sync", "league-id": "L1"}
+    container = publisher_job.spec.template.spec.containers[0]
+    assert container.image == "ghcr.io/example/fantasy-browser-worker:test"
+    assert container.command == ["node", "src/bots/draft_sync.js"]
+    env = {e.name: e.value for e in container.env if e.value is not None}
+    assert env["ESPN_LEAGUE_ID"] == "L1"
+    assert env["ESPN_TEAM_ID"] == "7"
+    assert env["CURRENT_YEAR"] == "2026"
+
+
+def test_start_draft_sync_with_publisher_rejects_practice_mode(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
+
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         image_patch, secret_patch, configmap_patch:
+        response = client.post("/v1/draft/start", params={"with_publisher": True})
+
+    assert response.status_code == 400
+    assert "practice" in response.json()["detail"].lower()
+
+
+def test_start_draft_sync_with_publisher_requires_browser_worker_image(client):
+    mock_cursor = MagicMock()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft.BROWSER_WORKER_IMAGE", None), \
+         image_patch, secret_patch, configmap_patch:
+        response = client.post("/v1/draft/start", params={"with_publisher": True})
+
+    assert response.status_code == 500
+    assert "BROWSER_WORKER_IMAGE" in response.json()["detail"]
+
+
+def test_start_draft_sync_with_publisher_skips_duplicate_when_already_active(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
+         patch("src.api.draft._live_publisher_job_state", return_value="Active"), \
+         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start", params={"with_publisher": True})
+
+    assert response.status_code == 202
+    assert response.json()["publisher_job_name"] is None
+    # The listener still gets created - only the redundant connector is skipped.
+    assert mock_batch_api.create_namespaced_job.call_count == 1
+
+
+def test_start_draft_sync_with_publisher_surfaces_publisher_creation_failure(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+    mock_batch_api = MagicMock()
+    mock_batch_api.create_namespaced_job.side_effect = [None, Exception("apiserver unreachable")]
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    image_patch, secret_patch, configmap_patch = _env_config_patches()
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._job_state", return_value="Unknown"), \
+         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
+         patch("src.api.draft._live_publisher_job_state", return_value="Unknown"), \
+         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
+         image_patch, secret_patch, configmap_patch, \
+         incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+        response = client.post("/v1/draft/start", params={"with_publisher": True})
+
+    assert response.status_code == 500
+    assert "connector" in response.json()["detail"].lower()
+
+
 def test_start_draft_sync_selector_picks_named_league(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
@@ -540,9 +648,11 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
     fake_job = MagicMock()
     fake_job.metadata.name = "draft-sync-L1-1234"
     # First call (the initial listing) finds the Job; the termination-poll call after
-    # deletion finds it gone.
+    # deletion finds it gone; the third call is the live-publisher lookup (issue #66),
+    # which finds nothing for this league.
     mock_batch_api.list_namespaced_job.side_effect = [
         MagicMock(items=[fake_job]),
+        MagicMock(items=[]),
         MagicMock(items=[]),
     ]
 
@@ -563,6 +673,7 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
         "status": "stopped",
         "league_id": "L1",
         "job_deleted": True,
+        "publisher_job_deleted": False,
         "redis_keys_cleared": 2,
         "pick_stream_cleared": False,
     }
@@ -571,8 +682,12 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
         name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
         grace_period_seconds=5, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
     )
-    for call in mock_batch_api.list_namespaced_job.call_args_list:
-        assert call.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
+    selectors = [call.kwargs["label_selector"] for call in mock_batch_api.list_namespaced_job.call_args_list]
+    assert selectors == [
+        "app=draft-sync,league-id=L1",
+        "app=draft-sync,league-id=L1",
+        "app=live-draft-sync,league-id=L1",
+    ]
     mock_redis.delete.assert_called_once_with(
         "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft", "draft:L1:pause:3"
     )
@@ -714,6 +829,79 @@ def test_stop_draft_does_not_touch_draft_config(client):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
 
     assert response.status_code == 200
+
+
+def test_stop_draft_confirmed_live_publisher_gone_clears_pick_stream_automatically(client):
+    """Issue #66: a live connector launched via /start?with_publisher=true carries
+    LIVE_SYNC_APP_LABEL, so /stop can discover, delete, and wait it out itself - once
+    confirmed gone, the pick ledger/Stream clear no longer needs a manual
+    confirm_publisher_stopped=true."""
+    mock_batch_api = MagicMock()
+    fake_listener = MagicMock()
+    fake_listener.metadata.name = "draft-sync-L1-1234"
+    fake_publisher = MagicMock()
+    fake_publisher.metadata.name = "live-draft-sync-l1-5678"
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[fake_listener]),  # initial listener list
+        MagicMock(items=[]),               # listener termination poll
+        MagicMock(items=[fake_publisher]), # initial live-publisher list
+        MagicMock(items=[]),               # live-publisher termination poll
+    ]
+
+    mock_redis = MagicMock()
+    mock_redis.scan_iter.return_value = []
+    mock_redis.delete.return_value = 5
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.time.sleep"):
+        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_deleted"] is True
+    assert body["publisher_job_deleted"] is True
+    assert body["pick_stream_cleared"] is True
+
+    publisher_delete_calls = [
+        call for call in mock_batch_api.delete_namespaced_job.call_args_list
+        if call.kwargs["name"] == "live-draft-sync-l1-5678"
+    ]
+    assert len(publisher_delete_calls) == 1
+    assert publisher_delete_calls[0].kwargs["grace_period_seconds"] == PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
+    mock_redis.delete.assert_called_once_with(
+        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft",
+        "draft:L1:picks", "draft:L1:health", "draft_picks:L1"
+    )
+
+
+def test_stop_draft_live_publisher_timeout_leaves_redis_untouched(client):
+    """A live connector that outlives its own termination poll must never have its pick
+    ledger/Stream cleared, even with confirm_publisher_stopped=true - this call just disproved
+    the very thing that flag asserts."""
+    mock_batch_api = MagicMock()
+    fake_publisher = MagicMock()
+    fake_publisher.metadata.name = "live-draft-sync-l1-5678"
+    mock_batch_api.list_namespaced_job.side_effect = [
+        MagicMock(items=[]),                # no listener
+        MagicMock(items=[fake_publisher]),  # initial live-publisher list
+    ] + [MagicMock(items=[fake_publisher])] * 20  # never terminates
+
+    mock_redis = MagicMock()
+
+    incluster_patch, kubeconfig_patch = _k8s_patches()
+    with incluster_patch, kubeconfig_patch, \
+         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.time.sleep"):
+        response = client.post(
+            "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
+        )
+
+    assert response.status_code == 504
+    mock_redis.delete.assert_not_called()
 
 
 def test_job_state_scopes_query_to_draft_sync_app_label():
