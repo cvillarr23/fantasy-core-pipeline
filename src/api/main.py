@@ -8,6 +8,7 @@ from src.migrations import run_migrations
 from src.api.routes import router
 from src.api.draft import draft_router
 from src.api.players import player_router
+from src.api.trade import trade_router
 from src.api.mcp_server import mcp, mcp_asgi_app
 from src.telemetry import configure_tracing, configure_trace_logging
 
@@ -66,6 +67,7 @@ async def catch_exceptions_middleware(request: Request, call_next):
 app.include_router(router, prefix="/v1")
 app.include_router(draft_router, prefix="/v1/draft")
 app.include_router(player_router, prefix="/v1/players")
+app.include_router(trade_router, prefix="/v1/trade")
 
 # Mount the MCP (Model Context Protocol) server (CORE-07) - its own routes already carry
 # absolute paths (/mcp, /.well-known/oauth-protected-resource/mcp), so it's mounted at
