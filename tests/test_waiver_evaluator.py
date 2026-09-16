@@ -1,0 +1,83 @@
+from unittest.mock import MagicMock, patch
+
+from src.optimization import waiver_evaluator as we
+
+
+def test_resolve_live_waiver_moves_translates_to_espn_identity():
+    cursor = MagicMock()
+    # add player_id lookup, then drop player_id lookup.
+    cursor.fetchone.side_effect = [("e-4046", "Some Back", "KC"), ("e-9999", "Bench Guy", "SEA")]
+    moves = [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "4046"}]
+
+    resolved = we.resolve_live_waiver_moves(cursor, moves)
+
+    assert resolved == [{
+        "player_id": "e-4046",
+        "drop_player_id": "e-9999",
+        "name": "Some Back",
+        "team": "KC",
+    }]
+
+
+def test_resolve_live_waiver_moves_skips_when_add_player_has_no_espn_id():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [(None, "Some Back", "KC")]
+    moves = [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "4046"}]
+
+    resolved = we.resolve_live_waiver_moves(cursor, moves)
+
+    assert resolved == []
+
+
+def test_resolve_live_waiver_moves_skips_when_drop_player_has_no_espn_id():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("e-4046", "Some Back", "KC"), (None, "Bench Guy", "SEA")]
+    moves = [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "4046"}]
+
+    resolved = we.resolve_live_waiver_moves(cursor, moves)
+
+    assert resolved == []
+
+
+def test_resolve_live_waiver_moves_handles_a_move_with_no_drop_player():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("e-4046", "Some Back", "KC")]
+    moves = [{"position": "RB", "drop_player_id": None, "add_player_id": "4046"}]
+
+    resolved = we.resolve_live_waiver_moves(cursor, moves)
+
+    assert resolved == [{"player_id": "e-4046", "drop_player_id": None, "name": "Some Back", "team": "KC"}]
+
+
+def test_publish_waiver_claim_posts_expected_payload():
+    target = {"player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC"}
+
+    with patch("src.optimization.waiver_evaluator.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=202)
+        we.publish_waiver_claim("7", target)
+
+    args, kwargs = mock_post.call_args
+    assert args[0] == f"{we.CORE_API_BASE_URL}/v1/trigger/waiver"
+    assert kwargs["json"] == {"team_id": "7", **target}
+
+
+def test_run_weekly_waivers_live_wires_decision_logic_to_publish():
+    resolved_target = {"player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC"}
+
+    with patch("src.optimization.waiver_evaluator.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position") as mock_bench, \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position") as mock_fa, \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves") as mock_propose, \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[resolved_target]), \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish:
+        mock_conn = MagicMock()
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        mock_bench.return_value = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
+        mock_fa.return_value = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
+        mock_propose.return_value = [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "4046"}]
+
+        result = we.run_weekly_waivers_live("7", 2023, 5)
+
+    mock_propose.assert_called_once_with(mock_bench.return_value, mock_fa.return_value)
+    mock_publish.assert_called_once_with("7", resolved_target, we.CORE_API_BASE_URL)
+    assert result == [resolved_target]

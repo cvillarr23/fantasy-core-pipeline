@@ -720,3 +720,123 @@ def test_normalized_name_drops_generational_suffixes_but_never_the_last_token():
     assert _normalized_name("Michael Pittman Jr.") == _normalized_name("Michael Pittman")
     # A bare suffix token is somebody's whole name; emptying it would match everything.
     assert _normalized_name("V") == "v"
+
+
+def test_trigger_waiver_claim_success(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "drop_player_id": "9999",
+        "name": "Some Back", "team": "KC",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/waiver", json=payload)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["queue"] == "waiver_actions"
+    assert body["team_id"] == "7"
+    assert "tracking_id" in body and body["tracking_id"]
+
+    mock_channel.queue_declare.assert_called_once_with(queue="waiver_actions", durable=True)
+    publish_kwargs = mock_channel.basic_publish.call_args.kwargs
+    assert publish_kwargs["routing_key"] == "waiver_actions"
+    assert publish_kwargs["properties"].delivery_mode == 2
+    assert body["tracking_id"] in publish_kwargs["body"]
+
+
+def test_trigger_waiver_claim_allows_an_add_only_claim_with_no_drop_player(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "team": "KC"}
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/waiver", json=payload)
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_waiver_claim_broker_failure(client):
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "team": "KC"}
+
+    with patch("src.api.routes.pika.BlockingConnection", side_effect=Exception("broker down")), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/waiver", json=payload)
+
+    assert response.status_code == 500
+    assert "background execution broker" in response.json()["detail"].lower()
+
+
+def test_trigger_waiver_claim_validates_payload(client):
+    response = client.post("/v1/trigger/waiver", json={"team_id": "7"})
+
+    assert response.status_code == 422
+
+
+def test_trigger_waiver_claim_rejects_the_real_stafford_bech_collision(client):
+    """Same id-namespace danger as draft-pick: 12483 is a real espn_id (Stafford) and a real
+    internal player_id (Bech). A caller meaning Bech must not silently claim Stafford."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Matthew Stafford",), ("Jack Bech",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/waiver", json={
+            "team_id": "7", "player_id": "12483", "name": "Jack Bech", "team": "NO",
+        })
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "internal Sleeper id" in detail
+    assert "Matthew Stafford" in detail
+    mock_connection.assert_not_called()
+
+
+def test_trigger_waiver_claim_rejects_a_drop_player_id_absent_from_the_crosswalk(client):
+    """drop_player_id carries no name to cross-check, so the guard can't disambiguate an
+    id present in both namespaces - but an id present ONLY as an internal player_id is still
+    decidably wrong and must still be rejected."""
+    cursor = MagicMock()
+    # add player_id (4046) resolves cleanly against espn_id; drop_player_id (9999) is a
+    # bare internal id with no espn_id row at all.
+    cursor.fetchone.side_effect = [("Some Back",), None, None, ("Some Bench Guy",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/waiver", json={
+            "team_id": "7", "player_id": "4046", "name": "Some Back", "team": "KC",
+            "drop_player_id": "9999",
+        })
+
+    assert response.status_code == 422
+    assert "internal Sleeper id" in response.json()["detail"]
+    mock_connection.assert_not_called()
+
+
+def test_trigger_waiver_claim_allows_a_drop_player_id_known_to_espn(client):
+    """Without a name to cross-check, any id that resolves in players.espn_id is accepted
+    outright - there's nothing decidable to reject."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Some Back",), None, ("Anyone",), None]
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
+        response = client.post("/v1/trigger/waiver", json={
+            "team_id": "7", "player_id": "4046", "name": "Some Back", "team": "KC",
+            "drop_player_id": "9999",
+        })
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()

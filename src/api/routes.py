@@ -50,6 +50,20 @@ class LineupTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
     optimized_swaps: List[SwapInstruction] = Field(..., description="Array of mathematical player reallocations")
 
+class WaiverTriggerPayload(BaseModel):
+    team_id: str = Field(..., description="Target local league team identification number")
+    player_id: str = Field(..., description="ESPN player id of the free agent to claim. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap DraftPickTriggerPayload guards against")
+    name: str = Field(..., description="Display name of the player to claim, as expected by the click bot")
+    team: str = Field(..., description="NFL team abbreviation of the player to claim, for a name+team match against ESPN's own player pool")
+    drop_player_id: Optional[str] = Field(
+        None,
+        description=(
+            "ESPN player id of the roster player to drop to open a slot. Optional: an "
+            "add-only claim into an already-open bench slot omits this."
+        ),
+    )
+
+
 class DraftPickTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
     player_id: str = Field(..., description="ESPN player id of the recommended draft target. Must be ESPN's, not the internal Sleeper players.player_id: the worker clicks button.Button--draft[data-player-id=...] in the draft room, and the two id spaces overlap numerically, so the wrong namespace silently matches a different player")
@@ -194,6 +208,60 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
+@router.post("/trigger/waiver", status_code=status.HTTP_202_ACCEPTED)
+def trigger_waiver_claim(payload: WaiverTriggerPayload):
+    """
+    Waiver-claim counterpart to /trigger/lineup (CORE-15/#117): publishes a live waiver
+    evaluation's recommended add/drop to the click-bot queue. Same asymmetric gateway shape
+    as /trigger/lineup - HTTP in, durable AMQP message out - no idempotency/deadline handling
+    since a waiver claim has no ticking pick clock for a duplicate retry to race against.
+    """
+    tracking_id = str(uuid.uuid4())
+    logger.info(f"Gateway processing waiver claim command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
+
+    _reject_internal_player_id(payload.player_id, payload.name)
+    if payload.drop_player_id:
+        _reject_internal_player_id(payload.drop_player_id)
+
+    try:
+        params = pika.URLParameters(AMQP_URL)
+        connection = pika.BlockingConnection(params)
+        channel = connection.channel()
+
+        channel.queue_declare(queue="waiver_actions", durable=True)
+
+        carrier: dict = {}
+        propagate.inject(carrier)
+
+        message_body = json.dumps({
+            "tracking_id": tracking_id,
+            "traceparent": carrier.get("traceparent"),
+            **payload.model_dump(),
+        })
+
+        channel.basic_publish(
+            exchange="",
+            routing_key="waiver_actions",
+            body=message_body,
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type="application/json",
+                headers=carrier,
+            )
+        )
+        connection.close()
+        logger.info(f"Waiver claim committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
+        return {
+            "status": "accepted",
+            "queue": "waiver_actions",
+            "team_id": payload.team_id,
+            "tracking_id": tracking_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Gateway failed to push waiver claim onto system exchange queue: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
+
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
@@ -212,7 +280,7 @@ def _normalized_name(value: str) -> str:
     return "".join(tokens)
 
 
-def _reject_internal_player_id(player_id: str, name: str) -> None:
+def _reject_internal_player_id(player_id: str, name: Optional[str] = None) -> None:
     """Guard against the id-namespace inversion that made auto-pick silently draft the wrong
     player. ESPN ids and Sleeper players.player_id values overlap numerically, so a mistake here
     is undetectable downstream - ESPN 12483 is Matthew Stafford, internal 12483 is Jack Bech.
@@ -220,17 +288,23 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     Existing in players.espn_id is NOT on its own sufficient to accept an id, which is the whole
     danger of the collision: 12483 is a real espn_id, so a caller meaning Jack Bech would sail
     through an existence check and draft Stafford. The payload's own name is the tiebreaker -
-    the caller states who it believes it is drafting, so the two can be cross-checked.
+    the caller states who it believes it is acting on, so the two can be cross-checked.
+
+    `name` is optional because not every id this guards has one available - a waiver claim's
+    drop_player_id carries no name field in the wire contract. Without a name, the disambiguation
+    step below is skipped entirely (there's nothing to cross-check), but the definite-wrong-
+    namespace case - an id absent from players.espn_id but present as a players.player_id - is
+    still decidable and still rejected regardless.
 
     Rejected: an id that is not an espn_id at all but is a known internal player_id - decidably
-    the wrong namespace whatever the payload calls it - and an id that is both, where the payload
-    names the internal owner rather than the ESPN one.
+    the wrong namespace whatever the payload calls it - and (when a name is given) an id that is
+    both, where the payload names the internal owner rather than the ESPN one.
 
     Allowed: an identity match; an id in neither column (the crosswalk covers ~82% of players and
     no K or D/ST, so a legitimate ESPN id for an uncovered player must stay draftable); and the
     genuinely ambiguous case, which is logged instead.
     """
-    submitted = _normalized_name(name)
+    submitted = _normalized_name(name) if name is not None else None
     try:
         with get_db_cursor() as cursor:
             cursor.execute("SELECT name FROM players WHERE espn_id = %s LIMIT 1;", (str(player_id),))
@@ -242,36 +316,36 @@ def _reject_internal_player_id(player_id: str, name: str) -> None:
     except Exception as e:
         # Fail open: the click bot is the draft-day safety valve and a database blip must not
         # block a manual pick. The check is a guard against a caller bug, not an authz gate.
-        logger.warning(f"Could not validate draft-pick id namespace for '{name}' ({player_id}): {e}")
+        logger.warning(f"Could not validate player id namespace for '{name}' ({player_id}): {e}")
         return
 
-    if espn_match and _normalized_name(espn_match[0]) == submitted:
+    if espn_match and (submitted is None or _normalized_name(espn_match[0]) == submitted):
         return
 
     # An id absent from players.espn_id but present as a players.player_id is the wrong namespace
     # regardless of the name attached to it: a typo in the payload does not make a Sleeper id an
-    # ESPN one. Only when the id lives in BOTH namespaces does the name decide which was meant.
-    if internal_match and (not espn_match or _normalized_name(internal_match[0]) == submitted):
+    # ESPN one. Only when the id lives in BOTH namespaces (and a name was actually given) does the
+    # name decide which was meant.
+    if internal_match and (not espn_match or (submitted is not None and _normalized_name(internal_match[0]) == submitted)):
         owner = internal_match[0]
         detail = (
             f"player_id '{player_id}' is {owner}'s internal Sleeper id, not an ESPN id. "
-            f"The browser worker clicks button.Button--draft[data-player-id=...] in the ESPN "
-            f"draft room, so it needs players.espn_id."
+            f"The browser worker needs players.espn_id here, not players.player_id."
         )
         if espn_match:
             detail += (
-                f" In ESPN's namespace that id is {espn_match[0]}, so this would have drafted "
+                f" In ESPN's namespace that id is {espn_match[0]}, so this would have acted on "
                 f"the wrong player rather than failing."
             )
         raise HTTPException(status_code=422, detail=detail)
 
     if espn_match:
-        # The id is a real espn_id, the names disagree, and no internal row claims the id at all.
-        # Most likely crosswalk or name-format drift rather than a namespace error, and blocking
-        # a draft-day pick on a name mismatch is worse than allowing it.
+        # The id is a real espn_id, the names disagree (or no name was given), and no internal
+        # row claims the id at all. Most likely crosswalk or name-format drift rather than a
+        # namespace error, and blocking a live action on a name mismatch is worse than allowing it.
         logger.warning(
-            f"Draft-pick payload names '{name}' but espn_id {player_id} maps to "
-            f"'{espn_match[0]}'. Allowing - verify the pick landed on the intended player."
+            f"Payload names '{name}' but espn_id {player_id} maps to '{espn_match[0]}'. "
+            f"Allowing - verify this acted on the intended player."
         )
 
     return
