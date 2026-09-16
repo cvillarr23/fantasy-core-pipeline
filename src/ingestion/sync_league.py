@@ -125,6 +125,38 @@ def build_roster_rows(raw_teams: list, espn_to_player_id: dict) -> list:
     return rows
 
 
+def _extract_team_name(team: dict) -> str:
+    """Replicates espn_api's own Team.team_name derivation exactly (team.py), so the
+    name stored here matches what box_scores()/League.teams would show elsewhere."""
+    name = team.get("name", "Unknown")
+    if name != "Unknown":
+        return name
+    return "%s %s" % (team.get("location", "Unknown"), team.get("nickname", "Unknown"))
+
+
+def build_team_name_rows(raw_teams: list) -> list:
+    """Pure function: maps each raw ESPN team -> (team_id, team_name)."""
+    return [(str(team.get("id")), _extract_team_name(team)) for team in raw_teams]
+
+
+def persist_team_names(conn, league_id: str, rows: list) -> int:
+    """Upsert, not a full-refresh - a team doesn't disappear mid-season the way a
+    roster's contents do, so there's no equivalent need to DELETE first."""
+    with conn.cursor() as cursor:
+        if rows:
+            cursor.executemany(
+                """
+                INSERT INTO league_teams (league_id, team_id, team_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (league_id, team_id) DO UPDATE SET
+                    team_name = EXCLUDED.team_name,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                [(league_id, team_id, team_name) for team_id, team_name in rows],
+            )
+    return len(rows)
+
+
 def persist_rosters(conn, rows: list) -> int:
     """Full refresh inside one transaction: dropped players must actually disappear, not
     linger from a prior week's roster snapshot."""
@@ -161,6 +193,9 @@ def sync_league(season: int) -> int:
 
         rows = build_roster_rows(raw.get("teams", []), espn_to_player_id)
         written = persist_rosters(conn, rows)
+
+        team_name_rows = build_team_name_rows(raw.get("teams", []))
+        persist_team_names(conn, league_id, team_name_rows)
 
     if written == 0:
         logger.info("Persisted 0 roster rows - all rosters are empty (expected pre-draft).")

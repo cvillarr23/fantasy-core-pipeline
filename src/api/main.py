@@ -9,6 +9,8 @@ from src.api.routes import router
 from src.api.draft import draft_router
 from src.api.players import player_router
 from src.api.roster import roster_router
+from src.api.matchup import matchup_router
+from src.api.league import league_router
 from src.api.stats import stats_router
 from src.api.trade import trade_router
 from src.api.mcp_server import mcp, mcp_asgi_app
@@ -70,6 +72,8 @@ app.include_router(router, prefix="/v1")
 app.include_router(draft_router, prefix="/v1/draft")
 app.include_router(player_router, prefix="/v1/players")
 app.include_router(roster_router, prefix="/v1/roster")
+app.include_router(matchup_router, prefix="/v1/matchup")
+app.include_router(league_router, prefix="/v1/league")
 app.include_router(stats_router, prefix="/v1/stats")
 app.include_router(trade_router, prefix="/v1/trade")
 

@@ -12,6 +12,7 @@ from src.models import (
     CREATE_LEAGUE_ROSTERS_TABLE,
     ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
     CREATE_LEAGUE_SETTINGS_TABLE,
+    CREATE_LEAGUE_TEAMS_TABLE,
     CREATE_EXECUTION_LOG_TABLE,
     ADD_EXECUTION_LOG_BOT_NAME_COLUMN,
     ADD_EXECUTION_LOG_TRACE_ID_COLUMN,
@@ -29,6 +30,7 @@ from src.models import (
     CREATE_LLM_CALL_METRICS_TABLE,
     CREATE_BACKTEST_RESULTS_TABLE,
     CREATE_DEFENSE_POSITION_STRENGTH_TABLE,
+    CREATE_BOT_DECISIONS_TABLE,
     CREATE_INDICES
 )
 
@@ -81,6 +83,9 @@ def run_migrations():
             logger.info("Validating 'league_settings' configuration table...")
             cursor.execute(CREATE_LEAGUE_SETTINGS_TABLE)
 
+            logger.info("Validating 'league_teams' name-mapping table...")
+            cursor.execute(CREATE_LEAGUE_TEAMS_TABLE)
+
             # 4. Execute worker execution telemetry table (INFRA-06)
             logger.info("Validating 'execution_log' worker telemetry table...")
             cursor.execute(CREATE_EXECUTION_LOG_TABLE)
@@ -118,6 +123,10 @@ def run_migrations():
             # 4g. Execute defense-vs-position strength ledger (#93)
             logger.info("Validating 'defense_position_strength' ledger...")
             cursor.execute(CREATE_DEFENSE_POSITION_STRENGTH_TABLE)
+
+            # 4h. Execute bot decision audit trail ledger (CORE-17)
+            logger.info("Validating 'bot_decisions' audit trail ledger...")
+            cursor.execute(CREATE_BOT_DECISIONS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")

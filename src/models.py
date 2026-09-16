@@ -171,6 +171,20 @@ CREATE TABLE IF NOT EXISTS league_settings (
 );
 """
 
+# Team-id -> display-name mapping, synced from ESPN alongside rosters (sync_league.py).
+# Kept separate from league_settings (one row per league) since this is one row per team.
+# PK is (league_id, team_id) rather than just team_id in case a future multi-league setup
+# reuses the same numeric ESPN team-id space across leagues.
+CREATE_LEAGUE_TEAMS_TABLE = """
+CREATE TABLE IF NOT EXISTS league_teams (
+    league_id VARCHAR(50) NOT NULL,
+    team_id VARCHAR(50) NOT NULL,
+    team_name VARCHAR(200) NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (league_id, team_id)
+);
+"""
+
 # One row per browser-worker transaction (lineup update, waiver claim), written on
 # completion (INFRA-06) so Grafana can chart worker execution latency/success rate.
 CREATE_EXECUTION_LOG_TABLE = """
@@ -414,6 +428,43 @@ CREATE TABLE IF NOT EXISTS defense_position_strength (
 );
 """
 
+# One row per automated bot decision (CORE-17/#35): the *why*, not the *whether* -
+# execution_log already covers success/failure, this covers the justification (VORP
+# delta, matchup multiplier, etc.) that drove the action. Written by src/api/routes.py's
+# trigger_* handlers, since the reasoning only exists on the Python side that computes it
+# before publishing to the click bots - the bots themselves never see it.
+#
+# target_player_id/drop_player_id are deliberately NOT FKs to players.player_id. The
+# trigger endpoints receive two different id namespaces depending on action:
+# trigger_waiver_claim/trigger_draft_pick get ESPN ids (validated by
+# _reject_internal_player_id), but trigger_lineup_swap's SwapInstruction ids are raw
+# internal players.player_id (Sleeper-namespaced), never translated. A blind FK here
+# risks silently matching the wrong player via the same id-namespace collision
+# _reject_internal_player_id's docstring warns about (ESPN 12483 is Matthew Stafford,
+# internal 12483 is Jack Bech). execution_log.player_id (added by
+# ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS above) already sets this precedent.
+#
+# inputs is JSONB rather than fixed columns so rumor-signal (WORKER-13) or LLM-output
+# (WORKER-12) justification can be added later with zero migration - no decision logic in
+# this repo consumes either signal yet. season/week get their own typed columns (pulled
+# out of inputs by the route handler) purely for cheap Grafana filtering.
+CREATE_BOT_DECISIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS bot_decisions (
+    id SERIAL PRIMARY KEY,
+    tracking_id VARCHAR(36) NOT NULL,
+    bot_name VARCHAR(50) NOT NULL,
+    action VARCHAR(30) NOT NULL,
+    team_id VARCHAR(50) NOT NULL,
+    league_id VARCHAR(50),
+    season INTEGER,
+    week INTEGER,
+    target_player_id VARCHAR(50),
+    drop_player_id VARCHAR(50),
+    inputs JSONB,
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
@@ -428,5 +479,7 @@ CREATE INDEX IF NOT EXISTS idx_raw_signals_player_id ON raw_signals(player_id);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_ingested_at ON raw_signals(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_created_at ON llm_call_metrics(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_provider ON llm_call_metrics(provider, model);
+CREATE INDEX IF NOT EXISTS idx_bot_decisions_bot_name_decided_at ON bot_decisions(bot_name, decided_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_decisions_tracking_id ON bot_decisions(tracking_id);
 """
 

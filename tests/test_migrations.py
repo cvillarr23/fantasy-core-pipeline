@@ -133,6 +133,41 @@ def test_run_migrations_executes_auto_publish_kill_switch_columns():
     assert draft_config_idx < enabled_idx < disabled_by_idx
 
 
+def test_run_migrations_executes_bot_decisions_ddl_before_indices():
+    """CORE-17 (#35): the trigger endpoints in src/api/routes.py insert into bot_decisions
+    on every successful lineup/waiver/draft-pick publish. Lock in that the table is
+    created, and before CREATE_INDICES (which indexes it), same ordering convention as
+    the other ledger tables' tests above."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    bot_decisions_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "CREATE TABLE IF NOT EXISTS bot_decisions" in s
+    )
+    indices_idx = next(i for i, s in enumerate(executed) if "CREATE INDEX" in s)
+    assert bot_decisions_idx < indices_idx
+
+
+def test_run_migrations_executes_league_teams_ddl_after_league_settings():
+    """The matchup view / real-team-names feature needs league_teams (team_id ->
+    team_name), synced alongside league_settings by sync_league.py. Lock in it's created,
+    right after league_settings, matching this migration block's existing ordering."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    league_settings_idx = next(i for i, s in enumerate(executed) if "CREATE TABLE IF NOT EXISTS league_settings" in s)
+    league_teams_idx = next(i for i, s in enumerate(executed) if "CREATE TABLE IF NOT EXISTS league_teams" in s)
+    assert league_settings_idx < league_teams_idx
+
+
 def test_run_migrations_raises_when_weekly_stats_pk_migration_was_skipped():
     """
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (a Postgres NOTICE, not an error) if
