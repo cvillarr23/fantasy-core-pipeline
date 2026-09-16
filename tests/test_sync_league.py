@@ -135,3 +135,62 @@ def test_persist_rosters_empty_rows_still_deletes():
     assert written == 0
     mock_cursor.execute.assert_called_once()
     mock_cursor.executemany.assert_not_called()
+
+
+RAW_TEAMS_WITH_NAMES = [
+    {"id": 1, "name": "The Dynasty", "roster": {"entries": []}},
+    {"id": 2, "name": "Unknown", "location": "Team", "nickname": "Two", "roster": {"entries": []}},
+]
+
+
+def test_extract_team_name_uses_name_field_when_present():
+    assert sl._extract_team_name(RAW_TEAMS_WITH_NAMES[0]) == "The Dynasty"
+
+
+def test_extract_team_name_falls_back_to_location_and_nickname_when_name_is_unknown():
+    assert sl._extract_team_name(RAW_TEAMS_WITH_NAMES[1]) == "Team Two"
+
+
+def test_build_team_name_rows_maps_all_teams():
+    rows = sl.build_team_name_rows(RAW_TEAMS_WITH_NAMES)
+
+    assert rows == [("1", "The Dynasty"), ("2", "Team Two")]
+
+
+def test_persist_team_names_upserts_without_deleting():
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    sl.persist_team_names(mock_conn, "1248158344", [("1", "The Dynasty")])
+
+    execute_calls = [c[0][0] for c in mock_cursor.execute.call_args_list]
+    assert not any("DELETE FROM league_teams" in c for c in execute_calls)
+    mock_cursor.executemany.assert_called_once()
+    upsert_sql = mock_cursor.executemany.call_args[0][0]
+    assert "INSERT INTO league_teams" in upsert_sql
+    assert "ON CONFLICT" in upsert_sql
+
+
+def test_sync_league_persists_team_names_alongside_rosters(monkeypatch):
+    _require_env_vars(monkeypatch)
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    mock_league = MagicMock()
+    mock_league.settings.team_count = 10
+    mock_league.settings.scoring_type = "H2H_POINTS"
+    mock_league.settings.name = "Test League"
+
+    with patch("src.ingestion.sync_league.build_league", return_value=mock_league), \
+         patch("src.ingestion.sync_league.fetch_raw_league_data",
+               return_value={"teams": RAW_TEAMS_WITH_NAMES, "settings": RAW_MSETTINGS["settings"]}), \
+         patch("src.ingestion.sync_league.get_db_connection") as mock_get_conn, \
+         patch("src.ingestion.sync_league.persist_team_names") as mock_persist_names:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+
+        sl.sync_league(season=2026)
+
+    mock_persist_names.assert_called_once_with(mock_conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
