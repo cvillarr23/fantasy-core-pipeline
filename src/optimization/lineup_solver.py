@@ -9,7 +9,9 @@ import argparse
 import json
 import logging
 import os
+from datetime import datetime
 
+import nflreadpy as nfl
 import pulp
 import requests
 from opentelemetry import propagate, trace
@@ -282,12 +284,30 @@ def optimize_weekly_lineup(team_id: str, season: int, week: int) -> int:
         return len(swaps)
 
 
+def resolve_default_week() -> int:
+    """Resolves a safe CLI default without letting nflreadpy's "current" helper crash startup."""
+    fallback_week = 1
+    try:
+        return int(nfl.get_current_week())
+    except Exception as exc:
+        logger.warning(
+            f"Failed to resolve current NFL week via nflreadpy ({exc}); defaulting --week to {fallback_week}."
+        )
+        return fallback_week
+
+
 if __name__ == "__main__":
     configure_tracing("lineup-solver")
 
+    default_season = int(os.getenv("CURRENT_YEAR", datetime.now().year))
+
     parser = argparse.ArgumentParser(description="Solve the optimal weekly lineup for a team via ILP.")
-    parser.add_argument("--team-id", type=str, required=True)
-    parser.add_argument("--season", type=int, required=True)
-    parser.add_argument("--week", type=int, required=True)
+    parser.add_argument("--team-id", type=str, default=os.getenv("ESPN_TEAM_ID"))
+    parser.add_argument("--season", type=int, default=default_season)
+    parser.add_argument("--week", type=int, default=resolve_default_week())
     args = parser.parse_args()
+
+    if not args.team_id:
+        parser.error("--team-id is required (or set the ESPN_TEAM_ID env var)")
+
     optimize_weekly_lineup(team_id=args.team_id, season=args.season, week=args.week)
