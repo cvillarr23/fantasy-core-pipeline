@@ -97,13 +97,15 @@ def test_apply_badges_sets_suggested_swap_from_map():
 
 
 def _make_roster_player(playerId=5000001, name="Bench Guy", position="WR", jersey="12",
-                         lineupSlot="BE"):
+                         lineupSlot="BE", proTeam="DET", injuryStatus="ACTIVE"):
     p = MagicMock()
     p.playerId = playerId
     p.name = name
     p.position = position
     p.jersey = jersey
     p.lineupSlot = lineupSlot
+    p.proTeam = proTeam
+    p.injuryStatus = injuryStatus
     return p
 
 
@@ -117,9 +119,12 @@ def test_shape_lineup_player_line_maps_roster_player_fields():
         "position": "WR",
         "jersey": "12",
         "slot": "BE",
+        "pro_team": "DET",
+        "injury_status": "ACTIVE",
         "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/5000001.png",
         "deficit_flag": False,
         "suggested_swap": None,
+        "net_vorp": None,
     }
 
 
@@ -138,6 +143,32 @@ def test_split_roster_starters_bench_separates_by_lineup_slot():
 
     assert [p["player_id"] for p in starters] == ["1"]
     assert [p["player_id"] for p in bench_list] == ["2", "3"]
+
+
+def test_load_vorp_by_espn_id_maps_query_rows():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("100", 12.5), ("200", -3.2)]
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = matchup_service._load_vorp_by_espn_id(season=2026, week=2, team_id="8")
+
+    assert result == {"100": 12.5, "200": -3.2}
+    cursor.execute.assert_called_once()
+    query_args = cursor.execute.call_args[0][1]
+    assert query_args == (2026, 2, "8")
+
+
+def test_apply_vorp_sets_net_vorp_for_known_players_only():
+    lines = [
+        matchup_service._shape_lineup_player_line(_make_roster_player(playerId=1)),
+        matchup_service._shape_lineup_player_line(_make_roster_player(playerId=2)),
+    ]
+    vorp_by_espn_id = {"1": 8.4}
+
+    matchup_service._apply_vorp(lines, vorp_by_espn_id)
+
+    assert lines[0]["net_vorp"] == 8.4
+    assert lines[1]["net_vorp"] is None
 
 
 def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
@@ -281,12 +312,15 @@ def test_get_current_team_roster_shapes_and_badges(monkeypatch):
          patch("src.services.matchup_service.resolve_default_week", return_value=2), \
          patch("src.services.matchup_service.compute_roster_deficits",
                return_value={"teams": {"8": {"RB": {"deficit": 1}}}}), \
-         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
+         patch("src.services.matchup_service._load_vorp_by_espn_id", return_value={"1": 9.9}):
         result = matchup_service.get_current_team_roster(season=2026)
 
     assert [p["player_id"] for p in result["starters"]] == ["1"]
     assert [p["player_id"] for p in result["bench"]] == ["2"]
     assert result["starters"][0]["deficit_flag"] is True
+    assert result["starters"][0]["net_vorp"] == 9.9
+    assert result["bench"][0]["net_vorp"] is None
 
 
 def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):

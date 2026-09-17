@@ -76,9 +76,12 @@ class LineupPlayerLine(BaseModel):
     position: str
     jersey: Optional[str] = None
     slot: str
+    pro_team: str
+    injury_status: Optional[str] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
+    net_vorp: Optional[float] = None
 
 
 class RosterResponse(BaseModel):
