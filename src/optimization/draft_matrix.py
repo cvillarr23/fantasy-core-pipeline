@@ -856,7 +856,7 @@ def persist_pick_autodraft_flag(conn, league_id: str, season: int, pick_number: 
         """, (value, league_id, season, pick_number))
 
 
-def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None, mode: Optional[str] = None, r_client=None) -> None:
+def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[str] = None, timeout: float = PUBLISH_TIMEOUT_SECONDS, expires_at: Optional[float] = None, league_id: Optional[str] = None, pick_number: Optional[int] = None, mode: Optional[str] = None, season: Optional[int] = None, r_client=None) -> None:
     # 182 of 1027 players have no crosswalk entry, and the worker has nothing to click
     # without one. Fail loudly here rather than posting a null id: the trigger would either
     # time out in the draft room or, worse, be coerced into matching someone else.
@@ -902,6 +902,11 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             # (anything in this same process as the gateway) must pass the league's actual
             # stored mode explicitly rather than rely on this env var.
             "mode": mode if mode is not None else DRAFT_MODE,
+            # CORE-17 (#35): the scarcity-adjusted VORP that justified this recommendation
+            # (compute_draft_recommendation_candidates), for /v1/trigger/draft-pick's
+            # bot_decisions audit trail write. Gateway-only state, like expires_at above -
+            # the click bot has no use for it.
+            "decision_inputs": {"vorp_score": target.get("vorp_score"), "season": season},
         },
         headers=headers,
         timeout=timeout,
@@ -1339,7 +1344,7 @@ def hold_and_publish(
                             team_id, target, idempotency_key=idempotency_key,
                             timeout=min(PUBLISH_TIMEOUT_SECONDS, remaining),
                             expires_at=time_fn() + remaining,
-                            league_id=league_id, pick_number=pick_number, r_client=r_client,
+                            league_id=league_id, pick_number=pick_number, season=season, r_client=r_client,
                         )
                         if failure_surfaced:
                             _clear_publish_error(r_client, league_id, error_owner)

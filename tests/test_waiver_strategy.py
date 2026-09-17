@@ -7,7 +7,10 @@ def test_propose_waiver_moves_swaps_when_margin_exceeded():
     bench = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
     free_agents = {"RB": {"player_id": "fa1", "vorp_score": 5.0}}
     moves = waiver_strategy.propose_waiver_moves(bench, free_agents, margin=3.0)
-    assert moves == [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "fa1"}]
+    assert moves == [{
+        "position": "RB", "drop_player_id": "bench1", "add_player_id": "fa1",
+        "add_vorp_score": 5.0, "drop_vorp_score": 1.0,
+    }]
 
 
 def test_propose_waiver_moves_no_swap_when_margin_not_exceeded():

@@ -66,6 +66,10 @@ def propose_waiver_moves(bench_by_position: dict, free_agents_by_position: dict,
                 "position": position,
                 "drop_player_id": worst_bench["player_id"],
                 "add_player_id": free_agent["player_id"],
+                # Carried through for CORE-17 (#35)'s bot_decisions audit trail -
+                # resolve_live_waiver_moves folds these into decision_inputs.
+                "add_vorp_score": free_agent["vorp_score"],
+                "drop_vorp_score": worst_bench["vorp_score"],
             })
     return moves
 

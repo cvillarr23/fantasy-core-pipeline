@@ -43,11 +43,16 @@ def _resolve_espn_identity(cursor, player_id: str) -> Optional[dict]:
     return {"espn_id": row[0], "name": row[1], "team": row[2]}
 
 
-def resolve_live_waiver_moves(cursor, moves: list) -> list:
+def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None, week: Optional[int] = None) -> list:
     """Translates waiver_strategy.propose_waiver_moves' Sleeper-namespaced output into the
     ESPN-identity payload /v1/trigger/waiver requires, dropping any move whose add or drop
     player has no espn_id resolved yet - publishing it would either fail the gateway's
-    namespace guard or silently target nothing in ESPN's UI."""
+    namespace guard or silently target nothing in ESPN's UI.
+
+    decision_inputs (CORE-17/#35) carries the VORP numbers that justified the move plus
+    season/week, for /v1/trigger/waiver's bot_decisions audit trail write - forwarded
+    through publish_waiver_claim's **target unpacking with no further wiring needed there.
+    """
     resolved = []
     for move in moves:
         add_identity = _resolve_espn_identity(cursor, move["add_player_id"])
@@ -69,6 +74,12 @@ def resolve_live_waiver_moves(cursor, moves: list) -> list:
             "drop_player_id": drop_espn_id,
             "name": add_identity["name"],
             "team": add_identity["team"],
+            "decision_inputs": {
+                "add_player_vorp_score": move.get("add_vorp_score"),
+                "drop_player_vorp_score": move.get("drop_vorp_score"),
+                "season": season,
+                "week": week,
+            },
         })
     return resolved
 
@@ -98,7 +109,7 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
                 bench_by_position = waiver_strategy.load_bench_by_position(cursor, team_id, season, week)
                 free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
                 moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
-                resolved = resolve_live_waiver_moves(cursor, moves)
+                resolved = resolve_live_waiver_moves(cursor, moves, season, week)
 
         for target in resolved:
             publish_waiver_claim(team_id, target, core_api_base_url)
