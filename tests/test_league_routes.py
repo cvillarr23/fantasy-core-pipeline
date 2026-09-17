@@ -23,3 +23,11 @@ def test_get_team_names_db_failure_returns_500(client):
         response = client.get("/v1/league/teams?league_id=1248158344")
 
     assert response.status_code == 500
+
+
+def test_get_current_week_success(client):
+    with patch("src.api.league.resolve_default_week", return_value=3):
+        response = client.get("/v1/league/current-week")
+
+    assert response.status_code == 200
+    assert response.json() == {"week": 3}

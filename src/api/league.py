@@ -8,6 +8,7 @@ import os
 
 from fastapi import APIRouter, HTTPException, Query
 
+from src.optimization.lineup_solver import resolve_default_week
 from src.services.league_service import get_team_names
 
 logger = logging.getLogger("LeagueRoutes")
@@ -21,3 +22,8 @@ def get_teams(league_id: str = Query(default_factory=lambda: os.getenv("ESPN_LEA
     except Exception as e:
         logger.error(f"Failed to fetch team names for league_id={league_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch team names: {str(e)}")
+
+
+@league_router.get("/current-week")
+def get_current_week():
+    return {"week": resolve_default_week()}
