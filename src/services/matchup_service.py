@@ -77,7 +77,7 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
         roster_pool = load_roster_pool(cursor, team_id, season, week)
         slot_counts = load_lineup_slot_counts(cursor, season)
         optimal_starters = build_and_solve_lineup(roster_pool, slot_counts)
-        current_starters = load_current_starters(cursor, team_id)
+        current_starters = load_current_starters(cursor, team_id, season, week)
 
     swaps = compute_lineup_swaps(optimal_starters, current_starters)
     names_by_id = {p["player_id"]: p["name"] for p in roster_pool}

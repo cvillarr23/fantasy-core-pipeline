@@ -120,6 +120,10 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
 
     assert result == {"drop1": {"bench_for": "Better Back"}}
     mock_publish.assert_not_called()
+    # load_current_starters' real signature is (cursor, team_id, season, week) - live
+    # /v1/matchup 500'd with "missing 2 required positional arguments" because this call
+    # site only passed (cursor, team_id) before this assertion existed to catch it.
+    mock_current.assert_called_once_with(cursor, "team1", 2026, 2)
 
 
 def _make_box_score(home_team, away_team, home_score=100.0, away_score=90.0,
