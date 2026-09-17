@@ -45,6 +45,15 @@ class SwapInstruction(BaseModel):
             "UI explain a nudge."
         ),
     )
+    decision_inputs: Optional[dict] = Field(
+        None,
+        description=(
+            "CORE-17 (#35): the VORP numbers that justified this specific swap (add/drop "
+            "player vorp_score, matchup_multiplier). Lives on the swap, not the request, "
+            "because one request carries a list of swaps and this must stay 1:1 with each "
+            "one. Recorded to bot_decisions; never forwarded to the click bot."
+        ),
+    )
 
 class LineupTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
@@ -60,6 +69,13 @@ class WaiverTriggerPayload(BaseModel):
         description=(
             "ESPN player id of the roster player to drop to open a slot. Optional: an "
             "add-only claim into an already-open bench slot omits this."
+        ),
+    )
+    decision_inputs: Optional[dict] = Field(
+        None,
+        description=(
+            "CORE-17 (#35): the VORP numbers (and season/week) that justified this claim. "
+            "Recorded to bot_decisions; never forwarded to the click bot."
         ),
     )
 
@@ -117,6 +133,13 @@ class DraftPickTriggerPayload(BaseModel):
             "label/env, and the web UI knows it from the stored draft config - never guessed "
             "downstream, since a live league misidentified as practice would defeat the "
             "point of the safe default."
+        ),
+    )
+    decision_inputs: Optional[dict] = Field(
+        None,
+        description=(
+            "CORE-17 (#35): the scarcity-adjusted VORP (and season) that justified this "
+            "recommendation. Recorded to bot_decisions; never forwarded to the click bot."
         ),
     )
 
@@ -181,7 +204,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"optimized_swaps": {"__all__": {"decision_inputs"}}}),
         })
 
         # 4. Publish message with high persistence markers to survive unexpected broker reboots
@@ -197,6 +220,18 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         )
         connection.close()
         logger.info(f"Asymmetric event transaction committed securely to RabbitMQ for Team {payload.team_id}.")
+
+        for swap in payload.optimized_swaps:
+            _record_bot_decision(
+                tracking_id=tracking_id,
+                bot_name="lineup_bot",
+                action="lineup_swap",
+                team_id=payload.team_id,
+                target_player_id=swap.add_player_id,
+                drop_player_id=swap.drop_player_id,
+                decision_inputs=swap.decision_inputs,
+            )
+
         return {
             "status": "accepted",
             "queue": "lineup_updates",
@@ -236,7 +271,7 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"decision_inputs"}),
         })
 
         channel.basic_publish(
@@ -251,6 +286,17 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
         )
         connection.close()
         logger.info(f"Waiver claim committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
+
+        _record_bot_decision(
+            tracking_id=tracking_id,
+            bot_name="waiver_sniper",
+            action="waiver_claim",
+            team_id=payload.team_id,
+            target_player_id=payload.player_id,
+            drop_player_id=payload.drop_player_id,
+            decision_inputs=payload.decision_inputs,
+        )
+
         return {
             "status": "accepted",
             "queue": "waiver_actions",
@@ -349,6 +395,44 @@ def _reject_internal_player_id(player_id: str, name: Optional[str] = None) -> No
         )
 
     return
+
+
+def _record_bot_decision(
+    *,
+    tracking_id: str,
+    bot_name: str,
+    action: str,
+    team_id: str,
+    league_id: Optional[str] = None,
+    target_player_id: Optional[str] = None,
+    drop_player_id: Optional[str] = None,
+    decision_inputs: Optional[dict] = None,
+) -> None:
+    """Records *why* an already-decided action happened (CORE-17/#35), separate from
+    execution_log's whether-it-succeeded record. season/week are pulled out of
+    decision_inputs into their own typed columns purely for cheap Grafana filtering.
+
+    Fails OPEN, same philosophy as _reject_internal_player_id above: a DB hiccup logging
+    the reasoning must never block the live action it describes.
+    """
+    inputs = decision_inputs or {}
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO bot_decisions
+                    (tracking_id, bot_name, action, team_id, league_id, season, week,
+                     target_player_id, drop_player_id, inputs)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """,
+                (
+                    tracking_id, bot_name, action, team_id, league_id,
+                    inputs.get("season"), inputs.get("week"),
+                    target_player_id, drop_player_id, json.dumps(inputs),
+                ),
+            )
+    except Exception as e:
+        logger.warning(f"Could not record bot_decisions row for tracking_id={tracking_id}: {e}")
 
 
 def _claim_idempotency_key(key: Optional[str], token: str) -> str:
@@ -546,7 +630,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         message_body = json.dumps({
             "tracking_id": tracking_id,
             "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"expires_at"}),
+            **payload.model_dump(exclude={"expires_at", "decision_inputs"}),
         })
 
         # Last possible moment before the message becomes durable. Everything above can
@@ -587,6 +671,17 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         )
         logger.info(f"Draft pick target committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
         _mark_idempotency_key_published(payload.idempotency_key)
+
+        _record_bot_decision(
+            tracking_id=tracking_id,
+            bot_name="draft_clicker",
+            action="draft_pick",
+            team_id=payload.team_id,
+            league_id=payload.league_id,
+            target_player_id=payload.player_id,
+            decision_inputs=payload.decision_inputs,
+        )
+
         return {
             "status": "accepted",
             "queue": "draft_targets",

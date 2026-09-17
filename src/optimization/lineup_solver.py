@@ -167,6 +167,10 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
         {
             "player_id": pid, "name": by_id[pid]["name"], "position": by_id[pid]["position"],
             "defense_matchup_multiplier": by_id[pid].get("defense_matchup_multiplier", 1.0),
+            # CORE-17 (#35): compute_lineup_swaps needs the added player's own vorp_score
+            # for decision_inputs - dropped here previously since only the objective
+            # weighting used it, not the returned starter dict.
+            "vorp_score": by_id[pid]["vorp_score"],
         }
         for pid in by_id
         if any(
@@ -177,22 +181,27 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
     ]
 
 
-def load_current_starters(cursor, team_id: str) -> dict:
-    """Maps player_id -> {"position", "slot_position"} for the team's currently-started
-    players. slot_position (e.g. "RB1", "FLEX") is the actual roster slot, distinct from
-    the player's real position - a WR started in FLEX has position="WR" but
-    slot_position="FLEX", and a swap must report the slot being vacated, not the
-    position of whoever happened to be sitting in it."""
+def load_current_starters(cursor, team_id: str, season: int, week: int) -> dict:
+    """Maps player_id -> {"position", "slot_position", "vorp_score"} for the team's
+    currently-started players. slot_position (e.g. "RB1", "FLEX") is the actual roster
+    slot, distinct from the player's real position - a WR started in FLEX has
+    position="WR" but slot_position="FLEX", and a swap must report the slot being
+    vacated, not the position of whoever happened to be sitting in it.
+
+    vorp_score (CORE-17/#35) is the dropped starter's own VORP, for compute_lineup_swaps'
+    decision_inputs. LEFT JOIN, not INNER like load_roster_pool - a starter being dropped
+    can be on a bye (no weekly_stats row) and must still appear here as droppable."""
     query = """
-        SELECT p.player_id, p.position, r.slot_position
+        SELECT p.player_id, p.position, r.slot_position, COALESCE(s.vorp_score, 0.0) AS vorp_score
         FROM league_rosters r
         JOIN players p ON r.player_id = p.player_id
+        LEFT JOIN weekly_stats s ON s.player_id = p.player_id AND s.season = %s AND s.week = %s
         WHERE r.team_id = %s AND r.is_starter = TRUE;
     """
-    cursor.execute(query, (team_id,))
+    cursor.execute(query, (season, week, team_id))
     return {
-        pid: {"position": pos, "slot_position": slot_position}
-        for pid, pos, slot_position in cursor.fetchall()
+        pid: {"position": pos, "slot_position": slot_position, "vorp_score": vorp_score}
+        for pid, pos, slot_position, vorp_score in cursor.fetchall()
     }
 
 
@@ -219,6 +228,7 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
         if drop_id is None:
             continue
         remaining_drops.remove(drop_id)
+        matchup_multiplier = add_player.get("defense_matchup_multiplier", 1.0)
         swaps.append({
             "drop_player_id": drop_id,
             "add_player_id": add_player["player_id"],
@@ -226,7 +236,16 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
             # Opponent-defense-strength multiplier applied to the added player's VORP this
             # week (#93); 1.0/neutral when the feature is off or add_player predates this
             # field (e.g. a caller building starter dicts without it).
-            "matchup_multiplier": add_player.get("defense_matchup_multiplier", 1.0),
+            "matchup_multiplier": matchup_multiplier,
+            # CORE-17 (#35): the numbers that justified this swap, for bot_decisions'
+            # audit trail. season/week deliberately not included here - this is a pure
+            # diff function and widening its signature just to pass through two values
+            # isn't worth it; those columns are simply NULL for lineup_swap rows.
+            "decision_inputs": {
+                "add_player_vorp_score": add_player.get("vorp_score"),
+                "drop_player_vorp_score": current_starters[drop_id].get("vorp_score"),
+                "matchup_multiplier": matchup_multiplier,
+            },
         })
 
     return swaps
@@ -271,7 +290,7 @@ def optimize_weekly_lineup(team_id: str, season: int, week: int) -> int:
                         return 0
 
                 with tracer.start_as_current_span("lineup_solver.load_current_starters"):
-                    current_starters = load_current_starters(cursor, team_id)
+                    current_starters = load_current_starters(cursor, team_id, season, week)
 
         with tracer.start_as_current_span("lineup_solver.compute_lineup_swaps"):
             swaps = compute_lineup_swaps(optimal_starters, current_starters)

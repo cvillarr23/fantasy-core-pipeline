@@ -14,8 +14,8 @@ def _player(pid, position, vorp_score, name=None, defense_matchup_multiplier=1.0
     }
 
 
-def _current(position, slot_position=None):
-    return {"position": position, "slot_position": slot_position or position}
+def _current(position, slot_position=None, vorp_score=0.0):
+    return {"position": position, "slot_position": slot_position or position, "vorp_score": vorp_score}
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,25 @@ def test_build_and_solve_lineup_selects_optimal_by_vorp_score():
     starters = {p["player_id"] for p in ls.build_and_solve_lineup(pool)}
     assert "wr_high" in starters
     assert "wr_low" not in starters
+
+
+def test_build_and_solve_lineup_includes_vorp_score_in_each_starter():
+    """CORE-17 (#35): compute_lineup_swaps needs each optimal starter's own vorp_score to
+    populate decision_inputs - previously only used internally for the objective weight
+    and dropped from the returned dict."""
+    pool = [
+        _player("qb1", "QB", 10.0),
+        _player("rb1", "RB", 8.0),
+        _player("rb2", "RB", 7.0),
+        _player("wr1", "WR", 6.0),
+        _player("wr2", "WR", 5.0),
+        _player("te1", "TE", 4.0),
+        _player("dst1", "D/ST", 3.0),
+        _player("k1", "K", 2.0),
+        _player("wr3", "WR", 1.0),
+    ]
+    starters = {p["player_id"]: p for p in ls.build_and_solve_lineup(pool)}
+    assert starters["qb1"]["vorp_score"] == 10.0
 
 
 def test_build_and_solve_lineup_respects_position_minimums():
@@ -226,21 +245,55 @@ def test_load_lineup_slot_counts_falls_back_when_missing():
 
 
 # ---------------------------------------------------------------------------
+# load_current_starters
+# ---------------------------------------------------------------------------
+
+def test_load_current_starters_includes_vorp_score():
+    """CORE-17 (#35): compute_lineup_swaps needs the dropped starter's own vorp_score to
+    populate decision_inputs, which load_current_starters didn't carry before."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("rb_old", "RB", "RB1", 4.0)]
+
+    starters = ls.load_current_starters(mock_cursor, team_id="1", season=2025, week=3)
+
+    query, params = mock_cursor.execute.call_args[0]
+    assert "weekly_stats" in query
+    assert "LEFT JOIN" in query
+    assert params == (2025, 3, "1")
+    assert starters == {"rb_old": {"position": "RB", "slot_position": "RB1", "vorp_score": 4.0}}
+
+
+def test_load_current_starters_coalesces_null_vorp_score_for_a_bye_week_starter():
+    """A starter's weekly_stats row is only missing (COALESCE fires) on a bye - the join
+    is LEFT specifically so a starter still on a bye still shows up as droppable."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("wr_bye", "WR", "FLEX", 0.0)]
+
+    ls.load_current_starters(mock_cursor, team_id="1", season=2025, week=3)
+
+    query = mock_cursor.execute.call_args[0][0]
+    assert "COALESCE(s.vorp_score, 0.0)" in query
+
+
+# ---------------------------------------------------------------------------
 # compute_lineup_swaps
 # ---------------------------------------------------------------------------
 
 def test_compute_lineup_swaps_pairs_add_and_drop_by_position():
     optimal = [
-        {"player_id": "rb_new", "name": "New RB", "position": "RB"},
+        {"player_id": "rb_new", "name": "New RB", "position": "RB", "vorp_score": 9.0},
         {"player_id": "rb_old_kept", "name": "Kept RB", "position": "RB"},
     ]
-    current = {"rb_old_kept": _current("RB", "RB1"), "rb_bench_me": _current("RB", "RB2")}
+    current = {"rb_old_kept": _current("RB", "RB1"), "rb_bench_me": _current("RB", "RB2", vorp_score=2.0)}
 
     swaps = ls.compute_lineup_swaps(optimal, current)
 
     assert swaps == [{
         "drop_player_id": "rb_bench_me", "add_player_id": "rb_new", "slot": "RB2",
         "matchup_multiplier": 1.0,
+        "decision_inputs": {
+            "add_player_vorp_score": 9.0, "drop_player_vorp_score": 2.0, "matchup_multiplier": 1.0,
+        },
     }]
 
 
@@ -253,15 +306,31 @@ def test_compute_lineup_swaps_returns_empty_when_already_optimal():
 def test_compute_lineup_swaps_reports_dropped_players_actual_flex_slot():
     # The dropped starter is a WR sitting in the FLEX slot, not a dedicated WR slot.
     # The emitted "slot" must be the vacated FLEX frame, not the player's own position.
-    optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB"}]
-    current = {"wr_in_flex": _current("WR", "FLEX")}
+    optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB", "vorp_score": 6.0}]
+    current = {"wr_in_flex": _current("WR", "FLEX", vorp_score=1.5)}
 
     swaps = ls.compute_lineup_swaps(optimal, current)
 
     assert swaps == [{
         "drop_player_id": "wr_in_flex", "add_player_id": "rb_new", "slot": "FLEX",
         "matchup_multiplier": 1.0,
+        "decision_inputs": {
+            "add_player_vorp_score": 6.0, "drop_player_vorp_score": 1.5, "matchup_multiplier": 1.0,
+        },
     }]
+
+
+def test_compute_lineup_swaps_includes_decision_inputs_with_both_vorp_scores():
+    """CORE-17 (#35): decision_inputs must carry both sides of the swap's VORP, not just
+    the added player's - the audit trail needs to show what was actually gained."""
+    optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB", "vorp_score": 9.0, "defense_matchup_multiplier": 1.05}]
+    current = {"rb_old": _current("RB", "RB1", vorp_score=4.0)}
+
+    swaps = ls.compute_lineup_swaps(optimal, current)
+
+    assert swaps[0]["decision_inputs"] == {
+        "add_player_vorp_score": 9.0, "drop_player_vorp_score": 4.0, "matchup_multiplier": 1.05,
+    }
 
 
 def test_compute_lineup_swaps_includes_matchup_multiplier():
@@ -322,9 +391,9 @@ def test_optimize_weekly_lineup_skips_publish_when_no_delta():
         [("qb1", "QB One", "QB", 10.0, 1.0), ("rb1", "RB One", "RB", 8.0, 1.0), ("rb2", "RB Two", "RB", 7.0, 1.0),
          ("wr1", "WR One", "WR", 6.0, 1.0), ("wr2", "WR Two", "WR", 5.0, 1.0), ("te1", "TE One", "TE", 4.0, 1.0),
          ("dst1", "DST One", "D/ST", 3.0, 1.0), ("k1", "K One", "K", 2.0, 1.0), ("wr3", "WR Three", "WR", 1.0, 1.0)],
-        [("qb1", "QB", "QB"), ("rb1", "RB", "RB1"), ("rb2", "RB", "RB2"), ("wr1", "WR", "WR1"),
-         ("wr2", "WR", "WR2"), ("te1", "TE", "TE"), ("dst1", "D/ST", "D/ST"), ("k1", "K", "K"),
-         ("wr3", "WR", "FLEX")],
+        [("qb1", "QB", "QB", 10.0), ("rb1", "RB", "RB1", 8.0), ("rb2", "RB", "RB2", 7.0), ("wr1", "WR", "WR1", 6.0),
+         ("wr2", "WR", "WR2", 5.0), ("te1", "TE", "TE", 4.0), ("dst1", "D/ST", "D/ST", 3.0), ("k1", "K", "K", 2.0),
+         ("wr3", "WR", "FLEX", 1.0)],
     ]
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
@@ -344,9 +413,9 @@ def test_optimize_weekly_lineup_end_to_end_with_swaps():
          ("wr1", "WR One", "WR", 6.0, 1.0), ("wr2", "WR Two", "WR", 5.0, 1.0), ("te1", "TE One", "TE", 4.0, 1.0),
          ("dst1", "DST One", "D/ST", 3.0, 1.0), ("k1", "K One", "K", 2.0, 1.0),
          ("wr_old", "Old WR", "WR", 1.0, 1.0), ("wr_bench", "Bench WR", "WR", 20.0, 1.09)],
-        [("qb1", "QB", "QB"), ("rb1", "RB", "RB1"), ("rb2", "RB", "RB2"), ("wr1", "WR", "WR1"),
-         ("wr2", "WR", "WR2"), ("te1", "TE", "TE"), ("dst1", "D/ST", "D/ST"), ("k1", "K", "K"),
-         ("wr_old", "WR", "FLEX")],
+        [("qb1", "QB", "QB", 10.0), ("rb1", "RB", "RB1", 8.0), ("rb2", "RB", "RB2", 7.0), ("wr1", "WR", "WR1", 6.0),
+         ("wr2", "WR", "WR2", 5.0), ("te1", "TE", "TE", 4.0), ("dst1", "D/ST", "D/ST", 3.0), ("k1", "K", "K", 2.0),
+         ("wr_old", "WR", "FLEX", 1.0)],
     ]
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
@@ -365,6 +434,9 @@ def test_optimize_weekly_lineup_end_to_end_with_swaps():
         {
             "drop_player_id": "wr_old", "add_player_id": "wr_bench", "slot": "FLEX",
             "matchup_multiplier": 1.09,
+            "decision_inputs": {
+                "add_player_vorp_score": 20.0, "drop_player_vorp_score": 1.0, "matchup_multiplier": 1.09,
+            },
         }
     ]
 

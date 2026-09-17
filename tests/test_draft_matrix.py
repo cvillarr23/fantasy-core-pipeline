@@ -455,7 +455,20 @@ def test_publish_draft_target_posts_expected_payload():
         "pick_number": None,
         # DRAFT_MODE env var, defaulting "live" - read once at import time.
         "mode": "live",
+        # CORE-17 (#35): the scarcity-adjusted VORP that justified this recommendation,
+        # for /v1/trigger/draft-pick's bot_decisions audit trail write.
+        "decision_inputs": {"vorp_score": 12.0, "season": None},
     }
+
+
+def test_publish_draft_target_forwards_season_into_decision_inputs():
+    target = _player("p1", "RB", 12.0, name="Some Back")
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.publish_draft_target("7", target, season=2026)
+
+    assert mock_post.call_args[1]["json"]["decision_inputs"] == {"vorp_score": 12.0, "season": 2026}
 
 
 def test_publish_draft_target_mode_override_takes_precedence_over_env_default():
@@ -573,6 +586,23 @@ def test_hold_and_publish_publishes_when_not_cancelled():
         dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None)
 
     mock_post.assert_called_once()
+
+
+def test_hold_and_publish_passes_season_through_to_publish_draft_target():
+    """CORE-17 (#35): hold_and_publish already carries season as its own parameter (used
+    elsewhere for _record_publish_error/_surface_publish_error); it must also reach
+    publish_draft_target's decision_inputs, not just the error-surfacing helpers."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = None
+    target = _player("p1", "RB", 10.0, name="Some Back")
+
+    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=202)
+        dm.hold_and_publish(
+            mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None, season=2026,
+        )
+
+    assert mock_post.call_args[1]["json"]["decision_inputs"] == {"vorp_score": 10.0, "season": 2026}
 
 
 def test_hold_and_publish_skips_when_cancelled():

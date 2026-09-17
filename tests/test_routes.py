@@ -822,6 +822,222 @@ def test_trigger_waiver_claim_rejects_a_drop_player_id_absent_from_the_crosswalk
     mock_connection.assert_not_called()
 
 
+def test_trigger_lineup_swap_records_bot_decision_per_swap(client):
+    """CORE-17 (#35): each swap in the payload carries its own decision_inputs (VORP for
+    the added/dropped player), so a multi-swap request must produce one bot_decisions row
+    per swap, not one row for the whole request."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    cursor = MagicMock()
+
+    payload = {
+        "team_id": "1",
+        "optimized_swaps": [
+            {
+                "drop_player_id": "4046", "add_player_id": "4983", "slot": "FLEX",
+                "decision_inputs": {"add_player_vorp_score": 12.5, "drop_player_vorp_score": 3.1},
+            },
+            {
+                "drop_player_id": "5000", "add_player_id": "5001", "slot": "WR2",
+                "decision_inputs": {"add_player_vorp_score": 9.0, "drop_player_vorp_score": 2.0},
+            },
+        ],
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.post("/v1/trigger/lineup", json=payload)
+
+    assert response.status_code == 202
+    insert_calls = [
+        c for c in cursor.execute.call_args_list
+        if c.args and "INSERT INTO bot_decisions" in c.args[0]
+    ]
+    assert len(insert_calls) == 2
+
+    _, params = insert_calls[0].args
+    assert params[1] == "lineup_bot"
+    assert params[2] == "lineup_swap"
+    assert params[3] == "1"
+    assert params[7] == "4983"  # target_player_id (add)
+    assert params[8] == "4046"  # drop_player_id
+    assert json.loads(params[9])["add_player_vorp_score"] == 12.5
+
+    _, params2 = insert_calls[1].args
+    assert params2[7] == "5001"
+    assert params2[8] == "5000"
+
+
+def test_trigger_lineup_swap_still_succeeds_when_bot_decision_insert_fails(client):
+    """A DB hiccup logging the audit trail must never block the live lineup action itself."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    @contextmanager
+    def _broken_db_cursor():
+        raise Exception("connection refused")
+        yield  # pragma: no cover
+
+    payload = {
+        "team_id": "1",
+        "optimized_swaps": [{"drop_player_id": "4046", "add_player_id": "4983", "slot": "FLEX"}],
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", _broken_db_cursor):
+        response = client.post("/v1/trigger/lineup", json=payload)
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_waiver_claim_records_bot_decision(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Some Back",), None, ("Some Bench Guy",), None]
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "drop_player_id": "9999",
+        "name": "Some Back", "team": "KC",
+        "decision_inputs": {
+            "add_player_vorp_score": 8.0, "drop_player_vorp_score": 1.0,
+            "season": 2026, "week": 3,
+        },
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.post("/v1/trigger/waiver", json=payload)
+
+    assert response.status_code == 202
+    insert_calls = [
+        c for c in cursor.execute.call_args_list
+        if c.args and "INSERT INTO bot_decisions" in c.args[0]
+    ]
+    assert len(insert_calls) == 1
+    _, params = insert_calls[0].args
+    assert params[1] == "waiver_sniper"
+    assert params[2] == "waiver_claim"
+    assert params[3] == "7"
+    assert params[5] == 2026  # season
+    assert params[6] == 3     # week
+    assert params[7] == "4046"
+    assert params[8] == "9999"
+    assert json.loads(params[9])["add_player_vorp_score"] == 8.0
+
+
+def test_trigger_waiver_claim_still_succeeds_when_bot_decision_insert_fails(client):
+    call_count = {"n": 0}
+
+    @contextmanager
+    def _cursor_then_broken():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            yield _espn_id_ok_cursor()
+        else:
+            raise Exception("db down")
+
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {"team_id": "7", "player_id": "4046", "name": "Some Back", "team": "KC"}
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", _cursor_then_broken):
+        response = client.post("/v1/trigger/waiver", json=payload)
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_draft_pick_records_bot_decision(client):
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    cursor = _espn_id_ok_cursor()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "league_id": "L1",
+        "decision_inputs": {"vorp_score": 15.2, "season": 2026},
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    insert_calls = [
+        c for c in cursor.execute.call_args_list
+        if c.args and "INSERT INTO bot_decisions" in c.args[0]
+    ]
+    assert len(insert_calls) == 1
+    _, params = insert_calls[0].args
+    assert params[1] == "draft_clicker"
+    assert params[2] == "draft_pick"
+    assert params[4] == "L1"  # league_id
+    assert params[5] == 2026  # season
+    assert params[7] == "4046"  # target_player_id
+    assert params[8] is None   # no drop side for a draft pick
+    assert json.loads(params[9])["vorp_score"] == 15.2
+
+
+def test_trigger_draft_pick_does_not_forward_decision_inputs_to_the_click_bot(client):
+    """decision_inputs is gateway-only state for the audit trail - the click bot has no
+    use for it and forwarding it would bloat every draft_targets message for nothing."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC",
+        "decision_inputs": {"vorp_score": 15.2, "season": 2026},
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_espn_id_ok_cursor())):
+        response = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert response.status_code == 202
+    body = json.loads(mock_channel.basic_publish.call_args.kwargs["body"])
+    assert "decision_inputs" not in body
+
+
+def test_trigger_draft_pick_does_not_record_bot_decision_on_duplicate(client):
+    """No new publish happened on the duplicate branch, so there's nothing new to record."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+    cursor = _espn_id_ok_cursor()
+
+    payload = {
+        "team_id": "7", "player_id": "4046", "name": "Some Back",
+        "position": "RB", "pro_team": "KC", "idempotency_key": "L1:5:4046",
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        client.post("/v1/trigger/draft-pick", json=payload)
+        cursor.fetchone.side_effect = [("Some Back",), None]
+        second = client.post("/v1/trigger/draft-pick", json=payload)
+
+    assert second.status_code == 202
+    assert second.json()["status"] == "duplicate"
+    insert_calls = [
+        c for c in cursor.execute.call_args_list
+        if c.args and "INSERT INTO bot_decisions" in c.args[0]
+    ]
+    assert len(insert_calls) == 1
+
+
 def test_trigger_waiver_claim_allows_a_drop_player_id_known_to_espn(client):
     """Without a name to cross-check, any id that resolves in players.espn_id is accepted
     outright - there's nothing decidable to reject."""
