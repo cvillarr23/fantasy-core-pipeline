@@ -71,6 +71,42 @@ sequenceDiagram
     DM->>Redis: XACK
 ```
 
+## Schema Notes
+
+Design rationale for `src/models.py` DDL that's too deep for an inline comment.
+
+### id-space contract
+
+`players.player_id` is Sleeper's internal id -- a different, numerically-overlapping
+namespace from ESPN's ids (crosswalk: `players.espn_id`, ~845/1027 covered). Every
+table that stores a `player_id` (`raw_signals`, `rumor_signals`, `execution_log`,
+`bot_decisions`) uses this internal id, never an ESPN id directly.
+
+Never forward one of these values into an ESPN-id-only field (e.g.
+fantasy-browser-worker's `waiver_sniper.js`/`lineup_bot.js` player/drop ids) without
+translating through `players.espn_id` first. `api/routes.py`'s
+`_reject_internal_player_id` exists specifically to catch this: the two id spaces
+collide numerically (ESPN id 12483 is Matthew Stafford; internal id 12483 is Jack
+Bech), so a translation bug here is silent and undetectable downstream.
+
+### `rumor_signals`
+
+- No `CHECK` constraints on `sentiment`/`suggested_action`: validation of the writer's
+  output shape lives in fantasy-browser-worker's digest bot, matching `raw_signals`'
+  precedent of staying schema-free of interpretation logic.
+- `ON DELETE CASCADE` on `player_id` (not `raw_signals`' `SET NULL`): a signal with no
+  player to attach to is meaningless, unlike raw ingestion history.
+- No separate watermark/cursor table. `max_raw_signal_id` is stamped on every row a
+  digest run writes -- including `no_op` verdicts -- with that run's batch-max
+  `raw_signals.id`. `MAX(max_raw_signal_id)` across the table is the watermark; this
+  only holds because the digest always writes one verdict per distinct player in its
+  batch, even a `no_op` one, so every `raw_signal` considered gets accounted for.
+- `source_raw_signal_ids` keeps cheap provenance (which raw_signals rows produced a
+  verdict) for debugging.
+- No `UNIQUE(player_id)`: a later run legitimately re-evaluates a player as new items
+  arrive, so multiple rows per player over time are expected -- the latest row per
+  player_id is the current signal.
+
 ## Local Configuration
 Ensure you match your system parameters before booting the engine:
 ```bash
