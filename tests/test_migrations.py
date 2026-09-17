@@ -153,6 +153,26 @@ def test_run_migrations_executes_bot_decisions_ddl_before_indices():
     assert bot_decisions_idx < indices_idx
 
 
+def test_run_migrations_executes_rumor_signals_ddl_before_indices():
+    """WORKER-13 (#27, fantasy-browser-worker): rumor_digest_bot.js writes structured
+    per-player verdicts into rumor_signals on every digest run. Lock in that the table is
+    created, and before CREATE_INDICES (which indexes it), same ordering convention as
+    the other ledger tables' tests above."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    rumor_signals_idx = next(
+        i
+        for i, s in enumerate(executed)
+        if "CREATE TABLE IF NOT EXISTS rumor_signals" in s
+    )
+    indices_idx = next(i for i, s in enumerate(executed) if "CREATE INDEX" in s)
+    assert rumor_signals_idx < indices_idx
+
+
 def test_run_migrations_executes_league_teams_ddl_after_league_settings():
     """The matchup view / real-team-names feature needs league_teams (team_id ->
     team_name), synced alongside league_settings by sync_league.py. Lock in it's created,

@@ -389,6 +389,49 @@ CREATE TABLE IF NOT EXISTS llm_call_metrics (
 );
 """
 
+# WORKER-13's structured, advisory-only interpretation of raw_signals -- one row per player per
+# digest run, written by fantasy-browser-worker's rumor_digest_bot.js via completeWithFallback
+# (WORKER-12). No CHECK constraints on sentiment/suggested_action: validation of the LLM's output
+# shape lives in the bot (parseDigestResponse), matching this repo's existing philosophy that
+# raw_signals stays "schema-free of any sentiment/confidence interpretation" and the interpreting
+# layer owns its own correctness.
+#
+# player_id is the SAME internal (Sleeper) id space as players.player_id/raw_signals.player_id --
+# NOT an ESPN id. Do not forward this value into an ESPN-id-only field (waiver_sniper.js's
+# player_id/drop_player_id, lineup_bot.js's swap ids) without translating through players.espn_id
+# first. This is exactly the id-namespace collision _reject_internal_player_id (api/routes.py)
+# exists to guard against elsewhere (ESPN 12483 is Matthew Stafford, internal 12483 is Jack
+# Bech) -- #81 (the eventual waiver/lineup action trigger that consumes this table) must add the
+# same guard before dispatching a real queue message off a row here.
+#
+# ON DELETE CASCADE (not raw_signals' SET NULL): a signal with no player to attach to is
+# meaningless, unlike raw ingestion history which is worth keeping regardless.
+#
+# No separate watermark/cursor table. max_raw_signal_id is stamped onto every row a digest run
+# writes -- including no_op verdicts -- with the batch's own highest raw_signals.id considered
+# that run. MAX(max_raw_signal_id) across this whole table IS the watermark: as long as the
+# digest prompt requires one verdict per distinct player_id in the batch (see
+# buildDigestSystemPrompt), it always advances past every raw_signal considered, whether or not
+# that raw_signal produced a "positive" sentiment. source_raw_signal_ids keeps cheap provenance
+# (which raw_signals rows a verdict was synthesized from) for debugging, mirroring the
+# debug-friendly bent of captureFailure-style dumps elsewhere in this system.
+#
+# No UNIQUE(player_id): a later run legitimately re-evaluates a player as new items arrive, so
+# multiple rows per player over time are expected -- the latest row per player_id is the current
+# signal.
+CREATE_RUMOR_SIGNALS_TABLE = """
+CREATE TABLE IF NOT EXISTS rumor_signals (
+    id SERIAL PRIMARY KEY,
+    player_id VARCHAR(50) NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+    sentiment VARCHAR(20) NOT NULL,
+    confidence REAL NOT NULL,
+    suggested_action VARCHAR(30) NOT NULL,
+    source_raw_signal_ids INTEGER[] NOT NULL,
+    max_raw_signal_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 # One row per historical-season backtest run (CORE-15): our system's decisions vs. a
 # true-optimal-in-hindsight lineup, a static no-waiver-moves roster, and a pure-ADP-drafted
 # roster, so a future Grafana panel can chart strategy performance over time without this
@@ -479,6 +522,8 @@ CREATE INDEX IF NOT EXISTS idx_raw_signals_player_id ON raw_signals(player_id);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_ingested_at ON raw_signals(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_created_at ON llm_call_metrics(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_provider ON llm_call_metrics(provider, model);
+CREATE INDEX IF NOT EXISTS idx_rumor_signals_player_id ON rumor_signals(player_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rumor_signals_max_raw_signal_id ON rumor_signals(max_raw_signal_id);
 CREATE INDEX IF NOT EXISTS idx_bot_decisions_bot_name_decided_at ON bot_decisions(bot_name, decided_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_decisions_tracking_id ON bot_decisions(tracking_id);
 """
