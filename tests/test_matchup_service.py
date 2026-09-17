@@ -49,6 +49,15 @@ def test_shape_player_line_maps_box_player_fields():
     }
 
 
+def test_shape_player_line_coerces_non_string_jersey_to_none():
+    """ESPN returns jersey as an empty list (not a string) for D/ST 'players' - live
+    /v1/matchup 500'd with a pydantic validation error on this exact case (playerId 7,
+    position D/ST) before this coercion existed."""
+    line = matchup_service._shape_player_line(_make_box_player(position="D/ST", jersey=[]))
+
+    assert line["jersey"] is None
+
+
 def test_split_starters_bench_separates_by_slot():
     starter = _make_box_player(playerId=1, slot_position="RB")
     bench = _make_box_player(playerId=2, slot_position="BE")

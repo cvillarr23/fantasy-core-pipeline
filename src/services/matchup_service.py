@@ -42,7 +42,7 @@ def _shape_player_line(box_player) -> dict:
         "espn_id": espn_id,
         "name": box_player.name,
         "position": box_player.position,
-        "jersey": box_player.jersey,
+        "jersey": box_player.jersey if isinstance(box_player.jersey, str) else None,
         "slot": box_player.slot_position,
         "points": box_player.points,
         "projected_points": box_player.projected_points,
