@@ -11,7 +11,11 @@ from espn_api.requests.espn_requests import ESPNAccessDenied, ESPNInvalidLeague,
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.services.matchup_service import NoMatchupFoundError, get_current_team_matchup
+from src.services.matchup_service import (
+    NoMatchupFoundError,
+    get_current_team_matchup,
+    get_current_team_roster,
+)
 
 logger = logging.getLogger("MatchupRoutes")
 matchup_router = APIRouter()
@@ -63,3 +67,32 @@ def get_matchup(season: int, week: int):
     except Exception as e:
         logger.error(f"Failed to compute matchup for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to compute matchup: {str(e)}")
+
+
+class LineupPlayerLine(BaseModel):
+    player_id: str
+    espn_id: str
+    name: str
+    position: str
+    jersey: Optional[str] = None
+    slot: str
+    headshot_url: str
+    deficit_flag: bool
+    suggested_swap: Optional[dict] = None
+
+
+class RosterResponse(BaseModel):
+    starters: list[LineupPlayerLine]
+    bench: list[LineupPlayerLine]
+
+
+@matchup_router.get("/roster", response_model=RosterResponse)
+def get_lineup_roster(season: int):
+    try:
+        return get_current_team_roster(season)
+    except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as e:
+        logger.error(f"ESPN unreachable while building roster for season={season}: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach ESPN")
+    except Exception as e:
+        logger.error(f"Failed to compute roster for season={season}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to compute roster: {str(e)}")

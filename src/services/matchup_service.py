@@ -16,6 +16,7 @@ from src.optimization.lineup_solver import (
     load_current_starters,
     load_lineup_slot_counts,
     load_roster_pool,
+    resolve_default_week,
 )
 from src.services.roster_service import compute_roster_deficits
 
@@ -69,6 +70,29 @@ def _split_starters_bench(lineup: list) -> tuple[list, list]:
     return starters, bench
 
 
+def _shape_lineup_player_line(player) -> dict:
+    espn_id = str(player.playerId)
+    return {
+        "player_id": espn_id,
+        "espn_id": espn_id,
+        "name": player.name,
+        "position": player.position,
+        "jersey": player.jersey if isinstance(player.jersey, str) else None,
+        "slot": player.lineupSlot,
+        "headshot_url": _headshot_url(espn_id),
+        "deficit_flag": False,
+        "suggested_swap": None,
+    }
+
+
+def _split_roster_starters_bench(players: list) -> tuple[list, list]:
+    starters, bench = [], []
+    for player in players:
+        line = _shape_lineup_player_line(player)
+        (bench if player.lineupSlot in BENCH_AND_IR_SLOTS else starters).append(line)
+    return starters, bench
+
+
 def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     """Read-only: reuses lineup_solver's pure functions to see what the optimizer would
     start, but never calls publish_lineup_swaps - this is a display-only badge, not an
@@ -82,7 +106,10 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     swaps = compute_lineup_swaps(optimal_starters, current_starters)
     names_by_id = {p["player_id"]: p["name"] for p in roster_pool}
     return {
-        swap["drop_player_id"]: {"bench_for": names_by_id[swap["add_player_id"]]}
+        swap["drop_player_id"]: {
+            "bench_for": names_by_id[swap["add_player_id"]],
+            "add_player_id": swap["add_player_id"],
+        }
         for swap in swaps
     }
 
@@ -147,3 +174,23 @@ def get_current_team_matchup(season: int, week: int) -> dict:
     payload = {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
     _MATCHUP_CACHE[cache_key] = (time.time(), payload)
     return payload
+
+
+def get_current_team_roster(season: int) -> dict:
+    """Bye-week-safe roster view: sourced from league.teams/Team.roster, not box_scores(),
+    so it works even when no opponent is scheduled (unlike get_current_team_matchup)."""
+    our_team_id = os.getenv("ESPN_TEAM_ID")
+    league = build_league(season)
+    our_team = next((t for t in league.teams if str(t.team_id) == our_team_id), None)
+    if our_team is None:
+        raise ValueError(f"Team {our_team_id} not found in league for season {season}.")
+
+    starters, bench = _split_roster_starters_bench(our_team.roster)
+
+    week = resolve_default_week()
+    deficits = compute_roster_deficits(season, week)
+    deficits_by_position = deficits["teams"].get(our_team_id, {})
+    swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
+    _apply_badges(starters, deficits_by_position, swap_suggestions)
+
+    return {"starters": starters, "bench": bench}

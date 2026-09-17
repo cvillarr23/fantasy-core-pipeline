@@ -96,6 +96,50 @@ def test_apply_badges_sets_suggested_swap_from_map():
     assert lines[0]["suggested_swap"] == {"bench_for": "Better Back"}
 
 
+def _make_roster_player(playerId=5000001, name="Bench Guy", position="WR", jersey="12",
+                         lineupSlot="BE"):
+    p = MagicMock()
+    p.playerId = playerId
+    p.name = name
+    p.position = position
+    p.jersey = jersey
+    p.lineupSlot = lineupSlot
+    return p
+
+
+def test_shape_lineup_player_line_maps_roster_player_fields():
+    line = matchup_service._shape_lineup_player_line(_make_roster_player())
+
+    assert line == {
+        "player_id": "5000001",
+        "espn_id": "5000001",
+        "name": "Bench Guy",
+        "position": "WR",
+        "jersey": "12",
+        "slot": "BE",
+        "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/5000001.png",
+        "deficit_flag": False,
+        "suggested_swap": None,
+    }
+
+
+def test_shape_lineup_player_line_coerces_non_string_jersey_to_none():
+    line = matchup_service._shape_lineup_player_line(_make_roster_player(jersey=[]))
+
+    assert line["jersey"] is None
+
+
+def test_split_roster_starters_bench_separates_by_lineup_slot():
+    starter = _make_roster_player(playerId=1, lineupSlot="RB")
+    bench = _make_roster_player(playerId=2, lineupSlot="BE")
+    ir = _make_roster_player(playerId=3, lineupSlot="IR")
+
+    starters, bench_list = matchup_service._split_roster_starters_bench([starter, bench, ir])
+
+    assert [p["player_id"] for p in starters] == ["1"]
+    assert [p["player_id"] for p in bench_list] == ["2", "3"]
+
+
 def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
     cursor = MagicMock()
 
@@ -118,7 +162,7 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
 
         result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
 
-    assert result == {"drop1": {"bench_for": "Better Back"}}
+    assert result == {"drop1": {"bench_for": "Better Back", "add_player_id": "add1"}}
     mock_publish.assert_not_called()
     # load_current_starters' real signature is (cursor, team_id, season, week) - live
     # /v1/matchup 500'd with "missing 2 required positional arguments" because this call
@@ -219,3 +263,37 @@ def test_get_current_team_matchup_caches_within_ttl(monkeypatch):
         matchup_service.get_current_team_matchup(season=2026, week=2)
 
     mock_build.assert_called_once()
+
+
+def test_get_current_team_roster_shapes_and_badges(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    our_team = _make_team(team_id=8, team_name="Our Team")
+    our_team.roster = [
+        _make_roster_player(playerId=1, position="RB", lineupSlot="RB"),
+        _make_roster_player(playerId=2, position="RB", lineupSlot="BE"),
+    ]
+    other_team = _make_team(team_id=9, team_name="Other Team")
+    other_team.roster = []
+    mock_league = MagicMock()
+    mock_league.teams = [other_team, our_team]
+
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
+         patch("src.services.matchup_service.resolve_default_week", return_value=2), \
+         patch("src.services.matchup_service.compute_roster_deficits",
+               return_value={"teams": {"8": {"RB": {"deficit": 1}}}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        result = matchup_service.get_current_team_roster(season=2026)
+
+    assert [p["player_id"] for p in result["starters"]] == ["1"]
+    assert [p["player_id"] for p in result["bench"]] == ["2"]
+    assert result["starters"][0]["deficit_flag"] is True
+
+
+def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    mock_league = MagicMock()
+    mock_league.teams = [_make_team(team_id=9)]
+
+    with patch("src.services.matchup_service.build_league", return_value=mock_league):
+        with pytest.raises(ValueError):
+            matchup_service.get_current_team_roster(season=2026)

@@ -55,3 +55,32 @@ def test_get_matchup_requires_season_and_week(client):
     response = client.get("/v1/matchup")
 
     assert response.status_code == 422
+
+
+def test_get_lineup_roster_success(client):
+    fixture = {"starters": [], "bench": []}
+    with patch("src.api.matchup.get_current_team_roster", return_value=fixture):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 200
+    assert response.json() == fixture
+
+
+def test_get_lineup_roster_espn_error_returns_502(client):
+    with patch("src.api.matchup.get_current_team_roster", side_effect=ESPNAccessDenied("denied")):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 502
+
+
+def test_get_lineup_roster_unexpected_error_returns_500(client):
+    with patch("src.api.matchup.get_current_team_roster", side_effect=Exception("boom")):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 500
+
+
+def test_get_lineup_roster_requires_season(client):
+    response = client.get("/v1/matchup/roster")
+
+    assert response.status_code == 422
