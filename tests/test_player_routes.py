@@ -15,7 +15,7 @@ def test_get_player_summary_success(client):
         ("rotowire", "Some Back is questionable for Sunday.", "https://example.com/1", datetime(2026, 8, 17, 12, 0, 0)),
     ]
 
-    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/players/p1/summary")
 
     assert response.status_code == 200
@@ -37,7 +37,7 @@ def test_get_player_summary_serializes_real_datetime_published_at(client):
         ("rotowire", "Some Back looked good in practice.", None, datetime(2026, 8, 17, 12, 0, 0)),
     ]
 
-    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/players/p1/summary")
 
     assert response.status_code == 200
@@ -48,7 +48,7 @@ def test_get_player_summary_unknown_player_returns_404(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = None
 
-    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/players/unknown/summary")
 
     assert response.status_code == 404
@@ -60,7 +60,7 @@ def test_get_player_summary_db_failure(client):
         raise Exception("connection refused")
         yield  # pragma: no cover
 
-    with patch("src.api.players.get_db_cursor", _broken_cursor):
+    with patch("src.services.players_service.get_db_cursor", _broken_cursor):
         response = client.get("/v1/players/p1/summary")
 
     assert response.status_code == 500
@@ -71,7 +71,7 @@ def test_get_player_summary_no_news_returns_empty_list(client):
     mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None)
     mock_cursor.fetchall.return_value = []
 
-    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/players/p1/summary")
 
     assert response.status_code == 200
@@ -86,7 +86,7 @@ def test_search_players_success(client):
         ("p2", None, "Some Backup", "RB", "SF", None, None, None),
     ]
 
-    with patch("src.api.players.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/players/search?q=Some")
 
     assert response.status_code == 200
@@ -105,7 +105,7 @@ def test_search_players_success(client):
 
 
 def test_search_players_short_query_returns_empty_without_hitting_db(client):
-    with patch("src.api.players.get_db_cursor") as mock_get_cursor:
+    with patch("src.services.players_service.get_db_cursor") as mock_get_cursor:
         response = client.get("/v1/players/search?q=a")
 
     assert response.status_code == 200
@@ -119,7 +119,7 @@ def test_search_players_db_error_returns_500(client):
         raise Exception("connection refused")
         yield  # pragma: no cover
 
-    with patch("src.api.players.get_db_cursor", _broken_cursor):
+    with patch("src.services.players_service.get_db_cursor", _broken_cursor):
         response = client.get("/v1/players/search?q=Some")
 
     assert response.status_code == 500

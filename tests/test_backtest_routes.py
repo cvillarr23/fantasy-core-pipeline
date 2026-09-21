@@ -15,7 +15,7 @@ def test_list_backtest_results_success(client):
         (2024, datetime(2025, 1, 6, 9, 0, 0), 1450.0, 1550.0, 1350.0, 190.0, 140.0, 1750.0, 1650.0),
     ]
 
-    with patch("src.api.backtest.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.backtest_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/backtest/results")
 
     assert response.status_code == 200
@@ -33,7 +33,7 @@ def test_list_backtest_results_filters_by_season(client):
         (2025, datetime(2026, 1, 5, 9, 0, 0), 1500.0, 1600.0, 1400.0, 200.0, 150.0, 1800.0, 1700.0),
     ]
 
-    with patch("src.api.backtest.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.backtest_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/backtest/results?season=2025")
 
     assert response.status_code == 200
@@ -50,7 +50,7 @@ def test_list_backtest_results_db_failure(client):
         raise Exception("connection refused")
         yield  # pragma: no cover
 
-    with patch("src.api.backtest.get_db_cursor", _broken_cursor):
+    with patch("src.services.backtest_service.get_db_cursor", _broken_cursor):
         response = client.get("/v1/backtest/results")
 
     assert response.status_code == 500
@@ -68,7 +68,7 @@ def test_get_backtest_result_success(client):
         2025, datetime(2026, 1, 5, 9, 0, 0), 1500.0, 1600.0, 1400.0, 200.0, 150.0, 1800.0, 1700.0, summary_json,
     )
 
-    with patch("src.api.backtest.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.backtest_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/backtest/results/2025")
 
     assert response.status_code == 200
@@ -81,7 +81,7 @@ def test_get_backtest_result_no_rows_returns_404(client):
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = None
 
-    with patch("src.api.backtest.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+    with patch("src.services.backtest_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
         response = client.get("/v1/backtest/results/2025")
 
     assert response.status_code == 404
@@ -93,7 +93,7 @@ def test_get_backtest_result_db_failure(client):
         raise Exception("connection refused")
         yield  # pragma: no cover
 
-    with patch("src.api.backtest.get_db_cursor", _broken_cursor):
+    with patch("src.services.backtest_service.get_db_cursor", _broken_cursor):
         response = client.get("/v1/backtest/results/2025")
 
     assert response.status_code == 500
