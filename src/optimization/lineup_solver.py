@@ -24,6 +24,7 @@ logger = logging.getLogger("LineupSolver")
 tracer = trace.get_tracer("lineup_solver")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
+TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 BENCH_AND_IR_SLOT_NAMES = {"BE", "Bench", "IR"}
 FLEX_SLOT_ELIGIBLE_POSITIONS = {
     "RB/WR/TE": ("RB", "WR", "TE"),
@@ -258,7 +259,7 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
 
     # Inject this pipeline run's trace context so the FastAPI-side root span (CORE-12)
     # becomes a child of this trace instead of starting a disconnected one.
-    headers: dict = {}
+    headers: dict = {"X-API-Key": TRIGGER_API_KEY}
     propagate.inject(headers)
 
     response = requests.post(

@@ -13,6 +13,10 @@ from fastapi.testclient import TestClient
 
 psycopg2.pool.ThreadedConnectionPool = MagicMock(return_value=MagicMock())
 
+# routes.py reads TRIGGER_API_KEY at import time, and test modules import routes before
+# the client fixture runs - must be set at collection time, not inside the fixture.
+os.environ.setdefault("TRIGGER_API_KEY", "test-trigger-api-key")
+
 
 @pytest.fixture(scope="session")
 def client():
@@ -36,5 +40,5 @@ def client():
     with patch("src.api.main.run_migrations"):
         from src.api.main import app
 
-        with TestClient(app) as test_client:
+        with TestClient(app, headers={"X-API-Key": os.environ["TRIGGER_API_KEY"]}) as test_client:
             yield test_client

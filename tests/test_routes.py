@@ -116,6 +116,27 @@ def test_trigger_lineup_swap_success(client):
     assert body["tracking_id"] in publish_kwargs["body"]
 
 
+def test_trigger_lineup_rejects_missing_or_wrong_api_key(client):
+    payload = {
+        "team_id": "1",
+        "optimized_swaps": [
+            {"drop_player_id": "4046", "add_player_id": "4983", "slot": "FLEX"}
+        ],
+    }
+
+    with patch("src.api.routes.pika.BlockingConnection") as mock_conn:
+        no_header_response = client.post(
+            "/v1/trigger/lineup", json=payload, headers={"X-API-Key": ""}
+        )
+        wrong_key_response = client.post(
+            "/v1/trigger/lineup", json=payload, headers={"X-API-Key": "not-the-key"}
+        )
+
+    assert no_header_response.status_code == 401
+    assert wrong_key_response.status_code == 401
+    mock_conn.assert_not_called()
+
+
 def test_trigger_lineup_swap_broker_failure(client):
     payload = {
         "team_id": "1",

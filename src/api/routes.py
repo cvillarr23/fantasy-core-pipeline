@@ -1,11 +1,12 @@
 import os
 import json
 import logging
+import secrets
 import uuid
 import time
 import pika
 from typing import List, Literal, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from opentelemetry import propagate
 from pydantic import BaseModel, Field
 from src.api.draft import _redis_client
@@ -26,6 +27,18 @@ BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 # parses as vhost "" (empty string) in pika, not "/", and RabbitMQ then rejects the
 # connection with "vhost  not found" instead of connecting to the default vhost.
 AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f")
+
+# Guards /v1/trigger/*, which bypass oauth2-proxy when called in-cluster. No default -
+# OpenBao-injected in deployed environments, same convention as DB_PASSWORD.
+TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
+
+
+def require_trigger_api_key(x_api_key: str = Header(...)) -> None:
+    if not TRIGGER_API_KEY:
+        raise HTTPException(status_code=500, detail="TRIGGER_API_KEY is not configured on this service.")
+    if not secrets.compare_digest(x_api_key, TRIGGER_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key.")
+
 
 # ------------------------------------------------------------------------------
 # PYDANTIC DATA TRANSFER OBJECTS (SCHEMAS)
@@ -171,7 +184,7 @@ def health_check():
 
     return {"status": "healthy", "database": "connected", "broker": "connected"}
 
-@router.post("/trigger/lineup", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/trigger/lineup", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_trigger_api_key)])
 def trigger_lineup_swap(payload: LineupTriggerPayload):
     """
     Asymmetric API gateway: Translates incoming high-level HTTP payloads into structured
@@ -243,7 +256,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
-@router.post("/trigger/waiver", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/trigger/waiver", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_trigger_api_key)])
 def trigger_waiver_claim(payload: WaiverTriggerPayload):
     """
     Waiver-claim counterpart to /trigger/lineup (CORE-15/#117): publishes a live waiver
@@ -550,7 +563,7 @@ def _close_broker_connection(connection) -> None:
         logger.warning(f"Could not close broker connection cleanly: {e}")
 
 
-@router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_trigger_api_key)])
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
     Draft-day counterpart to /trigger/lineup (CORE-08): publishes the live optimizer's
