@@ -56,6 +56,7 @@ logger = logging.getLogger("DraftMatrix")
 tracer = trace.get_tracer("draft_matrix")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
+TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
@@ -866,7 +867,7 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             "so the browser worker has no data-player-id to click. Pick this player manually."
         )
 
-    headers: dict = {}
+    headers: dict = {"X-API-Key": TRIGGER_API_KEY}
     propagate.inject(headers)
 
     response = requests.post(

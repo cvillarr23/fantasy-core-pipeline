@@ -25,6 +25,9 @@
   in `Dockerfile`. On newer local Python versions (e.g. 3.13+), some pins (`pydantic-core`,
   `psycopg2-binary`) may fail to build from source — install unpinned/latest versions in a
   local venv for running tests rather than editing the pins.
+- `tests/conftest.py` sets `TRIGGER_API_KEY` at module scope (not inside the `client`
+  fixture) since `tests/test_routes.py` imports `src.api.routes` — which reads
+  `TRIGGER_API_KEY` at import time — before any fixture runs.
 
 ## API layer conventions
 
@@ -60,6 +63,13 @@
   (Kubernetes Job orchestration, Redis draft state, and SQL all inline) — both mix in
   non-SQL orchestration concerns, not just SQL-behind-a-service, so migrating them needs
   its own design pass rather than a mechanical extraction. Tracked as separate issues.
+- `src/api/routes.py`'s three `/v1/trigger/*` routes (`lineup`, `waiver`, `draft-pick`)
+  require an `X-API-Key` header (`require_trigger_api_key` dependency), checked against
+  `TRIGGER_API_KEY` — OpenBao-injected in deployed environments, no default (issue #141:
+  these routes cause real ESPN side effects and are called in-cluster by CronJobs and
+  `fantasy-browser-worker`, bypassing the `oauth2-proxy` in front of `fantasy-web-ui`).
+  `src/optimization/lineup_solver.py`, `draft_matrix.py`, and `waiver_evaluator.py` each
+  read their own `TRIGGER_API_KEY` env var and set the header before posting.
 
 ## CORE-05: Dynamic VORP matrix
 

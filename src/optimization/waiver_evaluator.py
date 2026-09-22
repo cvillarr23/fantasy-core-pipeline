@@ -33,6 +33,7 @@ logger = logging.getLogger("WaiverEvaluator")
 tracer = trace.get_tracer("waiver_evaluator")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
+TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 
 
 def _resolve_espn_identity(cursor, player_id: str) -> Optional[dict]:
@@ -87,7 +88,7 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
 def publish_waiver_claim(team_id: str, target: dict, core_api_base_url: str = CORE_API_BASE_URL, timeout: float = 10.0) -> None:
     # Injects this run's trace context so the FastAPI-side root span (CORE-12) becomes a
     # child of this trace instead of starting a disconnected one.
-    headers: dict = {}
+    headers: dict = {"X-API-Key": TRIGGER_API_KEY}
     propagate.inject(headers)
 
     response = requests.post(
