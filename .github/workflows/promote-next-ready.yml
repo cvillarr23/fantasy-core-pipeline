@@ -1,0 +1,67 @@
+name: Promote next ready ticket
+
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  promote-next:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pick the next unblocked issue in this repo
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const closedNumber = context.issue.number;
+
+            // Already-ready or already-assigned issues aren't candidates -- pull open issues
+            // and filter client-side since blockedBy/assignees/labels need per-issue detail.
+            const { data: openIssues } = await github.rest.issues.listForRepo({
+              owner, repo, state: "open", per_page: 100,
+            });
+
+            const priorityRank = { "priority/blocker": 0, "priority/high": 1, "priority/medium": 2, "priority/low": 3 };
+
+            const candidates = [];
+            for (const issue of openIssues) {
+              if (issue.pull_request) continue;
+              if (issue.assignees && issue.assignees.length > 0) continue;
+              const labelNames = issue.labels.map(l => typeof l === "string" ? l : l.name);
+              if (labelNames.includes("status/ready")) continue;
+
+              const detail = await github.graphql(`
+                query($owner:String!, $repo:String!, $number:Int!) {
+                  repository(owner:$owner, name:$repo) {
+                    issue(number:$number) {
+                      blockedBy(first: 10) { nodes { state } }
+                    }
+                  }
+                }
+              `, { owner, repo, number: issue.number });
+
+              const blockedBy = detail.repository.issue.blockedBy.nodes;
+              const stillBlocked = blockedBy.some(b => b.state === "OPEN");
+              if (stillBlocked) continue;
+
+              const prio = labelNames.find(l => l.startsWith("priority/"));
+              candidates.push({ number: issue.number, rank: priorityRank[prio] ?? 4 });
+            }
+
+            if (candidates.length === 0) {
+              console.log("No unblocked, unassigned, not-yet-ready candidates left in this repo.");
+              return;
+            }
+
+            candidates.sort((a, b) => a.rank - b.rank || a.number - b.number);
+            const next = candidates[0].number;
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: next, labels: ["status/ready"],
+            });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: next,
+              body: `Promoted to \`status/ready\` -- #${closedNumber} just closed, freeing up capacity in this repo. Next unblocked, unassigned candidate by priority.`,
+            });
