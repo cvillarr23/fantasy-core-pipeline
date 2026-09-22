@@ -9,26 +9,13 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
 from src.optimization.lineup_solver import resolve_default_week
+from src.schemas.rumor_action import RumorActionTriggerRequest, RumorActionTriggerResponse
 from src.services import rumor_action_service
 
 logger = logging.getLogger("RumorActionRoutes")
 rumor_action_router = APIRouter()
-
-
-class RumorActionTriggerRequest(BaseModel):
-    team_id: Optional[str] = None
-    season: Optional[int] = None
-    week: Optional[int] = None
-
-
-class RumorActionTriggerResponse(BaseModel):
-    considered: int
-    waiver_claims_published: list
-    lineup_swaps_published: list
-    watermark: int
 
 
 @rumor_action_router.post("/trigger/rumor-action", response_model=RumorActionTriggerResponse)
