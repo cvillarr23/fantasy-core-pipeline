@@ -7,6 +7,7 @@ which bench player replaces them, so the actual add/drop pairing still comes fro
 VORP-based evaluation the weekly cadence already runs. This just re-runs that evaluation
 early and filters its output to the player(s) a qualifying signal actually named.
 """
+import argparse
 import logging
 import os
 
@@ -14,6 +15,7 @@ from src.api.draft import _redis_client
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.optimization import lineup_solver
+from src.optimization.lineup_solver import resolve_default_week
 from src.optimization.waiver_evaluator import publish_waiver_claim, resolve_live_waiver_moves
 
 logger = logging.getLogger("RumorActionService")
@@ -169,3 +171,15 @@ def evaluate_and_publish_rumor_actions(team_id: str, season: int, week: int) -> 
         "lineup_swaps_published": published_lineup_swaps,
         "watermark": new_watermark,
     }
+
+
+if __name__ == "__main__":
+    # Mirrors waiver_evaluator.py's __main__ shape - every CronJob in fantasy-infra runs a
+    # `python -m` module directly rather than curling the live FastAPI service.
+    parser = argparse.ArgumentParser(description="Evaluate and publish today's rumor-driven actions.")
+    parser.add_argument("--team-id", required=True)
+    parser.add_argument("--season", required=True, type=int)
+    parser.add_argument("--week", type=int, default=None)
+    args = parser.parse_args()
+    week = args.week if args.week is not None else resolve_default_week()
+    evaluate_and_publish_rumor_actions(args.team_id, args.season, week)
