@@ -14,6 +14,7 @@ from src.api.matchup import matchup_router
 from src.api.league import league_router
 from src.api.stats import stats_router
 from src.api.trade import trade_router
+from src.api.rumor_action import rumor_action_router
 from src.api.mcp_server import mcp, mcp_asgi_app
 from src.telemetry import configure_tracing, configure_trace_logging
 
@@ -78,6 +79,7 @@ app.include_router(matchup_router, prefix="/v1/matchup")
 app.include_router(league_router, prefix="/v1/league")
 app.include_router(stats_router, prefix="/v1/stats")
 app.include_router(trade_router, prefix="/v1/trade")
+app.include_router(rumor_action_router, prefix="/v1")
 
 # Mount the MCP (Model Context Protocol) server (CORE-07) - its own routes already carry
 # absolute paths (/mcp, /.well-known/oauth-protected-resource/mcp), so it's mounted at
