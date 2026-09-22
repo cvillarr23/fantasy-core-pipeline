@@ -48,7 +48,7 @@ def test_browse_vorp_filters_and_defaults_to_vorp_sort(client):
     cursor = MagicMock()
     cursor.fetchall.return_value = [VORP_ROW]
 
-    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+    with patch("src.services.stats_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         response = client.get("/v1/stats/vorp?season=2026&week=3&position=rb")
 
     assert response.status_code == 200
@@ -81,7 +81,7 @@ def test_browse_vorp_supports_season_trend_sort(client):
     cursor = MagicMock()
     cursor.fetchall.return_value = []
 
-    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+    with patch("src.services.stats_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         response = client.get("/v1/stats/vorp?season=2026&sort=week")
 
     assert response.status_code == 200
@@ -95,7 +95,7 @@ def test_browse_vorp_supports_projected_points_sort(client):
     cursor = MagicMock()
     cursor.fetchall.return_value = [VORP_ROW]
 
-    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+    with patch("src.services.stats_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         response = client.get("/v1/stats/vorp?sort=projected_points")
 
     assert response.status_code == 200
@@ -108,7 +108,7 @@ def test_browse_vorp_supports_actual_points_sort(client):
     cursor = MagicMock()
     cursor.fetchall.return_value = [VORP_ROW]
 
-    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+    with patch("src.services.stats_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         response = client.get("/v1/stats/vorp?sort=actual_points")
 
     assert response.status_code == 200
@@ -121,7 +121,7 @@ def test_browse_vorp_serializes_null_metrics(client):
     cursor = MagicMock()
     cursor.fetchall.return_value = [VORP_ROW_NULL_METRICS]
 
-    with patch("src.api.stats.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+    with patch("src.services.stats_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         response = client.get("/v1/stats/vorp")
 
     assert response.status_code == 200
@@ -146,7 +146,7 @@ def test_browse_vorp_serializes_null_metrics(client):
 
 
 def test_browse_vorp_rejects_unknown_sort(client):
-    with patch("src.api.stats.get_db_cursor") as get_cursor:
+    with patch("src.services.stats_service.get_db_cursor") as get_cursor:
         response = client.get("/v1/stats/vorp?sort=player_id")
 
     assert response.status_code == 422
@@ -154,7 +154,7 @@ def test_browse_vorp_rejects_unknown_sort(client):
 
 
 def test_browse_vorp_rejects_limit_out_of_bounds(client):
-    with patch("src.api.stats.get_db_cursor") as get_cursor:
+    with patch("src.services.stats_service.get_db_cursor") as get_cursor:
         response = client.get("/v1/stats/vorp?limit=0")
 
     assert response.status_code == 422
@@ -167,7 +167,7 @@ def test_browse_vorp_db_failure_returns_500(client):
         raise Exception("connection refused")
         yield  # pragma: no cover
 
-    with patch("src.api.stats.get_db_cursor", _broken_cursor):
+    with patch("src.services.stats_service.get_db_cursor", _broken_cursor):
         response = client.get("/v1/stats/vorp")
 
     assert response.status_code == 500

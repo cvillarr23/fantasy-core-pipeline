@@ -4,11 +4,9 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch
 
-from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.util._once import Once
 
 from src.optimization import draft_matrix as dm
 
@@ -1811,46 +1809,48 @@ def test_schedule_publish_cancels_previous_pending_job():
     mock_thread.start.assert_called_once()
 
 
-def test_schedule_publish_propagates_trace_context_across_thread_boundary():
+def test_schedule_publish_propagates_trace_context_across_thread_boundary(monkeypatch):
     """hold_and_publish runs on a background OS thread (see _schedule_publish), which -
     unlike an asyncio task - does not automatically inherit the calling thread's OTel
     context. This exercises the real (unmocked) threading.Thread path end-to-end and
     verifies the span created inside the background thread shares its parent's trace_id,
     guarding against a future argument-reordering regression silently breaking the
-    context handoff (context.get_current() -> Thread args -> context.attach())."""
-    original_provider = trace._TRACER_PROVIDER
-    original_once = trace._TRACER_PROVIDER_SET_ONCE
-    trace._TRACER_PROVIDER = None
-    trace._TRACER_PROVIDER_SET_ONCE = Once()
+    context handoff (context.get_current() -> Thread args -> context.attach()).
+
+    Patches dm.tracer directly rather than swapping OTel's global TracerProvider:
+    trace.get_tracer("draft_matrix") already ran at draft_matrix.py's import time, and
+    if some other already-imported module (e.g. src.api.main, which calls
+    configure_tracing() eagerly at import time) had already installed a real provider by
+    then, dm.tracer is a concrete SDK Tracer bound permanently to *that* provider - not a
+    dynamic proxy - so later reassigning trace._TRACER_PROVIDER in this test would never
+    reach it. That made this test pass in isolation but fail under the full suite,
+    depending on whether some earlier-collected test module had already imported
+    src.api.main. Patching dm.tracer sidesteps the global registry entirely."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
+    monkeypatch.setattr(dm, "tracer", provider.get_tracer("draft_matrix"))
 
-    try:
-        mock_client = MagicMock()
-        pending_state = {}
-        with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
-             patch.object(dm, "publish_draft_target"):
-            with dm.tracer.start_as_current_span("draft_pick.handle_event") as parent_span:
-                parent_trace_id = parent_span.get_span_context().trace_id
-                dm._schedule_publish(
-                    mock_client, "L1", "7", 5, [_player("p1", "RB", 1.0)],
-                    delay_seconds=0, pending_state=pending_state,
-                )
+    mock_client = MagicMock()
+    pending_state = {}
+    with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
+         patch.object(dm, "publish_draft_target"):
+        with dm.tracer.start_as_current_span("draft_pick.handle_event") as parent_span:
+            parent_trace_id = parent_span.get_span_context().trace_id
+            dm._schedule_publish(
+                mock_client, "L1", "7", 5, [_player("p1", "RB", 1.0)],
+                delay_seconds=0, pending_state=pending_state,
+            )
 
-            for _ in range(100):
-                if exporter.get_finished_spans():
-                    break
-                time.sleep(0.02)
+        for _ in range(100):
+            if exporter.get_finished_spans():
+                break
+            time.sleep(0.02)
 
-        spans = exporter.get_finished_spans()
-        publish_spans = [s for s in spans if s.name == "draft_pick.hold_and_publish"]
-        assert len(publish_spans) == 1
-        assert publish_spans[0].context.trace_id == parent_trace_id
-    finally:
-        trace._TRACER_PROVIDER = original_provider
-        trace._TRACER_PROVIDER_SET_ONCE = original_once
+    spans = exporter.get_finished_spans()
+    publish_spans = [s for s in spans if s.name == "draft_pick.hold_and_publish"]
+    assert len(publish_spans) == 1
+    assert publish_spans[0].context.trace_id == parent_trace_id
 
 
 def test_schedule_publish_clamps_delay_and_writes_absolute_deadlines():
