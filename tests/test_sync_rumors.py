@@ -1,5 +1,7 @@
+import time
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from src.ingestion import sync_rumors
@@ -175,6 +177,169 @@ def test_sync_rumors_soft_fails_when_source_raises():
 
     mock_persist.assert_called_once_with(mock_conn, [])
     mock_redis_instance.set.assert_called()  # lock acquire + mark_synced
+
+
+REDDIT_ENV = {
+    "REDDIT_CLIENT_ID": "test-client-id",
+    "REDDIT_CLIENT_SECRET": "test-client-secret",
+    "REDDIT_USER_AGENT": "test-agent/1.0 (by /u/testuser)",
+}
+
+
+def _reddit_post(name="t3_abc123", score=50, age_hours=1, title="McCaffrey injury update", selftext="", permalink="/r/fantasyfootball/comments/abc123/mccaffrey/"):
+    return {
+        "name": name,
+        "score": score,
+        "created_utc": time.time() - age_hours * 3600,
+        "title": title,
+        "selftext": selftext,
+        "permalink": permalink,
+        "url": "https://www.reddit.com" + permalink,
+    }
+
+
+def _reddit_listing_response(posts, after=None):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "data": {"children": [{"data": post} for post in posts], "after": after}
+    }
+    mock_response.raise_for_status.return_value = None
+    return mock_response
+
+
+def test_normalize_reddit_item_maps_fields():
+    post = _reddit_post(selftext="He's expected to play.")
+
+    result = sync_rumors.normalize_reddit_item(post)
+
+    assert result["source_item_id"] == "t3_abc123"
+    assert "McCaffrey injury update" in result["raw_text"]
+    assert "expected to play" in result["raw_text"]
+    assert result["url"] == "https://www.reddit.com/r/fantasyfootball/comments/abc123/mccaffrey/"
+    assert result["published_at"].tzinfo is not None
+
+
+def test_normalize_reddit_item_falls_back_to_url_without_permalink():
+    post = _reddit_post()
+    post["permalink"] = None
+    post["url"] = "https://external-site.example/article"
+
+    result = sync_rumors.normalize_reddit_item(post)
+
+    assert result["url"] == "https://external-site.example/article"
+
+
+def test_get_reddit_access_token_raises_when_env_missing():
+    with patch.dict("os.environ", {}, clear=True):
+        with pytest.raises(RuntimeError):
+            sync_rumors.get_reddit_access_token()
+
+
+def test_get_reddit_access_token_returns_token():
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"access_token": "fake-token"}
+    mock_response.raise_for_status.return_value = None
+
+    with patch.dict("os.environ", REDDIT_ENV, clear=True), \
+         patch("src.ingestion.sync_rumors.requests.post", return_value=mock_response) as mock_post:
+        token = sync_rumors.get_reddit_access_token()
+
+    assert token == "fake-token"
+    assert mock_post.call_args.kwargs["auth"] == ("test-client-id", "test-client-secret")
+
+
+def test_fetch_reddit_fantasyfootball_soft_fails_after_retries():
+    with patch.dict("os.environ", REDDIT_ENV, clear=True), \
+         patch("src.ingestion.sync_rumors.get_reddit_access_token", side_effect=requests.RequestException("boom")):
+        result = sync_rumors.fetch_reddit_fantasyfootball()
+
+    assert result == []
+
+
+def test_fetch_reddit_fantasyfootball_soft_fails_when_env_missing():
+    with patch.dict("os.environ", {}, clear=True):
+        result = sync_rumors.fetch_reddit_fantasyfootball()
+
+    assert result == []
+
+
+def test_fetch_reddit_fantasyfootball_applies_quality_filter():
+    good_post = _reddit_post(name="t3_good", score=50, age_hours=1)
+    low_score_post = _reddit_post(name="t3_lowscore", score=1, age_hours=1)
+    stale_post = _reddit_post(name="t3_stale", score=999, age_hours=200)
+
+    mock_redis_instance = MagicMock()
+    mock_redis_instance.get.return_value = None
+    response = _reddit_listing_response([good_post, low_score_post, stale_post], after=None)
+
+    with patch.dict("os.environ", REDDIT_ENV, clear=True), \
+         patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
+         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.requests.get", return_value=response):
+        result = sync_rumors.fetch_reddit_fantasyfootball()
+
+    assert [p["name"] for p in result] == ["t3_good"]
+
+
+def test_fetch_reddit_fantasyfootball_paginates_via_after_cursor():
+    page1 = [_reddit_post(name=f"t3_p1_{i}") for i in range(3)]
+    page2 = [_reddit_post(name=f"t3_p2_{i}") for i in range(2)]
+
+    mock_redis_instance = MagicMock()
+    mock_redis_instance.get.return_value = None
+    response_page1 = _reddit_listing_response(page1, after="cursor-1")
+    response_page2 = _reddit_listing_response(page2, after=None)
+
+    with patch.dict("os.environ", REDDIT_ENV, clear=True), \
+         patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
+         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.requests.get", side_effect=[response_page1, response_page2]) as mock_get:
+        result = sync_rumors.fetch_reddit_fantasyfootball()
+
+    assert len(result) == 5
+    assert mock_get.call_count == 2
+    assert mock_get.call_args_list[1].kwargs["params"]["after"] == "cursor-1"
+
+
+def test_fetch_reddit_fantasyfootball_stops_at_watermark():
+    seen_post = _reddit_post(name="t3_seen")
+    new_post = _reddit_post(name="t3_new")
+
+    mock_redis_instance = MagicMock()
+    mock_redis_instance.get.return_value = "t3_seen"
+    response = _reddit_listing_response([new_post, seen_post], after="cursor-1")
+
+    with patch.dict("os.environ", REDDIT_ENV, clear=True), \
+         patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
+         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.requests.get", return_value=response) as mock_get:
+        result = sync_rumors.fetch_reddit_fantasyfootball()
+
+    assert [p["name"] for p in result] == ["t3_new"]
+    mock_get.assert_called_once()
+
+
+def test_fetch_reddit_fantasyfootball_updates_watermark():
+    newest_post = _reddit_post(name="t3_newest")
+
+    mock_redis_instance = MagicMock()
+    mock_redis_instance.get.return_value = None
+    response = _reddit_listing_response([newest_post], after=None)
+
+    with patch.dict("os.environ", REDDIT_ENV, clear=True), \
+         patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
+         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.requests.get", return_value=response):
+        sync_rumors.fetch_reddit_fantasyfootball()
+
+    mock_redis_instance.set.assert_called_once_with(sync_rumors.REDDIT_WATERMARK_KEY, "t3_newest")
+
+
+def test_sources_includes_reddit_fantasyfootball():
+    names = [name for name, _, _ in sync_rumors._sources()]
+
+    assert "rotowire_rss" in names
+    assert "reddit_fantasyfootball" in names
 
 
 def test_sync_rumors_matches_and_persists_fetched_items():

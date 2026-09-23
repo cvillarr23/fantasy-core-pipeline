@@ -1,7 +1,7 @@
 """
-Polls a small, fixed set of trusted free news/rumor sources (currently just RotoWire's NFL
-news RSS feed), fuzzy-matches each item to a `players` row, and persists the raw text +
-source + timestamp + matched player id to `raw_signals`.
+Polls a small, fixed set of trusted free news/rumor sources (RotoWire's NFL news RSS feed
+and r/fantasyfootball via Reddit's OAuth API), fuzzy-matches each item to a `players` row,
+and persists the raw text + source + timestamp + matched player id to `raw_signals`.
 
 Deliberately deterministic, fetch-normalize-store only - no sentiment/confidence
 interpretation happens here (that's a downstream LLM concern, WORKER-13 in
@@ -10,10 +10,9 @@ pipeline, but does depend on `players` already being populated by `sync_players`
 matching to be useful - an empty player table just means every item goes unmatched, not a
 crash.
 
-r/fantasyfootball was originally planned as a second source, but its unauthenticated
-`.json` endpoint returns HTTP 403 (Reddit disabled anonymous listing access) - adding it
-properly needs an OAuth client against oauth.reddit.com plus a quality/relevance filter to
-avoid flooding `raw_signals` with low-effort posts, tracked as a follow-up (CORE-14, #38).
+Reddit is noisier than RotoWire's editorial feed, so `fetch_reddit_fantasyfootball` applies
+a deterministic score/recency quality filter before returning items - still no sentiment/LLM
+scoring here, consistent with the fetch-normalize-store mandate above.
 """
 import hashlib
 import logging
@@ -36,6 +35,14 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 ROTOWIRE_NEWS_RSS_URL = "https://www.rotowire.com/rss/news.php?sport=NFL"
 
+REDDIT_OAUTH_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+REDDIT_LISTING_URL = "https://oauth.reddit.com/r/fantasyfootball/new"
+REDDIT_WATERMARK_KEY = "rumors:reddit_fantasyfootball:watermark"
+REDDIT_PAGE_LIMIT = 100
+REDDIT_MAX_PAGES = 10
+REDDIT_MIN_SCORE = int(os.getenv("REDDIT_MIN_SCORE", "20"))
+REDDIT_MAX_POST_AGE_HOURS = int(os.getenv("REDDIT_MAX_POST_AGE_HOURS", "72"))
+
 SYNC_LOCK_KEY = "rumors:sync:last_run"
 SYNC_LOCK_TTL_SECONDS = 15 * 60
 SYNC_IN_PROGRESS_TTL_SECONDS = 5 * 60
@@ -44,6 +51,13 @@ FETCH_CONNECT_TIMEOUT_SECONDS = 5
 FETCH_READ_TIMEOUT_SECONDS = 30
 
 MATCH_CONFIDENCE_THRESHOLD = 90
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"{name} environment variable is required for Reddit ingestion but is not set.")
+    return value
 
 
 def fetch_rotowire_rss() -> list:
@@ -87,6 +101,117 @@ def normalize_rotowire_item(entry) -> dict:
     }
 
 
+def get_reddit_access_token() -> str:
+    """
+    App-only (client_credentials) OAuth against oauth.reddit.com - no Reddit user account
+    needed since this only reads a public subreddit's listings. Raises RuntimeError if
+    REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET/REDDIT_USER_AGENT aren't set (OpenBao-injected in
+    deployed environments, no defaults, no credentials committed here) - the caller treats
+    that the same as any other fetch failure and soft-fails to an empty list.
+    """
+    client_id = _require_env("REDDIT_CLIENT_ID")
+    client_secret = _require_env("REDDIT_CLIENT_SECRET")
+    user_agent = _require_env("REDDIT_USER_AGENT")
+    response = requests.post(
+        REDDIT_OAUTH_TOKEN_URL,
+        auth=(client_id, client_secret),
+        data={"grant_type": "client_credentials"},
+        headers={"User-Agent": user_agent},
+        timeout=(FETCH_CONNECT_TIMEOUT_SECONDS, FETCH_READ_TIMEOUT_SECONDS),
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+
+def _passes_reddit_quality_filter(post: dict) -> bool:
+    """Deterministic numeric threshold only - no sentiment/relevance interpretation."""
+    score = post.get("score") or 0
+    if score < REDDIT_MIN_SCORE:
+        return False
+    created_utc = post.get("created_utc")
+    if created_utc is None:
+        return False
+    age_hours = (datetime.now(timezone.utc) - datetime.fromtimestamp(created_utc, tz=timezone.utc)).total_seconds() / 3600
+    return age_hours <= REDDIT_MAX_POST_AGE_HOURS
+
+
+def fetch_reddit_fantasyfootball() -> list:
+    """
+    Fetches new r/fantasyfootball posts via OAuth, paginating with `limit=100` pages via
+    the `after` cursor until either the stored watermark (the newest post fullname already
+    ingested last run, kept in Redis) is reached, `REDDIT_MAX_PAGES` is hit, or Reddit runs
+    out of pages - a single un-paginated 25-item page would silently miss posts once
+    ingestion falls behind the sub's volume. Retries mirror `fetch_rotowire_rss`: log and
+    return `[]` on exhaustion rather than raising, so one bad source doesn't crash the sync.
+    The quality filter (`_passes_reddit_quality_filter`) is applied per-post before it's
+    added to the returned list, upstream of `normalize_reddit_item`.
+    """
+    last_error = None
+    for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
+        try:
+            logger.info(f"Fetching r/fantasyfootball via Reddit OAuth (attempt {attempt}/{FETCH_RETRY_ATTEMPTS})...")
+            access_token = get_reddit_access_token()
+            user_agent = _require_env("REDDIT_USER_AGENT")
+            r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            watermark = r_client.get(REDDIT_WATERMARK_KEY)
+
+            posts = []
+            newest_id_seen = None
+            after = None
+            for _ in range(REDDIT_MAX_PAGES):
+                response = requests.get(
+                    REDDIT_LISTING_URL,
+                    headers={"Authorization": f"Bearer {access_token}", "User-Agent": user_agent},
+                    params={"limit": REDDIT_PAGE_LIMIT, "after": after} if after else {"limit": REDDIT_PAGE_LIMIT},
+                    timeout=(FETCH_CONNECT_TIMEOUT_SECONDS, FETCH_READ_TIMEOUT_SECONDS),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                children = payload.get("data", {}).get("children", [])
+                if not children:
+                    break
+
+                hit_watermark = False
+                for child in children:
+                    post = child.get("data", {})
+                    fullname = post.get("name")
+                    if newest_id_seen is None:
+                        newest_id_seen = fullname
+                    if watermark and fullname == watermark:
+                        hit_watermark = True
+                        break
+                    if _passes_reddit_quality_filter(post):
+                        posts.append(post)
+
+                if hit_watermark:
+                    break
+                after = payload.get("data", {}).get("after")
+                if not after:
+                    break
+
+            if newest_id_seen:
+                r_client.set(REDDIT_WATERMARK_KEY, newest_id_seen)
+            return posts
+        except (requests.RequestException, RuntimeError, KeyError) as e:
+            last_error = e
+            logger.warning(f"Reddit fetch attempt {attempt} failed: {e}")
+    logger.error(f"Exhausted all {FETCH_RETRY_ATTEMPTS} attempts fetching r/fantasyfootball; skipping this source.")
+    return []
+
+
+def normalize_reddit_item(post: dict) -> dict:
+    """Maps a Reddit post's raw API dict to the common intermediate shape."""
+    created_utc = post.get("created_utc")
+    published_at = datetime.fromtimestamp(created_utc, tz=timezone.utc) if created_utc else None
+    permalink = post.get("permalink")
+    return {
+        "source_item_id": post.get("name"),
+        "raw_text": post.get("title", "") + (f" - {post.get('selftext')}" if post.get("selftext") else ""),
+        "url": f"https://www.reddit.com{permalink}" if permalink else post.get("url"),
+        "published_at": published_at,
+    }
+
+
 def _sources():
     """
     Looks up the fetch/normalize functions by module-global name at call time (rather
@@ -94,12 +219,10 @@ def _sources():
     `patch("src.ingestion.sync_rumors.fetch_rotowire_rss", ...)` and have sync_rumors()
     actually see the patched version - a tuple of direct function references captured at
     import time would still hold the original, unpatched functions.
-
-    Only one source for now - see the module docstring for why r/fantasyfootball was
-    dropped (CORE-14, #38 tracks adding it back via OAuth).
     """
     return [
         ("rotowire_rss", fetch_rotowire_rss, normalize_rotowire_item),
+        ("reddit_fantasyfootball", fetch_reddit_fantasyfootball, normalize_reddit_item),
     ]
 
 
