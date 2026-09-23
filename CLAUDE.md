@@ -86,22 +86,14 @@
   position and Sleeper has no projections endpoint for them; it needs `sync_players`'s
   K/D-ST rows to match against and reuses `sync_league.build_league`'s ESPN connection, so
   it slots in right after `sync_league`.
-- `sync_skill_position_crosswalk` (#150) backfills `players.espn_id` for the QB/RB/WR/TE
-  players `sync_id_crosswalk`'s DynastyProcess crosswalk still misses (~18% of skill
-  players — see `src/models.py`'s coverage note). It can't reuse `League.free_agents()`
-  the way `sync_kicker_dst` does: that endpoint only returns players unowned in the ESPN
-  league, and #83 only got away with it because it ran pre-draft, when "unowned" meant
-  "the entire universe". Once the draft has happened, most still-unmatched skill players
-  are rostered somewhere, so this queries the raw `kona_player_info` view directly via
-  `league.espn_request.league_get()` (same low-level pattern `sync_league.py`'s
-  `fetch_raw_league_data` uses) with no `filterStatus` ownership filter, then matches by
-  (normalized name, team) exactly, falling back to a high-cutoff `rapidfuzz` name-only
-  match for cases where `players.team` is stale relative to a mid-season trade/waiver
-  move — never a below-threshold guess. No `weekly_stats` write here, unlike
-  `sync_kicker_dst`: `sync_projections.py` already owns skill-position projections from
-  Sleeper. Slots in after `sync_kicker_dst` (same `build_league` reuse precedent); order
-  relative to `sync_league` doesn't matter since this only touches `players.espn_id`, not
-  rosters.
+- `sync_skill_position_crosswalk` (#150) backfills `players.espn_id` for the ~18% of
+  QB/RB/WR/TE players `sync_id_crosswalk`'s DynastyProcess crosswalk still misses (see
+  `src/models.py`'s coverage note). Unlike `sync_kicker_dst`, it can't use
+  `League.free_agents()` — that only returns unowned players, which was fine for #83
+  because it ran pre-draft; post-draft, most unmatched skill players are rostered
+  somewhere. So it queries the raw `kona_player_info` view with no `filterStatus`
+  ownership filter instead, matching by (name, team) with a high-cutoff `rapidfuzz`
+  fallback for stale `players.team` values.
 
 ## CORE-06: PuLP lineup optimizer
 
