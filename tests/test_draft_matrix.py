@@ -1831,10 +1831,21 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary(monkey
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(dm, "tracer", provider.get_tracer("draft_matrix"))
 
+    # Join the real spawned thread instead of polling on a sleep loop - the poll-window
+    # approach flaked under a full serial suite run's heavier thread-scheduling latency.
+    real_thread_cls = threading.Thread
+    spawned_threads = []
+
+    def _capturing_thread(*args, **kwargs):
+        thread = real_thread_cls(*args, **kwargs)
+        spawned_threads.append(thread)
+        return thread
+
     mock_client = MagicMock()
     pending_state = {}
     with patch.object(dm, "wait_for_pause_or_timeout", return_value=True), \
-         patch.object(dm, "publish_draft_target"):
+         patch.object(dm, "publish_draft_target"), \
+         patch("src.optimization.draft_matrix.threading.Thread", side_effect=_capturing_thread):
         with dm.tracer.start_as_current_span("draft_pick.handle_event") as parent_span:
             parent_trace_id = parent_span.get_span_context().trace_id
             dm._schedule_publish(
@@ -1842,13 +1853,12 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary(monkey
                 delay_seconds=0, pending_state=pending_state,
             )
 
-        # 2s (100 * 0.02s) was long enough in isolation but not deep into a full serial
-        # suite run, where OS thread-scheduling latency for this background thread grows
-        # enough to occasionally miss that window - widened to 8s.
-        for _ in range(400):
-            if exporter.get_finished_spans():
-                break
-            time.sleep(0.02)
+        assert len(spawned_threads) == 1
+        # A generous safety-net timeout, not the pass condition - if hold_and_publish
+        # hangs this fails loudly instead of the assertion below just silently missing
+        # spans, but a healthy run joins almost immediately.
+        spawned_threads[0].join(timeout=10)
+        assert not spawned_threads[0].is_alive()
 
     spans = exporter.get_finished_spans()
     publish_spans = [s for s in spans if s.name == "draft_pick.hold_and_publish"]
