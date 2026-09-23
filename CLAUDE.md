@@ -77,15 +77,23 @@
   (sourced from OpenBao in deployed environments) — no defaults, and no credentials are
   committed to this repo.
 - Ingestion job order matters: `sync_players` → `sync_id_crosswalk` → `sync_league` →
-  `sync_kicker_dst` → `sync_projections` → `metrics_extractor` → `vorp_matrix`.
-  `sync_id_crosswalk` must run after `sync_players` (it updates existing player rows) and
-  before `sync_league` (roster matching needs `players.espn_id`) and `metrics_extractor`
-  (needs a fresh `gsis_id`). `sync_kicker_dst` (#83) backfills `espn_id` and
-  `weekly_stats.projected_points` for K/D-ST directly from ESPN, since
-  `sync_id_crosswalk`'s DynastyProcess crosswalk has zero coverage for either position and
-  Sleeper has no projections endpoint for them; it needs `sync_players`'s K/D-ST rows to
-  match against and reuses `sync_league.build_league`'s ESPN connection, so it slots in
-  right after `sync_league`.
+  `sync_kicker_dst` → `sync_skill_position_crosswalk` → `sync_projections` →
+  `metrics_extractor` → `vorp_matrix`. `sync_id_crosswalk` must run after `sync_players`
+  (it updates existing player rows) and before `sync_league` (roster matching needs
+  `players.espn_id`) and `metrics_extractor` (needs a fresh `gsis_id`). `sync_kicker_dst`
+  (#83) backfills `espn_id` and `weekly_stats.projected_points` for K/D-ST directly from
+  ESPN, since `sync_id_crosswalk`'s DynastyProcess crosswalk has zero coverage for either
+  position and Sleeper has no projections endpoint for them; it needs `sync_players`'s
+  K/D-ST rows to match against and reuses `sync_league.build_league`'s ESPN connection, so
+  it slots in right after `sync_league`.
+- `sync_skill_position_crosswalk` (#150) backfills `players.espn_id` for the ~18% of
+  QB/RB/WR/TE players `sync_id_crosswalk`'s DynastyProcess crosswalk still misses (see
+  `src/models.py`'s coverage note). Unlike `sync_kicker_dst`, it can't use
+  `League.free_agents()` — that only returns unowned players, which was fine for #83
+  because it ran pre-draft; post-draft, most unmatched skill players are rostered
+  somewhere. So it queries the raw `kona_player_info` view with no `filterStatus`
+  ownership filter instead, matching by (name, team) with a high-cutoff `rapidfuzz`
+  fallback for stale `players.team` values.
 
 ## CORE-06: PuLP lineup optimizer
 
