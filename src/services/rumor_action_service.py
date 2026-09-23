@@ -7,20 +7,27 @@ which bench player replaces them, so the actual add/drop pairing still comes fro
 VORP-based evaluation the weekly cadence already runs. This just re-runs that evaluation
 early and filters its output to the player(s) a qualifying signal actually named.
 """
+
 import argparse
 import logging
 import os
+import time
 
 from src.api.draft import _redis_client
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.optimization import lineup_solver
 from src.optimization.lineup_solver import resolve_default_week
-from src.optimization.waiver_evaluator import publish_waiver_claim, resolve_live_waiver_moves
+from src.optimization.waiver_evaluator import (
+    publish_waiver_claim,
+    resolve_live_waiver_moves,
+)
 
 logger = logging.getLogger("RumorActionService")
 
-RUMOR_ACTION_CONFIDENCE_THRESHOLD = float(os.getenv("RUMOR_ACTION_CONFIDENCE_THRESHOLD", "0.75"))
+RUMOR_ACTION_CONFIDENCE_THRESHOLD = float(
+    os.getenv("RUMOR_ACTION_CONFIDENCE_THRESHOLD", "0.75")
+)
 WATERMARK_REDIS_KEY = "rumor_action:last_processed_id"
 
 BOOST_WAIVER_ACTION = "boost_waiver_priority"
@@ -42,7 +49,13 @@ def fetch_new_signals(cursor, since_id: int) -> list:
         (since_id,),
     )
     return [
-        {"id": rid, "player_id": pid, "sentiment": sentiment, "confidence": confidence, "suggested_action": action}
+        {
+            "id": rid,
+            "player_id": pid,
+            "sentiment": sentiment,
+            "confidence": confidence,
+            "suggested_action": action,
+        }
         for rid, pid, sentiment, confidence, action in cursor.fetchall()
     ]
 
@@ -79,7 +92,9 @@ def _decorate_decision_inputs(existing: dict, signal: dict) -> dict:
     }
 
 
-def _evaluate_and_publish_waiver_claims(team_id: str, season: int, week: int, waiver_targets: dict) -> list:
+def _evaluate_and_publish_waiver_claims(
+    team_id: str, season: int, week: int, waiver_targets: dict
+) -> list:
     """Re-runs waiver_strategy's normal weekly evaluation, but only publishes the proposed
     move(s) whose add_player_id is one of this run's qualifying boost_waiver_priority
     signals - any other move the evaluator would also propose today is left for the
@@ -87,10 +102,18 @@ def _evaluate_and_publish_waiver_claims(team_id: str, season: int, week: int, wa
     run."""
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            bench_by_position = waiver_strategy.load_bench_by_position(cursor, team_id, season, week)
-            free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
-            moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
-            matched_moves = [move for move in moves if move["add_player_id"] in waiver_targets]
+            bench_by_position = waiver_strategy.load_bench_by_position(
+                cursor, team_id, season, week
+            )
+            free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(
+                cursor, season, week
+            )
+            moves = waiver_strategy.propose_waiver_moves(
+                bench_by_position, free_agents_by_position
+            )
+            matched_moves = [
+                move for move in moves if move["add_player_id"] in waiver_targets
+            ]
 
             published = []
             for move in matched_moves:
@@ -102,14 +125,18 @@ def _evaluate_and_publish_waiver_claims(team_id: str, season: int, week: int, wa
                     continue
                 target = resolved[0]
                 signal = waiver_targets[move["add_player_id"]]
-                target["decision_inputs"] = _decorate_decision_inputs(target.get("decision_inputs"), signal)
+                target["decision_inputs"] = _decorate_decision_inputs(
+                    target.get("decision_inputs"), signal
+                )
                 publish_waiver_claim(team_id, target)
                 published.append(target)
 
     return published
 
 
-def _evaluate_and_publish_lineup_swaps(team_id: str, season: int, week: int, bench_watch_targets: dict) -> list:
+def _evaluate_and_publish_lineup_swaps(
+    team_id: str, season: int, week: int, bench_watch_targets: dict
+) -> list:
     """Re-runs lineup_solver's normal weekly ILP, but only publishes swap(s) whose
     drop_player_id is one of this run's qualifying bench_watch signals - a bench_watch
     signal is bad news about a currently-started player, so it surfaces as a drop, not
@@ -118,14 +145,22 @@ def _evaluate_and_publish_lineup_swaps(team_id: str, season: int, week: int, ben
         with conn.cursor() as cursor:
             roster_pool = lineup_solver.load_roster_pool(cursor, team_id, season, week)
             lineup_slot_counts = lineup_solver.load_lineup_slot_counts(cursor, season)
-            optimal_starters = lineup_solver.build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
-            current_starters = lineup_solver.load_current_starters(cursor, team_id, season, week)
+            optimal_starters = lineup_solver.build_and_solve_lineup(
+                roster_pool, lineup_slot_counts=lineup_slot_counts
+            )
+            current_starters = lineup_solver.load_current_starters(
+                cursor, team_id, season, week
+            )
 
     swaps = lineup_solver.compute_lineup_swaps(optimal_starters, current_starters)
-    matched_swaps = [swap for swap in swaps if swap["drop_player_id"] in bench_watch_targets]
+    matched_swaps = [
+        swap for swap in swaps if swap["drop_player_id"] in bench_watch_targets
+    ]
     for swap in matched_swaps:
         signal = bench_watch_targets[swap["drop_player_id"]]
-        swap["decision_inputs"] = _decorate_decision_inputs(swap.get("decision_inputs"), signal)
+        swap["decision_inputs"] = _decorate_decision_inputs(
+            swap.get("decision_inputs"), signal
+        )
 
     if matched_swaps:
         lineup_solver.publish_lineup_swaps(team_id, matched_swaps)
@@ -156,9 +191,13 @@ def evaluate_and_publish_rumor_actions(team_id: str, season: int, week: int) -> 
     published_lineup_swaps: list = []
     try:
         if waiver_targets:
-            published_waiver_claims = _evaluate_and_publish_waiver_claims(team_id, season, week, waiver_targets)
+            published_waiver_claims = _evaluate_and_publish_waiver_claims(
+                team_id, season, week, waiver_targets
+            )
         if bench_watch_targets:
-            published_lineup_swaps = _evaluate_and_publish_lineup_swaps(team_id, season, week, bench_watch_targets)
+            published_lineup_swaps = _evaluate_and_publish_lineup_swaps(
+                team_id, season, week, bench_watch_targets
+            )
     finally:
         # Advance past everything fetched even on a raise (fail-open, like
         # _record_bot_decision) - a stuck watermark blocks all future progress.
@@ -173,13 +212,52 @@ def evaluate_and_publish_rumor_actions(team_id: str, season: int, week: int) -> 
     }
 
 
+def _record_execution(
+    status: str, duration_ms: int, error_message: str = None, season: int = None
+) -> None:
+    # Same ad hoc, never-raise execution_log write draft_matrix.py's _record_publish_error
+    # uses - no shared Python instrumentation wrapper exists yet.
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO execution_log
+                        (transaction_type, bot_name, status, duration_ms, error_message, season)
+                    VALUES ('rumor_action_trigger', 'rumor_action_service', %s, %s, %s, %s);
+                    """,
+                    (status, duration_ms, error_message, season),
+                )
+    except Exception as error:
+        logger.error(
+            "Failed to record rumor_action_service execution outcome: %s", error
+        )
+
+
 if __name__ == "__main__":
     # Mirrors waiver_evaluator.py's __main__ shape - every CronJob in fantasy-infra runs a
     # `python -m` module directly rather than curling the live FastAPI service.
-    parser = argparse.ArgumentParser(description="Evaluate and publish today's rumor-driven actions.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate and publish today's rumor-driven actions."
+    )
     parser.add_argument("--team-id", required=True)
     parser.add_argument("--season", required=True, type=int)
     parser.add_argument("--week", type=int, default=None)
     args = parser.parse_args()
     week = args.week if args.week is not None else resolve_default_week()
-    evaluate_and_publish_rumor_actions(args.team_id, args.season, week)
+
+    started_at = time.monotonic()
+    try:
+        evaluate_and_publish_rumor_actions(args.team_id, args.season, week)
+    except Exception as error:
+        _record_execution(
+            "failure",
+            int((time.monotonic() - started_at) * 1000),
+            str(error),
+            args.season,
+        )
+        raise
+    else:
+        _record_execution(
+            "success", int((time.monotonic() - started_at) * 1000), season=args.season
+        )
