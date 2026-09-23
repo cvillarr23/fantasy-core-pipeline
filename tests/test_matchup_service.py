@@ -125,6 +125,9 @@ def test_shape_lineup_player_line_maps_roster_player_fields():
         "deficit_flag": False,
         "suggested_swap": None,
         "net_vorp": None,
+        "rumor_sentiment": None,
+        "rumor_confidence": None,
+        "rumor_suggested_action": None,
     }
 
 
@@ -169,6 +172,36 @@ def test_apply_vorp_sets_net_vorp_for_known_players_only():
 
     assert lines[0]["net_vorp"] == 8.4
     assert lines[1]["net_vorp"] is None
+
+
+def test_load_rumor_signal_by_espn_id_maps_query_rows():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("100", "positive", 0.9, "bench_watch")]
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = matchup_service._load_rumor_signal_by_espn_id(team_id="8")
+
+    assert result == {"100": {"sentiment": "positive", "confidence": 0.9, "suggested_action": "bench_watch"}}
+    cursor.execute.assert_called_once()
+    query_args = cursor.execute.call_args[0][1]
+    assert query_args == ("8",)
+
+
+def test_apply_rumor_signal_sets_fields_for_known_players_only():
+    lines = [
+        matchup_service._shape_lineup_player_line(_make_roster_player(playerId=1)),
+        matchup_service._shape_lineup_player_line(_make_roster_player(playerId=2)),
+    ]
+    signal_by_espn_id = {"1": {"sentiment": "negative", "confidence": 0.8, "suggested_action": "bench_watch"}}
+
+    matchup_service._apply_rumor_signal(lines, signal_by_espn_id)
+
+    assert lines[0]["rumor_sentiment"] == "negative"
+    assert lines[0]["rumor_confidence"] == 0.8
+    assert lines[0]["rumor_suggested_action"] == "bench_watch"
+    assert lines[1]["rumor_sentiment"] is None
+    assert lines[1]["rumor_confidence"] is None
+    assert lines[1]["rumor_suggested_action"] is None
 
 
 def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
@@ -313,7 +346,9 @@ def test_get_current_team_roster_shapes_and_badges(monkeypatch):
          patch("src.services.matchup_service.compute_roster_deficits",
                return_value={"teams": {"8": {"RB": {"deficit": 1}}}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
-         patch("src.services.matchup_service._load_vorp_by_espn_id", return_value={"1": 9.9}):
+         patch("src.services.matchup_service._load_vorp_by_espn_id", return_value={"1": 9.9}), \
+         patch("src.services.matchup_service._load_rumor_signal_by_espn_id",
+               return_value={"1": {"sentiment": "positive", "confidence": 0.85, "suggested_action": "bench_watch"}}):
         result = matchup_service.get_current_team_roster(season=2026)
 
     assert [p["player_id"] for p in result["starters"]] == ["1"]
@@ -321,6 +356,9 @@ def test_get_current_team_roster_shapes_and_badges(monkeypatch):
     assert result["starters"][0]["deficit_flag"] is True
     assert result["starters"][0]["net_vorp"] == 9.9
     assert result["bench"][0]["net_vorp"] is None
+    assert result["starters"][0]["rumor_sentiment"] == "positive"
+    assert result["starters"][0]["rumor_confidence"] == 0.85
+    assert result["bench"][0]["rumor_sentiment"] is None
 
 
 def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):

@@ -82,6 +82,9 @@ class LineupPlayerLine(BaseModel):
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
     net_vorp: Optional[float] = None
+    rumor_sentiment: Optional[str] = None
+    rumor_confidence: Optional[float] = None
+    rumor_suggested_action: Optional[str] = None
 
 
 class RosterResponse(BaseModel):
