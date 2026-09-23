@@ -226,6 +226,15 @@ ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS player_name VARCHAR(100);
 ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS round_number INTEGER;
 """
 
+# Backfills trade-negotiation context columns, written by fantasy-browser-worker's
+# trade_bot.js. dry_run is nullable/three-valued: NULL means the recording call ran before
+# dry-run status was ever resolved, not that it defaulted to a known state.
+ADD_EXECUTION_LOG_TRADE_CONTEXT_COLUMNS = """
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS offering_team_id TEXT;
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS counter_offer JSONB;
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS dry_run BOOLEAN;
+"""
+
 # One row per live draft pick (CORE-08), sourced from fantasy-browser-worker's
 # draft_picks:{leagueId} Redis Stream. Durable local mirror of draft state so the
 # real-time listener can resume the undrafted pool after a restart mid-draft instead of

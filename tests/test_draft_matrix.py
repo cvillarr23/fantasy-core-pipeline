@@ -1842,7 +1842,10 @@ def test_schedule_publish_propagates_trace_context_across_thread_boundary(monkey
                 delay_seconds=0, pending_state=pending_state,
             )
 
-        for _ in range(100):
+        # 2s (100 * 0.02s) was long enough in isolation but not deep into a full serial
+        # suite run, where OS thread-scheduling latency for this background thread grows
+        # enough to occasionally miss that window - widened to 8s.
+        for _ in range(400):
             if exporter.get_finished_spans():
                 break
             time.sleep(0.02)

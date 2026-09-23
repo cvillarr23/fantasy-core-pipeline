@@ -173,6 +173,24 @@ def test_run_migrations_executes_rumor_signals_ddl_before_indices():
     assert rumor_signals_idx < indices_idx
 
 
+def test_run_migrations_executes_execution_log_trade_context_columns_before_indices():
+    """trade_bot.js's recordTradeNegotiation (fantasy-browser-worker) writes
+    offering_team_id/counter_offer/dry_run on every negotiation run. Lock in that the
+    columns are added, and before CREATE_INDICES, same ordering convention as the other
+    execution_log column backfills above."""
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    trade_cols_idx = next(
+        i for i, s in enumerate(executed) if "offering_team_id" in s
+    )
+    indices_idx = next(i for i, s in enumerate(executed) if "CREATE INDEX" in s)
+    assert trade_cols_idx < indices_idx
+
+
 def test_run_migrations_executes_league_teams_ddl_after_league_settings():
     """The matchup view / real-team-names feature needs league_teams (team_id ->
     team_name), synced alongside league_settings by sync_league.py. Lock in it's created,
