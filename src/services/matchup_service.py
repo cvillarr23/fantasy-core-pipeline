@@ -89,6 +89,44 @@ def _apply_vorp(player_lines: list, vorp_by_espn_id: dict) -> None:
             line["net_vorp"] = vorp_by_espn_id[line["espn_id"]]
 
 
+def _load_rumor_signal_by_espn_id(team_id: str) -> dict:
+    """espn_id -> latest rumor_signals row for every rostered player. DISTINCT ON
+    (player_id) ... ORDER BY player_id, id DESC picks the highest-id row per player -
+    README.md's documented contract ("the latest row per player_id is the current
+    signal"), with no confidence threshold applied here since that's an
+    action-evaluation-only concern (RUMOR_ACTION_CONFIDENCE_THRESHOLD in
+    rumor_action_service.py), not a display one."""
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (rs.player_id)
+                p.espn_id, rs.sentiment, rs.confidence, rs.suggested_action
+            FROM rumor_signals rs
+            JOIN players p ON p.player_id = rs.player_id
+            JOIN league_rosters r ON r.player_id = rs.player_id
+            WHERE r.team_id = %s AND p.espn_id IS NOT NULL
+            ORDER BY rs.player_id, rs.id DESC;
+            """,
+            (team_id,),
+        )
+        return {
+            espn_id: {"sentiment": sentiment, "confidence": confidence, "suggested_action": suggested_action}
+            for espn_id, sentiment, confidence, suggested_action in cursor.fetchall()
+        }
+
+
+def _apply_rumor_signal(player_lines: list, signal_by_espn_id: dict) -> None:
+    """Mutates player_lines in place. Leaves the rumor_* fields at their shaped None
+    default for any player with no rumor_signals row."""
+    for line in player_lines:
+        signal = signal_by_espn_id.get(line["espn_id"])
+        if signal is None:
+            continue
+        line["rumor_sentiment"] = signal["sentiment"]
+        line["rumor_confidence"] = signal["confidence"]
+        line["rumor_suggested_action"] = signal["suggested_action"]
+
+
 def _split_starters_bench(lineup: list) -> tuple[list, list]:
     starters, bench = [], []
     for box_player in lineup:
@@ -112,6 +150,9 @@ def _shape_lineup_player_line(player) -> dict:
         "deficit_flag": False,
         "suggested_swap": None,
         "net_vorp": None,
+        "rumor_sentiment": None,
+        "rumor_confidence": None,
+        "rumor_suggested_action": None,
     }
 
 
@@ -226,5 +267,9 @@ def get_current_team_roster(season: int) -> dict:
     vorp_by_espn_id = _load_vorp_by_espn_id(season, week, our_team_id)
     _apply_vorp(starters, vorp_by_espn_id)
     _apply_vorp(bench, vorp_by_espn_id)
+
+    rumor_signal_by_espn_id = _load_rumor_signal_by_espn_id(our_team_id)
+    _apply_rumor_signal(starters, rumor_signal_by_espn_id)
+    _apply_rumor_signal(bench, rumor_signal_by_espn_id)
 
     return {"starters": starters, "bench": bench}
