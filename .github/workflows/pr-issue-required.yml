@@ -1,0 +1,63 @@
+name: Require linked issue
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  check-linked-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for a closing issue reference
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const result = await github.graphql(`
+              query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$number) {
+                    closingIssuesReferences(first: 10) { totalCount }
+                  }
+                }
+              }
+            `, { owner: context.repo.owner, repo: context.repo.repo, number: context.issue.number });
+
+            const linked = result.repository.pullRequest.closingIssuesReferences.totalCount > 0;
+            const labelName = "needs-issue-link";
+
+            const { data: existingLabels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const hasLabel = existingLabels.some((l) => l.name === labelName);
+
+            if (linked) {
+              if (hasLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  name: labelName,
+                });
+              }
+              return;
+            }
+
+            if (!hasLabel) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: [labelName],
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: "This PR doesn't reference a closing issue yet. Add `Fixes #N` / `Closes #N` (or the cross-repo form, e.g. `Fixes cvillarr23/fantasy-project#N`) to the PR description so it links up in GitHub's tracker and shows up for PM-loop review. Remove the `needs-issue-link` label once it's linked.",
+              });
+            }
+
+            core.setFailed("PR has no linked closing issue.");
