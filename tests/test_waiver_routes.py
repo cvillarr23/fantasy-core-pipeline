@@ -1,0 +1,74 @@
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
+
+
+@contextmanager
+def _fake_db_cursor(cursor=None):
+    yield cursor or MagicMock()
+
+
+def _mock_waiver_strategy_calls(monkeypatch, moves):
+    from src.services import waiver_service
+
+    monkeypatch.setattr(
+        waiver_service.waiver_strategy, "load_bench_by_position", lambda cur, team_id, season, week: {}
+    )
+    monkeypatch.setattr(
+        waiver_service.waiver_strategy, "load_best_free_agent_by_position", lambda cur, season, week: {}
+    )
+    monkeypatch.setattr(
+        waiver_service.waiver_strategy, "propose_waiver_moves", lambda bench, free_agents, margin: moves
+    )
+
+
+def test_get_waiver_recommendations_success(client, monkeypatch):
+    _mock_waiver_strategy_calls(
+        monkeypatch,
+        [
+            {
+                "position": "RB",
+                "add_player_id": "rb_fa",
+                "drop_player_id": "rb_bench",
+                "add_vorp_score": 8.0,
+                "drop_vorp_score": 2.0,
+            }
+        ],
+    )
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("rb_fa", "101", "FA RB", "SEA", None),
+        ("rb_bench", "102", "Bench RB", "NYJ", "Out"),
+    ]
+
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["season"] == 2026
+    assert body["week"] == 3
+    assert len(body["recommendations"]) == 1
+    rec = body["recommendations"][0]
+    assert rec["position"] == "RB"
+    assert rec["vorp_delta"] == 6.0
+    assert rec["free_agent"]["name"] == "FA RB"
+    assert rec["bench_player"]["injury_status"] == "Out"
+    assert rec["rumor_sentiment"] is None
+
+
+def test_get_waiver_recommendations_db_failure_returns_500(client):
+    @contextmanager
+    def _broken_cursor():
+        raise Exception("connection refused")
+        yield  # pragma: no cover
+
+    with patch("src.services.waiver_service.get_db_cursor", _broken_cursor):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3")
+
+    assert response.status_code == 500
+
+
+def test_get_waiver_recommendations_requires_season_and_week(client):
+    response = client.get("/v1/waiver/recommendations")
+
+    assert response.status_code == 422
