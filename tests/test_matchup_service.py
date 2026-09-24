@@ -11,6 +11,15 @@ def _fake_db_cursor(cursor):
     yield cursor
 
 
+def test_espn_request_timeout_binds_timeout_and_restores_original_get():
+    original_get = matchup_service._espn_requests.requests.get
+    with matchup_service._espn_request_timeout(seconds=5):
+        patched_get = matchup_service._espn_requests.requests.get
+        assert patched_get.func is original_get
+        assert patched_get.keywords == {"timeout": 5}
+    assert matchup_service._espn_requests.requests.get is original_get
+
+
 def test_headshot_url_builds_espn_cdn_path_from_espn_id():
     assert (
         matchup_service._headshot_url("4240657")

@@ -5,8 +5,12 @@ sync_league.py already builds - weekly_stats.actual_points is never populated by
 job (only the backtesting harness writes it), so real per-player scoring only exists on
 ESPN's side.
 """
+import functools
 import os
 import time
+from contextlib import contextmanager
+
+from espn_api.requests import espn_requests as _espn_requests
 
 from src.database import get_db_cursor
 from src.ingestion.sync_league import build_league
@@ -23,6 +27,20 @@ from src.services.roster_service import compute_roster_deficits
 MATCHUP_CACHE_TTL_SECONDS = 60
 # (season, week) -> (cached_at_epoch_seconds, payload)
 _MATCHUP_CACHE: dict = {}
+
+ESPN_REQUEST_TIMEOUT_SECONDS = 10
+
+
+@contextmanager
+def _espn_request_timeout(seconds: int = ESPN_REQUEST_TIMEOUT_SECONDS):
+    """espn_api's EspnFantasyRequests calls requests.get() with no timeout and exposes no
+    session/timeout param - patch the requests.get it calls, scoped to this block only."""
+    original_get = _espn_requests.requests.get
+    _espn_requests.requests.get = functools.partial(original_get, timeout=seconds)
+    try:
+        yield
+    finally:
+        _espn_requests.requests.get = original_get
 
 
 class NoMatchupFoundError(Exception):
@@ -207,7 +225,8 @@ def get_current_team_matchup(season: int, week: int) -> dict:
 
     our_team_id = os.getenv("ESPN_TEAM_ID")
     league = build_league(season)
-    box_scores = league.box_scores(week)
+    with _espn_request_timeout():
+        box_scores = league.box_scores(week)
 
     matched_box = None
     we_are_home = False
