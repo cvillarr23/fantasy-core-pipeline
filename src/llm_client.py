@@ -24,7 +24,7 @@ from src.database import get_db_cursor
 
 logger = logging.getLogger("LlmClient")
 
-DEFAULT_PROVIDER_PRIORITY = "groq:llama-3.3-70b-versatile,gemini:gemini-1.5-flash,ollama:llama3.1:8b"
+DEFAULT_PROVIDER_PRIORITY = "groq:openai/gpt-oss-120b,gemini:gemini-1.5-flash,ollama:llama3.1:8b"
 
 # Conservative free-tier request-per-minute budgets, mirroring llm_client.js. No entry for
 # ollama -- it's a local last-resort tier with no external quota to protect.
