@@ -266,6 +266,36 @@ def get_current_team_matchup(season: int, week: int) -> dict:
     return payload
 
 
+def _shape_scoreboard_team(team, score: float, projected: float) -> dict | None:
+    if team is None:
+        return None
+    return {
+        "team_id": str(team.team_id),
+        "name": team.team_name,
+        "logo_url": team.logo_url,
+        "score": score,
+        "projected": projected,
+    }
+
+
+def get_league_scoreboard(season: int, week: int) -> dict:
+    """Every matchup in the league for a week, score-only (no rosters) - mirrors ESPN's
+    own Scoreboard tab. Unlike get_current_team_matchup, doesn't filter box_scores() down
+    to our team's matchup."""
+    league = build_league(season)
+    with _espn_request_timeout():
+        box_scores = league.box_scores(week)
+
+    matchups = [
+        {
+            "home": _shape_scoreboard_team(box.home_team, box.home_score, box.home_projected),
+            "away": _shape_scoreboard_team(box.away_team, box.away_score, box.away_projected),
+        }
+        for box in box_scores
+    ]
+    return {"season": season, "week": week, "matchups": matchups}
+
+
 def get_current_team_roster(season: int) -> dict:
     """Bye-week-safe roster view: sourced from league.teams/Team.roster, not box_scores(),
     so it works even when no opponent is scheduled (unlike get_current_team_matchup)."""
