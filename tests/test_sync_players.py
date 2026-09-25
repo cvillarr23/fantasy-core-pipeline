@@ -194,7 +194,7 @@ def test_sync_players_skips_fetch_when_lock_already_held():
     mock_redis_instance = MagicMock()
     mock_redis_instance.set.return_value = None  # NX failed: lock already held
 
-    with patch("src.ingestion.sync_players.redis.Redis", return_value=mock_redis_instance), \
+    with patch("src.ingestion.sync_players.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_players.fetch_sleeper_players") as mock_fetch:
         sync_players.sync_players(force=False)
 
@@ -205,7 +205,7 @@ def test_sync_players_forces_fetch_when_requested():
     mock_redis_instance = MagicMock()
     mock_redis_instance.set.return_value = True
 
-    with patch("src.ingestion.sync_players.redis.Redis", return_value=mock_redis_instance), \
+    with patch("src.ingestion.sync_players.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_players.fetch_sleeper_players", return_value={}) as mock_fetch, \
          patch("src.ingestion.sync_players.assert_position_coverage"), \
          patch("src.ingestion.sync_players.get_db_connection") as mock_get_conn, \
@@ -231,7 +231,7 @@ def test_sync_players_does_not_mark_synced_when_publish_fails():
     mock_redis_instance = MagicMock()
     mock_redis_instance.set.return_value = True
 
-    with patch("src.ingestion.sync_players.redis.Redis", return_value=mock_redis_instance), \
+    with patch("src.ingestion.sync_players.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_players.fetch_sleeper_players", return_value={}), \
          patch("src.ingestion.sync_players.assert_position_coverage"), \
          patch("src.ingestion.sync_players.get_db_connection") as mock_get_conn, \

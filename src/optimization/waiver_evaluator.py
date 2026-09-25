@@ -18,22 +18,18 @@ tracked as a follow-up.
 """
 import argparse
 import logging
-import os
 from typing import Optional
 
-import requests
-from opentelemetry import propagate, trace
+from opentelemetry import trace
 
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.telemetry import configure_tracing, configure_trace_logging
+from src.trigger_client import CORE_API_BASE_URL, post_trigger
 
 configure_trace_logging()
 logger = logging.getLogger("WaiverEvaluator")
 tracer = trace.get_tracer("waiver_evaluator")
-
-CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
-TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 
 
 def _resolve_espn_identity(cursor, player_id: str) -> Optional[dict]:
@@ -86,18 +82,7 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
 
 
 def publish_waiver_claim(team_id: str, target: dict, core_api_base_url: str = CORE_API_BASE_URL, timeout: float = 10.0) -> None:
-    # Injects this run's trace context so the FastAPI-side root span (CORE-12) becomes a
-    # child of this trace instead of starting a disconnected one.
-    headers: dict = {"X-API-Key": TRIGGER_API_KEY}
-    propagate.inject(headers)
-
-    response = requests.post(
-        f"{core_api_base_url}/v1/trigger/waiver",
-        json={"team_id": team_id, **target},
-        headers=headers,
-        timeout=timeout,
-    )
-    response.raise_for_status()
+    post_trigger("waiver", {"team_id": team_id, **target}, core_api_base_url=core_api_base_url, timeout=timeout)
     logger.info(f"Published waiver claim for Team {team_id}: {target['name']}.")
 
 
@@ -119,7 +104,7 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
 
 
 if __name__ == "__main__":
-    configure_tracing()
+    configure_tracing("waiver-evaluator")
     parser = argparse.ArgumentParser(description="Evaluate and publish this week's live waiver claims.")
     parser.add_argument("--team-id", required=True)
     parser.add_argument("--season", required=True, type=int)

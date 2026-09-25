@@ -30,7 +30,7 @@ def test_no_practice_jobs_is_a_noop():
     ]
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         sweep()
 
@@ -49,7 +49,7 @@ def test_live_heartbeat_is_left_alone():
     ]
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 1  # key present, not expired
         sweep()
@@ -66,7 +66,7 @@ def test_expired_heartbeat_triggers_teardown():
     ]
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 0  # key absent - TTL expired
         mock_delete.return_value = MagicMock(status_code=200)
@@ -88,7 +88,7 @@ def test_a_race_that_already_ended_the_run_is_not_an_error():
     ]
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 0
         mock_delete.return_value = MagicMock(status_code=404)
@@ -110,7 +110,7 @@ def test_a_stale_leftover_alongside_a_healthy_session_is_not_torn_down():
     ]
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         # league 12345 is a stale leftover (no heartbeat); 999 is the healthy, currently-active
         # session (heartbeat present) - must not be torn down as collateral.
@@ -132,7 +132,7 @@ def test_listener_only_job_with_expired_heartbeat_also_triggers_teardown():
     ]
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.ops.sweep_stale_draft_jobs.redis.Redis") as mock_redis_cls, \
+         patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 0
         mock_delete.return_value = MagicMock(status_code=200)

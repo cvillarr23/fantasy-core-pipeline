@@ -97,13 +97,13 @@ def test_resolve_live_waiver_moves_handles_a_move_with_no_drop_player():
 def test_publish_waiver_claim_posts_expected_payload():
     target = {"player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC"}
 
-    with patch("src.optimization.waiver_evaluator.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.waiver_evaluator.post_trigger") as mock_post:
         we.publish_waiver_claim("7", target)
 
     args, kwargs = mock_post.call_args
-    assert args[0] == f"{we.CORE_API_BASE_URL}/v1/trigger/waiver"
-    assert kwargs["json"] == {"team_id": "7", **target}
+    assert args[0] == "waiver"
+    assert args[1] == {"team_id": "7", **target}
+    assert kwargs["core_api_base_url"] == we.CORE_API_BASE_URL
 
 
 def test_run_weekly_waivers_live_wires_decision_logic_to_publish():

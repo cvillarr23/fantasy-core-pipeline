@@ -1,6 +1,7 @@
 import os
 from contextlib import contextmanager
 import logging
+import redis
 from psycopg2.pool import ThreadedConnectionPool
 
 logging.basicConfig(level=logging.INFO)
@@ -11,6 +12,15 @@ DB_HOST = os.getenv("DB_HOST", "fantasy-db.default.svc.cluster.local")
 DB_NAME = os.getenv("DB_NAME", "fantasy_football")
 DB_USER = os.getenv("DB_USER", "bot_admin")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
+
+REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
+# redis-py defaults to waiting forever on a connection that accepts and then stops
+# replying, which turns one degraded dependency into a permanently hung caller. Bounded
+# here so every caller degrades on this one call instead.
+REDIS_CONNECT_TIMEOUT_SECONDS = 3
+REDIS_SOCKET_TIMEOUT_SECONDS = 5
 
 if not DB_PASSWORD:
     logger.error("DB_PASSWORD environment variable is missing!")
@@ -59,4 +69,14 @@ def get_db_cursor():
             yield cursor
         finally:
             cursor.close()
+
+
+def get_redis_client() -> redis.Redis:
+    return redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
 

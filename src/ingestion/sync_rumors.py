@@ -25,13 +25,10 @@ import redis
 import requests
 from rapidfuzz import fuzz, process
 
-from src.database import get_db_connection
+from src.database import get_db_connection, get_redis_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RumorSignalSync")
-
-REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 ROTOWIRE_NEWS_RSS_URL = "https://www.rotowire.com/rss/news.php?sport=NFL"
 
@@ -152,7 +149,7 @@ def fetch_reddit_fantasyfootball() -> list:
             logger.info(f"Fetching r/fantasyfootball via Reddit OAuth (attempt {attempt}/{FETCH_RETRY_ATTEMPTS})...")
             access_token = get_reddit_access_token()
             user_agent = _require_env("REDDIT_USER_AGENT")
-            r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r_client = get_redis_client()
             watermark = r_client.get(REDDIT_WATERMARK_KEY)
 
             posts = []
@@ -299,7 +296,7 @@ def persist_signals(conn, rows: list) -> None:
 
 def sync_rumors(force: bool = False) -> None:
     try:
-        r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r_client = get_redis_client()
         r_client.ping()
     except Exception as e:
         logger.error(f"Redis cache layer unavailable, aborting sync: {e}")

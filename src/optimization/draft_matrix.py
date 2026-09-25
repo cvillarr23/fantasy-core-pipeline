@@ -31,9 +31,9 @@ import polars as pl
 import pulp
 import redis
 import requests
-from opentelemetry import context, propagate, trace
+from opentelemetry import context, trace
 
-from src.database import get_db_connection
+from src.database import REDIS_CONNECT_TIMEOUT_SECONDS, REDIS_HOST, REDIS_PORT, get_db_connection
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.optimization.vorp_matrix import (
     VORP_POSITIONS,
@@ -50,15 +50,11 @@ from src.optimization.vorp_matrix import (
     compute_scarcity_multipliers,
     apply_scarcity,
 )
+from src.trigger_client import post_trigger
 
 configure_trace_logging()
 logger = logging.getLogger("DraftMatrix")
 tracer = trace.get_tracer("draft_matrix")
-
-CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
-TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
-REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 CONSUMER_GROUP = "draft_matrix"
 DEFAULT_ROSTER_SIZE = 16
@@ -867,57 +863,43 @@ def publish_draft_target(team_id: str, target: dict, idempotency_key: Optional[s
             "so the browser worker has no data-player-id to click. Pick this player manually."
         )
 
-    headers: dict = {"X-API-Key": TRIGGER_API_KEY}
-    propagate.inject(headers)
-
-    response = requests.post(
-        f"{CORE_API_BASE_URL}/v1/trigger/draft-pick",
-        json={
-            "team_id": team_id,
-            # The browser worker clicks button.Button--draft[data-player-id="..."], which is
-            # ESPN's id. target["player_id"] is Sleeper's - sending it means the selector
-            # never matches (a 15s timeout, no pick) or, where the id spaces collide,
-            # matches a real but entirely different player.
-            "player_id": target["espn_id"],
-            "name": target["name"],
-            "position": target["position"],
-            "pro_team": target["team"],
-            # Stable across every retry of this pick, so an ambiguous failure (a read
-            # timeout, or a reset after the request was sent) cannot enqueue the same draft
-            # action twice and have the worker click twice.
-            "idempotency_key": idempotency_key,
-            # The request timeout only stops *this* client waiting; the FastAPI handler is
-            # synchronous and can resume from a blocked broker call long after we gave up.
-            # An absolute deadline lets the gateway discard the pick itself rather than
-            # queue a click for a slot ESPN has already autodrafted.
-            "expires_at": expires_at,
-            # cancel_event cannot interrupt a request already inside requests.post, so if the
-            # slot is filled mid-flight only the gateway can still stop the enqueue. It
-            # rechecks these against the listener board immediately before publishing.
-            "league_id": league_id,
-            "pick_number": pick_number,
-            # DRAFT_MODE is a per-process env var, set correctly on the per-league draft-sync
-            # Job this function normally runs inside - but NOT on the FastAPI gateway
-            # Deployment, which also calls this (e.g. /resume) and would otherwise always
-            # default to "live" even for a practice league. Callers running outside that Job
-            # (anything in this same process as the gateway) must pass the league's actual
-            # stored mode explicitly rather than rely on this env var.
-            "mode": mode if mode is not None else DRAFT_MODE,
-            # CORE-17 (#35): the scarcity-adjusted VORP that justified this recommendation
-            # (compute_draft_recommendation_candidates), for /v1/trigger/draft-pick's
-            # bot_decisions audit trail write. Gateway-only state, like expires_at above -
-            # the click bot has no use for it.
-            "decision_inputs": {"vorp_score": target.get("vorp_score"), "season": season},
-        },
-        headers=headers,
-        timeout=timeout,
-    )
-    if response.status_code >= 400:
-        logger.error(
-            "Draft target API rejected %s for Team %s with HTTP %s: %s",
-            target["name"], team_id, response.status_code, response.text,
-        )
-    response.raise_for_status()
+    post_trigger("draft-pick", {
+        "team_id": team_id,
+        # The browser worker clicks button.Button--draft[data-player-id="..."], which is
+        # ESPN's id. target["player_id"] is Sleeper's - sending it means the selector
+        # never matches (a 15s timeout, no pick) or, where the id spaces collide,
+        # matches a real but entirely different player.
+        "player_id": target["espn_id"],
+        "name": target["name"],
+        "position": target["position"],
+        "pro_team": target["team"],
+        # Stable across every retry of this pick, so an ambiguous failure (a read
+        # timeout, or a reset after the request was sent) cannot enqueue the same draft
+        # action twice and have the worker click twice.
+        "idempotency_key": idempotency_key,
+        # The request timeout only stops *this* client waiting; the FastAPI handler is
+        # synchronous and can resume from a blocked broker call long after we gave up.
+        # An absolute deadline lets the gateway discard the pick itself rather than
+        # queue a click for a slot ESPN has already autodrafted.
+        "expires_at": expires_at,
+        # cancel_event cannot interrupt a request already inside requests.post, so if the
+        # slot is filled mid-flight only the gateway can still stop the enqueue. It
+        # rechecks these against the listener board immediately before publishing.
+        "league_id": league_id,
+        "pick_number": pick_number,
+        # DRAFT_MODE is a per-process env var, set correctly on the per-league draft-sync
+        # Job this function normally runs inside - but NOT on the FastAPI gateway
+        # Deployment, which also calls this (e.g. /resume) and would otherwise always
+        # default to "live" even for a practice league. Callers running outside that Job
+        # (anything in this same process as the gateway) must pass the league's actual
+        # stored mode explicitly rather than rely on this env var.
+        "mode": mode if mode is not None else DRAFT_MODE,
+        # CORE-17 (#35): the scarcity-adjusted VORP that justified this recommendation
+        # (compute_draft_recommendation_candidates), for /v1/trigger/draft-pick's
+        # bot_decisions audit trail write. Gateway-only state, like expires_at above -
+        # the click bot has no use for it.
+        "decision_inputs": {"vorp_score": target.get("vorp_score"), "season": season},
+    }, timeout=timeout)
     logger.info(f"Published draft target for Team {team_id}: {target['name']} ({target['position']}).")
     # Records what we actually attempted for this pick_number (issue #108, Task F), so a
     # later pick event landing on our own team's slot can be compared against it in
@@ -1867,6 +1849,7 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
         try:
             r_client = redis.Redis(
                 host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
                 socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
             )
             r_client.ping()

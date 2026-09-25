@@ -2553,19 +2553,17 @@ def test_practice_start_lock_ttl_covers_the_worst_case_start(client):
     assert PRACTICE_START_LOCK_TTL_SECONDS >= 2 * worst_case_wait
 
 
-def test_redis_client_bounds_its_socket_timeouts():
-    """redis-py waits forever by default. These calls sit in synchronous endpoints on a bounded
-    threadpool, so a Redis that accepts the connection then stops replying parks a worker
-    permanently - the same failure mode as the unbounded Kubernetes calls this PR bounds, and the
-    reason the start lock's fail-open behaviour is real rather than nominal."""
+def test_redis_client_delegates_to_the_shared_database_client():
+    """Timeout-bounding itself is tested once, at the source, in test_database.py - this
+    only guards that draft.py's _redis_client hasn't drifted back to its own ad hoc
+    redis.Redis(...) call."""
     from src.api.draft import _redis_client
 
-    with patch("src.api.draft.redis.Redis") as mock_redis_cls:
-        _redis_client()
+    with patch("src.api.draft.get_redis_client") as mock_get_client:
+        result = _redis_client()
 
-    kwargs = mock_redis_cls.call_args.kwargs
-    assert kwargs["socket_connect_timeout"] > 0
-    assert kwargs["socket_timeout"] > 0
+    mock_get_client.assert_called_once_with()
+    assert result is mock_get_client.return_value
 
 
 def test_start_practice_sync_job_proceeds_when_the_lock_is_unavailable(client):
