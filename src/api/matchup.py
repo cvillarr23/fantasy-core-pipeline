@@ -15,6 +15,7 @@ from src.services.matchup_service import (
     NoMatchupFoundError,
     get_current_team_matchup,
     get_current_team_roster,
+    get_league_scoreboard,
 )
 
 logger = logging.getLogger("MatchupRoutes")
@@ -67,6 +68,37 @@ def get_matchup(season: int, week: int):
     except Exception as e:
         logger.error(f"Failed to compute matchup for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to compute matchup: {str(e)}")
+
+
+class ScoreboardTeamInfo(BaseModel):
+    team_id: str
+    name: str
+    logo_url: str
+    score: float
+    projected: float
+
+
+class ScoreboardMatchup(BaseModel):
+    home: Optional[ScoreboardTeamInfo] = None
+    away: Optional[ScoreboardTeamInfo] = None
+
+
+class ScoreboardResponse(BaseModel):
+    season: int
+    week: int
+    matchups: list[ScoreboardMatchup]
+
+
+@matchup_router.get("/scoreboard", response_model=ScoreboardResponse)
+def get_scoreboard(season: int, week: int):
+    try:
+        return get_league_scoreboard(season, week)
+    except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as e:
+        logger.error(f"ESPN unreachable while building scoreboard for season={season} week={week}: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach ESPN")
+    except Exception as e:
+        logger.error(f"Failed to compute scoreboard for season={season} week={week}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to compute scoreboard: {str(e)}")
 
 
 class LineupPlayerLine(BaseModel):
