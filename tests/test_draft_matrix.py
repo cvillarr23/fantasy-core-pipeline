@@ -16,10 +16,6 @@ LEAGUE_CONFIG = {
 }
 
 
-def test_core_api_base_url_defaults_to_core_pipeline_service():
-    assert dm.CORE_API_BASE_URL == "http://fantasy-core-pipeline.core.svc.cluster.local:8000"
-
-
 def _player(pid, position, vorp_score, name=None, team="KC", espn_id="e-1"):
     return {"player_id": pid, "espn_id": espn_id, "name": name or pid, "position": position,
             "vorp_score": vorp_score, "team": team}
@@ -432,13 +428,12 @@ def test_wait_for_pause_or_timeout_aborts_when_cancelled():
 def test_publish_draft_target_posts_expected_payload():
     target = _player("p1", "RB", 12.0, name="Some Back")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         dm.publish_draft_target("7", target)
 
-    url, kwargs = mock_post.call_args[0], mock_post.call_args[1]
-    assert url[0] == f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
-    assert kwargs["json"] == {
+    args = mock_post.call_args[0]
+    assert args[0] == "draft-pick"
+    assert args[1] == {
         "team_id": "7",
         # ESPN's id, not the internal one: the worker clicks data-player-id in the draft room.
         "player_id": "e-1",
@@ -462,11 +457,10 @@ def test_publish_draft_target_posts_expected_payload():
 def test_publish_draft_target_forwards_season_into_decision_inputs():
     target = _player("p1", "RB", 12.0, name="Some Back")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         dm.publish_draft_target("7", target, season=2026)
 
-    assert mock_post.call_args[1]["json"]["decision_inputs"] == {"vorp_score": 12.0, "season": 2026}
+    assert mock_post.call_args[0][1]["decision_inputs"] == {"vorp_score": 12.0, "season": 2026}
 
 
 def test_publish_draft_target_mode_override_takes_precedence_over_env_default():
@@ -476,23 +470,21 @@ def test_publish_draft_target_mode_override_takes_precedence_over_env_default():
     practice league's resume. An explicit mode= argument must win over that env default."""
     target = _player("p1", "RB", 12.0, name="Some Back")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post, \
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post, \
          patch("src.optimization.draft_matrix.DRAFT_MODE", "live"):
-        mock_post.return_value = MagicMock(status_code=202)
         dm.publish_draft_target("7", target, mode="practice")
 
-    assert mock_post.call_args[1]["json"]["mode"] == "practice"
+    assert mock_post.call_args[0][1]["mode"] == "practice"
 
 
 def test_publish_draft_target_falls_back_to_env_default_when_mode_not_given():
     target = _player("p1", "RB", 12.0, name="Some Back")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post, \
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post, \
          patch("src.optimization.draft_matrix.DRAFT_MODE", "practice"):
-        mock_post.return_value = MagicMock(status_code=202)
         dm.publish_draft_target("7", target)
 
-    assert mock_post.call_args[1]["json"]["mode"] == "practice"
+    assert mock_post.call_args[0][1]["mode"] == "practice"
 
 
 def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
@@ -500,27 +492,22 @@ def test_publish_draft_target_refuses_a_player_with_no_crosswalk_entry():
     draft room or be coerced into clicking a different player - never silently proceed."""
     target = _player("p1", "RB", 12.0, name="Some Back", espn_id=None)
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         with pytest.raises(ValueError, match="no espn_id"):
             dm.publish_draft_target("7", target)
 
     mock_post.assert_not_called()
 
 
-def test_publish_draft_target_logs_error_response_body(caplog):
+def test_publish_draft_target_propagates_trigger_errors():
+    """Response-body logging on a 4xx/5xx is trigger_client.post_trigger's job now (see
+    test_trigger_client.py) - this only guards that publish_draft_target doesn't swallow
+    the exception post_trigger raises."""
     target = _player("p1", "RB", 12.0, name="Some Back")
-    response = dm.requests.Response()
-    response.status_code = 422
-    response._content = b'{"detail":[{"loc":["body","pro_team"],"msg":"Input should be a valid string"}]}'
-    response.url = f"{dm.CORE_API_BASE_URL}/v1/trigger/draft-pick"
 
-    with patch("src.optimization.draft_matrix.requests.post", return_value=response):
-        with caplog.at_level("ERROR", logger="DraftMatrix"):
-            with pytest.raises(dm.requests.HTTPError):
-                dm.publish_draft_target("7", target)
-
-    assert '"pro_team"' in caplog.text
-    assert "Input should be a valid string" in caplog.text
+    with patch("src.optimization.draft_matrix.post_trigger", side_effect=dm.requests.HTTPError("422 error")):
+        with pytest.raises(dm.requests.HTTPError):
+            dm.publish_draft_target("7", target)
 
 
 def test_publish_draft_target_records_last_attempted_target(monkeypatch):
@@ -531,8 +518,7 @@ def test_publish_draft_target_records_last_attempted_target(monkeypatch):
     target = _player("p1", "RB", 12.0, name="Some Back", espn_id="e-1")
     mock_client = MagicMock()
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.draft_matrix.post_trigger"):
         dm.publish_draft_target(
             "7", target, league_id="L1", pick_number=5, r_client=mock_client,
         )
@@ -548,8 +534,7 @@ def test_publish_draft_target_skips_recording_without_r_client_league_id_or_pick
     nothing meaningful to key it on."""
     target = _player("p1", "RB", 12.0, name="Some Back", espn_id="e-1")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.draft_matrix.post_trigger"):
         dm.publish_draft_target("7", target)  # no r_client, league_id, or pick_number
 
 
@@ -579,8 +564,7 @@ def test_hold_and_publish_publishes_when_not_cancelled():
     mock_client.get.return_value = None
     target = _player("p1", "RB", 10.0, name="Some Back")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None)
 
     mock_post.assert_called_once()
@@ -594,13 +578,12 @@ def test_hold_and_publish_passes_season_through_to_publish_draft_target():
     mock_client.get.return_value = None
     target = _player("p1", "RB", 10.0, name="Some Back")
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         dm.hold_and_publish(
             mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None, season=2026,
         )
 
-    assert mock_post.call_args[1]["json"]["decision_inputs"] == {"vorp_score": 10.0, "season": 2026}
+    assert mock_post.call_args[0][1]["decision_inputs"] == {"vorp_score": 10.0, "season": 2026}
 
 
 def test_hold_and_publish_skips_when_cancelled():
@@ -610,7 +593,7 @@ def test_hold_and_publish_skips_when_cancelled():
     cancel_event.set()
     target = _player("p1", "RB", 10.0)
 
-    with patch("src.optimization.draft_matrix.requests.post") as mock_post:
+    with patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, cancel_event=cancel_event, sleep_fn=lambda s: None)
 
     mock_post.assert_not_called()
@@ -629,7 +612,7 @@ def test_hold_and_publish_abandons_when_auto_publish_disabled():
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("src.optimization.draft_matrix.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.draft_matrix.requests.post") as mock_post:
+         patch("src.optimization.draft_matrix.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
         dm.hold_and_publish(mock_client, "L1", "7", 5, [target], delay_seconds=1, sleep_fn=lambda s: None)
 

@@ -9,7 +9,7 @@ import polars as pl
 import redis
 import requests
 
-from src.database import get_db_connection
+from src.database import get_db_connection, get_redis_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SleeperPlayerSync")
@@ -18,8 +18,6 @@ logger = logging.getLogger("SleeperPlayerSync")
 # parses as vhost "" (empty string) in pika, not "/", and RabbitMQ then rejects the
 # connection with "vhost  not found" instead of connecting to the default vhost.
 AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f")
-REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
 # Sleeper labels team defenses "DEF"; everywhere else in this codebase (lineup_solver's
@@ -212,7 +210,7 @@ def publish_waiver_alerts(changed_rows: list, rostered_ids: set) -> None:
 
 def sync_players(force: bool = False) -> None:
     try:
-        r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r_client = get_redis_client()
         r_client.ping()
     except Exception as e:
         logger.error(f"Redis cache layer unavailable, aborting sync: {e}")

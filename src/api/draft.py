@@ -53,7 +53,7 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 from pydantic import BaseModel, Field, field_validator
 
-from src.database import get_db_cursor
+from src.database import get_db_cursor, get_redis_client
 from src.ingestion.sync_kicker_dst import ESPN_TO_INTERNAL_TEAM
 from src.optimization.draft_matrix import (
     _set_auto_publish_enabled,
@@ -157,22 +157,8 @@ DRAFT_LOGS_DEFAULT_TAIL_LINES = 200
 DRAFT_LOGS_MAX_TAIL_LINES = 1000
 
 
-# Same reasoning as K8S_REQUEST_TIMEOUT_SECONDS: these calls run in synchronous endpoints on a
-# bounded threadpool, and redis-py defaults to waiting forever. A Redis that accepts the
-# connection and then stops replying would park a worker permanently - the exact way a degraded
-# dependency turns into a dead API. Bounded, so it degrades one call instead.
-REDIS_CONNECT_TIMEOUT_SECONDS = 3
-REDIS_SOCKET_TIMEOUT_SECONDS = 5
-
-
 def _redis_client() -> redis.Redis:
-    return redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        decode_responses=True,
-        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
-        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
-    )
+    return get_redis_client()
 
 
 def _draft_sync_env(mode: str = "live") -> list:

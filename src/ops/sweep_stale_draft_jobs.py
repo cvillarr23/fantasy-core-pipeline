@@ -31,10 +31,9 @@ from src.api.draft import (
     K8S_NAMESPACE,
     K8S_REQUEST_TIMEOUT_SECONDS,
     PRACTICE_SYNC_APP_LABEL,
-    REDIS_HOST,
-    REDIS_PORT,
     _batch_v1_api,
 )
+from src.database import get_redis_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("StaleDraftJobSweeper")
@@ -81,7 +80,7 @@ def sweep() -> None:
         logger.info("No practice draft-sync Jobs registered; nothing to sweep.")
         return
 
-    r_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    r_client = get_redis_client()
     stale_league_ids = [league_id for league_id in league_ids if _is_stale(r_client, league_id)]
 
     if not stale_league_ids:

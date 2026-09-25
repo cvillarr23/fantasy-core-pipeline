@@ -13,18 +13,16 @@ from datetime import datetime
 
 import nflreadpy as nfl
 import pulp
-import requests
-from opentelemetry import propagate, trace
+from opentelemetry import trace
 
 from src.database import get_db_connection
 from src.telemetry import configure_tracing, configure_trace_logging
+from src.trigger_client import post_trigger
 
 configure_trace_logging()
 logger = logging.getLogger("LineupSolver")
 tracer = trace.get_tracer("lineup_solver")
 
-CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
-TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 BENCH_AND_IR_SLOT_NAMES = {"BE", "Bench", "IR"}
 FLEX_SLOT_ELIGIBLE_POSITIONS = {
     "RB/WR/TE": ("RB", "WR", "TE"),
@@ -257,18 +255,7 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
         logger.info(f"Lineup already optimal for Team {team_id}; nothing to publish.")
         return
 
-    # Inject this pipeline run's trace context so the FastAPI-side root span (CORE-12)
-    # becomes a child of this trace instead of starting a disconnected one.
-    headers: dict = {"X-API-Key": TRIGGER_API_KEY}
-    propagate.inject(headers)
-
-    response = requests.post(
-        f"{CORE_API_BASE_URL}/v1/trigger/lineup",
-        json={"team_id": team_id, "optimized_swaps": swaps},
-        headers=headers,
-        timeout=10,
-    )
-    response.raise_for_status()
+    post_trigger("lineup", {"team_id": team_id, "optimized_swaps": swaps}, timeout=10)
     logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane.")
 
 

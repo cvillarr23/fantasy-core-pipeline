@@ -3,10 +3,6 @@ from unittest.mock import MagicMock, patch
 from src.optimization import lineup_solver as ls
 
 
-def test_core_api_base_url_defaults_to_core_pipeline_service():
-    assert ls.CORE_API_BASE_URL == "http://fantasy-core-pipeline.core.svc.cluster.local:8000"
-
-
 def _player(pid, position, vorp_score, name=None, defense_matchup_multiplier=1.0):
     return {
         "player_id": pid, "name": name or pid, "position": position, "vorp_score": vorp_score,
@@ -360,17 +356,17 @@ def test_compute_lineup_swaps_defaults_matchup_multiplier_when_absent():
 def test_publish_lineup_swaps_posts_expected_payload():
     swaps = [{"drop_player_id": "d1", "add_player_id": "a1", "slot": "RB", "matchup_multiplier": 1.03}]
 
-    with patch("src.optimization.lineup_solver.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=202)
+    with patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         ls.publish_lineup_swaps("team-1", swaps)
 
-    url, kwargs = mock_post.call_args[0], mock_post.call_args[1]
-    assert url[0] == f"{ls.CORE_API_BASE_URL}/v1/trigger/lineup"
-    assert kwargs["json"] == {"team_id": "team-1", "optimized_swaps": swaps}
+    args, kwargs = mock_post.call_args
+    assert args[0] == "lineup"
+    assert args[1] == {"team_id": "team-1", "optimized_swaps": swaps}
+    assert kwargs["timeout"] == 10
 
 
 def test_publish_lineup_swaps_skips_request_when_no_swaps():
-    with patch("src.optimization.lineup_solver.requests.post") as mock_post:
+    with patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         ls.publish_lineup_swaps("team-1", [])
     mock_post.assert_not_called()
 
@@ -398,7 +394,7 @@ def test_optimize_weekly_lineup_skips_publish_when_no_delta():
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
-         patch("src.optimization.lineup_solver.requests.post") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
 
@@ -420,16 +416,14 @@ def test_optimize_weekly_lineup_end_to_end_with_swaps():
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
-         patch("src.optimization.lineup_solver.requests.post") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
-        mock_post.return_value = MagicMock(status_code=202)
         swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
 
     assert swap_count == 1
     mock_post.assert_called_once()
-    url = mock_post.call_args[0][0]
-    payload = mock_post.call_args[1]["json"]
-    assert url == f"{ls.CORE_API_BASE_URL}/v1/trigger/lineup"
+    path, payload = mock_post.call_args[0]
+    assert path == "lineup"
     assert payload["optimized_swaps"] == [
         {
             "drop_player_id": "wr_old", "add_player_id": "wr_bench", "slot": "FLEX",
@@ -447,7 +441,7 @@ def test_optimize_weekly_lineup_no_roster_returns_zero():
 
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
-         patch("src.optimization.lineup_solver.requests.post") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
 

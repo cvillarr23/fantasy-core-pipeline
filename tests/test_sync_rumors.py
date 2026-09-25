@@ -152,7 +152,7 @@ def test_sync_rumors_skips_when_lock_held():
     mock_redis_instance = MagicMock()
     mock_redis_instance.set.return_value = None  # NX failed: lock already held
 
-    with patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+    with patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.fetch_rotowire_rss") as mock_fetch_rss:
         sync_rumors.sync_rumors(force=False)
 
@@ -163,7 +163,7 @@ def test_sync_rumors_soft_fails_when_source_raises():
     mock_redis_instance = MagicMock()
     mock_redis_instance.set.return_value = True
 
-    with patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+    with patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.fetch_rotowire_rss", side_effect=Exception("rss down")), \
          patch("src.ingestion.sync_rumors.get_db_connection") as mock_get_conn, \
          patch("src.ingestion.sync_rumors.persist_signals") as mock_persist:
@@ -274,7 +274,7 @@ def test_fetch_reddit_fantasyfootball_applies_quality_filter():
 
     with patch.dict("os.environ", REDDIT_ENV, clear=True), \
          patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
-         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.requests.get", return_value=response):
         result = sync_rumors.fetch_reddit_fantasyfootball()
 
@@ -292,7 +292,7 @@ def test_fetch_reddit_fantasyfootball_paginates_via_after_cursor():
 
     with patch.dict("os.environ", REDDIT_ENV, clear=True), \
          patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
-         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.requests.get", side_effect=[response_page1, response_page2]) as mock_get:
         result = sync_rumors.fetch_reddit_fantasyfootball()
 
@@ -311,7 +311,7 @@ def test_fetch_reddit_fantasyfootball_stops_at_watermark():
 
     with patch.dict("os.environ", REDDIT_ENV, clear=True), \
          patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
-         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.requests.get", return_value=response) as mock_get:
         result = sync_rumors.fetch_reddit_fantasyfootball()
 
@@ -328,7 +328,7 @@ def test_fetch_reddit_fantasyfootball_updates_watermark():
 
     with patch.dict("os.environ", REDDIT_ENV, clear=True), \
          patch("src.ingestion.sync_rumors.get_reddit_access_token", return_value="fake-token"), \
-         patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+         patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.requests.get", return_value=response):
         sync_rumors.fetch_reddit_fantasyfootball()
 
@@ -358,7 +358,7 @@ def test_sync_rumors_matches_and_persists_fetched_items():
     mock_cursor.fetchall.return_value = [("4046", "Christian McCaffrey")]
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    with patch("src.ingestion.sync_rumors.redis.Redis", return_value=mock_redis_instance), \
+    with patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.fetch_rotowire_rss", return_value=[rss_entry]), \
          patch("src.ingestion.sync_rumors.get_db_connection") as mock_get_conn, \
          patch("src.ingestion.sync_rumors.persist_signals") as mock_persist:
