@@ -199,8 +199,8 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
 
-        # 2. Declare and enforce durable queue settings matching the infrastructure layer
-        channel.queue_declare(queue="lineup_updates", durable=True)
+        # The broker owns the queue's durable and dead-letter configuration.
+        channel.queue_declare(queue="lineup_updates", passive=True)
 
         # W3C trace context, separate from tracking_id below: tracking_id stays the
         # human/log-facing correlation UUID already returned to callers; traceparent is
@@ -276,7 +276,7 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
 
-        channel.queue_declare(queue="waiver_actions", durable=True)
+        channel.queue_declare(queue="waiver_actions", passive=True)
 
         carrier: dict = {}
         propagate.inject(carrier)
@@ -621,7 +621,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         # silent drop into a raised exception the except block below already retries.
         channel.confirm_delivery()
 
-        channel.queue_declare(queue="draft_targets", durable=True)
+        channel.queue_declare(queue="draft_targets", passive=True)
 
         carrier: dict = {}
         propagate.inject(carrier)
@@ -731,4 +731,3 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         # queue_declare that raises, or either 409 below - used to leak a socket per attempt
         # and could exhaust the gateway or the broker mid-draft.
         _close_broker_connection(connection)
-

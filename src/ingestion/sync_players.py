@@ -186,7 +186,7 @@ def publish_waiver_alerts(changed_rows: list, rostered_ids: set) -> None:
     connection = pika.BlockingConnection(params)
     try:
         channel = connection.channel()
-        channel.queue_declare(queue=WAIVER_ACTIONS_QUEUE, durable=True)
+        channel.queue_declare(queue=WAIVER_ACTIONS_QUEUE, passive=True)
 
         for row in alertable:
             payload = {
