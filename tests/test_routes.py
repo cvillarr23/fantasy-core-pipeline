@@ -109,7 +109,7 @@ def test_trigger_lineup_swap_success(client):
     assert body["team_id"] == "1"
     assert "tracking_id" in body and body["tracking_id"]
 
-    mock_channel.queue_declare.assert_called_once_with(queue="lineup_updates", durable=True)
+    mock_channel.queue_declare.assert_called_once_with(queue="lineup_updates", passive=True)
     publish_kwargs = mock_channel.basic_publish.call_args.kwargs
     assert publish_kwargs["routing_key"] == "lineup_updates"
     assert publish_kwargs["properties"].delivery_mode == 2
@@ -176,7 +176,7 @@ def test_trigger_draft_pick_success(client):
     assert body["team_id"] == "7"
     assert "tracking_id" in body and body["tracking_id"]
 
-    mock_channel.queue_declare.assert_called_once_with(queue="draft_targets", durable=True)
+    mock_channel.queue_declare.assert_called_once_with(queue="draft_targets", passive=True)
     publish_kwargs = mock_channel.basic_publish.call_args.kwargs
     assert publish_kwargs["routing_key"] == "draft_targets"
     assert publish_kwargs["properties"].delivery_mode == 2
@@ -764,7 +764,7 @@ def test_trigger_waiver_claim_success(client):
     assert body["team_id"] == "7"
     assert "tracking_id" in body and body["tracking_id"]
 
-    mock_channel.queue_declare.assert_called_once_with(queue="waiver_actions", durable=True)
+    mock_channel.queue_declare.assert_called_once_with(queue="waiver_actions", passive=True)
     publish_kwargs = mock_channel.basic_publish.call_args.kwargs
     assert publish_kwargs["routing_key"] == "waiver_actions"
     assert publish_kwargs["properties"].delivery_mode == 2

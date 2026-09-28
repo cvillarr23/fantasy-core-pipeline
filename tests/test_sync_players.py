@@ -150,7 +150,7 @@ def test_publish_waiver_alerts_fires_for_rostered_transition():
     with patch("src.ingestion.sync_players.pika.BlockingConnection", return_value=mock_connection):
         sync_players.publish_waiver_alerts([_row()], rostered_ids={"4046"})
 
-    mock_channel.queue_declare.assert_called_once_with(queue="waiver_actions", durable=True)
+    mock_channel.queue_declare.assert_called_once_with(queue="waiver_actions", passive=True)
     publish_kwargs = mock_channel.basic_publish.call_args.kwargs
     assert publish_kwargs["routing_key"] == "waiver_actions"
     assert publish_kwargs["properties"].delivery_mode == 2
