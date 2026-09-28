@@ -16,6 +16,7 @@ from espn_api.football import League
 from espn_api.football.constant import POSITION_MAP
 
 from src.database import get_db_connection
+from src.ingestion.espn_client import TimedEspnFantasyRequests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LeagueSync")
@@ -30,12 +31,26 @@ def _require_env(name: str) -> str:
     return value
 
 
-def build_league(season: int) -> League:
+def build_league(season: int, request_timeout_seconds: int | None = None) -> League:
     """Constructs an authenticated espn_api League client from OpenBao-sourced env vars."""
     league_id = _require_env("ESPN_LEAGUE_ID")
     espn_s2 = _require_env("ESPN_S2")
     swid = _require_env("ESPN_SWID")
-    return League(league_id=int(league_id), year=season, espn_s2=espn_s2, swid=swid)
+    kwargs = {"league_id": int(league_id), "year": season, "espn_s2": espn_s2, "swid": swid}
+    if request_timeout_seconds is None:
+        return League(**kwargs)
+
+    league = League(**kwargs, fetch_league=False)
+    league.espn_request = TimedEspnFantasyRequests(
+        sport="nfl",
+        year=season,
+        league_id=int(league_id),
+        cookies={"espn_s2": espn_s2, "SWID": swid},
+        logger=league.logger,
+        timeout_seconds=request_timeout_seconds,
+    )
+    league.fetch_league()
+    return league
 
 
 def fetch_raw_league_data(league: League) -> dict:

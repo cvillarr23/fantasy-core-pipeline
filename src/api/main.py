@@ -11,7 +11,7 @@ from src.api.players import player_router
 from src.api.backtest import backtest_router
 from src.api.roster import roster_router
 from src.api.waiver import waiver_router
-from src.api.matchup import matchup_router
+from src.api.matchup import matchup_router, scoreboard_router
 from src.api.league import league_router
 from src.api.stats import stats_router
 from src.api.trade import trade_router
@@ -79,6 +79,7 @@ app.include_router(backtest_router, prefix="/v1/backtest")
 app.include_router(roster_router, prefix="/v1/roster")
 app.include_router(waiver_router, prefix="/v1/waiver")
 app.include_router(matchup_router, prefix="/v1/matchup")
+app.include_router(scoreboard_router, prefix="/v1/scoreboard")
 app.include_router(league_router, prefix="/v1/league")
 app.include_router(stats_router, prefix="/v1/stats")
 app.include_router(trade_router, prefix="/v1/trade")
