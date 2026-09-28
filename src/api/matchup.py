@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.services.matchup_service import (
+    ESPNTimeoutError,
     NoMatchupFoundError,
     get_current_team_matchup,
     get_current_team_roster,
@@ -20,6 +21,7 @@ from src.services.matchup_service import (
 
 logger = logging.getLogger("MatchupRoutes")
 matchup_router = APIRouter()
+scoreboard_router = APIRouter()
 
 
 class PlayerLine(BaseModel):
@@ -62,6 +64,9 @@ def get_matchup(season: int, week: int):
         return get_current_team_matchup(season, week)
     except NoMatchupFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ESPNTimeoutError as e:
+        logger.error(f"ESPN timed out while building matchup for season={season} week={week}: {e}")
+        raise HTTPException(status_code=504, detail="ESPN request timed out")
     except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as e:
         logger.error(f"ESPN unreachable while building matchup for season={season} week={week}: {e}")
         raise HTTPException(status_code=502, detail="Could not reach ESPN")
@@ -90,9 +95,13 @@ class ScoreboardResponse(BaseModel):
 
 
 @matchup_router.get("/scoreboard", response_model=ScoreboardResponse)
+@scoreboard_router.get("", response_model=ScoreboardResponse)
 def get_scoreboard(season: int, week: int):
     try:
         return get_league_scoreboard(season, week)
+    except ESPNTimeoutError as e:
+        logger.error(f"ESPN timed out while building scoreboard for season={season} week={week}: {e}")
+        raise HTTPException(status_code=504, detail="ESPN request timed out")
     except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as e:
         logger.error(f"ESPN unreachable while building scoreboard for season={season} week={week}: {e}")
         raise HTTPException(status_code=502, detail="Could not reach ESPN")
