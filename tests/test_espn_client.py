@@ -15,6 +15,7 @@ def test_timed_clients_keep_overlapping_requests_and_failure_isolated():
     a_entered = Event()
     b_entered = Event()
     release_a = Event()
+    release_b = Event()
     calls = []
 
     def fake_get(url, **kwargs):
@@ -26,6 +27,7 @@ def test_timed_clients_keep_overlapping_requests_and_failure_isolated():
             raise requests.Timeout("A timed out")
         if url.endswith("/b"):
             b_entered.set()
+            assert release_b.wait(5)
             return Mock(status_code=200, json=lambda: {"client": "B"})
         return Mock(status_code=200, json=lambda: {"unrelated": True})
 
@@ -36,15 +38,24 @@ def test_timed_clients_keep_overlapping_requests_and_failure_isolated():
             future_a = pool.submit(a.get, extend="/a")
             assert a_entered.wait(5)
             future_b = pool.submit(b.get, extend="/b")
+            try:
+                assert b_entered.wait(5)
+                release_a.set()
+                with pytest.raises(requests.Timeout):
+                    future_a.result(timeout=5)
+
+                assert not future_b.done()
+                assert requests.get is patched_get
+                assert requests.get("https://example.test/unrelated").json() == {
+                    "unrelated": True
+                }
+            finally:
+                release_a.set()
+                release_b.set()
+
             assert future_b.result(timeout=5) == {"client": "B"}
-            release_a.set()
-            with pytest.raises(requests.Timeout):
-                future_a.result(timeout=5)
 
         assert requests.get is patched_get
-        assert requests.get("https://example.test/unrelated").json() == {
-            "unrelated": True
-        }
 
     assert requests.get is original_get
     assert calls[0][1] == 5
