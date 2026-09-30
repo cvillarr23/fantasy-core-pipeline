@@ -124,6 +124,30 @@ def test_set_draft_config_practice_mode_skips_check_when_espn_league_id_unset(cl
     assert response.json()["mode"] == "practice"
 
 
+def test_get_draft_config_returns_latest_live_row(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        response = client.get("/v1/draft/config")
+
+    assert response.status_code == 200
+    assert response.json() == {"league_id": "L1", "team_id": "7", "season": 2026, "mode": "live"}
+    query = mock_cursor.execute.call_args[0][0]
+    assert "mode = 'live'" in query
+    assert "ORDER BY updated_at DESC" in query
+
+
+def test_get_draft_config_404_when_none_stored(client):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        response = client.get("/v1/draft/config")
+
+    assert response.status_code == 404
+
+
 def test_set_draft_config_db_failure(client):
     @contextmanager
     def _broken_cursor():

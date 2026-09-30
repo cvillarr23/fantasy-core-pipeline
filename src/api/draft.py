@@ -1362,6 +1362,25 @@ def set_draft_config(payload: DraftConfigPayload):
     return {"status": "stored", "league_id": payload.league_id, "team_id": payload.team_id, "season": payload.season, "mode": payload.mode, "auto_publish_enabled": payload.auto_publish_enabled}
 
 
+@draft_router.get("/config", status_code=status.HTTP_200_OK)
+def get_draft_config():
+    """Returns the most recently stored live config, so the web UI's league/team settings
+    follow the operator across browsers/devices instead of living only in localStorage.
+    Practice rows are excluded - they're mock-room configs, never the real league."""
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT league_id, team_id, season, mode FROM draft_config WHERE mode = 'live' ORDER BY updated_at DESC LIMIT 1;")
+            row = cursor.fetchone()
+    except Exception as e:
+        logger.error(f"Failed to read draft config: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to read draft config: {str(e)}")
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No live draft config stored yet.")
+    league_id, team_id, season, mode = row
+    return {"league_id": league_id, "team_id": team_id, "season": season, "mode": mode}
+
+
 @draft_router.post("/start", status_code=status.HTTP_202_ACCEPTED)
 def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = False):
     """Creates the draft-sync Job (a wrapper around draft_matrix.py's listener) from a
