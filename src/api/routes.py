@@ -19,6 +19,11 @@ router = APIRouter()
 # pick clock (the retry window it guards) and far shorter than a draft, so keys from an
 # earlier draft can never collide with a later one.
 DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 900
+# Same guard for /trigger/lineup (#189). It covers lineup_solver's in-process retries and
+# the CronJob's pod-level retries, which all finish within minutes. Short enough that a
+# deliberate re-run later the same day (after a manual revert on ESPN, say) isn't mistaken
+# for a duplicate - and the optimizer's key includes the Job name, so a new Job never is.
+LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 1800
 # Ceiling on any single broker operation for a deadline-carrying request.
 BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 
@@ -83,6 +88,16 @@ class SwapInstruction(BaseModel):
 class LineupTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
     optimized_swaps: List[SwapInstruction] = Field(..., description="Array of mathematical player reallocations")
+    idempotency_key: Optional[str] = Field(
+        None,
+        description=(
+            "Stable key for this lineup decision (#189). lineup_solver retries a failed publish "
+            "and the CronJob retries a failed pod, and a retry after an ambiguous failure (read "
+            "timeout, reset after send) could otherwise enqueue the same swaps twice. Repeats "
+            "within LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS return status 'duplicate'. Optional: "
+            "the web UI's manual swaps omit it."
+        ),
+    )
 
 class WaiverTriggerPayload(BaseModel):
     team_id: str = Field(..., description="Target local league team identification number")
@@ -209,6 +224,32 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
         _reject_internal_player_id(swap.add_player_id, swap.add_player_name)
 
+    # Same claim/mark/release protocol as trigger_draft_pick - see _claim_idempotency_key.
+    claim = _claim_idempotency_key(
+        payload.idempotency_key, tracking_id, namespace="lineup", ttl=LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+    )
+    if claim == "published":
+        logger.info(
+            f"Lineup swaps for Team {payload.team_id} already enqueued under idempotency key "
+            f"{payload.idempotency_key}; not queueing a duplicate."
+        )
+        return {
+            "status": "duplicate",
+            "queue": "lineup_updates",
+            "team_id": payload.team_id,
+            "tracking_id": tracking_id,
+        }
+    if claim == "pending":
+        logger.info(
+            f"Lineup swaps for Team {payload.team_id} are still in flight under idempotency key "
+            f"{payload.idempotency_key}; asking the caller to retry."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="An earlier request for this lineup decision is still in flight; retry shortly.",
+        )
+
+    publish_attempted = False
     try:
         # 1. Establish an on-demand transaction connection channel to the cluster broker
         params = pika.URLParameters(AMQP_URL)
@@ -237,6 +278,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         })
 
         # 4. Publish message with high persistence markers to survive unexpected broker reboots
+        publish_attempted = True
         channel.basic_publish(
             exchange="",
             routing_key="lineup_updates",
@@ -246,6 +288,9 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
                 content_type="application/json",
                 headers=carrier,
             )
+        )
+        _mark_idempotency_key_published(
+            payload.idempotency_key, namespace="lineup", ttl=LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
         )
         connection.close()
         logger.info(f"Asymmetric event transaction committed securely to RabbitMQ for Team {payload.team_id}.")
@@ -269,6 +314,15 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
         }
 
     except Exception as e:
+        # Before basic_publish (or a provably pre-write broker error) nothing can have been
+        # enqueued, so release the claim and let the caller's retry publish. At or after it,
+        # the message may exist: keep the claim as "published" so a retry reports duplicate.
+        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
+            _release_idempotency_key(payload.idempotency_key, tracking_id, namespace="lineup")
+        else:
+            _mark_idempotency_key_published(
+                payload.idempotency_key, namespace="lineup", ttl=LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+            )
         logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
@@ -481,7 +535,14 @@ def _record_bot_decision(
             logger.debug("Could not mark bot_decisions write failure on the span", exc_info=True)
 
 
-def _claim_idempotency_key(key: Optional[str], token: str) -> str:
+def _idempotency_redis_key(namespace: str, key: str) -> str:
+    return f"{namespace}:trigger:idempotency:{key}"
+
+
+def _claim_idempotency_key(
+    key: Optional[str], token: str, namespace: str = "draft",
+    ttl: int = DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+) -> str:
     """Claims `key` for this request. Returns "claimed", "pending" or "published".
 
     A publish that fails ambiguously - a read timeout, or a connection reset after the bytes
@@ -501,11 +562,11 @@ def _claim_idempotency_key(key: Optional[str], token: str) -> str:
     """
     if not key:
         return "claimed"
-    redis_key = f"draft:trigger:idempotency:{key}"
+    redis_key = _idempotency_redis_key(namespace, key)
     try:
         client = _redis_client()
         # The value carries this request's token so only this request can release the claim.
-        if client.set(redis_key, f"pending:{token}", nx=True, ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS):
+        if client.set(redis_key, f"pending:{token}", nx=True, ex=ttl):
             return "claimed"
         # Lost the race. A key with no value left (expired between SET and GET) is treated as
         # still in flight rather than published; the caller retrying is the safe reading.
@@ -515,16 +576,15 @@ def _claim_idempotency_key(key: Optional[str], token: str) -> str:
         return "claimed"
 
 
-def _mark_idempotency_key_published(key: Optional[str]) -> None:
+def _mark_idempotency_key_published(
+    key: Optional[str], namespace: str = "draft", ttl: int = DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+) -> None:
     """Promotes a claim from "pending" once the message provably may exist, so that later
     retries for this pick get "duplicate" instead of being told to try again."""
     if not key:
         return
     try:
-        _redis_client().set(
-            f"draft:trigger:idempotency:{key}", "published",
-            ex=DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-        )
+        _redis_client().set(_idempotency_redis_key(namespace, key), "published", ex=ttl)
     except Exception as e:
         logger.warning(f"Could not mark idempotency key {key} published: {e}")
 
@@ -537,7 +597,7 @@ return 0
 """
 
 
-def _release_idempotency_key(key: Optional[str], token: str) -> None:
+def _release_idempotency_key(key: Optional[str], token: str, namespace: str = "draft") -> None:
     """Releases a claim for a request that provably never enqueued anything.
 
     Called only from the pre-publish failure path. Leaving the claim there would turn a
@@ -550,7 +610,7 @@ def _release_idempotency_key(key: Optional[str], token: str) -> None:
         # Compare-and-delete: a retry may already hold a fresh "pending" claim by the time
         # this runs, and a blind DELETE would drop it and let a third request enqueue too.
         _redis_client().eval(
-            _RELEASE_CLAIM_LUA, 1, f"draft:trigger:idempotency:{key}", f"pending:{token}",
+            _RELEASE_CLAIM_LUA, 1, _idempotency_redis_key(namespace, key), f"pending:{token}",
         )
     except Exception as e:
         # The TTL is the backstop. Worst case the retries for this pick all report duplicate

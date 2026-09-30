@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from src.optimization import lineup_solver as ls
 
 
@@ -356,7 +358,7 @@ def test_compute_lineup_swaps_defaults_matchup_multiplier_when_absent():
 def test_publish_lineup_swaps_posts_expected_payload():
     swaps = [{"drop_player_id": "d1", "add_player_id": "a1", "slot": "RB", "matchup_multiplier": 1.03}]
 
-    with patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+    with patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
         ls.publish_lineup_swaps("team-1", swaps)
 
     args, kwargs = mock_post.call_args
@@ -366,7 +368,7 @@ def test_publish_lineup_swaps_posts_expected_payload():
 
 
 def test_publish_lineup_swaps_skips_request_when_no_swaps():
-    with patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+    with patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
         ls.publish_lineup_swaps("team-1", [])
     mock_post.assert_not_called()
 
@@ -434,7 +436,7 @@ def _mock_conn_with_cursor(mock_cursor):
 def _run_optimize(roster, metrics, starters=CURRENT_STARTERS, week=TARGET_WEEK,
                   teams_playing=ALL_TEAMS_PLAYING, dry_run=False, espn_id_by_pid=ESPN_ID_BY_PID):
     """Runs optimize_weekly_lineup against a mocked DB. Returns (result_or_exception,
-    post_trigger mock, cursor mock)."""
+    post_trigger_idempotent mock, cursor mock)."""
     mock_cursor = MagicMock()
     mock_cursor.fetchall.side_effect = [roster, metrics, starters]
     schedule_patch = (
@@ -446,7 +448,7 @@ def _run_optimize(roster, metrics, starters=CURRENT_STARTERS, week=TARGET_WEEK,
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          schedule_patch, \
          patch("src.optimization.lineup_solver.resolve_espn_identity", _identity_resolver(espn_id_by_pid)), \
-         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         try:
             result = ls.optimize_weekly_lineup(
@@ -468,7 +470,7 @@ def test_optimize_uses_rolling_prior_weeks_when_target_week_has_no_rows():
 
     assert result == 1
     mock_post.assert_called_once()
-    path, payload = mock_post.call_args[0]
+    path, payload, _key = mock_post.call_args[0]
     assert path == "lineup"
     [swap] = payload["optimized_swaps"]
     assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == (
@@ -646,7 +648,7 @@ def test_main_exits_nonzero_when_every_swap_is_unresolvable():
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
          patch("src.optimization.lineup_solver.resolve_espn_identity", return_value=None), \
-         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         assert ls.main(ARGV) != 0
     mock_post.assert_not_called()
@@ -767,7 +769,7 @@ def test_main_end_to_end_no_usable_data_exits_nonzero():
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
-         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         assert ls.main(ARGV) != 0
     mock_post.assert_not_called()
@@ -796,7 +798,7 @@ def test_evaluate_lineup_returns_swaps_with_source_and_never_publishes():
     mock_cursor.fetchall.side_effect = [ROSTER, _metric_rows(4, dict(BASE_VORP, wr_bench=99.0)), CURRENT_STARTERS]
     with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
-         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+         patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
         result = ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
 
     mock_post.assert_not_called()
@@ -814,3 +816,67 @@ def test_evaluate_lineup_raises_on_insufficient_input():
     with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          pytest.raises(ls.InsufficientLineupInputError):
         ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+
+# ---------------------------------------------------------------------------
+# Idempotent, retried publishing (#189)
+# ---------------------------------------------------------------------------
+
+def _swap(drop, add, slot, season=2026, week=4):
+    return {"drop_player_id": drop, "add_player_id": add, "slot": slot,
+            "decision_inputs": {"season": season, "week": week}}
+
+
+def test_lineup_idempotency_key_is_stable_for_the_same_decision():
+    swaps = [_swap("16737", "4360761", "WR"), _swap("4040715", "3917315", "QB")]
+
+    key = ls.lineup_idempotency_key("8", swaps, job_name="job-a")
+
+    # Same decision recomputed by a retried pod (possibly in another order): same key.
+    assert ls.lineup_idempotency_key("8", list(reversed(swaps)), job_name="job-a") == key
+    assert key.startswith("lineup-8-")
+
+
+def test_lineup_idempotency_key_differs_across_jobs_swaps_and_weeks():
+    swaps = [_swap("16737", "4360761", "WR")]
+    key = ls.lineup_idempotency_key("8", swaps, job_name="job-a")
+
+    # A new Job (next Tuesday, or a deliberate manual re-run) is a new decision.
+    assert ls.lineup_idempotency_key("8", swaps, job_name="job-b") != key
+    assert ls.lineup_idempotency_key("8", [_swap("16737", "4360761", "RB/WR/TE")], job_name="job-a") != key
+    assert ls.lineup_idempotency_key("8", [_swap("16737", "4360761", "WR", week=5)], job_name="job-a") != key
+    assert ls.lineup_idempotency_key("7", swaps, job_name="job-a") != key
+
+
+def test_publish_lineup_swaps_sends_the_job_scoped_key(monkeypatch):
+    monkeypatch.setenv("JOB_NAME", "fantasy-lineup-optimizer-29850000")
+    swaps = [_swap("16737", "4360761", "WR")]
+
+    with patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
+        ls.publish_lineup_swaps("8", swaps)
+
+    assert mock_post.call_args[0][2] == ls.lineup_idempotency_key("8", swaps, job_name="fantasy-lineup-optimizer-29850000")
+
+
+def test_main_survives_a_refused_connection_and_publishes_exactly_once(caplog):
+    """End to end through the real trigger client: the 2026-09-30 manual run hit a refused
+    connection during an API rollout and failed its Job. Now the run retries in-process,
+    publishes once, and exits 0."""
+    ok = MagicMock(status_code=202)
+    ok.json.return_value = {"status": "accepted"}
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER, _metric_rows(4, dict(BASE_VORP, wr_bench=99.0)), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
+         patch("src.optimization.lineup_solver.resolve_espn_identity", _identity_resolver(ESPN_ID_BY_PID)), \
+         patch("src.trigger_client.time.sleep") as mock_sleep, \
+         patch("src.trigger_client.requests.post",
+               side_effect=[requests.ConnectionError("Connection refused"), ok]) as mock_post:
+        mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
+        assert ls.main(ARGV) == 0
+
+    assert mock_post.call_count == 2
+    keys = {c.kwargs["json"]["idempotency_key"] for c in mock_post.call_args_list}
+    assert len(keys) == 1, "every attempt must carry the same idempotency key"
+    mock_sleep.assert_called_once()

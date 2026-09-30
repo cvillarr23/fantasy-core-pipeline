@@ -1247,3 +1247,111 @@ def test_trigger_waiver_claim_allows_a_drop_player_id_known_to_espn(client):
 
     assert response.status_code == 202
     mock_channel.basic_publish.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# /trigger/lineup idempotency (#189)
+# ---------------------------------------------------------------------------
+
+LINEUP_KEYED_PAYLOAD = {
+    "team_id": "8",
+    "optimized_swaps": [{"drop_player_id": "16737", "add_player_id": "4360761", "slot": "WR"}],
+    "idempotency_key": "lineup-8-abc",
+}
+
+
+def _namespace_ok_cursor():
+    """Every id resolves as an espn_id and no name is sent, so the namespace guard passes."""
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("Somebody",)
+    return cursor
+
+
+def _post_lineup(client, mock_connection, mock_redis, payload=LINEUP_KEYED_PAYLOAD):
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_namespace_ok_cursor())):
+        return client.post("/v1/trigger/lineup", json=payload)
+
+
+def test_trigger_lineup_idempotency_key_blocks_a_duplicate_enqueue(client):
+    """lineup_solver retries a publish whose response it never saw, and the CronJob retries
+    a failed pod; either must come back "duplicate" instead of enqueueing the swaps again."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    first = _post_lineup(client, mock_connection, mock_redis)
+    second = _post_lineup(client, mock_connection, mock_redis)
+
+    assert first.status_code == 202 and first.json()["status"] == "accepted"
+    assert second.status_code == 202 and second.json()["status"] == "duplicate"
+    assert mock_channel.basic_publish.call_count == 1
+    assert mock_redis.store["lineup:trigger:idempotency:lineup-8-abc"] == "published"
+    assert not any(k.startswith("draft:") for k in mock_redis.store)
+
+
+def test_trigger_lineup_asks_the_caller_to_retry_while_an_earlier_attempt_is_in_flight(client):
+    mock_connection = MagicMock()
+    mock_redis = _fake_redis()
+    mock_redis.store["lineup:trigger:idempotency:lineup-8-abc"] = "pending:other-request"
+
+    response = _post_lineup(client, mock_connection, mock_redis)
+
+    assert response.status_code == 503
+    mock_connection.channel.return_value.basic_publish.assert_not_called()
+
+
+def test_trigger_lineup_releases_the_key_when_the_broker_fails_before_publishing(client):
+    """Nothing was enqueued, so holding the claim would turn the retry into a false
+    "duplicate" and silently drop the lineup change."""
+    mock_redis = _fake_redis()
+    good_channel = MagicMock()
+    good_connection = MagicMock()
+    good_connection.channel.return_value = good_channel
+
+    with patch("src.api.routes.pika.BlockingConnection", side_effect=[Exception("broker down"), good_connection]), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_namespace_ok_cursor())):
+        failed = client.post("/v1/trigger/lineup", json=LINEUP_KEYED_PAYLOAD)
+        retried = client.post("/v1/trigger/lineup", json=LINEUP_KEYED_PAYLOAD)
+
+    assert failed.status_code == 500
+    assert retried.status_code == 202 and retried.json()["status"] == "accepted"
+    good_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_lineup_treats_a_failure_during_publish_as_possibly_enqueued(client):
+    """A failure inside basic_publish is ambiguous - the message may exist - so the retry
+    must get "duplicate", not a second enqueue."""
+    mock_redis = _fake_redis()
+    channel = MagicMock()
+    channel.basic_publish.side_effect = [Exception("connection reset"), None]
+    connection = MagicMock()
+    connection.channel.return_value = channel
+
+    failed = _post_lineup(client, connection, mock_redis)
+    retried = _post_lineup(client, connection, mock_redis)
+
+    assert failed.status_code == 500
+    assert retried.status_code == 202 and retried.json()["status"] == "duplicate"
+    assert channel.basic_publish.call_count == 1
+
+
+def test_trigger_lineup_without_a_key_never_touches_redis(client):
+    """The web UI's manual swaps send no key and must behave exactly as before."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    payload = {k: v for k, v in LINEUP_KEYED_PAYLOAD.items() if k != "idempotency_key"}
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client") as mock_redis_client, \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_namespace_ok_cursor())):
+        first = client.post("/v1/trigger/lineup", json=payload)
+        second = client.post("/v1/trigger/lineup", json=payload)
+
+    assert first.json()["status"] == second.json()["status"] == "accepted"
+    assert mock_channel.basic_publish.call_count == 2
+    mock_redis_client.assert_not_called()
