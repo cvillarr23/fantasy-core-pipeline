@@ -109,8 +109,32 @@
   exists in the table.
 - Players with `injury_status = 'Out'` are excluded from the optimizer's decision
   variables entirely; `Questionable`/`Doubtful` remain eligible to start (real judgment
-  calls, not hard exclusions). Bye-week players need no special handling — they simply have
-  no `weekly_stats` row for that week, so the roster/stats join already drops them.
+  calls, not hard exclusions). In `load_roster_pool` (exact-week, used by backtests,
+  `matchup_service`, `rumor_action_service`) a bye-week player simply has no `weekly_stats`
+  row for that week, so the roster/stats join drops them.
+- The scheduled run (`optimize_weekly_lineup`) evaluates an **upcoming** week (#178) via
+  `load_pregame_roster_pool`, not `load_roster_pool`. Source order, always within the
+  target season: (1) the target week's own `vorp_score` if any rostered player has one
+  (pregame Sleeper projections written by `fantasy-draft-prep-refresher`, 05:00 CT daily);
+  otherwise (2) each player's mean `vorp_score` over the up-to-3 prior weeks of the same
+  season. Week 1 never reads the prior season. Mode (2) needs the newest usable week to be
+  `target - 1` (else "stale"), and takes byes from the nflverse schedule
+  (`load_teams_playing`), since prior-week rows say nothing about the target week. The
+  source (`source_mode`, `source_season`, `source_weeks`, `held_slots`, plus `season`/`week`)
+  is logged and merged into each swap's `decision_inputs` → `bot_decisions`.
+- K and D/ST normally have no `vorp_score` (Sleeper projections are QB/RB/WR/TE only;
+  `sync_kicker_dst` is free-agent-only and unscheduled). A `HOLDABLE_WITHOUT_METRICS` slot
+  no pool player can fill is **held**: removed from the ILP, and its current starter is
+  left out of the diff so it's never dropped. An unfillable skill slot is an error.
+- Exit codes: `main()` returns 0 for a real decision (swaps published *or* lineup already
+  optimal) and 1 for `InsufficientLineupInputError` (no roster, no usable/stale metrics,
+  schedule unavailable in mode (2), infeasible solve), so the CronJob's Job fails and
+  alerts (fantasy-infra#97). Publish/HTTP errors still raise. `--dry-run` computes and logs
+  swaps without calling `/v1/trigger/lineup`.
+- `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
+  game final, from the nflverse schedule), not nflreadpy's current week, which is already
+  the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week
+  exits 1; preseason (no completed week yet) exits 0.
 - The solver does not publish to RabbitMQ directly. It POSTs to the existing
   `POST /v1/trigger/lineup` FastAPI route (`src/api/routes.py`, mounted under the `/v1`
   prefix in `src/api/main.py` — `CORE_API_BASE_URL` is just the host, the `/v1` prefix is

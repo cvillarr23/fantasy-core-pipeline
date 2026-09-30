@@ -566,17 +566,112 @@ def test_extract_weekly_metrics_no_plays_for_week_writes_nothing():
     mock_cursor.executemany.assert_not_called()
 
 
-def test_resolve_default_year_week_uses_nflreadpy_when_available():
-    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2025), \
-         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=22):
+def _schedule(games):
+    """games: (week, game_type, home_score, away_score) tuples."""
+    return pl.DataFrame(
+        [{"week": w, "game_type": gt, "home_team": "BUF", "away_team": "NYJ", "home_score": hs, "away_score": as_}
+         for w, gt, hs, as_ in games],
+        schema={"week": pl.Int64, "game_type": pl.Utf8, "home_team": pl.Utf8, "away_team": pl.Utf8,
+                "home_score": pl.Int64, "away_score": pl.Int64},
+    )
+
+
+def test_last_completed_week_skips_a_partially_played_week():
+    """Tuesday of Week 5 with Thursday's Week 5 game already final must still pick Week 4:
+    ingesting a half-played week would write a partial weekly_stats row set."""
+    df = _schedule([(3, "REG", 20, 17), (4, "REG", 24, 10), (4, "REG", 7, 3), (5, "REG", 21, 14), (5, "REG", None, None)])
+    assert me.last_completed_week(df) == 4
+
+
+def test_last_completed_week_is_none_before_any_game_is_final():
+    df = _schedule([(1, "REG", None, None), (1, "REG", None, None)])
+    assert me.last_completed_week(df) is None
+
+
+def test_last_completed_week_ignores_postseason_games():
+    df = _schedule([(18, "REG", 20, 17), (19, "WC", 30, 27)])
+    assert me.last_completed_week(df) == 18
+
+
+def test_resolve_default_year_week_uses_last_completed_week_from_schedule():
+    """The ingestor runs Tuesdays, when nflreadpy's current week is already the upcoming,
+    unplayed one (#178) - so the default must come from final scores, not current week."""
+    df = _schedule([(3, "REG", 20, 17), (4, "REG", 24, 10), (5, "REG", None, None)])
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
+         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=5), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", return_value=df):
         year, week = me.resolve_default_year_week()
-    assert year == 2025
-    assert week == 22
+    assert (year, week) == (2026, 4)
 
 
-def test_resolve_default_year_week_falls_back_when_nflreadpy_raises():
+def test_resolve_default_year_week_falls_back_to_current_week_minus_one_without_schedule():
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
+         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=5), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=RuntimeError("boom")):
+        year, week = me.resolve_default_year_week()
+    assert (year, week) == (2026, 4)
+
+
+def test_resolve_default_year_week_is_none_in_preseason():
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
+         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=1), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=RuntimeError("boom")):
+        year, week = me.resolve_default_year_week()
+    assert (year, week) == (2026, None)
+
+
+def test_resolve_default_year_week_raises_when_week_cannot_be_resolved():
     with patch("src.ingestion.metrics_extractor.nfl.get_current_season", side_effect=RuntimeError("boom")), \
-         patch("src.ingestion.metrics_extractor.nfl.get_current_week", side_effect=RuntimeError("boom")):
-        year, week = me.resolve_default_year_week()
-    assert year == me.datetime.now().year
-    assert week == 1
+         patch("src.ingestion.metrics_extractor.nfl.get_current_week", side_effect=RuntimeError("boom")), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            me.resolve_default_year_week()
+
+
+def test_main_exits_nonzero_when_a_completed_week_writes_nothing(caplog):
+    """extract_weekly_metrics returning 0 for a week that should have been played is a
+    failure, not a quiet success."""
+    with patch("src.ingestion.metrics_extractor.extract_weekly_metrics", return_value=0):
+        assert me.main(["--year", "2026", "--week", "4"]) == 1
+    assert "0 weekly_stats rows" in caplog.text
+
+
+def test_main_exits_zero_when_rows_written():
+    with patch("src.ingestion.metrics_extractor.extract_weekly_metrics", return_value=812) as mock_extract:
+        assert me.main(["--year", "2026", "--week", "4"]) == 0
+    mock_extract.assert_called_once_with(year=2026, week=4)
+
+
+def test_main_defaults_to_last_completed_week():
+    with patch("src.ingestion.metrics_extractor.resolve_default_year_week", return_value=(2026, 4)), \
+         patch("src.ingestion.metrics_extractor.extract_weekly_metrics", return_value=812) as mock_extract:
+        assert me.main([]) == 0
+    mock_extract.assert_called_once_with(year=2026, week=4)
+
+
+def test_main_resolves_last_completed_week_for_an_explicit_year():
+    with patch("src.ingestion.metrics_extractor.resolve_default_year_week", return_value=(2025, 18)) as mock_resolve, \
+         patch("src.ingestion.metrics_extractor.extract_weekly_metrics", return_value=812) as mock_extract:
+        assert me.main(["--year", "2025"]) == 0
+    mock_resolve.assert_called_once_with(2025)
+    mock_extract.assert_called_once_with(year=2025, week=18)
+
+
+def test_main_rejects_week_without_year():
+    with pytest.raises(SystemExit) as exc:
+        me.main(["--week", "4"])
+    assert exc.value.code != 0
+
+
+def test_main_exits_zero_without_ingesting_in_preseason():
+    with patch("src.ingestion.metrics_extractor.resolve_default_year_week", return_value=(2026, None)), \
+         patch("src.ingestion.metrics_extractor.extract_weekly_metrics") as mock_extract:
+        assert me.main([]) == 0
+    mock_extract.assert_not_called()
+
+
+def test_main_exits_nonzero_when_week_cannot_be_resolved():
+    with patch("src.ingestion.metrics_extractor.resolve_default_year_week", side_effect=RuntimeError("boom")), \
+         patch("src.ingestion.metrics_extractor.extract_weekly_metrics") as mock_extract:
+        assert me.main([]) == 1
+    mock_extract.assert_not_called()
