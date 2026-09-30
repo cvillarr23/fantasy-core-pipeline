@@ -24,6 +24,11 @@ DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 900
 # deliberate re-run later the same day (after a manual revert on ESPN, say) isn't mistaken
 # for a duplicate - and the optimizer's key includes the Job name, so a new Job never is.
 LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 1800
+# /trigger/waiver's guard spans a whole waiver week, not minutes: a claim sits queued on
+# ESPN until waivers process, where the worker's roster check can't see it, so any re-run
+# that week proposing the same claim would queue a second one. waiver_evaluator's key is
+# per claim + season/week (deliberately no Job name, unlike lineup's).
+WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 3600
 # Ceiling on any single broker operation for a deadline-carrying request.
 BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 
@@ -100,6 +105,14 @@ class LineupTriggerPayload(BaseModel):
     )
 
 class WaiverTriggerPayload(BaseModel):
+    idempotency_key: Optional[str] = Field(
+        None,
+        description=(
+            "Stable key for this claim in this waiver week. Repeats within "
+            "WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS return status 'duplicate' instead of "
+            "queueing a second ESPN claim. Optional: omit it for a deliberately independent claim."
+        ),
+    )
     team_id: str = Field(..., description="Target local league team identification number")
     player_id: str = Field(..., description="ESPN player id of the free agent to claim. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap DraftPickTriggerPayload guards against")
     name: str = Field(..., description="Display name of the player to claim, as expected by the click bot")
@@ -331,8 +344,9 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     """
     Waiver-claim counterpart to /trigger/lineup (CORE-15/#117): publishes a live waiver
     evaluation's recommended add/drop to the click-bot queue. Same asymmetric gateway shape
-    as /trigger/lineup - HTTP in, durable AMQP message out - no idempotency/deadline handling
-    since a waiver claim has no ticking pick clock for a duplicate retry to race against.
+    as /trigger/lineup - HTTP in, durable AMQP message out. No deadline handling (no pick
+    clock), but the same idempotency claim protocol, week-scoped: see
+    WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS.
     """
     tracking_id = str(uuid.uuid4())
     logger.info(f"Gateway processing waiver claim command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
@@ -341,6 +355,34 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
 
+    claim = _claim_idempotency_key(
+        payload.idempotency_key, tracking_id, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+    )
+    if claim == "claimed" and payload.idempotency_key and _waiver_claim_already_recorded(payload):
+        # Redis didn't know the key (claim predates keys, or Redis lost it this week), but
+        # the durable ledger shows this exact claim was already queued.
+        _mark_idempotency_key_published(
+            payload.idempotency_key, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+        )
+        claim = "published"
+    if claim == "published":
+        logger.info(
+            f"Waiver claim for Team {payload.team_id} -> {payload.name} already queued under idempotency "
+            f"key {payload.idempotency_key}; not queueing a duplicate."
+        )
+        return {
+            "status": "duplicate",
+            "queue": "waiver_actions",
+            "team_id": payload.team_id,
+            "tracking_id": tracking_id,
+        }
+    if claim == "pending":
+        raise HTTPException(
+            status_code=503,
+            detail="An earlier request for this waiver claim is still in flight; retry shortly.",
+        )
+
+    publish_attempted = False
     try:
         params = pika.URLParameters(AMQP_URL)
         connection = pika.BlockingConnection(params)
@@ -357,6 +399,7 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
             **payload.model_dump(exclude={"decision_inputs"}),
         })
 
+        publish_attempted = True
         channel.basic_publish(
             exchange="",
             routing_key="waiver_actions",
@@ -366,6 +409,9 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
                 content_type="application/json",
                 headers=carrier,
             )
+        )
+        _mark_idempotency_key_published(
+            payload.idempotency_key, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
         )
         connection.close()
         logger.info(f"Waiver claim committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
@@ -388,6 +434,14 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
         }
 
     except Exception as e:
+        # Same split as /trigger/lineup: provably pre-publish -> release so the retry
+        # publishes; at/after basic_publish -> the claim may exist, so a retry is a duplicate.
+        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
+            _release_idempotency_key(payload.idempotency_key, tracking_id, namespace="waiver")
+        else:
+            _mark_idempotency_key_published(
+                payload.idempotency_key, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+            )
         logger.error(f"Gateway failed to push waiver claim onto system exchange queue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
@@ -478,6 +532,33 @@ def _reject_internal_player_id(player_id: str, name: Optional[str] = None) -> No
         )
 
     return
+
+
+def _waiver_claim_already_recorded(payload: "WaiverTriggerPayload") -> bool:
+    """True when bot_decisions already holds this team's claim for the same add/drop in the
+    same season/week. Needs season/week from decision_inputs to scope to one waiver week;
+    without them there's nothing safe to match on. Fails open (False) like the other ledger
+    reads: a DB blip must not block a claim, and Redis still guards in-week retries."""
+    inputs = payload.decision_inputs or {}
+    season, week = inputs.get("season"), inputs.get("week")
+    if season is None or week is None:
+        return False
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1 FROM bot_decisions
+                WHERE bot_name = 'waiver_sniper' AND action = 'waiver_claim'
+                  AND team_id = %s AND season = %s AND week = %s
+                  AND target_player_id = %s AND drop_player_id IS NOT DISTINCT FROM %s
+                LIMIT 1;
+                """,
+                (payload.team_id, season, week, payload.player_id, payload.drop_player_id),
+            )
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logger.warning(f"Could not check bot_decisions for a prior waiver claim; proceeding: {e}")
+        return False
 
 
 def _record_bot_decision(

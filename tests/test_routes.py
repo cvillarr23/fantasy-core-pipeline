@@ -1355,3 +1355,118 @@ def test_trigger_lineup_without_a_key_never_touches_redis(client):
     assert first.json()["status"] == second.json()["status"] == "accepted"
     assert mock_channel.basic_publish.call_count == 2
     mock_redis_client.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# /trigger/waiver idempotency
+# ---------------------------------------------------------------------------
+
+WAIVER_KEYED_PAYLOAD = {
+    "team_id": "8", "player_id": "4685247", "drop_player_id": "4239996",
+    "name": "Braelon Allen", "team": "NYJ",
+    "decision_inputs": {"season": 2026, "week": 4},
+    "idempotency_key": "waiver-8-abc",
+}
+
+
+def _waiver_cursor(recorded_claim=False):
+    """Namespace guard passes; the bot_decisions prior-claim lookup finds a row only when
+    recorded_claim is set."""
+    cursor = MagicMock()
+    last_sql = {"q": ""}
+    cursor.execute.side_effect = lambda sql, *a, **k: last_sql.__setitem__("q", sql)
+    cursor.fetchone.side_effect = lambda: (
+        ((1,) if recorded_claim else None) if "FROM bot_decisions" in last_sql["q"] else ("Somebody",)
+    )
+    return cursor
+
+
+def _post_waiver(client, mock_connection, mock_redis, payload=WAIVER_KEYED_PAYLOAD, cursor=None):
+    cursor = cursor or _waiver_cursor()
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        return client.post("/v1/trigger/waiver", json=payload)
+
+
+def test_trigger_waiver_treats_a_claim_already_in_bot_decisions_as_duplicate(client):
+    """Redis may not hold the key - the claim predates keys, or Redis lost it within the
+    week - but bot_decisions durably records every published claim. Same team, week, add
+    and drop already recorded -> duplicate, and the key is marked so later repeats stay cheap."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+    cursor = _waiver_cursor(recorded_claim=True)
+
+    response = _post_waiver(client, mock_connection, mock_redis, cursor=cursor)
+
+    assert response.status_code == 202 and response.json()["status"] == "duplicate"
+    mock_channel.basic_publish.assert_not_called()
+    assert mock_redis.store["waiver:trigger:idempotency:waiver-8-abc"] == "published"
+    [lookup] = [c for c in cursor.execute.call_args_list if "FROM bot_decisions" in c.args[0]]
+    assert lookup.args[1] == ("8", 2026, 4, "4685247", "4239996")
+
+
+def test_trigger_waiver_idempotency_key_blocks_a_re_run_claim(client):
+    """A waiver claim sits queued on ESPN until waivers process, where the worker's roster
+    check can't see it - so a re-run proposing the same claim must come back "duplicate"
+    rather than queue a second claim."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    mock_redis = _fake_redis()
+
+    with patch.object(routes, "_claim_idempotency_key", wraps=routes._claim_idempotency_key) as spy:
+        first = _post_waiver(client, mock_connection, mock_redis)
+        second = _post_waiver(client, mock_connection, mock_redis)
+
+    assert first.status_code == 202 and first.json()["status"] == "accepted"
+    assert second.status_code == 202 and second.json()["status"] == "duplicate"
+    assert mock_channel.basic_publish.call_count == 1
+    assert mock_redis.store["waiver:trigger:idempotency:waiver-8-abc"] == "published"
+    assert spy.call_args.kwargs == {"namespace": "waiver", "ttl": routes.WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS}
+    assert routes.WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS >= 7 * 24 * 3600
+
+
+def test_trigger_waiver_asks_the_caller_to_retry_while_an_earlier_attempt_is_in_flight(client):
+    mock_connection = MagicMock()
+    mock_redis = _fake_redis()
+    mock_redis.store["waiver:trigger:idempotency:waiver-8-abc"] = "pending:other-request"
+
+    response = _post_waiver(client, mock_connection, mock_redis)
+
+    assert response.status_code == 503
+    mock_connection.channel.return_value.basic_publish.assert_not_called()
+
+
+def test_trigger_waiver_releases_the_key_when_the_broker_fails_before_publishing(client):
+    mock_redis = _fake_redis()
+    good_channel = MagicMock()
+    good_connection = MagicMock()
+    good_connection.channel.return_value = good_channel
+
+    with patch("src.api.routes.pika.BlockingConnection", side_effect=[Exception("broker down"), good_connection]), \
+         patch("src.api.routes._redis_client", return_value=mock_redis), \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_waiver_cursor())):
+        failed = client.post("/v1/trigger/waiver", json=WAIVER_KEYED_PAYLOAD)
+        retried = client.post("/v1/trigger/waiver", json=WAIVER_KEYED_PAYLOAD)
+
+    assert failed.status_code == 500
+    assert retried.status_code == 202 and retried.json()["status"] == "accepted"
+    good_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_waiver_treats_a_failure_during_publish_as_possibly_enqueued(client):
+    mock_redis = _fake_redis()
+    channel = MagicMock()
+    channel.basic_publish.side_effect = [Exception("connection reset"), None]
+    connection = MagicMock()
+    connection.channel.return_value = channel
+
+    failed = _post_waiver(client, connection, mock_redis)
+    retried = _post_waiver(client, connection, mock_redis)
+
+    assert failed.status_code == 500
+    assert retried.status_code == 202 and retried.json()["status"] == "duplicate"
+    assert channel.basic_publish.call_count == 1
