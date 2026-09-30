@@ -113,7 +113,7 @@ def _evaluate_and_publish_waiver_claims(
                 move for move in moves if move["add_player_id"] in waiver_targets
             ]
 
-            published = []
+            targets = []
             for move in matched_moves:
                 # Resolved one move at a time (rather than batching matched_moves through
                 # a single resolve_live_waiver_moves call) so a move dropped for missing
@@ -126,10 +126,12 @@ def _evaluate_and_publish_waiver_claims(
                 target["decision_inputs"] = _decorate_decision_inputs(
                     target.get("decision_inputs"), signal
                 )
-                publish_waiver_claim(team_id, target)
-                published.append(target)
+                targets.append(target)
 
-    return published
+    # Published after the DB connection is returned: publish_waiver_claim retries with
+    # backoff (up to ~2 min), which mustn't pin a pooled connection. Claims the gateway
+    # reports as already queued aren't counted as published.
+    return [target for target in targets if publish_waiver_claim(team_id, target)]
 
 
 def _evaluate_and_publish_lineup_swaps(

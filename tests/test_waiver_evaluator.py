@@ -94,16 +94,67 @@ def test_resolve_live_waiver_moves_handles_a_move_with_no_drop_player():
     }]
 
 
-def test_publish_waiver_claim_posts_expected_payload():
-    target = {"player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC"}
+WEEK4_TARGET = {
+    "player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC",
+    "decision_inputs": {"add_player_vorp_score": 5.0, "drop_player_vorp_score": 1.0, "season": 2026, "week": 4},
+}
 
-    with patch("src.optimization.waiver_evaluator.post_trigger") as mock_post:
-        we.publish_waiver_claim("7", target)
+
+def test_waiver_idempotency_key_is_stable_per_claim_and_week_not_per_job():
+    """A queued claim is invisible to the worker's roster check until waivers process, so
+    any re-run (new Job) proposing the same claim that week must reuse the key - unlike
+    lineup keys, which are Job-scoped because re-applying a lineup is a no-op."""
+    rescored = {**WEEK4_TARGET, "decision_inputs": {**WEEK4_TARGET["decision_inputs"], "add_player_vorp_score": 9.9}}
+    key = we.waiver_idempotency_key("7", WEEK4_TARGET)
+
+    assert key == we.waiver_idempotency_key("7", rescored)
+    assert key.startswith("waiver-7-")
+    next_week = {**WEEK4_TARGET, "decision_inputs": {"season": 2026, "week": 5}}
+    assert key != we.waiver_idempotency_key("7", next_week)
+    assert key != we.waiver_idempotency_key("7", {**WEEK4_TARGET, "drop_player_id": "e-1111"})
+    assert key != we.waiver_idempotency_key("8", WEEK4_TARGET)
+
+
+def test_waiver_idempotency_key_is_none_without_season_week():
+    """Otherwise the key would be identical every week and the 7-day TTL could swallow
+    next week's legitimate claim."""
+    assert we.waiver_idempotency_key("7", {**WEEK4_TARGET, "decision_inputs": {"season": 2026}}) is None
+    assert we.waiver_idempotency_key("7", {k: v for k, v in WEEK4_TARGET.items() if k != "decision_inputs"}) is None
+
+
+def test_publish_waiver_claim_without_a_key_posts_once_without_retries():
+    target = {k: v for k, v in WEEK4_TARGET.items() if k != "decision_inputs"}
+    with patch("src.optimization.waiver_evaluator.post_trigger") as mock_post, \
+         patch("src.optimization.waiver_evaluator.post_trigger_idempotent") as mock_idem:
+        assert we.publish_waiver_claim("7", target) is True
+    mock_post.assert_called_once()
+    mock_idem.assert_not_called()
+
+
+def test_publish_waiver_claim_posts_idempotently_with_the_claim_key():
+    response = MagicMock()
+    response.json.return_value = {"status": "accepted"}
+
+    with patch("src.optimization.waiver_evaluator.post_trigger_idempotent", return_value=response) as mock_post:
+        assert we.publish_waiver_claim("7", WEEK4_TARGET) is True
 
     args, kwargs = mock_post.call_args
     assert args[0] == "waiver"
-    assert args[1] == {"team_id": "7", **target}
+    assert args[1] == {"team_id": "7", **WEEK4_TARGET}
+    assert args[2] == we.waiver_idempotency_key("7", WEEK4_TARGET)
     assert kwargs["core_api_base_url"] == we.CORE_API_BASE_URL
+
+
+def test_publish_waiver_claim_says_so_when_the_claim_was_already_queued(caplog):
+    response = MagicMock()
+    response.json.return_value = {"status": "duplicate"}
+
+    with patch("src.optimization.waiver_evaluator.post_trigger_idempotent", return_value=response), \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        assert we.publish_waiver_claim("7", WEEK4_TARGET) is False
+
+    assert "already queued" in caplog.text
+    assert "Published waiver claim" not in caplog.text
 
 
 def test_run_weekly_waivers_live_wires_decision_logic_to_publish():

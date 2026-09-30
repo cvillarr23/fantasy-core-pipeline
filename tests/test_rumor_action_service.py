@@ -73,6 +73,40 @@ def test_qualifying_boost_waiver_signal_publishes_matching_move():
     assert redis_client.store[ras.WATERMARK_REDIS_KEY] == "10"
 
 
+def test_waiver_claims_publish_outside_the_db_block_and_skip_already_queued():
+    """publish_waiver_claim retries with backoff (up to ~2 min), so it must not run while a
+    pooled connection is checked out; and a claim the gateway reports as already queued
+    (False) isn't a new publish."""
+    waiver_conn_open = {"open": False}
+    waiver_conn = MagicMock()
+    waiver_cursor = MagicMock()
+    waiver_conn.__enter__.side_effect = lambda: waiver_conn_open.update(open=True) or waiver_conn
+    waiver_conn.__exit__.side_effect = lambda *a: waiver_conn_open.update(open=False)
+    waiver_conn.cursor.return_value.__enter__.return_value = waiver_cursor
+
+    targets = [
+        {"player_id": "e-1", "drop_player_id": "e-9", "name": "Queued Already", "team": "KC"},
+        {"player_id": "e-2", "drop_player_id": "e-8", "name": "Brand New", "team": "SF"},
+    ]
+    moves = [{"add_player_id": "1"}, {"add_player_id": "2"}]
+    signals = {"1": {}, "2": {}}
+
+    def _publish(team_id, target):
+        assert not waiver_conn_open["open"], "published while a DB connection was checked out"
+        return target["name"] == "Brand New"
+
+    with patch("src.services.rumor_action_service.get_db_connection", return_value=waiver_conn), \
+         patch("src.services.rumor_action_service.load_live_waiver_inputs", return_value=({}, {})), \
+         patch("src.services.rumor_action_service.waiver_strategy.propose_waiver_moves", return_value=moves), \
+         patch("src.services.rumor_action_service.resolve_live_waiver_moves", side_effect=[[targets[0]], [targets[1]]]), \
+         patch("src.services.rumor_action_service._decorate_decision_inputs", return_value={}), \
+         patch("src.services.rumor_action_service.publish_waiver_claim", side_effect=_publish) as mock_publish:
+        published = ras._evaluate_and_publish_waiver_claims("7", 2026, 4, signals)
+
+    assert mock_publish.call_count == 2
+    assert [t["name"] for t in published] == ["Brand New"]
+
+
 def test_qualifying_bench_watch_signal_publishes_matching_swap():
     redis_client = _fake_redis()
     signals_cursor = MagicMock()

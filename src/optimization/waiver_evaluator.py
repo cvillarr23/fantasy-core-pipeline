@@ -17,6 +17,8 @@ waiver_strategy's margin-threshold rule has none either - out of scope for #117,
 tracked as a follow-up.
 """
 import argparse
+import hashlib
+import json
 import logging
 import sys
 from typing import Optional
@@ -27,7 +29,7 @@ from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.telemetry import configure_tracing, configure_trace_logging
-from src.trigger_client import CORE_API_BASE_URL, post_trigger
+from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
 
 configure_trace_logging()
 logger = logging.getLogger("WaiverEvaluator")
@@ -75,9 +77,43 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
     return resolved
 
 
-def publish_waiver_claim(team_id: str, target: dict, core_api_base_url: str = CORE_API_BASE_URL, timeout: float = 10.0) -> None:
-    post_trigger("waiver", {"team_id": team_id, **target}, core_api_base_url=core_api_base_url, timeout=timeout)
-    logger.info(f"Published waiver claim for Team {team_id}: {target['name']}.")
+def waiver_idempotency_key(team_id: str, target: dict) -> Optional[str]:
+    """Stable key for one claim in one waiver week. Unlike lineup_idempotency_key it has no
+    Job name: a claim stays queued on ESPN until waivers process, invisible to the worker's
+    roster check, so a re-run (any Job) proposing the same add/drop that week must come back
+    "duplicate" rather than queue it again. VORP inputs are left out on purpose - a rescored
+    re-run is still the same claim. None without season/week: the key would then be the same
+    every week, and the 7-day TTL could swallow next week's legitimate claim."""
+    inputs = target.get("decision_inputs") or {}
+    if inputs.get("season") is None or inputs.get("week") is None:
+        return None
+    material = json.dumps({
+        "team_id": str(team_id),
+        "season": inputs.get("season"),
+        "week": inputs.get("week"),
+        "add": str(target["player_id"]),
+        "drop": str(target.get("drop_player_id")),
+    }, sort_keys=True)
+    return f"waiver-{team_id}-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
+
+
+def publish_waiver_claim(team_id: str, target: dict, core_api_base_url: str = CORE_API_BASE_URL, timeout: float = 10.0) -> bool:
+    """POSTs one claim to /v1/trigger/waiver, retrying transient failures (#189's client)
+    under its week-scoped idempotency key. True if newly queued, False if the gateway said
+    it was already queued. Raises once retries are exhausted or on a 4xx. Without a key
+    (no season/week) it's a single un-retried POST, since a retry could double-queue."""
+    payload = {"team_id": team_id, **target}
+    key = waiver_idempotency_key(team_id, target)
+    if key is None:
+        post_trigger("waiver", payload, core_api_base_url=core_api_base_url, timeout=timeout)
+        logger.warning(f"Published waiver claim for Team {team_id}: {target['name']} without an idempotency key (no season/week).")
+        return True
+    response = post_trigger_idempotent("waiver", payload, key, core_api_base_url=core_api_base_url, timeout=timeout)
+    if response_status(response) == "duplicate":
+        logger.info(f"Waiver claim for Team {team_id}: {target['name']} already queued under {key}; not re-queued.")
+        return False
+    logger.info(f"Published waiver claim for Team {team_id}: {target['name']} (idempotency key {key}).")
+    return True
 
 
 class InsufficientWaiverInputError(Exception):
