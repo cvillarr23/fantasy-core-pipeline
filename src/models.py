@@ -458,15 +458,15 @@ CREATE TABLE IF NOT EXISTS defense_position_strength (
 # trigger_* handlers, since the reasoning only exists on the Python side that computes it
 # before publishing to the click bots - the bots themselves never see it.
 #
-# target_player_id/drop_player_id are deliberately NOT FKs to players.player_id. The
-# trigger endpoints receive two different id namespaces depending on action:
-# trigger_waiver_claim/trigger_draft_pick get ESPN ids (validated by
-# _reject_internal_player_id), but trigger_lineup_swap's SwapInstruction ids are raw
-# internal players.player_id (Sleeper-namespaced), never translated. A blind FK here
-# risks silently matching the wrong player via the same id-namespace collision
-# _reject_internal_player_id's docstring warns about (ESPN 12483 is Matthew Stafford,
-# internal 12483 is Jack Bech). execution_log.player_id (added by
-# ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS above) already sets this precedent.
+# target_player_id/drop_player_id are deliberately NOT FKs to players.player_id: every
+# trigger endpoint (waiver, draft-pick, and since #187 lineup) receives ESPN ids, validated
+# by _reject_internal_player_id. Rows written before #187 hold raw internal
+# players.player_id (Sleeper-namespaced) for lineup_swap, so the column mixes namespaces
+# historically. A blind FK here risks silently matching the wrong player via the same
+# id-namespace collision _reject_internal_player_id's docstring warns about (ESPN 12483 is
+# Matthew Stafford, internal 12483 is Jack Bech). execution_log.player_id (added by
+# ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS above) already sets this precedent. Lineup swaps
+# keep their internal ids in inputs (add_player_internal_id/drop_player_internal_id).
 #
 # inputs is JSONB rather than fixed columns so rumor-signal (WORKER-13) or LLM-output
 # (WORKER-12) justification can be added later with zero migration - no decision logic in

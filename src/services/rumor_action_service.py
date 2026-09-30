@@ -139,24 +139,26 @@ def _evaluate_and_publish_lineup_swaps(
     drop_player_id is one of this run's qualifying bench_watch signals - a bench_watch
     signal is bad news about a currently-started player, so it surfaces as a drop, not
     an add. Missing lineup inputs raise InsufficientLineupInputError, same as the weekly
-    optimizer, rather than looking like "no swap needed"."""
+    optimizer, rather than looking like "no swap needed". Signals match on the internal
+    drop_player_id; only then are the ids translated to ESPN's for publishing (#187)."""
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             swaps = lineup_solver.evaluate_lineup(cursor, team_id, season, week)["swaps"]
 
-    matched_swaps = [
-        swap for swap in swaps if swap["drop_player_id"] in bench_watch_targets
-    ]
-    for swap in matched_swaps:
-        signal = bench_watch_targets[swap["drop_player_id"]]
-        swap["decision_inputs"] = _decorate_decision_inputs(
-            swap.get("decision_inputs"), signal
-        )
+            matched_swaps = [
+                swap for swap in swaps if swap["drop_player_id"] in bench_watch_targets
+            ]
+            for swap in matched_swaps:
+                signal = bench_watch_targets[swap["drop_player_id"]]
+                swap["decision_inputs"] = _decorate_decision_inputs(
+                    swap.get("decision_inputs"), signal
+                )
+            resolved_swaps = lineup_solver.resolve_lineup_swaps(cursor, matched_swaps)
 
-    if matched_swaps:
-        lineup_solver.publish_lineup_swaps(team_id, matched_swaps)
+    if resolved_swaps:
+        lineup_solver.publish_lineup_swaps(team_id, resolved_swaps)
 
-    return matched_swaps
+    return resolved_swaps
 
 
 def evaluate_and_publish_rumor_actions(team_id: str, season: int, week: int) -> dict:

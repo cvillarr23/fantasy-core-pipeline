@@ -403,6 +403,20 @@ CURRENT_STARTERS = [
 ]
 
 
+# players.espn_id per roster player. Deliberately unrelated to the internal ids, like the
+# real Sleeper vs. ESPN namespaces (#187).
+ESPN_ID_BY_PID = {pid: str(4000 + i) for i, (pid, *_rest) in enumerate(ROSTER)}
+NAME_BY_PID = {pid: name for pid, name, *_rest in ROSTER}
+
+
+def _identity_resolver(espn_id_by_pid):
+    """Stand-in for espn_identity.resolve_espn_identity: None for a player with no espn_id."""
+    def resolve(_cursor, pid):
+        espn_id = espn_id_by_pid.get(pid)
+        return None if espn_id is None else {"espn_id": espn_id, "name": NAME_BY_PID.get(pid, pid), "team": "KC"}
+    return resolve
+
+
 def _metric_rows(week, vorp_by_pid, multiplier=None):
     return [(pid, week, vorp, multiplier) for pid, vorp in vorp_by_pid.items()]
 
@@ -418,7 +432,7 @@ def _mock_conn_with_cursor(mock_cursor):
 
 
 def _run_optimize(roster, metrics, starters=CURRENT_STARTERS, week=TARGET_WEEK,
-                  teams_playing=ALL_TEAMS_PLAYING, dry_run=False):
+                  teams_playing=ALL_TEAMS_PLAYING, dry_run=False, espn_id_by_pid=ESPN_ID_BY_PID):
     """Runs optimize_weekly_lineup against a mocked DB. Returns (result_or_exception,
     post_trigger mock, cursor mock)."""
     mock_cursor = MagicMock()
@@ -431,6 +445,7 @@ def _run_optimize(roster, metrics, starters=CURRENT_STARTERS, week=TARGET_WEEK,
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
          schedule_patch, \
+         patch("src.optimization.lineup_solver.resolve_espn_identity", _identity_resolver(espn_id_by_pid)), \
          patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
         try:
@@ -456,7 +471,9 @@ def test_optimize_uses_rolling_prior_weeks_when_target_week_has_no_rows():
     path, payload = mock_post.call_args[0]
     assert path == "lineup"
     [swap] = payload["optimized_swaps"]
-    assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == ("wr_old", "wr_bench", "RB/WR/TE")
+    assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == (
+        ESPN_ID_BY_PID["wr_old"], ESPN_ID_BY_PID["wr_bench"], "RB/WR/TE",
+    )
     inputs = swap["decision_inputs"]
     # Rolling mean of weeks 3 and 4, and the dropped starter's VORP from the same source.
     assert inputs["add_player_vorp_score"] == 20.0
@@ -490,7 +507,7 @@ def test_optimize_prefers_target_week_projections_when_present():
 
     assert result == 1
     [swap] = mock_post.call_args[0][1]["optimized_swaps"]
-    assert swap["add_player_id"] == "wr_bench"
+    assert swap["add_player_id"] == ESPN_ID_BY_PID["wr_bench"]
     assert swap["decision_inputs"]["source_mode"] == "target_week"
     assert swap["decision_inputs"]["source_weeks"] == [TARGET_WEEK]
     assert swap["decision_inputs"]["add_player_vorp_score"] == 50.0
@@ -542,7 +559,7 @@ def test_optimize_holds_kicker_and_dst_starters_when_they_have_no_metrics():
 
     swaps = mock_post.call_args[0][1]["optimized_swaps"]
     touched = {s["drop_player_id"] for s in swaps} | {s["add_player_id"] for s in swaps}
-    assert not touched & {"k1", "dst1"}
+    assert not touched & {ESPN_ID_BY_PID["k1"], ESPN_ID_BY_PID["dst1"]}
 
 
 def test_optimize_dry_run_never_publishes():
@@ -552,6 +569,104 @@ def test_optimize_dry_run_never_publishes():
 
     assert result == 1
     mock_post.assert_not_called()
+
+
+# ESPN id translation (#187) -------------------------------------------------------
+
+def test_optimize_publishes_espn_ids_not_internal_player_ids():
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics)
+
+    assert result == 1
+    [swap] = mock_post.call_args[0][1]["optimized_swaps"]
+    assert swap["drop_player_id"] == ESPN_ID_BY_PID["wr_old"]
+    assert swap["add_player_id"] == ESPN_ID_BY_PID["wr_bench"]
+    # Names ride along for the gateway's namespace cross-check.
+    assert (swap["drop_player_name"], swap["add_player_name"]) == ("Old WR", "Bench WR")
+    # The internal ids stay in the audit trail only.
+    assert swap["decision_inputs"]["drop_player_internal_id"] == "wr_old"
+    assert swap["decision_inputs"]["add_player_internal_id"] == "wr_bench"
+
+
+def test_optimize_never_publishes_an_internal_id_that_collides_with_another_espn_id():
+    """The overlap case: the dropped starter's internal id "2216" is also some *other*
+    player's espn_id. Publishing it raw would pass the worker's roster check if that other
+    player were rostered, and bench the wrong person. Translation must use the dropped
+    player's own espn_id, never the raw internal value."""
+    roster = [("2216", "Old WR", *row[2:]) if row[0] == "wr_old" else row for row in ROSTER]
+    starters = [("2216", *row[1:]) if row[0] == "wr_old" else row for row in CURRENT_STARTERS]
+    vorp = {("2216" if pid == "wr_old" else pid): v for pid, v in dict(BASE_VORP, wr_bench=99.0).items()}
+    # "2216" is a rostered teammate's espn_id; the internal "2216"'s own espn_id is 9216.
+    espn_ids = dict(ESPN_ID_BY_PID, qb1="2216")
+    espn_ids.pop("wr_old")
+    espn_ids["2216"] = "9216"
+
+    result, mock_post, _ = _run_optimize(roster, _metric_rows(4, vorp), starters=starters, espn_id_by_pid=espn_ids)
+
+    assert result == 1
+    [swap] = mock_post.call_args[0][1]["optimized_swaps"]
+    assert swap["drop_player_id"] == "9216"
+    published_ids = {swap["drop_player_id"], swap["add_player_id"]}
+    assert "2216" not in published_ids
+
+
+def test_optimize_skips_a_swap_with_no_espn_id_and_publishes_the_rest(caplog):
+    # Two upgrades: wr_bench over wr_old in FLEX, and rb3 over rb2.
+    roster = ROSTER + [("rb3", "RB Three", "RB", "KC", None)]
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0, rb3=50.0))
+    espn_ids = dict(ESPN_ID_BY_PID, rb3="4999")
+    espn_ids.pop("wr_bench")
+
+    result, mock_post, _ = _run_optimize(roster, metrics, espn_id_by_pid=espn_ids)
+
+    assert result == 1
+    [swap] = mock_post.call_args[0][1]["optimized_swaps"]
+    assert swap["add_player_id"] == "4999"
+    assert "no espn_id resolved yet for add wr_bench" in caplog.text
+
+
+def test_optimize_fails_when_every_proposed_swap_is_unresolvable():
+    """Unlike a genuine zero-swap run, "had swaps but couldn't publish any" must fail the Job."""
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+    espn_ids = dict(ESPN_ID_BY_PID)
+    espn_ids.pop("wr_old")
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics, espn_id_by_pid=espn_ids)
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "espn_id" in str(result)
+    mock_post.assert_not_called()
+
+
+def test_main_exits_nonzero_when_every_swap_is_unresolvable():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER, _metric_rows(4, dict(BASE_VORP, wr_bench=99.0)), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
+         patch("src.optimization.lineup_solver.resolve_espn_identity", return_value=None), \
+         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+        mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
+        assert ls.main(ARGV) != 0
+    mock_post.assert_not_called()
+
+
+def test_optimize_dry_run_logs_translated_espn_ids(caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics, dry_run=True)
+
+    assert result == 1
+    mock_post.assert_not_called()
+    assert f"'add_player_id': '{ESPN_ID_BY_PID['wr_bench']}'" in caplog.text
+
+
+def test_resolve_lineup_swaps_returns_empty_for_no_swaps():
+    """Zero proposed swaps is "already optimal", not an unresolvable-input failure."""
+    assert ls.resolve_lineup_swaps(MagicMock(), []) == []
 
 
 # (b) missing / insufficient input must not report success ------------------------

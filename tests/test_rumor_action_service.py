@@ -87,17 +87,25 @@ def test_qualifying_bench_watch_signal_publishes_matching_swap():
          patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
          patch("src.services.rumor_action_service.lineup_solver.evaluate_lineup",
                return_value={"swaps": [swap], "roster_pool": [], "optimal_starters": [], "source": {}}), \
+         patch("src.optimization.lineup_solver.resolve_espn_identity",
+               side_effect=lambda _cursor, pid: {"espn_id": f"espn-{pid}", "name": f"Name {pid}", "team": "KC"}), \
          patch("src.services.rumor_action_service.lineup_solver.publish_lineup_swaps") as mock_publish:
         result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
 
-    mock_publish.assert_called_once_with("7", [swap])
+    # Matched on the internal drop id (the signal's player_id), published with ESPN ids (#187).
     published = result["lineup_swaps_published"]
-    assert published == [swap]
+    mock_publish.assert_called_once_with("7", published)
+    assert len(published) == 1
+    assert published[0]["drop_player_id"] == "espn-9001"
+    assert published[0]["add_player_id"] == "espn-bench2"
+    assert published[0]["drop_player_name"] == "Name 9001"
     assert published[0]["decision_inputs"] == {
         "add_player_vorp_score": 4.0,
         "rumor_signal_id": 20,
         "rumor_sentiment": "negative",
         "rumor_confidence": 0.8,
+        "add_player_internal_id": "bench2",
+        "drop_player_internal_id": "9001",
     }
     assert result["watermark"] == 20
 

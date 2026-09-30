@@ -151,6 +151,17 @@
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week
   exits 1; preseason (no completed week yet) exits 0.
+- Swaps are computed on internal `players.player_id` but **published with `players.espn_id`**
+  (#187): `lineup_solver.resolve_lineup_swaps` translates both ids through the shared
+  `src/espn_identity.resolve_espn_identity` (also used by `waiver_evaluator`) and adds
+  `add_player_name`/`drop_player_name` for the gateway's namespace guard. It runs at publish
+  time in both publishers (`optimize_weekly_lineup`, before the dry-run log too, and
+  `rumor_action_service`'s bench_watch path, after matching on internal ids), never inside
+  `evaluate_lineup`, whose internal ids the matchup badge and rumor matching rely on. A swap
+  with no espn_id is skipped with a warning; if swaps were proposed but none resolve,
+  `InsufficientLineupInputError` makes the Job exit 1, distinct from a zero-swap "already
+  optimal" run. `/v1/trigger/lineup` runs `_reject_internal_player_id` on every swap id
+  (names optional, since the web UI sends bare ESPN ids).
 - The solver does not publish to RabbitMQ directly. It POSTs to the existing
   `POST /v1/trigger/lineup` FastAPI route (`src/api/routes.py`, mounted under the `/v1`
   prefix in `src/api/main.py` — `CORE_API_BASE_URL` is just the host, the `/v1` prefix is

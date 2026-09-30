@@ -44,9 +44,21 @@ def require_trigger_api_key(x_api_key: str = Header(...)) -> None:
 # PYDANTIC DATA TRANSFER OBJECTS (SCHEMAS)
 # ------------------------------------------------------------------------------
 class SwapInstruction(BaseModel):
-    drop_player_id: str = Field(..., description="Unique ESPN/Sleeper tracking ID to bench or cut")
-    add_player_id: str = Field(..., description="Unique ESPN/Sleeper tracking ID to elevate to active lineup")
+    drop_player_id: str = Field(..., description="ESPN player id of the starter to bench. Must be ESPN's, not the internal Sleeper players.player_id - the two id spaces overlap numerically, so the wrong namespace can silently swap a different player (#187)")
+    add_player_id: str = Field(..., description="ESPN player id of the player to elevate to the active lineup. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap as drop_player_id")
     slot: str = Field(..., description="Target lineup position frame (e.g., RB1, WR2, FLEX)")
+    drop_player_name: Optional[str] = Field(
+        None,
+        description=(
+            "Display name of the drop player. Optional, but lets the gateway's id-namespace "
+            "guard reject an id that is both some player's espn_id and this player's internal "
+            "player_id - without it only a purely internal id can be caught."
+        ),
+    )
+    add_player_name: Optional[str] = Field(
+        None,
+        description="Display name of the add player, for the same id-namespace cross-check as drop_player_name.",
+    )
     matchup_multiplier: Optional[float] = Field(
         None,
         description=(
@@ -192,6 +204,10 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
     """
     tracking_id = str(uuid.uuid4())
     logger.info(f"Gateway processing roster realignment command sequence for Team ID {payload.team_id} (tracking_id={tracking_id})...")
+
+    for swap in payload.optimized_swaps:
+        _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
+        _reject_internal_player_id(swap.add_player_id, swap.add_player_name)
 
     try:
         # 1. Establish an on-demand transaction connection channel to the cluster broker
