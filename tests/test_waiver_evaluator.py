@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.optimization import waiver_evaluator as we
 
 
@@ -130,3 +132,40 @@ def test_run_weekly_waivers_live_wires_decision_logic_to_publish():
     mock_resolve.assert_called_once_with(expected_cursor, mock_propose.return_value, 2023, 5)
     mock_publish.assert_called_once_with("7", resolved_target, we.CORE_API_BASE_URL)
     assert result == [resolved_target]
+
+
+def _run_with_loaded_inputs(bench, free_agents, proposed):
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position", return_value=bench), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position", return_value=free_agents), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=proposed) as mock_propose, \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[]), \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish:
+        result = we.run_weekly_waivers_live("8", 2026, 4)
+    return result, mock_propose, mock_publish
+
+
+def test_run_weekly_waivers_live_fails_when_no_bench_inputs_loaded():
+    """#159: the 2026-09-29 CronJob found nothing to evaluate for an unplayed week and still
+    exited 0, so bot_decisions never saw a waiver row and nobody noticed. Missing inputs must
+    fail the Job - the same distinction #178 draws for the lineup optimizer."""
+    with pytest.raises(we.WaiverInputsMissing, match="bench"):
+        _run_with_loaded_inputs({}, {"RB": {"player_id": "4046", "vorp_score": 5.0}}, [])
+
+
+def test_run_weekly_waivers_live_fails_when_no_free_agent_inputs_loaded():
+    with pytest.raises(we.WaiverInputsMissing, match="free-agent"):
+        _run_with_loaded_inputs({"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}, {}, [])
+
+
+def test_run_weekly_waivers_live_zero_moves_with_real_inputs_succeeds_and_says_so(caplog):
+    bench = {"RB": [{"player_id": "bench1", "vorp_score": 9.0}]}
+    free_agents = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
+
+    with caplog.at_level("INFO", logger="WaiverEvaluator"):
+        result, mock_propose, mock_publish = _run_with_loaded_inputs(bench, free_agents, [])
+
+    assert result == []
+    mock_propose.assert_called_once_with(bench, free_agents)
+    mock_publish.assert_not_called()
+    assert any("No waiver moves proposed" in r.getMessage() for r in caplog.records)

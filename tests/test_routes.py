@@ -4,6 +4,9 @@ from src.api import routes
 import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 
 @contextmanager
@@ -974,6 +977,62 @@ def test_trigger_waiver_claim_still_succeeds_when_bot_decision_insert_fails(clie
 
     assert response.status_code == 202
     mock_channel.basic_publish.assert_called_once()
+
+
+def test_record_bot_decision_commits_the_insert_through_the_real_cursor_helper():
+    """#159: the table was empty in prod, so prove the row is actually committed - not just
+    that an INSERT string was built. Goes through the real get_db_cursor/get_db_connection,
+    faking only the pool, so a helper that forgot to commit would fail here."""
+    conn = MagicMock()
+    cursor = conn.cursor.return_value
+
+    with patch("src.database.db_pool") as mock_pool:
+        mock_pool.getconn.return_value = conn
+        routes._record_bot_decision(
+            tracking_id="t-1", bot_name="waiver_sniper", action="waiver_claim", team_id="7",
+            target_player_id="4046", decision_inputs={"season": 2026, "week": 4},
+        )
+
+    sql, params = cursor.execute.call_args.args
+    assert "INSERT INTO bot_decisions" in sql
+    assert params[:3] == ("t-1", "waiver_sniper", "waiver_claim")
+    assert (params[5], params[6]) == (2026, 4)
+    conn.commit.assert_called_once()
+    conn.rollback.assert_not_called()
+    mock_pool.putconn.assert_called_once_with(conn)
+
+
+def test_record_bot_decision_failure_is_logged_as_error_and_marked_on_the_span(caplog):
+    """Fail-open is deliberate (the live action must not be blocked), but #159 showed a
+    WARNING-only swallow is too easy to miss: the failure must surface at ERROR with the
+    traceback and as a span event, so a dropped audit row is visible in logs and Tempo."""
+    @contextmanager
+    def _broken_db_cursor():
+        raise Exception("relation \"bot_decisions\" does not exist")
+        yield  # pragma: no cover
+
+    # A local provider rather than the global one - see the dm.tracer note in
+    # test_draft_matrix.py; get_current_span() resolves through context either way.
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    with patch("src.api.routes.get_db_cursor", _broken_db_cursor), \
+         caplog.at_level("ERROR", logger="GatewayRoutes"), \
+         provider.get_tracer("test").start_as_current_span("POST /v1/trigger/lineup"):
+        routes._record_bot_decision(
+            tracking_id="t-2", bot_name="lineup_bot", action="lineup_swap", team_id="8",
+        )
+
+    [record] = [r for r in caplog.records if "bot_decisions" in r.getMessage()]
+    assert record.levelname == "ERROR"
+    assert "t-2" in record.getMessage()
+    assert record.exc_info is not None
+    [span] = exporter.get_finished_spans()
+    [event] = span.events
+    assert event.name == "bot_decision.write_failed"
+    assert event.attributes["bot_name"] == "lineup_bot"
+    assert event.attributes["tracking_id"] == "t-2"
 
 
 def test_trigger_draft_pick_records_bot_decision(client):

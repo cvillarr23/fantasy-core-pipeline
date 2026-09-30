@@ -7,7 +7,7 @@ import time
 import pika
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from opentelemetry import propagate
+from opentelemetry import propagate, trace
 from pydantic import BaseModel, Field
 from src.api.draft import _redis_client
 from src.database import get_db_cursor
@@ -426,7 +426,9 @@ def _record_bot_decision(
     decision_inputs into their own typed columns purely for cheap Grafana filtering.
 
     Fails OPEN, same philosophy as _reject_internal_player_id above: a DB hiccup logging
-    the reasoning must never block the live action it describes.
+    the reasoning must never block the live action it describes. But fail-open is not
+    fail-silent (#159): a dropped row logs at ERROR with the traceback and marks the
+    request span, so a gap in the audit trail is visible in logs and Tempo.
     """
     inputs = decision_inputs or {}
     try:
@@ -445,7 +447,14 @@ def _record_bot_decision(
                 ),
             )
     except Exception as e:
-        logger.warning(f"Could not record bot_decisions row for tracking_id={tracking_id}: {e}")
+        logger.error(
+            f"Could not record bot_decisions row for tracking_id={tracking_id} ({bot_name}/{action}): {e}",
+            exc_info=True,
+        )
+        trace.get_current_span().add_event(
+            "bot_decision.write_failed",
+            attributes={"tracking_id": tracking_id, "bot_name": bot_name, "action": action, "error": str(e)},
+        )
 
 
 def _claim_idempotency_key(key: Optional[str], token: str) -> str:

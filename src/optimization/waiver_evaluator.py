@@ -32,6 +32,12 @@ logger = logging.getLogger("WaiverEvaluator")
 tracer = trace.get_tracer("waiver_evaluator")
 
 
+class WaiverInputsMissing(RuntimeError):
+    """Nothing to evaluate - no bench or no free-agent VORP rows for the target week.
+    Distinct from a valid zero-move result: this one must fail the CronJob (#159), since
+    exiting 0 here is what hid an empty bot_decisions table for weeks."""
+
+
 def _resolve_espn_identity(cursor, player_id: str) -> Optional[dict]:
     cursor.execute("SELECT espn_id, name, team FROM players WHERE player_id = %s;", (player_id,))
     row = cursor.fetchone()
@@ -90,12 +96,30 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
     logger.info(f"Evaluating live waivers for Team {team_id} Season {season} Week {week}...")
 
     with tracer.start_as_current_span("waiver_evaluator.run", attributes={"team_id": team_id, "season": season, "week": week}):
+        moves, resolved = [], []
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 bench_by_position = waiver_strategy.load_bench_by_position(cursor, team_id, season, week)
                 free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
-                moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
-                resolved = resolve_live_waiver_moves(cursor, moves, season, week)
+                if bench_by_position and free_agents_by_position:
+                    moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
+                    resolved = resolve_live_waiver_moves(cursor, moves, season, week)
+
+        # Raised outside the connection block so a missing-input failure isn't also logged
+        # as a rolled-back database transaction.
+        if not bench_by_position:
+            raise WaiverInputsMissing(
+                f"No bench players with VORP found for Team {team_id} Season {season} Week {week}."
+            )
+        if not free_agents_by_position:
+            raise WaiverInputsMissing(
+                f"No free-agent candidates with VORP found for Season {season} Week {week}."
+            )
+        if not resolved:
+            logger.info(
+                f"No waiver moves proposed for Team {team_id} Season {season} Week {week} "
+                f"({len(moves)} candidate move(s) before espn_id resolution); nothing to publish."
+            )
 
         for target in resolved:
             publish_waiver_claim(team_id, target, core_api_base_url)
