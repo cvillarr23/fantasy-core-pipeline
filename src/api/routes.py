@@ -7,7 +7,7 @@ import time
 import pika
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from opentelemetry import propagate
+from opentelemetry import propagate, trace
 from pydantic import BaseModel, Field
 from src.api.draft import _redis_client
 from src.database import get_db_cursor
@@ -442,7 +442,10 @@ def _record_bot_decision(
     decision_inputs into their own typed columns purely for cheap Grafana filtering.
 
     Fails OPEN, same philosophy as _reject_internal_player_id above: a DB hiccup logging
-    the reasoning must never block the live action it describes.
+    the reasoning must never block the live action it describes. But fail-open is not
+    fail-silent (#159): a dropped row logs at ERROR with the traceback and records the
+    exception on the request span (plus a `bot_decision.write_failed` attribute), so a
+    gap in the audit trail is visible in logs and Tempo.
     """
     inputs = decision_inputs or {}
     try:
@@ -461,7 +464,21 @@ def _record_bot_decision(
                 ),
             )
     except Exception as e:
-        logger.warning(f"Could not record bot_decisions row for tracking_id={tracking_id}: {e}")
+        logger.error(
+            f"Could not record bot_decisions row for tracking_id={tracking_id} ({bot_name}/{action}): {e}",
+            exc_info=True,
+        )
+        # Span status stays OK on purpose - the live action itself succeeded (202). Guarded
+        # because this runs after the AMQP publish committed: a telemetry error escaping
+        # here would 500 the request and a retry would publish the action twice.
+        try:
+            span = trace.get_current_span()
+            span.set_attribute("bot_decision.write_failed", True)
+            span.record_exception(
+                e, attributes={"tracking_id": tracking_id, "bot_name": bot_name, "action": action}
+            )
+        except Exception:
+            logger.debug("Could not mark bot_decisions write failure on the span", exc_info=True)
 
 
 def _claim_idempotency_key(key: Optional[str], token: str) -> str:

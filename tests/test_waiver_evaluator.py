@@ -188,6 +188,42 @@ def test_main_exits_nonzero_with_reason_on_insufficient_input(caplog):
     assert "no free-agent rows" in caplog.text
 
 
+def test_run_weekly_waivers_live_logs_a_valid_zero_move_result(caplog):
+    """#159: a real-input run that proposes nothing went silent after "Evaluating...",
+    indistinguishable in the logs from a hang. Say so explicitly."""
+    pools = ({"RB": [{"player_id": "bench1", "vorp_score": 9.0}]}, {"RB": {"player_id": "4046", "vorp_score": 5.0}})
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=pools), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=[]), \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[]), \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish, \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        assert we.run_weekly_waivers_live("7", 2026, 5) == []
+    mock_publish.assert_not_called()
+    [record] = [r for r in caplog.records if "No waiver moves proposed" in r.getMessage()]
+    assert record.levelname == "INFO"
+    assert "Team 7 Season 2026 Week 5" in record.getMessage()
+
+
+def test_run_weekly_waivers_live_warns_when_every_proposed_move_is_dropped(caplog):
+    """Worthwhile moves that all fail espn_id resolution are a crosswalk gap blocking real
+    claims - not the same as "nothing worth claiming", so it must not read as healthy."""
+    pools = ({"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}, {"RB": {"player_id": "4046", "vorp_score": 9.0}})
+    proposed = [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "4046"}] * 3
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=pools), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=proposed), \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[]), \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish, \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        assert we.run_weekly_waivers_live("7", 2026, 5) == []
+    mock_publish.assert_not_called()
+    assert not any("No waiver moves proposed" in r.getMessage() for r in caplog.records)
+    [record] = [r for r in caplog.records if "espn_id" in r.getMessage()]
+    assert record.levelname == "WARNING"
+    assert "3" in record.getMessage()
+
+
 def test_main_exits_zero_when_no_moves_are_worth_making():
     with patch("src.optimization.waiver_evaluator.run_weekly_waivers_live", return_value=[]) as mock_run:
         assert we.main(WAIVER_ARGV) == 0
