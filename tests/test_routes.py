@@ -1385,7 +1385,8 @@ def _post_waiver(client, mock_connection, mock_redis, payload=WAIVER_KEYED_PAYLO
     cursor = cursor or _waiver_cursor()
     with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
          patch("src.api.routes._redis_client", return_value=mock_redis), \
-         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         return client.post("/v1/trigger/waiver", json=payload)
 
 
@@ -1417,7 +1418,8 @@ def test_trigger_waiver_idempotency_key_blocks_a_re_run_claim(client):
     mock_connection.channel.return_value = mock_channel
     mock_redis = _fake_redis()
 
-    with patch.object(routes, "_claim_idempotency_key", wraps=routes._claim_idempotency_key) as spy:
+    with patch.object(routes, "_claim_idempotency_key", wraps=routes._claim_idempotency_key) as claim_spy, \
+         patch.object(routes, "_mark_idempotency_key_published", wraps=routes._mark_idempotency_key_published) as mark_spy:
         first = _post_waiver(client, mock_connection, mock_redis)
         second = _post_waiver(client, mock_connection, mock_redis)
 
@@ -1425,8 +1427,12 @@ def test_trigger_waiver_idempotency_key_blocks_a_re_run_claim(client):
     assert second.status_code == 202 and second.json()["status"] == "duplicate"
     assert mock_channel.basic_publish.call_count == 1
     assert mock_redis.store["waiver:trigger:idempotency:waiver-8-abc"] == "published"
-    assert spy.call_args.kwargs == {"namespace": "waiver", "ttl": routes.WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS}
+    # Only the published mark spans the waiver week; the in-flight claim is short, so a
+    # request that dies mid-flight can't leave the key "pending" (503) for days.
+    assert claim_spy.call_args.kwargs == {"namespace": "waiver", "ttl": routes.WAIVER_TRIGGER_CLAIM_TTL_SECONDS}
+    assert mark_spy.call_args.kwargs == {"namespace": "waiver", "ttl": routes.WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS}
     assert routes.WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS >= 7 * 24 * 3600
+    assert routes.WAIVER_TRIGGER_CLAIM_TTL_SECONDS <= 900
 
 
 def test_trigger_waiver_asks_the_caller_to_retry_while_an_earlier_attempt_is_in_flight(client):
@@ -1448,7 +1454,8 @@ def test_trigger_waiver_releases_the_key_when_the_broker_fails_before_publishing
 
     with patch("src.api.routes.pika.BlockingConnection", side_effect=[Exception("broker down"), good_connection]), \
          patch("src.api.routes._redis_client", return_value=mock_redis), \
-         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_waiver_cursor())):
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_waiver_cursor())), \
+         patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(_waiver_cursor())):
         failed = client.post("/v1/trigger/waiver", json=WAIVER_KEYED_PAYLOAD)
         retried = client.post("/v1/trigger/waiver", json=WAIVER_KEYED_PAYLOAD)
 

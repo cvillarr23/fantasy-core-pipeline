@@ -154,3 +154,30 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
     recommendations = [_shape_recommendation(m, display_by_player_id) for m in moves]
     recommendations.sort(key=lambda r: r["vorp_delta"], reverse=True)
     return {"season": season, "week": week, "recommendations": recommendations, **source}
+
+
+def waiver_claim_already_recorded(
+    team_id: str, season, week, add_player_id: str, drop_player_id=None,
+) -> bool:
+    """True when bot_decisions already holds this team's claim for the same add/drop in the
+    same season/week - the durable backstop for /trigger/waiver's idempotency when Redis
+    doesn't know the key. Needs season/week to scope to one waiver week; without them
+    there's nothing safe to match on. Fails open (False): a DB blip must not block a claim."""
+    if season is None or week is None:
+        return False
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1 FROM bot_decisions
+                WHERE bot_name = 'waiver_sniper' AND action = 'waiver_claim'
+                  AND team_id = %s AND season = %s AND week = %s
+                  AND target_player_id = %s AND drop_player_id IS NOT DISTINCT FROM %s
+                LIMIT 1;
+                """,
+                (team_id, season, week, add_player_id, drop_player_id),
+            )
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logger.warning(f"Could not check bot_decisions for a prior waiver claim; proceeding: {e}")
+        return False

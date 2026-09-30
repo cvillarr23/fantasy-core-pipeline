@@ -115,12 +115,28 @@ def test_waiver_idempotency_key_is_stable_per_claim_and_week_not_per_job():
     assert key != we.waiver_idempotency_key("8", WEEK4_TARGET)
 
 
+def test_waiver_idempotency_key_is_none_without_season_week():
+    """Otherwise the key would be identical every week and the 7-day TTL could swallow
+    next week's legitimate claim."""
+    assert we.waiver_idempotency_key("7", {**WEEK4_TARGET, "decision_inputs": {"season": 2026}}) is None
+    assert we.waiver_idempotency_key("7", {k: v for k, v in WEEK4_TARGET.items() if k != "decision_inputs"}) is None
+
+
+def test_publish_waiver_claim_without_a_key_posts_once_without_retries():
+    target = {k: v for k, v in WEEK4_TARGET.items() if k != "decision_inputs"}
+    with patch("src.optimization.waiver_evaluator.post_trigger") as mock_post, \
+         patch("src.optimization.waiver_evaluator.post_trigger_idempotent") as mock_idem:
+        assert we.publish_waiver_claim("7", target) is True
+    mock_post.assert_called_once()
+    mock_idem.assert_not_called()
+
+
 def test_publish_waiver_claim_posts_idempotently_with_the_claim_key():
     response = MagicMock()
     response.json.return_value = {"status": "accepted"}
 
     with patch("src.optimization.waiver_evaluator.post_trigger_idempotent", return_value=response) as mock_post:
-        we.publish_waiver_claim("7", WEEK4_TARGET)
+        assert we.publish_waiver_claim("7", WEEK4_TARGET) is True
 
     args, kwargs = mock_post.call_args
     assert args[0] == "waiver"
@@ -135,7 +151,7 @@ def test_publish_waiver_claim_says_so_when_the_claim_was_already_queued(caplog):
 
     with patch("src.optimization.waiver_evaluator.post_trigger_idempotent", return_value=response), \
          caplog.at_level("INFO", logger="WaiverEvaluator"):
-        we.publish_waiver_claim("7", WEEK4_TARGET)
+        assert we.publish_waiver_claim("7", WEEK4_TARGET) is False
 
     assert "already queued" in caplog.text
     assert "Published waiver claim" not in caplog.text

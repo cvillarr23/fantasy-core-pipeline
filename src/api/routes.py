@@ -11,6 +11,7 @@ from opentelemetry import propagate, trace
 from pydantic import BaseModel, Field
 from src.api.draft import _redis_client
 from src.database import get_db_cursor
+from src.services import waiver_service
 
 logger = logging.getLogger("GatewayRoutes")
 router = APIRouter()
@@ -29,6 +30,9 @@ LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 1800
 # that week proposing the same claim would queue a second one. waiver_evaluator's key is
 # per claim + season/week (deliberately no Job name, unlike lineup's).
 WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 3600
+# ...but only once published. The in-flight "pending" claim outlasts waiver_evaluator's
+# retry budget (~2 min) and no more, so a request that dies mid-flight frees the key.
+WAIVER_TRIGGER_CLAIM_TTL_SECONDS = 600
 # Ceiling on any single broker operation for a deadline-carrying request.
 BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 
@@ -109,8 +113,10 @@ class WaiverTriggerPayload(BaseModel):
         None,
         description=(
             "Stable key for this claim in this waiver week. Repeats within "
-            "WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS return status 'duplicate' instead of "
-            "queueing a second ESPN claim. Optional: omit it for a deliberately independent claim."
+            "WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS - or any keyed repeat of a claim already "
+            "in bot_decisions for the same team/season/week/add/drop - return status "
+            "'duplicate' instead of queueing a second ESPN claim. Omit it to force a "
+            "deliberately independent claim, e.g. re-queueing one the worker failed to make."
         ),
     )
     team_id: str = Field(..., description="Target local league team identification number")
@@ -355,10 +361,15 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
 
+    # The in-flight claim gets a short TTL; only a published mark lasts the waiver week, so
+    # a gateway killed mid-request can't wedge the key as "pending" (503s) for days.
     claim = _claim_idempotency_key(
-        payload.idempotency_key, tracking_id, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+        payload.idempotency_key, tracking_id, namespace="waiver", ttl=WAIVER_TRIGGER_CLAIM_TTL_SECONDS,
     )
-    if claim == "claimed" and payload.idempotency_key and _waiver_claim_already_recorded(payload):
+    inputs = payload.decision_inputs or {}
+    if claim == "claimed" and payload.idempotency_key and waiver_service.waiver_claim_already_recorded(
+        payload.team_id, inputs.get("season"), inputs.get("week"), payload.player_id, payload.drop_player_id,
+    ):
         # Redis didn't know the key (claim predates keys, or Redis lost it this week), but
         # the durable ledger shows this exact claim was already queued.
         _mark_idempotency_key_published(
@@ -532,33 +543,6 @@ def _reject_internal_player_id(player_id: str, name: Optional[str] = None) -> No
         )
 
     return
-
-
-def _waiver_claim_already_recorded(payload: "WaiverTriggerPayload") -> bool:
-    """True when bot_decisions already holds this team's claim for the same add/drop in the
-    same season/week. Needs season/week from decision_inputs to scope to one waiver week;
-    without them there's nothing safe to match on. Fails open (False) like the other ledger
-    reads: a DB blip must not block a claim, and Redis still guards in-week retries."""
-    inputs = payload.decision_inputs or {}
-    season, week = inputs.get("season"), inputs.get("week")
-    if season is None or week is None:
-        return False
-    try:
-        with get_db_cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT 1 FROM bot_decisions
-                WHERE bot_name = 'waiver_sniper' AND action = 'waiver_claim'
-                  AND team_id = %s AND season = %s AND week = %s
-                  AND target_player_id = %s AND drop_player_id IS NOT DISTINCT FROM %s
-                LIMIT 1;
-                """,
-                (payload.team_id, season, week, payload.player_id, payload.drop_player_id),
-            )
-            return cursor.fetchone() is not None
-    except Exception as e:
-        logger.warning(f"Could not check bot_decisions for a prior waiver claim; proceeding: {e}")
-        return False
 
 
 def _record_bot_decision(

@@ -91,8 +91,12 @@ def post_trigger_idempotent(
         return response
 
 
-def _response_status(response: requests.Response):
+def response_status(response: requests.Response):
+    """The trigger response's "status" ("accepted", "duplicate", ...), or None if unparseable."""
     try:
         return response.json().get("status")
     except Exception:
         return None
+
+
+_response_status = response_status
