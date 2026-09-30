@@ -670,3 +670,32 @@ def test_main_requires_team_id(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         ls.main(["--season", "2026", "--week", "5"])
     assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# evaluate_lineup (shared by the optimizer, the matchup badge, and rumor actions)
+# ---------------------------------------------------------------------------
+
+def test_evaluate_lineup_returns_swaps_with_source_and_never_publishes():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER, _metric_rows(4, dict(BASE_VORP, wr_bench=99.0)), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
+         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
+        result = ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+    mock_post.assert_not_called()
+    [swap] = result["swaps"]
+    assert (swap["drop_player_id"], swap["add_player_id"]) == ("wr_old", "wr_bench")
+    assert swap["decision_inputs"]["source_mode"] == "rolling_prior_weeks"
+    assert result["source"]["held_slots"] == ["D/ST", "K"]
+    assert {p["player_id"] for p in result["roster_pool"]} >= {"wr_bench", "wr_old"}
+
+
+def test_evaluate_lineup_raises_on_insufficient_input():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER, [], CURRENT_STARTERS]
+    import pytest
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         pytest.raises(ls.InsufficientLineupInputError):
+        ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)

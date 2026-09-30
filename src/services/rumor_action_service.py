@@ -19,6 +19,7 @@ from src.database import get_db_connection
 from src.optimization import lineup_solver
 from src.optimization.lineup_solver import resolve_default_week
 from src.optimization.waiver_evaluator import (
+    load_live_waiver_inputs,
     publish_waiver_claim,
     resolve_live_waiver_moves,
 )
@@ -102,11 +103,8 @@ def _evaluate_and_publish_waiver_claims(
     run."""
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            bench_by_position = waiver_strategy.load_bench_by_position(
+            bench_by_position, free_agents_by_position = load_live_waiver_inputs(
                 cursor, team_id, season, week
-            )
-            free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(
-                cursor, season, week
             )
             moves = waiver_strategy.propose_waiver_moves(
                 bench_by_position, free_agents_by_position
@@ -137,22 +135,15 @@ def _evaluate_and_publish_waiver_claims(
 def _evaluate_and_publish_lineup_swaps(
     team_id: str, season: int, week: int, bench_watch_targets: dict
 ) -> list:
-    """Re-runs lineup_solver's normal weekly ILP, but only publishes swap(s) whose
+    """Re-runs lineup_solver's weekly pregame evaluation, but only publishes swap(s) whose
     drop_player_id is one of this run's qualifying bench_watch signals - a bench_watch
     signal is bad news about a currently-started player, so it surfaces as a drop, not
-    an add."""
+    an add. Missing lineup inputs raise InsufficientLineupInputError, same as the weekly
+    optimizer, rather than looking like "no swap needed"."""
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            roster_pool = lineup_solver.load_roster_pool(cursor, team_id, season, week)
-            lineup_slot_counts = lineup_solver.load_lineup_slot_counts(cursor, season)
-            optimal_starters = lineup_solver.build_and_solve_lineup(
-                roster_pool, lineup_slot_counts=lineup_slot_counts
-            )
-            current_starters = lineup_solver.load_current_starters(
-                cursor, team_id, season, week
-            )
+            swaps = lineup_solver.evaluate_lineup(cursor, team_id, season, week)["swaps"]
 
-    swaps = lineup_solver.compute_lineup_swaps(optimal_starters, current_starters)
     matched_swaps = [
         swap for swap in swaps if swap["drop_player_id"] in bench_watch_targets
     ]

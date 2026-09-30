@@ -418,54 +418,66 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
     logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane.")
 
 
+def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
+    """Pregame lineup decision for team/season/week, without publishing: pool ->
+    held slots -> ILP -> diff. Shared by the weekly optimizer, the matchup page's swap
+    badge, and rumor bench_watch actions, so all three see the same upcoming-week data.
+    Returns {"swaps", "optimal_starters", "roster_pool", "source"}; raises
+    InsufficientLineupInputError when there isn't enough data to decide."""
+    with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
+        roster_pool, vorp_by_player, source = load_pregame_roster_pool(cursor, team_id, season, week)
+        lineup_slot_counts, held_slots = hold_slots_without_metrics(
+            load_lineup_slot_counts(cursor, season), roster_pool,
+        )
+        source["held_slots"] = held_slots
+    logger.info(
+        f"Evaluating Team {team_id} Season {season} Week {week} from {METRIC_SOURCE} "
+        f"({source['source_mode']}, Season {season} Week(s) {source['source_weeks']}); "
+        f"{len(roster_pool)} eligible player(s); held slots without metrics: {held_slots or 'none'}."
+    )
+    span = trace.get_current_span()
+    span.set_attribute("source_mode", source["source_mode"])
+    span.set_attribute("source_weeks", source["source_weeks"])
+    span.set_attribute("held_slots", held_slots)
+
+    with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
+        optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
+        if not optimal_starters:
+            raise InsufficientLineupInputError(
+                "could not fill the starting lineup from players with usable metrics: "
+                + describe_unfilled_slots(roster_pool, lineup_slot_counts)
+            )
+
+    with tracer.start_as_current_span("lineup_solver.load_current_starters"):
+        current_starters = load_current_starters(cursor, team_id, season, week)
+    # Held slots' starters stay put, so they must not appear as droppable.
+    current_starters = {
+        pid: dict(info, vorp_score=vorp_by_player.get(pid, info["vorp_score"]))
+        for pid, info in current_starters.items()
+        if info["position"] not in held_slots
+    }
+    with tracer.start_as_current_span("lineup_solver.compute_lineup_swaps"):
+        swaps = compute_lineup_swaps(optimal_starters, current_starters)
+    for swap in swaps:
+        # season/week are lifted into bot_decisions' own columns by the trigger route.
+        swap["decision_inputs"].update(source, season=season, week=week)
+    return {"swaps": swaps, "optimal_starters": optimal_starters, "roster_pool": roster_pool, "source": source}
+
+
 def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool = False) -> int:
     """Returns the number of swaps (0 = lineup already optimal). Raises
     InsufficientLineupInputError when there isn't enough data to decide."""
     logger.info(f"Assembling mathematical optimization model for Team {team_id} Season {season} Week {week}...")
 
-    with tracer.start_as_current_span("lineup_solver.run", attributes={"team_id": team_id, "season": season, "week": week}) as span:
+    with tracer.start_as_current_span("lineup_solver.run", attributes={"team_id": team_id, "season": season, "week": week}):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
-                    roster_pool, vorp_by_player, source = load_pregame_roster_pool(cursor, team_id, season, week)
-                    lineup_slot_counts, held_slots = hold_slots_without_metrics(
-                        load_lineup_slot_counts(cursor, season), roster_pool,
-                    )
-                    source["held_slots"] = held_slots
-                logger.info(
-                    f"Evaluating Team {team_id} Season {season} Week {week} from {METRIC_SOURCE} "
-                    f"({source['source_mode']}, Season {season} Week(s) {source['source_weeks']}); "
-                    f"{len(roster_pool)} eligible player(s); held slots without metrics: {held_slots or 'none'}."
-                )
-                span.set_attribute("source_mode", source["source_mode"])
-                span.set_attribute("source_weeks", source["source_weeks"])
-                span.set_attribute("held_slots", held_slots)
+                evaluation = evaluate_lineup(cursor, team_id, season, week)
 
-                with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
-                    optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
-                    if not optimal_starters:
-                        raise InsufficientLineupInputError(
-                            "could not fill the starting lineup from players with usable metrics: "
-                            + describe_unfilled_slots(roster_pool, lineup_slot_counts)
-                        )
-
-                with tracer.start_as_current_span("lineup_solver.load_current_starters"):
-                    current_starters = load_current_starters(cursor, team_id, season, week)
-
-        # Held slots' starters stay put, so they must not appear as droppable.
-        current_starters = {
-            pid: dict(info, vorp_score=vorp_by_player.get(pid, info["vorp_score"]))
-            for pid, info in current_starters.items()
-            if info["position"] not in held_slots
-        }
-        with tracer.start_as_current_span("lineup_solver.compute_lineup_swaps"):
-            swaps = compute_lineup_swaps(optimal_starters, current_starters)
-        for swap in swaps:
-            # season/week are lifted into bot_decisions' own columns by the trigger route.
-            swap["decision_inputs"].update(source, season=season, week=week)
+        swaps = evaluation["swaps"]
         logger.info(
             f"Optimal lineup for Team {team_id} Season {season} Week {week}: "
-            f"{[p['name'] for p in optimal_starters]}"
+            f"{[p['name'] for p in evaluation['optimal_starters']]}"
         )
         if dry_run:
             logger.info(f"Dry run: not publishing {len(swaps)} swap(s): {swaps}")
