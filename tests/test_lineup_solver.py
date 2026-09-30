@@ -375,75 +375,298 @@ def test_publish_lineup_swaps_skips_request_when_no_swaps():
 # optimize_weekly_lineup (orchestrator)
 # ---------------------------------------------------------------------------
 
+# The orchestrator reads three result sets in order: the team's roster, the roster's
+# weekly_stats metrics for [target_week - 3, target_week] in the target season, and the
+# current starters. Rows mirror each query's SELECT column order.
+
+TARGET_SEASON = 2026
+TARGET_WEEK = 5
+ALL_TEAMS_PLAYING = {"KC", "BUF", "PHI", "DAL", "SF", "LAR"}
+
+ROSTER = [
+    ("qb1", "QB One", "QB", "KC", None),
+    ("rb1", "RB One", "RB", "BUF", None),
+    ("rb2", "RB Two", "RB", "PHI", None),
+    ("wr1", "WR One", "WR", "DAL", None),
+    ("wr2", "WR Two", "WR", "SF", None),
+    ("te1", "TE One", "TE", "KC", None),
+    ("wr_old", "Old WR", "WR", "BUF", None),
+    ("wr_bench", "Bench WR", "WR", "LAR", None),
+    ("dst1", "DST One", "D/ST", "KC", None),
+    ("k1", "K One", "K", "PHI", None),
+]
+
+CURRENT_STARTERS = [
+    ("qb1", "QB", "QB", 0.0), ("rb1", "RB", "RB", 0.0), ("rb2", "RB", "RB", 0.0),
+    ("wr1", "WR", "WR", 0.0), ("wr2", "WR", "WR", 0.0), ("te1", "TE", "TE", 0.0),
+    ("wr_old", "WR", "RB/WR/TE", 0.0), ("dst1", "D/ST", "D/ST", 0.0), ("k1", "K", "K", 0.0),
+]
+
+
+def _metric_rows(week, vorp_by_pid, multiplier=None):
+    return [(pid, week, vorp, multiplier) for pid, vorp in vorp_by_pid.items()]
+
+
+# Skill-position VORP where the current lineup (wr_old in FLEX) is already optimal.
+BASE_VORP = {"qb1": 10.0, "rb1": 8.0, "rb2": 7.0, "wr1": 6.0, "wr2": 5.0, "te1": 4.0, "wr_old": 3.0, "wr_bench": 1.0}
+
+
 def _mock_conn_with_cursor(mock_cursor):
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
     return mock_conn
 
 
-def test_optimize_weekly_lineup_skips_publish_when_no_delta():
+def _run_optimize(roster, metrics, starters=CURRENT_STARTERS, week=TARGET_WEEK,
+                  teams_playing=ALL_TEAMS_PLAYING, dry_run=False):
+    """Runs optimize_weekly_lineup against a mocked DB. Returns (result_or_exception,
+    post_trigger mock, cursor mock)."""
     mock_cursor = MagicMock()
-    mock_cursor.fetchall.side_effect = [
-        [("qb1", "QB One", "QB", 10.0, 1.0), ("rb1", "RB One", "RB", 8.0, 1.0), ("rb2", "RB Two", "RB", 7.0, 1.0),
-         ("wr1", "WR One", "WR", 6.0, 1.0), ("wr2", "WR Two", "WR", 5.0, 1.0), ("te1", "TE One", "TE", 4.0, 1.0),
-         ("dst1", "DST One", "D/ST", 3.0, 1.0), ("k1", "K One", "K", 2.0, 1.0), ("wr3", "WR Three", "WR", 1.0, 1.0)],
-        [("qb1", "QB", "QB", 10.0), ("rb1", "RB", "RB1", 8.0), ("rb2", "RB", "RB2", 7.0), ("wr1", "WR", "WR1", 6.0),
-         ("wr2", "WR", "WR2", 5.0), ("te1", "TE", "TE", 4.0), ("dst1", "D/ST", "D/ST", 3.0), ("k1", "K", "K", 2.0),
-         ("wr3", "WR", "FLEX", 1.0)],
-    ]
-
+    mock_cursor.fetchall.side_effect = [roster, metrics, starters]
+    schedule_patch = (
+        patch("src.optimization.lineup_solver.load_teams_playing", side_effect=teams_playing)
+        if isinstance(teams_playing, Exception)
+        else patch("src.optimization.lineup_solver.load_teams_playing", return_value=teams_playing)
+    )
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         schedule_patch, \
          patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
-        swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
+        try:
+            result = ls.optimize_weekly_lineup(
+                team_id="8", season=TARGET_SEASON, week=week, dry_run=dry_run,
+            )
+        except ls.InsufficientLineupInputError as exc:
+            result = exc
+    return result, mock_post, mock_cursor
 
-    assert swap_count == 0
-    mock_post.assert_not_called()
 
+# (a) no target-week weekly_stats, but usable prior same-season data --------------
 
-def test_optimize_weekly_lineup_end_to_end_with_swaps():
-    mock_cursor = MagicMock()
-    mock_cursor.fetchall.side_effect = [
-        [("qb1", "QB One", "QB", 10.0, 1.0), ("rb1", "RB One", "RB", 8.0, 1.0), ("rb2", "RB Two", "RB", 7.0, 1.0),
-         ("wr1", "WR One", "WR", 6.0, 1.0), ("wr2", "WR Two", "WR", 5.0, 1.0), ("te1", "TE One", "TE", 4.0, 1.0),
-         ("dst1", "DST One", "D/ST", 3.0, 1.0), ("k1", "K One", "K", 2.0, 1.0),
-         ("wr_old", "Old WR", "WR", 1.0, 1.0), ("wr_bench", "Bench WR", "WR", 20.0, 1.09)],
-        [("qb1", "QB", "QB", 10.0), ("rb1", "RB", "RB1", 8.0), ("rb2", "RB", "RB2", 7.0), ("wr1", "WR", "WR1", 6.0),
-         ("wr2", "WR", "WR2", 5.0), ("te1", "TE", "TE", 4.0), ("dst1", "D/ST", "D/ST", 3.0), ("k1", "K", "K", 2.0),
-         ("wr_old", "WR", "FLEX", 1.0)],
-    ]
+def test_optimize_uses_rolling_prior_weeks_when_target_week_has_no_rows():
+    week3 = dict(BASE_VORP, wr_bench=10.0)
+    week4 = dict(BASE_VORP, wr_bench=30.0)
+    metrics = _metric_rows(3, week3) + _metric_rows(4, week4)
 
-    with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
-         patch("src.optimization.lineup_solver.post_trigger") as mock_post:
-        mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
-        swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
+    result, mock_post, _ = _run_optimize(ROSTER, metrics)
 
-    assert swap_count == 1
+    assert result == 1
     mock_post.assert_called_once()
     path, payload = mock_post.call_args[0]
     assert path == "lineup"
-    assert payload["optimized_swaps"] == [
-        {
-            "drop_player_id": "wr_old", "add_player_id": "wr_bench", "slot": "FLEX",
-            "matchup_multiplier": 1.09,
-            "decision_inputs": {
-                "add_player_vorp_score": 20.0, "drop_player_vorp_score": 1.0, "matchup_multiplier": 1.09,
-            },
-        }
-    ]
+    [swap] = payload["optimized_swaps"]
+    assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == ("wr_old", "wr_bench", "RB/WR/TE")
+    inputs = swap["decision_inputs"]
+    # Rolling mean of weeks 3 and 4, and the dropped starter's VORP from the same source.
+    assert inputs["add_player_vorp_score"] == 20.0
+    assert inputs["drop_player_vorp_score"] == 3.0
+    assert inputs["metric_source"] == "weekly_stats.vorp_score"
+    assert inputs["source_mode"] == "rolling_prior_weeks"
+    assert inputs["source_season"] == TARGET_SEASON
+    assert inputs["source_weeks"] == [3, 4]
+    assert inputs["season"] == TARGET_SEASON
+    assert inputs["week"] == TARGET_WEEK
+    assert inputs["held_slots"] == ["D/ST", "K"]
 
 
-def test_optimize_weekly_lineup_no_roster_returns_zero():
+def test_optimize_rolling_window_only_queries_the_target_season_and_prior_three_weeks():
+    metrics = _metric_rows(4, BASE_VORP)
+
+    _, _, mock_cursor = _run_optimize(ROSTER, metrics)
+
+    metrics_query, params = mock_cursor.execute.call_args_list[1][0]
+    assert "s.season = %s" in metrics_query
+    assert "vorp_score IS NOT NULL" in metrics_query
+    assert params == ("8", TARGET_SEASON, TARGET_WEEK - 3, TARGET_WEEK)
+
+
+def test_optimize_prefers_target_week_projections_when_present():
+    week5 = dict(BASE_VORP, wr_bench=50.0)
+    week4 = dict(BASE_VORP, wr_bench=0.0, wr_old=40.0)
+    metrics = _metric_rows(4, week4) + _metric_rows(5, week5, multiplier=1.0)
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics)
+
+    assert result == 1
+    [swap] = mock_post.call_args[0][1]["optimized_swaps"]
+    assert swap["add_player_id"] == "wr_bench"
+    assert swap["decision_inputs"]["source_mode"] == "target_week"
+    assert swap["decision_inputs"]["source_weeks"] == [TARGET_WEEK]
+    assert swap["decision_inputs"]["add_player_vorp_score"] == 50.0
+
+
+def test_optimize_target_week_mode_does_not_need_the_schedule():
+    """Target-week rows already encode byes (no projection row), so the schedule lookup
+    is only a fallback-mode requirement."""
+    metrics = _metric_rows(5, BASE_VORP)
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics, teams_playing=RuntimeError("nflverse down"))
+
+    assert result == 0
+    mock_post.assert_not_called()
+
+
+def test_optimize_fallback_excludes_players_whose_team_is_on_bye_in_target_week():
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics, teams_playing=ALL_TEAMS_PLAYING - {"LAR"})
+
+    assert result == 0
+    mock_post.assert_not_called()
+
+
+def test_optimize_fallback_normalizes_schedule_team_aliases():
+    """nflverse schedules call the Rams "LA"; Sleeper's players.team says "LAR"."""
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    result, _, _ = _run_optimize(ROSTER, metrics, teams_playing=(ALL_TEAMS_PLAYING - {"LAR"}) | {"LA"})
+
+    assert result == 1
+
+
+def test_optimize_excludes_out_players_from_pool():
+    roster = [row if row[0] != "wr_bench" else ("wr_bench", "Bench WR", "WR", "LAR", "Out") for row in ROSTER]
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    result, mock_post, _ = _run_optimize(roster, metrics)
+
+    assert result == 0
+    mock_post.assert_not_called()
+
+
+def test_optimize_holds_kicker_and_dst_starters_when_they_have_no_metrics():
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    _, mock_post, _ = _run_optimize(ROSTER, metrics)
+
+    swaps = mock_post.call_args[0][1]["optimized_swaps"]
+    touched = {s["drop_player_id"] for s in swaps} | {s["add_player_id"] for s in swaps}
+    assert not touched & {"k1", "dst1"}
+
+
+def test_optimize_dry_run_never_publishes():
+    metrics = _metric_rows(4, dict(BASE_VORP, wr_bench=99.0))
+
+    result, mock_post, _ = _run_optimize(ROSTER, metrics, dry_run=True)
+
+    assert result == 1
+    mock_post.assert_not_called()
+
+
+# (b) missing / insufficient input must not report success ------------------------
+
+def test_optimize_raises_when_no_usable_metrics_exist():
+    result, mock_post, _ = _run_optimize(ROSTER, [])
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "no usable weekly_stats.vorp_score" in str(result)
+    mock_post.assert_not_called()
+
+
+def test_optimize_raises_when_team_has_no_roster():
+    result, mock_post, _ = _run_optimize([], _metric_rows(4, BASE_VORP))
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "no league_rosters rows" in str(result)
+    mock_post.assert_not_called()
+
+
+def test_optimize_raises_when_prior_week_data_is_stale():
+    """Newest usable week is target-2: last week's refresh/ingest never landed."""
+    result, mock_post, _ = _run_optimize(ROSTER, _metric_rows(3, BASE_VORP))
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "stale" in str(result)
+    mock_post.assert_not_called()
+
+
+def test_optimize_week_one_without_projections_fails_and_never_reads_last_season():
+    result, mock_post, mock_cursor = _run_optimize(ROSTER, [], week=1)
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "Week 1" in str(result)
+    _, params = mock_cursor.execute.call_args_list[1][0]
+    assert params == ("8", TARGET_SEASON, 1, 1)
+    mock_post.assert_not_called()
+
+
+def test_optimize_raises_when_a_skill_slot_cannot_be_filled():
+    no_te = {pid: v for pid, v in BASE_VORP.items() if pid != "te1"}
+
+    result, mock_post, _ = _run_optimize(ROSTER, _metric_rows(4, no_te))
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "TE" in str(result)
+    mock_post.assert_not_called()
+
+
+def test_optimize_raises_when_schedule_unavailable_in_fallback_mode():
+    result, mock_post, _ = _run_optimize(
+        ROSTER, _metric_rows(4, BASE_VORP), teams_playing=RuntimeError("nflverse down"),
+    )
+
+    assert isinstance(result, ls.InsufficientLineupInputError)
+    assert "schedule" in str(result)
+    mock_post.assert_not_called()
+
+
+# (c) a valid zero-swap result still succeeds ---------------------------------------
+
+def test_optimize_returns_zero_when_lineup_already_optimal():
+    result, mock_post, _ = _run_optimize(ROSTER, _metric_rows(4, BASE_VORP))
+
+    assert result == 0
+    mock_post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# main (CronJob entrypoint exit codes)
+# ---------------------------------------------------------------------------
+
+ARGV = ["--team-id", "8", "--season", "2026", "--week", "5"]
+
+
+def test_main_exits_zero_when_lineup_already_optimal():
+    with patch("src.optimization.lineup_solver.optimize_weekly_lineup", return_value=0) as mock_opt:
+        assert ls.main(ARGV) == 0
+    mock_opt.assert_called_once_with(team_id="8", season=2026, week=5, dry_run=False)
+
+
+def test_main_exits_zero_when_swaps_published():
+    with patch("src.optimization.lineup_solver.optimize_weekly_lineup", return_value=2):
+        assert ls.main(ARGV) == 0
+
+
+def test_main_exits_nonzero_with_reason_on_insufficient_input(caplog):
+    error = ls.InsufficientLineupInputError("no usable weekly_stats.vorp_score for Season 2026")
+    with patch("src.optimization.lineup_solver.optimize_weekly_lineup", side_effect=error):
+        assert ls.main(ARGV) != 0
+    assert "cannot evaluate Team 8 Season 2026 Week 5" in caplog.text
+    assert "no usable weekly_stats.vorp_score" in caplog.text
+
+
+def test_main_end_to_end_no_usable_data_exits_nonzero():
     mock_cursor = MagicMock()
-    mock_cursor.fetchall.return_value = []
-
+    mock_cursor.fetchall.side_effect = [ROSTER, [], CURRENT_STARTERS]
     with patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
          patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING), \
          patch("src.optimization.lineup_solver.post_trigger") as mock_post:
         mock_get_conn.return_value.__enter__.return_value = _mock_conn_with_cursor(mock_cursor)
-        swap_count = ls.optimize_weekly_lineup(team_id="1", season=2025, week=1)
-
-    assert swap_count == 0
+        assert ls.main(ARGV) != 0
     mock_post.assert_not_called()
+
+
+def test_main_passes_dry_run_flag():
+    with patch("src.optimization.lineup_solver.optimize_weekly_lineup", return_value=0) as mock_opt:
+        assert ls.main(ARGV + ["--dry-run"]) == 0
+    assert mock_opt.call_args.kwargs["dry_run"] is True
+
+
+def test_main_requires_team_id(monkeypatch):
+    monkeypatch.delenv("ESPN_TEAM_ID", raising=False)
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        ls.main(["--season", "2026", "--week", "5"])
+    assert exc.value.code != 0

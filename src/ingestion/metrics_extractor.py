@@ -1,5 +1,6 @@
 import argparse
 import logging
+import sys
 from datetime import datetime, timedelta
 
 import nflreadpy as nfl
@@ -680,34 +681,75 @@ def extract_weekly_metrics(year: int, week: int) -> int:
     return written
 
 
-def resolve_default_year_week() -> tuple[int, int]:
-    """Resolves safe CLI defaults without letting nflreadpy "current" helpers crash startup."""
-    fallback_year = datetime.now().year
-    fallback_week = 1
+def last_completed_week(df_schedules: pl.DataFrame) -> int | None:
+    """Latest regular-season week whose games all have final scores, or None before any
+    week has finished. A week with only Thursday's game final doesn't count - ingesting
+    it would write a partial week."""
+    if df_schedules.is_empty():
+        return None
+    weeks = (
+        df_schedules.filter(pl.col("game_type") == "REG")
+        .group_by("week")
+        .agg((pl.col("home_score").is_not_null() & pl.col("away_score").is_not_null()).all().alias("complete"))
+        .filter(pl.col("complete"))
+    )
+    if weeks.is_empty():
+        return None
+    return int(weeks["week"].max())
+
+
+def resolve_default_year_week(year: int | None = None) -> tuple[int, int | None]:
+    """Resolves the season and the most recently *completed* week - the only week with
+    play-by-play to ingest. nflreadpy's current week is already the upcoming, unplayed
+    week by the Tuesday CronJob (#178), which made every scheduled run ingest nothing.
+    Returns week=None when no week has completed yet (preseason); raises RuntimeError
+    when the week can't be determined at all."""
+    if year is None:
+        try:
+            year = int(nfl.get_current_season())
+        except Exception as exc:
+            year = datetime.now().year
+            logger.warning(f"Failed to resolve current NFL season via nflreadpy ({exc}); defaulting --year to {year}.")
 
     try:
-        year = int(nfl.get_current_season())
+        return year, last_completed_week(nfl.load_schedules(year))
     except Exception as exc:
-        logger.warning(
-            f"Failed to resolve current NFL season via nflreadpy ({exc}); defaulting --year to {fallback_year}."
-        )
-        year = fallback_year
+        logger.warning(f"Failed to load the {year} schedule ({exc}); falling back to nflreadpy's current week - 1.")
 
     try:
-        week = int(nfl.get_current_week())
+        week = int(nfl.get_current_week()) - 1
     except Exception as exc:
-        logger.warning(
-            f"Failed to resolve current NFL week via nflreadpy ({exc}); defaulting --week to {fallback_week}."
-        )
-        week = fallback_week
+        raise RuntimeError(f"Could not resolve the last completed NFL week for {year}: {exc}") from exc
+    return year, week if week >= 1 else None
 
-    return year, week
+
+def main(argv=None) -> int:
+    """CronJob entrypoint. Nonzero when a completed week yields no rows, so a failed
+    ingestion fails the Job instead of logging a warning and exiting 0."""
+    parser = argparse.ArgumentParser(description="Extract nflverse advanced weekly metrics into weekly_stats.")
+    parser.add_argument("--year", type=int, default=None)
+    parser.add_argument("--week", type=int, default=None, help="defaults to the last completed week")
+    args = parser.parse_args(argv)
+
+    year, week = args.year, args.week
+    if week is None:
+        try:
+            year, week = resolve_default_year_week(year)
+        except RuntimeError as exc:
+            logger.error(str(exc))
+            return 1
+        if week is None:
+            logger.info(f"No completed {year} regular-season week yet; nothing to ingest.")
+            return 0
+    elif year is None:
+        parser.error("--week requires --year: weekly_stats is keyed by (season, week)")
+
+    written = extract_weekly_metrics(year=year, week=week)
+    if written == 0:
+        logger.error(f"Wrote 0 weekly_stats rows for {year} Week {week}, a week that should have been played.")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    default_year, default_week = resolve_default_year_week()
-    parser = argparse.ArgumentParser(description="Extract nflverse advanced weekly metrics into weekly_stats.")
-    parser.add_argument("--year", type=int, default=default_year)
-    parser.add_argument("--week", type=int, default=default_week)
-    args = parser.parse_args()
-    extract_weekly_metrics(year=args.year, week=args.week)
+    sys.exit(main())
