@@ -162,6 +162,16 @@
   `InsufficientLineupInputError` makes the Job exit 1, distinct from a zero-swap "already
   optimal" run. `/v1/trigger/lineup` runs `_reject_internal_player_id` on every swap id
   (names optional, since the web UI sends bare ESPN ids).
+- Publishing is **retried and idempotent** (#189). `publish_lineup_swaps` sends an
+  `idempotency_key` from `lineup_idempotency_key` (hash of `JOB_NAME` + team + season/week +
+  the resolved swaps) through `trigger_client.post_trigger_idempotent`. That retries
+  connection errors, timeouts and 5xx (6 attempts, 5s doubling to 30s, which outlasts an API
+  rollout), never a 4xx. `/v1/trigger/lineup` reuses draft-pick's claim/mark/release helpers
+  under the `lineup:` Redis namespace (`LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS`, 30 min): a
+  repeat returns `status: "duplicate"`, an in-flight claim 503s. `JOB_NAME` comes from the
+  CronJob's downward API (fantasy-infra#110, which also moved the Job to
+  `restartPolicy: Never`), so pod retries within one Job dedupe while every new Job
+  publishes. Callers without a key (the web UI) are unchanged.
 - The solver does not publish to RabbitMQ directly. It POSTs to the existing
   `POST /v1/trigger/lineup` FastAPI route (`src/api/routes.py`, mounted under the `/v1`
   prefix in `src/api/main.py` — `CORE_API_BASE_URL` is just the host, the `/v1` prefix is

@@ -16,6 +16,7 @@ nonzero = missing/insufficient input - including proposed swaps none of which re
 espn_id - so the CronJob's Job fails and alerts (fantasy-infra#97) instead of looking healthy.
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -30,7 +31,7 @@ from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion.metrics_extractor import normalize_team
 from src.telemetry import configure_tracing, configure_trace_logging
-from src.trigger_client import post_trigger
+from src.trigger_client import post_trigger_idempotent
 
 configure_trace_logging()
 logger = logging.getLogger("LineupSolver")
@@ -458,13 +459,43 @@ def resolve_lineup_swaps(cursor, swaps: list) -> list:
     return resolved
 
 
+def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = None) -> str:
+    """Stable key for one lineup decision (#189), so a retry - in-process after an ambiguous
+    failure, or a whole re-run when the CronJob retries a failed pod - can't enqueue the same
+    swaps twice. A re-run recomputes identical swaps (league_rosters isn't resynced from
+    ESPN in between), so the same inputs give the same key. The Job name, when set
+    (JOB_NAME, from the CronJob's downward API), scopes it to one Job: a new scheduled or
+    manual Job is a new decision and always publishes."""
+    weeks = sorted({
+        (s.get("decision_inputs") or {}).get("season", 0) * 100 + (s.get("decision_inputs") or {}).get("week", 0)
+        for s in swaps
+    })
+    material = json.dumps({
+        "job": job_name,
+        "team_id": str(team_id),
+        "weeks": weeks,
+        "swaps": sorted([str(s["drop_player_id"]), str(s["add_player_id"]), str(s["slot"])] for s in swaps),
+    }, sort_keys=True)
+    return f"lineup-{team_id}-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
+
+
 def publish_lineup_swaps(team_id: str, swaps: list) -> None:
+    """POSTs swaps to /v1/trigger/lineup, retrying transient failures (#189) under a stable
+    idempotency key. Raises once retries are exhausted or on a 4xx."""
     if not swaps:
         logger.info(f"Lineup already optimal for Team {team_id}; nothing to publish.")
         return
 
-    post_trigger("lineup", {"team_id": team_id, "optimized_swaps": swaps}, timeout=10)
-    logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane.")
+    key = lineup_idempotency_key(team_id, swaps, job_name=os.getenv("JOB_NAME"))
+    response = post_trigger_idempotent("lineup", {"team_id": team_id, "optimized_swaps": swaps}, key, timeout=10)
+    try:
+        status = response.json().get("status")
+    except Exception:
+        status = None
+    if status == "duplicate":
+        logger.info(f"Lineup swap(s) for Team {team_id} were already published under {key}; not re-enqueued.")
+        return
+    logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane (idempotency key {key}).")
 
 
 def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
