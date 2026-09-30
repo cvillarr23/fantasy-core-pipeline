@@ -140,8 +140,13 @@
   `InsufficientWaiverInputError` when the bench or free-agent side is empty (target-week
   projections not landed yet); `waiver_evaluator.main()` then exits 1. Both Tuesday CronJobs
   (lineup, waivers) are scheduled after the 05:00 CT refresher in fantasy-infra, so the
-  target week's projections normally exist. `waiver_service` (the read-only
-  recommendations page) still returns an empty list in that pre-refresh window.
+  target week's projections normally exist.
+- `waiver_service` (read-only `GET /v1/waiver/recommendations`) prefers the exact-week
+  pools. When either side is empty (before the refresh), it uses
+  `load_prior_week_waiver_pools`: the same same-season, up-to-3-prior-week mean, staleness
+  gate and schedule bye exclusion as the lineup fallback (#185). Our bench plus unrostered
+  players only. The response's `source_mode`/`source_weeks` say which source was used,
+  and `WaiverInputsUnavailableError` maps to 503 rather than an empty list.
 - `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week
