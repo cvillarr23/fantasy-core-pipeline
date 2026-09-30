@@ -7,9 +7,13 @@ Pipeline: load pregame roster pool (CORE-05 vorp_score as objective weight) -> s
 
 The scheduled run evaluates an *upcoming* week (#178), so it can't require that week to
 have been played. See load_pregame_roster_pool for the source order and season boundary.
+Swaps are computed on internal players.player_id (Sleeper-namespaced) but published with
+players.espn_id (resolve_lineup_swaps, #187): the browser worker acts on ESPN ids, and the
+two id spaces overlap numerically, so an untranslated id can swap the wrong player.
+
 Exit codes: 0 = a real decision was made (swaps published, or lineup already optimal);
-nonzero = missing/insufficient input, so the CronJob's Job fails and alerts
-(fantasy-infra#97) instead of looking healthy.
+nonzero = missing/insufficient input - including proposed swaps none of which resolve to an
+espn_id - so the CronJob's Job fails and alerts (fantasy-infra#97) instead of looking healthy.
 """
 import argparse
 import json
@@ -23,6 +27,7 @@ import pulp
 from opentelemetry import trace
 
 from src.database import get_db_connection
+from src.espn_identity import resolve_espn_identity
 from src.ingestion.metrics_extractor import normalize_team
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import post_trigger
@@ -409,6 +414,50 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
     return swaps
 
 
+def resolve_lineup_swaps(cursor, swaps: list) -> list:
+    """Translates compute_lineup_swaps' internal (Sleeper) ids into the ESPN ids the browser
+    worker acts on, returning new swap dicts. A swap whose add or drop player has no espn_id
+    yet is skipped with a warning, like waiver_evaluator.resolve_live_waiver_moves - there's
+    no ESPN identity to safely act on. Names ride along so /v1/trigger/lineup's namespace
+    guard can catch an id that exists in both namespaces; the internal ids stay in
+    decision_inputs for the bot_decisions audit trail.
+
+    Raises InsufficientLineupInputError when swaps were proposed but none resolve, so that
+    can't pass for a valid "already optimal" zero-swap run."""
+    resolved = []
+    for swap in swaps:
+        add_identity = resolve_espn_identity(cursor, swap["add_player_id"])
+        drop_identity = resolve_espn_identity(cursor, swap["drop_player_id"])
+        missing = [
+            f"{label} {swap[key]}"
+            for label, key, identity in (
+                ("add", "add_player_id", add_identity), ("drop", "drop_player_id", drop_identity),
+            )
+            if identity is None
+        ]
+        if missing:
+            logger.warning(f"Skipping lineup swap into {swap['slot']}: no espn_id resolved yet for {', '.join(missing)}.")
+            continue
+        resolved.append(dict(
+            swap,
+            add_player_id=str(add_identity["espn_id"]),
+            drop_player_id=str(drop_identity["espn_id"]),
+            add_player_name=add_identity["name"],
+            drop_player_name=drop_identity["name"],
+            decision_inputs=dict(
+                swap.get("decision_inputs") or {},
+                add_player_internal_id=swap["add_player_id"],
+                drop_player_internal_id=swap["drop_player_id"],
+            ),
+        ))
+    if swaps and not resolved:
+        raise InsufficientLineupInputError(
+            f"none of {len(swaps)} proposed lineup swap(s) have a resolvable players.espn_id; "
+            "refusing to publish Sleeper ids"
+        )
+    return resolved
+
+
 def publish_lineup_swaps(team_id: str, swaps: list) -> None:
     if not swaps:
         logger.info(f"Lineup already optimal for Team {team_id}; nothing to publish.")
@@ -465,16 +514,17 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
 
 
 def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool = False) -> int:
-    """Returns the number of swaps (0 = lineup already optimal). Raises
-    InsufficientLineupInputError when there isn't enough data to decide."""
+    """Returns the number of swaps published (0 = lineup already optimal). Raises
+    InsufficientLineupInputError when there isn't enough data to decide, or when every
+    proposed swap lacks an espn_id."""
     logger.info(f"Assembling mathematical optimization model for Team {team_id} Season {season} Week {week}...")
 
     with tracer.start_as_current_span("lineup_solver.run", attributes={"team_id": team_id, "season": season, "week": week}):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 evaluation = evaluate_lineup(cursor, team_id, season, week)
+                swaps = resolve_lineup_swaps(cursor, evaluation["swaps"])
 
-        swaps = evaluation["swaps"]
         logger.info(
             f"Optimal lineup for Team {team_id} Season {season} Week {week}: "
             f"{[p['name'] for p in evaluation['optimal_starters']]}"

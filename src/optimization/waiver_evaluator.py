@@ -25,20 +25,13 @@ from opentelemetry import trace
 
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
+from src.espn_identity import resolve_espn_identity
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import CORE_API_BASE_URL, post_trigger
 
 configure_trace_logging()
 logger = logging.getLogger("WaiverEvaluator")
 tracer = trace.get_tracer("waiver_evaluator")
-
-
-def _resolve_espn_identity(cursor, player_id: str) -> Optional[dict]:
-    cursor.execute("SELECT espn_id, name, team FROM players WHERE player_id = %s;", (player_id,))
-    row = cursor.fetchone()
-    if not row or not row[0]:
-        return None
-    return {"espn_id": row[0], "name": row[1], "team": row[2]}
 
 
 def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None, week: Optional[int] = None) -> list:
@@ -53,7 +46,7 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
     """
     resolved = []
     for move in moves:
-        add_identity = _resolve_espn_identity(cursor, move["add_player_id"])
+        add_identity = resolve_espn_identity(cursor, move["add_player_id"])
         if add_identity is None:
             logger.warning(f"Skipping waiver move adding {move['add_player_id']}: no espn_id resolved yet.")
             continue
@@ -61,7 +54,7 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
         drop_espn_id = None
         drop_player_id = move.get("drop_player_id")
         if drop_player_id:
-            drop_identity = _resolve_espn_identity(cursor, drop_player_id)
+            drop_identity = resolve_espn_identity(cursor, drop_player_id)
             if drop_identity is None:
                 logger.warning(f"Skipping waiver move dropping {drop_player_id}: no espn_id resolved yet.")
                 continue

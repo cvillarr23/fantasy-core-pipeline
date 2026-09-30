@@ -843,6 +843,90 @@ def test_trigger_waiver_claim_rejects_a_drop_player_id_absent_from_the_crosswalk
     mock_connection.assert_not_called()
 
 
+def test_trigger_lineup_swap_rejects_an_internal_sleeper_drop_id(client):
+    """#187: the optimizer published players.player_id 2216 as drop_player_id. An id present
+    only as an internal player_id is decidably the wrong namespace, name or no name."""
+    cursor = MagicMock()
+    # drop 2216: no espn_id row, but an internal player_id row.
+    cursor.fetchone.side_effect = [None, ("Some Starter",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/lineup", json={
+            "team_id": "8",
+            "optimized_swaps": [{"drop_player_id": "2216", "add_player_id": "4983", "slot": "FLEX"}],
+        })
+
+    assert response.status_code == 422
+    assert "internal Sleeper id" in response.json()["detail"]
+    mock_connection.assert_not_called()
+
+
+def test_trigger_lineup_swap_rejects_the_real_stafford_bech_collision(client):
+    """The overlap case: 12483 is Stafford's espn_id AND Bech's internal player_id. A swap
+    meaning Bech would pass the worker's roster check if Stafford were rostered, so with the
+    name supplied the gateway must reject it rather than bench/start the wrong player."""
+    cursor = MagicMock()
+    # drop 4046 resolves cleanly as an espn_id; add 12483 lives in both namespaces.
+    cursor.fetchone.side_effect = [("Some Starter",), None, ("Matthew Stafford",), ("Jack Bech",)]
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection") as mock_connection:
+        response = client.post("/v1/trigger/lineup", json={
+            "team_id": "8",
+            "optimized_swaps": [{
+                "drop_player_id": "4046", "drop_player_name": "Some Starter",
+                "add_player_id": "12483", "add_player_name": "Jack Bech", "slot": "WR2",
+            }],
+        })
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "internal Sleeper id" in detail
+    assert "Matthew Stafford" in detail
+    mock_connection.assert_not_called()
+
+
+def test_trigger_lineup_swap_allows_the_colliding_id_when_the_name_is_the_espn_player(client):
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Some Starter",), None, ("Matthew Stafford",), ("Jack Bech",)]
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
+        response = client.post("/v1/trigger/lineup", json={
+            "team_id": "8",
+            "optimized_swaps": [{
+                "drop_player_id": "4046", "drop_player_name": "Some Starter",
+                "add_player_id": "12483", "add_player_name": "Matthew Stafford", "slot": "QB",
+            }],
+        })
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
+def test_trigger_lineup_swap_allows_unnamed_espn_ids_from_the_web_ui(client):
+    """The web UI's lineup editor sends ESPN ids without names; those must keep working."""
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Some Starter",), None, ("Some Back",), None]
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection):
+        response = client.post("/v1/trigger/lineup", json={
+            "team_id": "8",
+            "optimized_swaps": [{"drop_player_id": "4046", "add_player_id": "4983", "slot": "FLEX"}],
+        })
+
+    assert response.status_code == 202
+    mock_channel.basic_publish.assert_called_once()
+
+
 def test_trigger_lineup_swap_records_bot_decision_per_swap(client):
     """CORE-17 (#35): each swap in the payload carries its own decision_inputs (VORP for
     the added/dropped player), so a multi-swap request must produce one bot_decisions row
