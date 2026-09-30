@@ -11,10 +11,10 @@ def _mock_waiver_strategy_calls(monkeypatch, moves):
     from src.services import waiver_service
 
     monkeypatch.setattr(
-        waiver_service.waiver_strategy, "load_bench_by_position", lambda cur, team_id, season, week: {}
+        waiver_service.waiver_strategy, "load_bench_by_position", lambda cur, team_id, season, week: {"RB": [{"player_id": "rb_bench", "vorp_score": 2.0}]}
     )
     monkeypatch.setattr(
-        waiver_service.waiver_strategy, "load_best_free_agent_by_position", lambda cur, season, week: {}
+        waiver_service.waiver_strategy, "load_best_free_agent_by_position", lambda cur, season, week: {"RB": {"player_id": "rb_fa", "vorp_score": 8.0}}
     )
     monkeypatch.setattr(
         waiver_service.waiver_strategy, "propose_waiver_moves", lambda bench, free_agents, margin: moves
@@ -54,6 +54,8 @@ def test_get_waiver_recommendations_success(client, monkeypatch):
     assert rec["free_agent"]["name"] == "FA RB"
     assert rec["bench_player"]["injury_status"] == "Out"
     assert rec["rumor_sentiment"] is None
+    assert body["source_mode"] == "target_week"
+    assert body["source_weeks"] == [3]
 
 
 def test_get_waiver_recommendations_db_failure_returns_500(client):
@@ -72,3 +74,14 @@ def test_get_waiver_recommendations_requires_season_and_week(client):
     response = client.get("/v1/waiver/recommendations")
 
     assert response.status_code == 422
+
+
+def test_get_waiver_recommendations_returns_503_when_inputs_unavailable(client):
+    from src.services import waiver_service
+
+    error = waiver_service.WaiverInputsUnavailableError("no usable weekly_stats.vorp_score for Season 2026 Week 1")
+    with patch("src.api.waiver.compute_waiver_recommendations", side_effect=error):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=1")
+
+    assert response.status_code == 503
+    assert "no usable weekly_stats.vorp_score" in response.json()["detail"]
