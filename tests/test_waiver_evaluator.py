@@ -279,3 +279,125 @@ def test_main_exits_zero_when_no_moves_are_worth_making():
     with patch("src.optimization.waiver_evaluator.run_weekly_waivers_live", return_value=[]) as mock_run:
         assert we.main(WAIVER_ARGV) == 0
     mock_run.assert_called_once_with("7", 2026, 5)
+
+
+# ---------------------------------------------------------------------------
+# #191: the weekly waiver CronJob retries (in-process, and pod-level under restartPolicy:
+# Never) without ever queueing a claim twice. End to end through main() and the real
+# trigger client, against a fake /v1/trigger/waiver that dedupes on idempotency_key the
+# way the gateway does.
+# ---------------------------------------------------------------------------
+
+import json
+
+import requests
+
+CLAIM_1 = {
+    "player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC",
+    "decision_inputs": {"add_player_vorp_score": 5.0, "drop_player_vorp_score": 1.0, "season": 2026, "week": 5},
+}
+CLAIM_2 = {
+    "player_id": "e-5050", "drop_player_id": "e-8888", "name": "Other Receiver", "team": "BUF",
+    "decision_inputs": {"add_player_vorp_score": 4.0, "drop_player_vorp_score": 0.5, "season": 2026, "week": 5},
+}
+
+
+def _response(status_code, body):
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = json.dumps(body).encode()
+    response.url = "http://gateway/v1/trigger/waiver"
+    return response
+
+
+class _FakeWaiverGateway:
+    """Queues each idempotency key once; a repeat is 202 "duplicate". `failures` maps a
+    player_id to the exceptions/status codes to serve before that claim succeeds."""
+
+    def __init__(self, failures=None):
+        self.failures = {k: list(v) for k, v in (failures or {}).items()}
+        self.queued = []
+        self.posts = []
+
+    def post(self, url, json, headers, timeout):
+        self.posts.append(json)
+        pending = self.failures.get(json["player_id"])
+        if pending:
+            failure = pending.pop(0)
+            if isinstance(failure, Exception):
+                raise failure
+            return _response(failure, {"detail": "failed"})
+        key = json["idempotency_key"]
+        if key in self.queued:
+            return _response(202, {"status": "duplicate"})
+        self.queued.append(key)
+        return _response(202, {"status": "accepted"})
+
+
+def _run_main(gateway, claims=(CLAIM_1, CLAIM_2)):
+    pools = ({"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}, {"RB": {"player_id": "4046", "vorp_score": 5.0}})
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=pools), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=[{}] * len(claims)), \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[dict(c) for c in claims]), \
+         patch("src.trigger_client.time.sleep") as mock_sleep, \
+         patch("src.trigger_client.requests.post", side_effect=gateway.post):
+        return we.main(WAIVER_ARGV), mock_sleep
+
+
+KEY_1 = we.waiver_idempotency_key("7", CLAIM_1)
+KEY_2 = we.waiver_idempotency_key("7", CLAIM_2)
+
+
+def test_main_survives_a_refused_connection_and_queues_each_claim_once():
+    """An API rollout refusing the first connection (what failed the 2026-09-30 lineup run)
+    is retried in-process under the same key: the Job succeeds, each claim queued once."""
+    gateway = _FakeWaiverGateway(failures={"e-4046": [requests.ConnectionError("Connection refused")]})
+
+    exit_code, mock_sleep = _run_main(gateway)
+
+    assert exit_code == 0
+    assert gateway.queued == [KEY_1, KEY_2]
+    assert [p["idempotency_key"] for p in gateway.posts] == [KEY_1, KEY_1, KEY_2]
+    mock_sleep.assert_called_once()
+
+
+def test_a_pod_retry_after_claim_2_fails_queues_only_claim_2():
+    """Claims publish one at a time: claim 1 is queued, then claim 2 exhausts its retries
+    and the pod fails. The Job's next pod re-runs everything - claim 1 must come back
+    "duplicate" and only claim 2 is queued."""
+    gateway = _FakeWaiverGateway(failures={"e-5050": [503] * 6})
+
+    with pytest.raises(requests.HTTPError):
+        _run_main(gateway)
+    assert gateway.queued == [KEY_1]
+
+    exit_code, _ = _run_main(gateway)
+
+    assert exit_code == 0
+    assert gateway.queued == [KEY_1, KEY_2]
+    assert [p["idempotency_key"] for p in gateway.posts[-2:]] == [KEY_1, KEY_2]
+
+
+def test_a_4xx_is_not_retried():
+    """A 4xx (the #187 namespace guard's 422, a bad API key) gets the same answer every
+    time: fail the run at once rather than burn the retry budget."""
+    gateway = _FakeWaiverGateway(failures={"e-4046": [422]})
+
+    with pytest.raises(requests.HTTPError):
+        _run_main(gateway)
+
+    assert len(gateway.posts) == 1
+    assert gateway.queued == []
+
+
+def test_main_exits_nonzero_on_insufficient_input_without_posting(caplog):
+    """#178 follow-up: missing target-week inputs still fail the Job (every pod retry
+    fails the same way) and never reach the gateway."""
+    gateway = _FakeWaiverGateway()
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs",
+               side_effect=we.InsufficientWaiverInputError("no free-agent rows")), \
+         patch("src.trigger_client.requests.post", side_effect=gateway.post):
+        assert we.main(WAIVER_ARGV) == 1
+    assert gateway.posts == []

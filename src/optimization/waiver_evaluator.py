@@ -169,7 +169,9 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
 def main(argv=None) -> int:
     """CronJob entrypoint: 0 when claims were evaluated (published or none worth making),
     1 when the target week's inputs are missing, so the Job fails instead of looking
-    healthy."""
+    healthy. A publish that fails after its in-process retries (or on a 4xx) propagates,
+    exiting nonzero, so the CronJob's pod retry re-runs every claim: already-queued ones
+    come back "duplicate" under their week-scoped keys (#191)."""
     parser = argparse.ArgumentParser(description="Evaluate and publish this week's live waiver claims.")
     parser.add_argument("--team-id", required=True)
     parser.add_argument("--season", required=True, type=int)
