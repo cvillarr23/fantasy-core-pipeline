@@ -1,14 +1,21 @@
 """
 Weekly lineup ILP solver (CORE-06).
 
-Pipeline: load roster pool (CORE-05 vorp_score as objective weight) -> solve ILP ->
-diff against current ESPN-synced starters -> publish swaps via the FastAPI
+Pipeline: load pregame roster pool (CORE-05 vorp_score as objective weight) -> solve ILP
+-> diff against current ESPN-synced starters -> publish swaps via the FastAPI
 /trigger/lineup endpoint (optimization -> api -> mq, per ARCHITECTURE.md).
+
+The scheduled run evaluates an *upcoming* week (#178), so it can't require that week to
+have been played. See load_pregame_roster_pool for the source order and season boundary.
+Exit codes: 0 = a real decision was made (swaps published, or lineup already optimal);
+nonzero = missing/insufficient input, so the CronJob's Job fails and alerts
+(fantasy-infra#97) instead of looking healthy.
 """
 import argparse
 import json
 import logging
 import os
+import sys
 from datetime import datetime
 
 import nflreadpy as nfl
@@ -16,6 +23,7 @@ import pulp
 from opentelemetry import trace
 
 from src.database import get_db_connection
+from src.ingestion.metrics_extractor import normalize_team
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import post_trigger
 
@@ -38,6 +46,18 @@ DEFAULT_LINEUP_SLOT_COUNTS = {
     "K": 1,
     "RB/WR/TE": 1,
 }
+# Sleeper projections (sync_projections, the only scheduled vorp_score source) cover
+# QB/RB/WR/TE only, and sync_kicker_dst is free-agent-only, so rostered K/D-ST normally
+# have no weekly_stats metrics at all. When no rostered player has data for one of these
+# slots, its current starter is held rather than failing the whole run.
+HOLDABLE_WITHOUT_METRICS = {"K", "D/ST"}
+PREGAME_WINDOW_WEEKS = 3
+METRIC_SOURCE = "weekly_stats.vorp_score"
+
+
+class InsufficientLineupInputError(Exception):
+    """The optimizer can't make a defensible decision from the data available - distinct
+    from "lineup already optimal" (a valid zero-swap result)."""
 
 
 def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
@@ -64,6 +84,145 @@ def load_roster_pool(cursor, team_id: str, season: int, week: int) -> list:
         }
         for pid, name, pos, vorp_score, defense_matchup_multiplier in cursor.fetchall()
     ]
+
+
+def load_teams_playing(season: int, week: int) -> set:
+    """Team abbreviations (normalized) with a game in season/week, from nflverse's
+    schedule - needed to spot bye weeks when the pool comes from prior weeks' rows."""
+    df = nfl.load_schedules(season)
+    games = df.filter(df["week"] == week)
+    return {normalize_team(t) for t in games["home_team"].to_list() + games["away_team"].to_list()}
+
+
+def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int,
+                             window: int = PREGAME_WINDOW_WEEKS) -> tuple:
+    """Roster pool for a week that hasn't been played yet. Returns
+    (pool, vorp_by_player, source).
+
+    Source order, always within `season` only - week 1 never reads last season's rows:
+      1. target_week's own vorp_score, if any rostered player has one. These are pregame
+         Sleeper projections (draft-prep-refresher: sync_projections -> vorp_matrix), and
+         a player without a row is on bye, same as load_roster_pool.
+      2. Otherwise, each player's mean vorp_score over the up-to-`window` prior weeks of
+         the same season. Byes come from the nflverse schedule, since prior-week rows say
+         nothing about the target week. The newest usable week must be target_week - 1,
+         or the data is stale.
+
+    Raises InsufficientLineupInputError when neither source is usable."""
+    cursor.execute(
+        """
+        SELECT p.player_id, p.name, p.position, p.team, p.injury_status
+        FROM league_rosters r
+        JOIN players p ON p.player_id = r.player_id
+        WHERE r.team_id = %s;
+        """,
+        (team_id,),
+    )
+    roster = cursor.fetchall()
+    if not roster:
+        raise InsufficientLineupInputError(f"no league_rosters rows for Team {team_id}")
+
+    first_week = max(1, target_week - window)
+    cursor.execute(
+        """
+        SELECT s.player_id, s.week, s.vorp_score, s.defense_matchup_multiplier
+        FROM weekly_stats s
+        JOIN league_rosters r ON r.player_id = s.player_id
+        WHERE r.team_id = %s AND s.season = %s AND s.week BETWEEN %s AND %s
+          AND s.vorp_score IS NOT NULL;
+        """,
+        (team_id, season, first_week, target_week),
+    )
+    metrics = cursor.fetchall()
+
+    target_rows = [row for row in metrics if row[1] == target_week]
+    if target_rows:
+        vorp_by_player = {pid: vorp for pid, _, vorp, _ in target_rows}
+        multiplier_by_player = {pid: mult for pid, _, _, mult in target_rows}
+        mode, weeks = "target_week", [target_week]
+        teams_playing = None
+    else:
+        prior_rows = [row for row in metrics if row[1] < target_week]
+        if not prior_rows:
+            if target_week == 1:
+                reason = (
+                    f"no usable {METRIC_SOURCE} for Season {season} Week 1: no pregame "
+                    "projections for Week 1, and prior seasons are deliberately not used"
+                )
+            else:
+                reason = (
+                    f"no usable {METRIC_SOURCE} for Season {season} Week {target_week} "
+                    f"or Weeks {first_week}-{target_week - 1}"
+                )
+            raise InsufficientLineupInputError(reason)
+        weeks = sorted({row[1] for row in prior_rows})
+        if weeks[-1] < target_week - 1:
+            raise InsufficientLineupInputError(
+                f"stale {METRIC_SOURCE}: newest usable week is Season {season} Week {weeks[-1]}, "
+                f"expected Week {target_week - 1} before evaluating Week {target_week}"
+            )
+        values = {}
+        for pid, _, vorp, _ in prior_rows:
+            values.setdefault(pid, []).append(vorp)
+        vorp_by_player = {pid: sum(v) / len(v) for pid, v in values.items()}
+        # vorp_matrix only sets defense_matchup_multiplier for Week 1 (#93), so a prior
+        # week's value says nothing about this week's opponent.
+        multiplier_by_player = {}
+        mode = "rolling_prior_weeks"
+        try:
+            teams_playing = {normalize_team(t) for t in load_teams_playing(season, target_week)}
+        except Exception as exc:
+            raise InsufficientLineupInputError(
+                f"could not load the nflverse schedule for Season {season} Week {target_week} "
+                f"to exclude bye-week players: {exc}"
+            ) from exc
+
+    pool = []
+    for pid, name, position, team, injury_status in roster:
+        if pid not in vorp_by_player or injury_status == "Out":
+            continue
+        if teams_playing is not None and normalize_team(team) not in teams_playing:
+            continue
+        pool.append({
+            "player_id": pid, "name": name, "position": position,
+            "vorp_score": vorp_by_player[pid],
+            "defense_matchup_multiplier": multiplier_by_player.get(pid) or 1.0,
+        })
+    if not pool:
+        raise InsufficientLineupInputError(
+            f"no eligible players for Team {team_id} after excluding Out and bye-week players "
+            f"({mode}, Season {season} Weeks {weeks})"
+        )
+
+    source = {"metric_source": METRIC_SOURCE, "source_mode": mode, "source_season": season, "source_weeks": weeks}
+    return pool, vorp_by_player, source
+
+
+def hold_slots_without_metrics(lineup_slot_counts: dict, roster_pool: list) -> tuple:
+    """Drops HOLDABLE_WITHOUT_METRICS slots no pool player can fill. Returns
+    (slot counts to solve, sorted held slot names)."""
+    pool_positions = {p["position"] for p in roster_pool}
+    held = sorted(
+        slot for slot, count in lineup_slot_counts.items()
+        if slot in HOLDABLE_WITHOUT_METRICS and int(count) > 0 and slot not in pool_positions
+    )
+    return {slot: count for slot, count in lineup_slot_counts.items() if slot not in held}, held
+
+
+def describe_unfilled_slots(roster_pool: list, lineup_slot_counts: dict) -> str:
+    """Human-readable slot demand vs. pool supply, for an infeasible-solve error."""
+    starter_slots = {
+        slot: int(count) for slot, count in lineup_slot_counts.items()
+        if slot not in BENCH_AND_IR_SLOT_NAMES and int(count) > 0
+    }
+    supply = {}
+    for player in roster_pool:
+        supply[player["position"]] = supply.get(player["position"], 0) + 1
+    short = [
+        slot for slot, count in starter_slots.items()
+        if sum(supply.get(pos, 0) for pos in FLEX_SLOT_ELIGIBLE_POSITIONS.get(slot, (slot,))) < count
+    ]
+    return f"slots {starter_slots} vs players with metrics by position {supply}; short: {short or 'combined FLEX demand'}"
 
 
 def load_lineup_slot_counts(cursor, season: int) -> dict:
@@ -259,33 +418,70 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
     logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane.")
 
 
-def optimize_weekly_lineup(team_id: str, season: int, week: int) -> int:
+def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
+    """Pregame lineup decision for team/season/week, without publishing: pool ->
+    held slots -> ILP -> diff. Shared by the weekly optimizer, the matchup page's swap
+    badge, and rumor bench_watch actions, so all three see the same upcoming-week data.
+    Returns {"swaps", "optimal_starters", "roster_pool", "source"}; raises
+    InsufficientLineupInputError when there isn't enough data to decide."""
+    with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
+        roster_pool, vorp_by_player, source = load_pregame_roster_pool(cursor, team_id, season, week)
+        lineup_slot_counts, held_slots = hold_slots_without_metrics(
+            load_lineup_slot_counts(cursor, season), roster_pool,
+        )
+        source["held_slots"] = held_slots
+    logger.info(
+        f"Evaluating Team {team_id} Season {season} Week {week} from {METRIC_SOURCE} "
+        f"({source['source_mode']}, Season {season} Week(s) {source['source_weeks']}); "
+        f"{len(roster_pool)} eligible player(s); held slots without metrics: {held_slots or 'none'}."
+    )
+    span = trace.get_current_span()
+    span.set_attribute("source_mode", source["source_mode"])
+    span.set_attribute("source_weeks", source["source_weeks"])
+    span.set_attribute("held_slots", held_slots)
+
+    with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
+        optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
+        if not optimal_starters:
+            raise InsufficientLineupInputError(
+                "could not fill the starting lineup from players with usable metrics: "
+                + describe_unfilled_slots(roster_pool, lineup_slot_counts)
+            )
+
+    with tracer.start_as_current_span("lineup_solver.load_current_starters"):
+        current_starters = load_current_starters(cursor, team_id, season, week)
+    # Held slots' starters stay put, so they must not appear as droppable.
+    current_starters = {
+        pid: dict(info, vorp_score=vorp_by_player.get(pid, info["vorp_score"]))
+        for pid, info in current_starters.items()
+        if info["position"] not in held_slots
+    }
+    with tracer.start_as_current_span("lineup_solver.compute_lineup_swaps"):
+        swaps = compute_lineup_swaps(optimal_starters, current_starters)
+    for swap in swaps:
+        # season/week are lifted into bot_decisions' own columns by the trigger route.
+        swap["decision_inputs"].update(source, season=season, week=week)
+    return {"swaps": swaps, "optimal_starters": optimal_starters, "roster_pool": roster_pool, "source": source}
+
+
+def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool = False) -> int:
+    """Returns the number of swaps (0 = lineup already optimal). Raises
+    InsufficientLineupInputError when there isn't enough data to decide."""
     logger.info(f"Assembling mathematical optimization model for Team {team_id} Season {season} Week {week}...")
 
     with tracer.start_as_current_span("lineup_solver.run", attributes={"team_id": team_id, "season": season, "week": week}):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
-                    roster_pool = load_roster_pool(cursor, team_id, season, week)
-                    if not roster_pool:
-                        logger.error(f"No active roster metrics found for Team {team_id} Season {season} Week {week}.")
-                        return 0
-                    lineup_slot_counts = load_lineup_slot_counts(cursor, season)
+                evaluation = evaluate_lineup(cursor, team_id, season, week)
 
-                with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
-                    optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
-                    if not optimal_starters:
-                        return 0
-
-                with tracer.start_as_current_span("lineup_solver.load_current_starters"):
-                    current_starters = load_current_starters(cursor, team_id, season, week)
-
-        with tracer.start_as_current_span("lineup_solver.compute_lineup_swaps"):
-            swaps = compute_lineup_swaps(optimal_starters, current_starters)
+        swaps = evaluation["swaps"]
         logger.info(
             f"Optimal lineup for Team {team_id} Season {season} Week {week}: "
-            f"{[p['name'] for p in optimal_starters]}"
+            f"{[p['name'] for p in evaluation['optimal_starters']]}"
         )
+        if dry_run:
+            logger.info(f"Dry run: not publishing {len(swaps)} swap(s): {swaps}")
+            return len(swaps)
         with tracer.start_as_current_span("lineup_solver.publish_lineup_swaps"):
             publish_lineup_swaps(team_id, swaps)
         return len(swaps)
@@ -303,18 +499,26 @@ def resolve_default_week() -> int:
         return fallback_week
 
 
-if __name__ == "__main__":
-    configure_tracing("lineup-solver")
-
-    default_season = int(os.getenv("CURRENT_YEAR", datetime.now().year))
-
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Solve the optimal weekly lineup for a team via ILP.")
     parser.add_argument("--team-id", type=str, default=os.getenv("ESPN_TEAM_ID"))
-    parser.add_argument("--season", type=int, default=default_season)
-    parser.add_argument("--week", type=int, default=resolve_default_week())
-    args = parser.parse_args()
+    parser.add_argument("--season", type=int, default=int(os.getenv("CURRENT_YEAR", datetime.now().year)))
+    parser.add_argument("--week", type=int, default=None, help="target week; defaults to nflreadpy's current week")
+    parser.add_argument("--dry-run", action="store_true", help="compute and log swaps without publishing them")
+    args = parser.parse_args(argv)
 
     if not args.team_id:
         parser.error("--team-id is required (or set the ESPN_TEAM_ID env var)")
+    week = args.week if args.week is not None else resolve_default_week()
 
-    optimize_weekly_lineup(team_id=args.team_id, season=args.season, week=args.week)
+    try:
+        optimize_weekly_lineup(team_id=args.team_id, season=args.season, week=week, dry_run=args.dry_run)
+    except InsufficientLineupInputError as exc:
+        logger.error(f"Lineup optimizer cannot evaluate Team {args.team_id} Season {args.season} Week {week}: {exc}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    configure_tracing("lineup-solver")
+    sys.exit(main())

@@ -10,7 +10,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.services.waiver_service import compute_waiver_recommendations
+from src.services.waiver_service import WaiverInputsUnavailableError, compute_waiver_recommendations
 
 logger = logging.getLogger("WaiverRoutes")
 waiver_router = APIRouter()
@@ -38,12 +38,17 @@ class WaiverRecommendationsResponse(BaseModel):
     season: int
     week: int
     recommendations: List[WaiverRecommendation]
+    # "target_week", or "rolling_prior_weeks" before the week's projections land (#185).
+    source_mode: Optional[str] = None
+    source_weeks: Optional[List[int]] = None
 
 
 @waiver_router.get("/recommendations", response_model=WaiverRecommendationsResponse)
 def get_waiver_recommendations(season: int, week: int):
     try:
         return compute_waiver_recommendations(season, week)
+    except WaiverInputsUnavailableError as e:
+        raise HTTPException(status_code=503, detail=f"Waiver recommendations unavailable: {e}")
     except Exception as e:
         logger.error(f"Failed to compute waiver recommendations for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to compute waiver recommendations: {str(e)}")
