@@ -1029,10 +1029,37 @@ def test_record_bot_decision_failure_is_logged_as_error_and_marked_on_the_span(c
     assert "t-2" in record.getMessage()
     assert record.exc_info is not None
     [span] = exporter.get_finished_spans()
+    # Semantic-convention exception event (type + stack), so Tempo/Grafana index it...
     [event] = span.events
-    assert event.name == "bot_decision.write_failed"
+    assert event.name == "exception"
+    assert event.attributes["exception.type"] == "Exception"
+    assert "bot_decisions" in event.attributes["exception.message"]
     assert event.attributes["bot_name"] == "lineup_bot"
     assert event.attributes["tracking_id"] == "t-2"
+    # ...plus a flat attribute to query the gap by name.
+    assert span.attributes["bot_decision.write_failed"] is True
+
+
+def test_record_bot_decision_stays_fail_open_when_telemetry_itself_raises():
+    """Runs after the AMQP publish has committed: if the telemetry calls in the failure
+    path raised, the route would 500 an already-published action and a retry would
+    publish it twice. The failure report is best-effort; the helper must never raise."""
+    @contextmanager
+    def _broken_db_cursor():
+        raise Exception("db down")
+        yield  # pragma: no cover
+
+    broken_span = MagicMock()
+    # Keeps src/telemetry.py's TraceIdLogFilter (which also calls get_current_span) working.
+    broken_span.get_span_context.return_value = routes.trace.INVALID_SPAN_CONTEXT
+    broken_span.record_exception.side_effect = RuntimeError("exporter blew up")
+    broken_span.set_attribute.side_effect = RuntimeError("exporter blew up")
+
+    with patch("src.api.routes.get_db_cursor", _broken_db_cursor), \
+         patch.object(routes.trace, "get_current_span", return_value=broken_span):
+        routes._record_bot_decision(
+            tracking_id="t-3", bot_name="waiver_sniper", action="waiver_claim", team_id="7",
+        )
 
 
 def test_trigger_draft_pick_records_bot_decision(client):

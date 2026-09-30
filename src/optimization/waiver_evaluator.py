@@ -120,10 +120,16 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
                 moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
                 resolved = resolve_live_waiver_moves(cursor, moves, season, week)
 
-        if not resolved:
+        if not moves:
             logger.info(
-                f"No waiver moves proposed for Team {team_id} Season {season} Week {week} "
-                f"({len(moves)} candidate move(s) before espn_id resolution); nothing to publish."
+                f"No waiver moves proposed for Team {team_id} Season {season} Week {week}; nothing to publish."
+            )
+        elif not resolved:
+            # Worthwhile claims exist but none has an ESPN identity yet - a crosswalk gap
+            # blocking real moves, not "nothing worth claiming".
+            logger.warning(
+                f"All {len(moves)} proposed waiver move(s) for Team {team_id} Season {season} Week {week} "
+                f"were dropped: no espn_id resolved; nothing published."
             )
         for target in resolved:
             publish_waiver_claim(team_id, target, core_api_base_url)
