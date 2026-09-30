@@ -109,10 +109,14 @@
   exists in the table.
 - Players with `injury_status = 'Out'` are excluded from the optimizer's decision
   variables entirely; `Questionable`/`Doubtful` remain eligible to start (real judgment
-  calls, not hard exclusions). In `load_roster_pool` (exact-week, used by backtests,
-  `matchup_service`, `rumor_action_service`) a bye-week player simply has no `weekly_stats`
-  row for that week, so the roster/stats join drops them.
-- The scheduled run (`optimize_weekly_lineup`) evaluates an **upcoming** week (#178) via
+  calls, not hard exclusions). In `load_roster_pool` (exact-week, now used only by the
+  backtests) a bye-week player simply has no `weekly_stats` row for that week, so the
+  roster/stats join drops them.
+- Live lineup decisions evaluate an **upcoming** week (#178) through one shared, non-publishing
+  `evaluate_lineup()` (pregame pool → held slots → ILP → diff): the weekly
+  `optimize_weekly_lineup`, `matchup_service.suggest_lineup_swaps` (display-only: on
+  `InsufficientLineupInputError` it logs and shows no badges), and `rumor_action_service`'s
+  bench_watch path (lets the error raise, like the optimizer). It uses
   `load_pregame_roster_pool`, not `load_roster_pool`. Source order, always within the
   target season: (1) the target week's own `vorp_score` if any rostered player has one
   (pregame Sleeper projections written by `fantasy-draft-prep-refresher`, 05:00 CT daily);
@@ -131,6 +135,13 @@
   schedule unavailable in mode (2), infeasible solve), so the CronJob's Job fails and
   alerts (fantasy-infra#97). Publish/HTTP errors still raise. `--dry-run` computes and logs
   swaps without calling `/v1/trigger/lineup`.
+- `waiver_evaluator.load_live_waiver_inputs` (the waiver CronJob and rumor boost_waiver path)
+  keeps `waiver_strategy`'s exact-week loaders, which are shared with backtesting, but raises
+  `InsufficientWaiverInputError` when the bench or free-agent side is empty (target-week
+  projections not landed yet); `waiver_evaluator.main()` then exits 1. Both Tuesday CronJobs
+  (lineup, waivers) are scheduled after the 05:00 CT refresher in fantasy-infra, so the
+  target week's projections normally exist. `waiver_service` (the read-only
+  recommendations page) still returns an empty list in that pre-refresh window.
 - `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week

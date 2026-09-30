@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from src.optimization.lineup_solver import InsufficientLineupInputError
 from src.services import matchup_service
 
 
@@ -223,33 +224,36 @@ def test_apply_rumor_signal_sets_fields_for_known_players_only():
 
 
 def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
+    """Uses lineup_solver's pregame evaluation (#178 follow-up) - the exact-week pool it
+    used before is empty until the target week's projections land, so the badge vanished."""
     cursor = MagicMock()
+    evaluation = {
+        "swaps": [{"drop_player_id": "drop1", "add_player_id": "add1", "slot": "RB", "matchup_multiplier": 1.0}],
+        "roster_pool": [{"player_id": "add1", "name": "Better Back", "position": "RB", "vorp_score": 10.0}],
+        "optimal_starters": [], "source": {},
+    }
 
     with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
-         patch("src.services.matchup_service.load_roster_pool") as mock_pool, \
-         patch("src.services.matchup_service.load_lineup_slot_counts") as mock_slots, \
-         patch("src.services.matchup_service.build_and_solve_lineup") as mock_solve, \
-         patch("src.services.matchup_service.load_current_starters") as mock_current, \
-         patch("src.services.matchup_service.compute_lineup_swaps") as mock_swaps, \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation) as mock_evaluate, \
          patch("src.optimization.lineup_solver.publish_lineup_swaps") as mock_publish:
-        mock_pool.return_value = [
-            {"player_id": "add1", "name": "Better Back", "position": "RB", "vorp_score": 10.0},
-        ]
-        mock_slots.return_value = {"RB": 2}
-        mock_solve.return_value = [{"player_id": "add1", "name": "Better Back", "position": "RB"}]
-        mock_current.return_value = {"drop1": {"position": "RB", "slot_position": "RB"}}
-        mock_swaps.return_value = [
-            {"drop_player_id": "drop1", "add_player_id": "add1", "slot": "RB", "matchup_multiplier": 1.0},
-        ]
-
         result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
 
     assert result == {"drop1": {"bench_for": "Better Back", "add_player_id": "add1"}}
     mock_publish.assert_not_called()
-    # load_current_starters' real signature is (cursor, team_id, season, week) - live
-    # /v1/matchup 500'd with "missing 2 required positional arguments" because this call
-    # site only passed (cursor, team_id) before this assertion existed to catch it.
-    mock_current.assert_called_once_with(cursor, "team1", 2026, 2)
+    mock_evaluate.assert_called_once_with(cursor, "team1", 2026, 2)
+
+
+def test_suggest_lineup_swaps_shows_no_badges_on_insufficient_input(caplog):
+    """Display-only: missing lineup inputs must not 500 the whole matchup page."""
+    cursor = MagicMock()
+    error = InsufficientLineupInputError("no usable weekly_stats.vorp_score")
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", side_effect=error):
+        result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
+
+    assert result == {}
+    assert "no usable weekly_stats.vorp_score" in caplog.text
 
 
 def _make_box_score(home_team, away_team, home_score=100.0, away_score=90.0,

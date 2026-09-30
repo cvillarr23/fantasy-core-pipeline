@@ -1,5 +1,7 @@
+import pytest
 from unittest.mock import MagicMock, patch
 
+from src.optimization import lineup_solver
 from src.services import rumor_action_service as ras
 
 
@@ -83,11 +85,8 @@ def test_qualifying_bench_watch_signal_publishes_matching_swap():
 
     with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
          patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
-         patch("src.services.rumor_action_service.lineup_solver.load_roster_pool"), \
-         patch("src.services.rumor_action_service.lineup_solver.load_lineup_slot_counts"), \
-         patch("src.services.rumor_action_service.lineup_solver.build_and_solve_lineup"), \
-         patch("src.services.rumor_action_service.lineup_solver.load_current_starters"), \
-         patch("src.services.rumor_action_service.lineup_solver.compute_lineup_swaps", return_value=[swap]), \
+         patch("src.services.rumor_action_service.lineup_solver.evaluate_lineup",
+               return_value={"swaps": [swap], "roster_pool": [], "optimal_starters": [], "source": {}}), \
          patch("src.services.rumor_action_service.lineup_solver.publish_lineup_swaps") as mock_publish:
         result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
 
@@ -101,6 +100,25 @@ def test_qualifying_bench_watch_signal_publishes_matching_swap():
         "rumor_confidence": 0.8,
     }
     assert result["watermark"] == 20
+
+
+def test_bench_watch_fails_loudly_on_insufficient_lineup_input():
+    """Same contract as the weekly optimizer (#178): missing lineup inputs raise (the
+    endpoint 500s, the CronJob fails) instead of reporting zero swaps."""
+    redis_client = _fake_redis()
+    signals_cursor = MagicMock()
+    signals_cursor.fetchall.return_value = [(21, "9001", "negative", 0.8, ras.BENCH_WATCH_ACTION)]
+    error = lineup_solver.InsufficientLineupInputError("stale weekly_stats.vorp_score")
+
+    with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
+         patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
+         patch("src.services.rumor_action_service.lineup_solver.evaluate_lineup", side_effect=error), \
+         patch("src.services.rumor_action_service.lineup_solver.publish_lineup_swaps") as mock_publish, \
+         pytest.raises(lineup_solver.InsufficientLineupInputError):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
+
+    mock_publish.assert_not_called()
+    assert redis_client.store[ras.WATERMARK_REDIS_KEY] == "21"
 
 
 def test_signal_below_threshold_is_never_published():

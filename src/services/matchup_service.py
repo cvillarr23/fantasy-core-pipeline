@@ -5,6 +5,7 @@ sync_league.py already builds - weekly_stats.actual_points is never populated by
 job (only the backtesting harness writes it), so real per-player scoring only exists on
 ESPN's side.
 """
+import logging
 import os
 import time
 
@@ -13,14 +14,13 @@ import requests
 from src.database import get_db_cursor
 from src.ingestion.sync_league import build_league
 from src.optimization.lineup_solver import (
-    build_and_solve_lineup,
-    compute_lineup_swaps,
-    load_current_starters,
-    load_lineup_slot_counts,
-    load_roster_pool,
+    InsufficientLineupInputError,
+    evaluate_lineup,
     resolve_default_week,
 )
 from src.services.roster_service import compute_roster_deficits
+
+logger = logging.getLogger("MatchupService")
 
 MATCHUP_CACHE_TTL_SECONDS = 60
 # (season, week) -> (cached_at_epoch_seconds, payload)
@@ -181,23 +181,24 @@ def _split_roster_starters_bench(players: list) -> tuple[list, list]:
 
 
 def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
-    """Read-only: reuses lineup_solver's pure functions to see what the optimizer would
-    start, but never calls publish_lineup_swaps - this is a display-only badge, not an
-    action. Returns {drop_player_id: {"bench_for": add_player_name}}."""
-    with get_db_cursor() as cursor:
-        roster_pool = load_roster_pool(cursor, team_id, season, week)
-        slot_counts = load_lineup_slot_counts(cursor, season)
-        optimal_starters = build_and_solve_lineup(roster_pool, slot_counts)
-        current_starters = load_current_starters(cursor, team_id, season, week)
+    """Read-only: reuses lineup_solver's pregame evaluation to see what the optimizer
+    would start, but never publishes - this is a display-only badge, not an action.
+    Missing lineup inputs mean no badges (logged), not a failed matchup page. Returns
+    {drop_player_id: {"bench_for": add_player_name, "add_player_id": ...}}."""
+    try:
+        with get_db_cursor() as cursor:
+            evaluation = evaluate_lineup(cursor, team_id, season, week)
+    except InsufficientLineupInputError as exc:
+        logger.warning(f"No lineup swap badges for Team {team_id} Season {season} Week {week}: {exc}")
+        return {}
 
-    swaps = compute_lineup_swaps(optimal_starters, current_starters)
-    names_by_id = {p["player_id"]: p["name"] for p in roster_pool}
+    names_by_id = {p["player_id"]: p["name"] for p in evaluation["roster_pool"]}
     return {
         swap["drop_player_id"]: {
             "bench_for": names_by_id[swap["add_player_id"]],
             "add_player_id": swap["add_player_id"],
         }
-        for swap in swaps
+        for swap in evaluation["swaps"]
     }
 
 

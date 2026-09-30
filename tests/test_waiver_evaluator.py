@@ -130,3 +130,65 @@ def test_run_weekly_waivers_live_wires_decision_logic_to_publish():
     mock_resolve.assert_called_once_with(expected_cursor, mock_propose.return_value, 2023, 5)
     mock_publish.assert_called_once_with("7", resolved_target, we.CORE_API_BASE_URL)
     assert result == [resolved_target]
+
+
+# ---------------------------------------------------------------------------
+# Missing target-week inputs (#178 follow-up): an empty bench/free-agent pool means the
+# target week's weekly_stats haven't landed, not "no waiver moves worth making".
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+def test_load_live_waiver_inputs_raises_when_no_free_agents_have_target_week_rows():
+    with patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position",
+               return_value={"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position", return_value={}), \
+         pytest.raises(we.InsufficientWaiverInputError) as exc:
+        we.load_live_waiver_inputs(MagicMock(), "7", 2026, 5)
+    assert "free-agent" in str(exc.value)
+    assert "Season 2026 Week 5" in str(exc.value)
+
+
+def test_load_live_waiver_inputs_raises_when_bench_has_no_target_week_rows():
+    with patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position", return_value={}), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position",
+               return_value={"RB": {"player_id": "4046", "vorp_score": 5.0}}), \
+         pytest.raises(we.InsufficientWaiverInputError) as exc:
+        we.load_live_waiver_inputs(MagicMock(), "7", 2026, 5)
+    assert "bench" in str(exc.value)
+
+
+def test_load_live_waiver_inputs_returns_both_pools():
+    bench = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
+    fa = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
+    with patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position", return_value=bench), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position", return_value=fa):
+        assert we.load_live_waiver_inputs(MagicMock(), "7", 2026, 5) == (bench, fa)
+
+
+def test_run_weekly_waivers_live_publishes_nothing_on_insufficient_input():
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs",
+               side_effect=we.InsufficientWaiverInputError("no free-agent rows")), \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish, \
+         pytest.raises(we.InsufficientWaiverInputError):
+        we.run_weekly_waivers_live("7", 2026, 5)
+    mock_publish.assert_not_called()
+
+
+WAIVER_ARGV = ["--team-id", "7", "--season", "2026", "--week", "5"]
+
+
+def test_main_exits_nonzero_with_reason_on_insufficient_input(caplog):
+    with patch("src.optimization.waiver_evaluator.run_weekly_waivers_live",
+               side_effect=we.InsufficientWaiverInputError("no free-agent rows")):
+        assert we.main(WAIVER_ARGV) == 1
+    assert "cannot evaluate Team 7 Season 2026 Week 5" in caplog.text
+    assert "no free-agent rows" in caplog.text
+
+
+def test_main_exits_zero_when_no_moves_are_worth_making():
+    with patch("src.optimization.waiver_evaluator.run_weekly_waivers_live", return_value=[]) as mock_run:
+        assert we.main(WAIVER_ARGV) == 0
+    mock_run.assert_called_once_with("7", 2026, 5)
