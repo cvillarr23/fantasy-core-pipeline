@@ -1390,6 +1390,28 @@ def _post_waiver(client, mock_connection, mock_redis, payload=WAIVER_KEYED_PAYLO
         return client.post("/v1/trigger/waiver", json=payload)
 
 
+def test_trigger_waiver_without_an_idempotency_key_never_touches_redis_or_the_ledger(client):
+    """The web UI's waiver claims carry no key: they must publish exactly as before #191,
+    with no Redis claim and no bot_decisions prior-claim lookup (repeat submits allowed)."""
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+    payload = {k: v for k, v in WAIVER_KEYED_PAYLOAD.items() if k != "idempotency_key"}
+
+    with patch("src.api.routes.pika.BlockingConnection", return_value=mock_connection), \
+         patch("src.api.routes._redis_client") as mock_redis_client, \
+         patch("src.api.routes.waiver_service.waiver_claim_already_recorded") as mock_lookup, \
+         patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_waiver_cursor())):
+        first = client.post("/v1/trigger/waiver", json=payload)
+        second = client.post("/v1/trigger/waiver", json=payload)
+
+    assert first.status_code == 202 and first.json()["status"] == "accepted"
+    assert second.status_code == 202 and second.json()["status"] == "accepted"
+    assert mock_channel.basic_publish.call_count == 2
+    mock_redis_client.assert_not_called()
+    mock_lookup.assert_not_called()
+
+
 def test_trigger_waiver_treats_a_claim_already_in_bot_decisions_as_duplicate(client):
     """Redis may not hold the key - the claim predates keys, or Redis lost it within the
     week - but bot_decisions durably records every published claim. Same team, week, add
