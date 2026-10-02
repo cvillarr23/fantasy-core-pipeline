@@ -479,12 +479,13 @@ def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = Non
     return f"lineup-{team_id}-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
 
 
-def publish_lineup_swaps(team_id: str, swaps: list) -> None:
+def publish_lineup_swaps(team_id: str, swaps: list) -> bool:
     """POSTs swaps to /v1/trigger/lineup, retrying transient failures (#189) under a stable
-    idempotency key. Raises once retries are exhausted or on a 4xx."""
+    idempotency key. Returns True for newly accepted swaps, False for no-op/duplicate.
+    Raises once retries are exhausted or on a 4xx."""
     if not swaps:
         logger.info(f"Lineup already optimal for Team {team_id}; nothing to publish.")
-        return
+        return False
 
     key = lineup_idempotency_key(team_id, swaps, job_name=os.getenv("JOB_NAME"))
     response = post_trigger_idempotent("lineup", {"team_id": team_id, "optimized_swaps": swaps}, key, timeout=10)
@@ -494,8 +495,9 @@ def publish_lineup_swaps(team_id: str, swaps: list) -> None:
         status = None
     if status == "duplicate":
         logger.info(f"Lineup swap(s) for Team {team_id} were already published under {key}; not re-enqueued.")
-        return
+        return False
     logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane (idempotency key {key}).")
+    return True
 
 
 def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:

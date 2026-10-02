@@ -509,3 +509,8 @@ CREATE INDEX IF NOT EXISTS idx_bot_decisions_bot_name_decided_at ON bot_decision
 CREATE INDEX IF NOT EXISTS idx_bot_decisions_tracking_id ON bot_decisions(tracking_id);
 """
 
+
+# Structured application-level run accounting (#140); existing writers can omit it.
+ADD_EXECUTION_LOG_OUTCOME_DETAILS_COLUMN = """
+ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS outcome_details JSONB;
+"""

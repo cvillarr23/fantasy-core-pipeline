@@ -32,7 +32,7 @@ def test_trigger_rumor_action_body_overrides_env_team_id(client, monkeypatch):
         response = client.post("/v1/trigger/rumor-action", json={"team_id": "99", "season": 2026, "week": 4})
 
     assert response.status_code == 200
-    mock_eval.assert_called_once_with("99", 2026, 4)
+    mock_eval.assert_called_once_with("99", 2026, 4, source="http")
 
 
 def test_trigger_rumor_action_missing_team_id_returns_422(client, monkeypatch):

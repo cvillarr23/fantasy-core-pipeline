@@ -1,6 +1,6 @@
 """
-Rumor-signal action trigger REST endpoint (#124), meant to be hit by a daily CronJob
-(fantasy-browser-worker#81, not built in this repo) rather than a human - mirrors
+Rumor-signal action trigger REST endpoint (#124). The daily CronJob invokes the
+shared service directly via python -m; this is the HTTP entrypoint. Mirrors
 src/api/trade.py's thin-controller-over-a-service pattern.
 """
 import logging
@@ -28,7 +28,7 @@ def trigger_rumor_action(payload: Optional[RumorActionTriggerRequest] = None):
     week = payload.week or resolve_default_week()
 
     try:
-        return rumor_action_service.evaluate_and_publish_rumor_actions(team_id, season, week)
+        return rumor_action_service.evaluate_and_publish_rumor_actions(team_id, season, week, source="http")
     except Exception as e:
         logger.error(f"Failed to evaluate/publish rumor actions: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to evaluate rumor actions: {str(e)}")
