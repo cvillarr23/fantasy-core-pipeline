@@ -194,7 +194,8 @@ the process exits zero. The public response shape is unchanged.
 Action acceptance means queued by the core API, not completed in ESPN. Lineup response
 lists retain their existing resolved-swap semantics; structured counts distinguish
 newly accepted versus duplicate swaps. A structured `rumor_action_outcome` log is emitted
-as a diagnostic fallback if the best-effort database write fails.
+for every invocation before the best-effort database write, so it remains searchable
+even when that write fails.
 
 The Grafana rule/dashboard/runbook are owned by fantasy-infra. The rule counts failures
 in a 26-hour window, so a later empty success cannot conceal lost work. It does not alert
