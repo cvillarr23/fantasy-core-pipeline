@@ -15,6 +15,7 @@ from src.models import (
     CREATE_LEAGUE_TEAMS_TABLE,
     CREATE_EXECUTION_LOG_TABLE,
     ADD_EXECUTION_LOG_BOT_NAME_COLUMN,
+    ADD_EXECUTION_LOG_OUTCOME_DETAILS_COLUMN,
     ADD_EXECUTION_LOG_TRACE_ID_COLUMN,
     ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS,
     ADD_EXECUTION_LOG_TRADE_CONTEXT_COLUMNS,
@@ -92,6 +93,7 @@ def run_migrations():
             logger.info("Validating 'execution_log' worker telemetry table...")
             cursor.execute(CREATE_EXECUTION_LOG_TABLE)
             cursor.execute(ADD_EXECUTION_LOG_BOT_NAME_COLUMN)
+            cursor.execute(ADD_EXECUTION_LOG_OUTCOME_DETAILS_COLUMN)
             cursor.execute(ADD_EXECUTION_LOG_TRACE_ID_COLUMN)
             cursor.execute(ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS)
             cursor.execute(ADD_EXECUTION_LOG_TRADE_CONTEXT_COLUMNS)

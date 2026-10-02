@@ -173,3 +173,32 @@ automated commits only change digest-pinned image references.
 
 ## Project Tracking
 Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-core-pipeline/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-browser-worker` and `fantasy-infra`.
+
+### Rumor-action application outcomes (#140)
+
+The daily CronJob invokes `python -m src.services.rumor_action_service` directly; the
+HTTP route shares its service. Each invocation records exactly one `execution_log`
+row (`transaction_type=rumor_action_trigger`, `bot_name=rumor_action_service`).
+`outcome_details` is an additive nullable JSONB column migrated at API startup, before
+CronJobs using the new image should run. Existing execution-log writers are unchanged.
+
+The details include a run ID, source (`cli`, `http`, or `service`), Job name when supplied,
+team/season/week, watermark range, signal reasons and separate action counts. No new
+signals, non-qualifying/superseded signals, no beneficial move, and already-queued
+responses are healthy `success` outcomes. Unresolved identities for proposed actions,
+unaccounted work or exceptions produce `failure`, or `partial_failure` if other actions
+were accepted/already queued. Exceptions still propagate to the CLI/HTTP caller;
+non-raising incomplete results are visible through the application signal even when
+the process exits zero. The public response shape is unchanged.
+
+Action acceptance means queued by the core API, not completed in ESPN. Lineup response
+lists retain their existing resolved-swap semantics; structured counts distinguish
+newly accepted versus duplicate swaps. A structured `rumor_action_outcome` log is emitted
+for every invocation before the best-effort database write, so it remains searchable
+even when that write fails.
+
+The Grafana rule/dashboard/runbook are owned by fantasy-infra. The rule counts failures
+in a 26-hour window, so a later empty success cannot conceal lost work. It does not alert
+on zero action volume. Retry safety and the existing fail-open watermark remain #192's
+responsibility; this change does not make replay safe. Reuse this outcome accounting
+when implementing bounded retries or permanent error-related drops.
