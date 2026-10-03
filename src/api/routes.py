@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 import json
 import logging
 import secrets
@@ -555,6 +556,7 @@ def _record_bot_decision(
     target_player_id: Optional[str] = None,
     drop_player_id: Optional[str] = None,
     decision_inputs: Optional[dict] = None,
+    cursor=None,
 ) -> None:
     """Records *why* an already-decided action happened (CORE-17/#35), separate from
     execution_log's whether-it-succeeded record. season/week are pulled out of
@@ -564,11 +566,14 @@ def _record_bot_decision(
     the reasoning must never block the live action it describes. But fail-open is not
     fail-silent (#159): a dropped row logs at ERROR with the traceback and records the
     exception on the request span (plus a `bot_decision.write_failed` attribute), so a
-    gap in the audit trail is visible in logs and Tempo.
+    gap in the audit trail is visible in logs and Tempo. With an explicit cursor,
+    participates in the caller's transaction and propagates failures instead.
     """
+    # Approval callers supply their transaction: audit failure must roll back the claim.
+    transaction_cursor = cursor
     inputs = decision_inputs or {}
     try:
-        with get_db_cursor() as cursor:
+        with (nullcontext(transaction_cursor) if transaction_cursor is not None else get_db_cursor()) as cursor:
             cursor.execute(
                 """
                 INSERT INTO bot_decisions
@@ -583,6 +588,8 @@ def _record_bot_decision(
                 ),
             )
     except Exception as e:
+        if transaction_cursor is not None:
+            raise
         logger.error(
             f"Could not record bot_decisions row for tracking_id={tracking_id} ({bot_name}/{action}): {e}",
             exc_info=True,

@@ -1,0 +1,78 @@
+[
+  {
+    "offer": {
+      "leagueId": "1248158344",
+      "seasonId": "2026",
+      "fromTeamId": "8",
+      "toTeamId": "3",
+      "incomingPlayerIds": [
+        "4259545",
+        "-16021",
+        "10",
+        "2"
+      ],
+      "outgoingPlayerIds": [
+        "3139477"
+      ],
+      "message": null
+    },
+    "key": "db68b78150f2bb530e8d961f05e3610a74b602c8a1ba4f45233e94b22fa94ef5"
+  },
+  {
+    "offer": {
+      "leagueId": "1248158344",
+      "seasonId": "2026",
+      "fromTeamId": "8",
+      "toTeamId": "3",
+      "incomingPlayerIds": [
+        "4259545",
+        "-16021",
+        "10",
+        "2"
+      ],
+      "outgoingPlayerIds": [
+        "3139477"
+      ],
+      "message": "  Fair deal?  "
+    },
+    "key": "f9cf587c5d3c2d8746112a61964580d5918060568ef4978fdc476b5366fea956"
+  },
+  {
+    "offer": {
+      "leagueId": "1248158344",
+      "seasonId": "2026",
+      "fromTeamId": "8",
+      "toTeamId": "3",
+      "incomingPlayerIds": [
+        "4259545",
+        "-16021",
+        "10",
+        "2"
+      ],
+      "outgoingPlayerIds": [
+        "3139477"
+      ],
+      "message": "Café 🏈\nLet’s trade!"
+    },
+    "key": "19ee8bd8377b1ee72c3787216ad9e251eb80fd150bf3728ba3304647deac2112"
+  },
+  {
+    "offer": {
+      "leagueId": "1248158344",
+      "seasonId": "2026",
+      "fromTeamId": "8",
+      "toTeamId": "3",
+      "incomingPlayerIds": [
+        "4259545",
+        "-16021",
+        "10",
+        "2"
+      ],
+      "outgoingPlayerIds": [
+        "3139477"
+      ],
+      "message": "  "
+    },
+    "key": "6df6066bab78e491b2585d10779133018151ac031d3daa770e79be87cd85fc80"
+  }
+]
