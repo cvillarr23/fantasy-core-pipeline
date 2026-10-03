@@ -144,6 +144,7 @@ def test_shape_lineup_player_line_maps_roster_player_fields():
         "deficit_flag": False,
         "suggested_swap": None,
         "net_vorp": None,
+        "projected_points": None,
         "rumor_sentiment": None,
         "rumor_confidence": None,
         "rumor_suggested_action": None,
@@ -167,30 +168,41 @@ def test_split_roster_starters_bench_separates_by_lineup_slot():
     assert [p["player_id"] for p in bench_list] == ["2", "3"]
 
 
-def test_load_vorp_by_espn_id_maps_query_rows():
+def test_load_weekly_metrics_by_espn_id_maps_query_rows():
     cursor = MagicMock()
-    cursor.fetchall.return_value = [("100", 12.5), ("200", -3.2)]
+    cursor.fetchall.return_value = [("100", 12.5, 18.2), ("200", None, 7.5), ("300", None, None), ("400", -3.2, 0.0)]
 
     with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
-        result = matchup_service._load_vorp_by_espn_id(season=2026, week=2, team_id="8")
+        result = matchup_service._load_weekly_metrics_by_espn_id(season=2026, week=2, team_id="8")
 
-    assert result == {"100": 12.5, "200": -3.2}
+    assert result == {
+        "100": {"net_vorp": 12.5, "projected_points": 18.2},
+        "200": {"net_vorp": None, "projected_points": 7.5},
+        "300": {"net_vorp": None, "projected_points": None},
+        "400": {"net_vorp": -3.2, "projected_points": 0.0},
+    }
+    query = " ".join(cursor.execute.call_args[0][0].split())
+    assert "LEFT JOIN weekly_stats" in query
+    assert "s.season = %s AND s.week = %s" in query
+    assert "r.team_id = %s" in query
     cursor.execute.assert_called_once()
     query_args = cursor.execute.call_args[0][1]
     assert query_args == (2026, 2, "8")
 
 
-def test_apply_vorp_sets_net_vorp_for_known_players_only():
+def test_apply_weekly_metrics_sets_values_for_known_players_only():
     lines = [
         matchup_service._shape_lineup_player_line(_make_roster_player(playerId=1)),
         matchup_service._shape_lineup_player_line(_make_roster_player(playerId=2)),
     ]
-    vorp_by_espn_id = {"1": 8.4}
+    metrics_by_espn_id = {"1": {"net_vorp": 8.4, "projected_points": 12.0}}
 
-    matchup_service._apply_vorp(lines, vorp_by_espn_id)
+    matchup_service._apply_weekly_metrics(lines, metrics_by_espn_id)
 
     assert lines[0]["net_vorp"] == 8.4
     assert lines[1]["net_vorp"] is None
+    assert lines[0]["projected_points"] == 12.0
+    assert lines[1]["projected_points"] is None
 
 
 def test_load_rumor_signal_by_espn_id_maps_query_rows():
@@ -368,7 +380,7 @@ def test_get_current_team_roster_shapes_and_badges(monkeypatch):
          patch("src.services.matchup_service.compute_roster_deficits",
                return_value={"teams": {"8": {"RB": {"deficit": 1}}}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
-         patch("src.services.matchup_service._load_vorp_by_espn_id", return_value={"1": 9.9}), \
+         patch("src.services.matchup_service._load_weekly_metrics_by_espn_id", return_value={"1": {"net_vorp": 9.9, "projected_points": 15.0}}), \
          patch("src.services.matchup_service._load_rumor_signal_by_espn_id",
                return_value={"1": {"sentiment": "positive", "confidence": 0.85, "suggested_action": "bench_watch"}}):
         result = matchup_service.get_current_team_roster(season=2026)

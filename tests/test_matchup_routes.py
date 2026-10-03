@@ -1,4 +1,5 @@
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import requests
 from espn_api.requests.espn_requests import ESPNAccessDenied
@@ -119,3 +120,41 @@ def test_scoreboard_alias_preserves_existing_response_shape(client):
 
     assert response.status_code == 200
     assert response.json() == payload
+
+
+def test_roster_current_week_projections_with_real_service(client, monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    players = [
+        SimpleNamespace(playerId=pid, name=f"Player {pid}", position=position,
+                        jersey=None, lineupSlot=slot, proTeam="DET", injuryStatus="ACTIVE")
+        for pid, position, slot in [
+            (1, "RB", "RB"), (2, "WR", "BE"), (3, "K", "K"),
+            (4, "D/ST", "BE"), (5, "WR", "IR"), (6, "RB", "BE"),
+        ]
+    ]
+    league = MagicMock()
+    league.teams = [SimpleNamespace(team_id=8, roster=players)]
+    league.box_scores.side_effect = AssertionError("Roster must not require box scores")
+    cursor = MagicMock()
+    # NULL from a missing weekly row or a NULL column stays unknown; an unmapped
+    # live ESPN player (5) is absent from these database results altogether.
+    cursor.fetchall.side_effect = [
+        [("1", 4.0, 15.5), ("2", None, 9.2), ("3", None, None),
+         ("4", None, None), ("6", 0.0, 0.0)],
+        [],  # rumor signals
+    ]
+    with patch("src.services.matchup_service.build_league", return_value=league), \
+         patch("src.services.matchup_service.resolve_default_week", return_value=2), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
+         patch("src.services.matchup_service.get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [p["projected_points"] for p in body["starters"]] == [15.5, None]
+    assert [p["projected_points"] for p in body["bench"]] == [9.2, None, None, 0.0]
+    assert body["bench"][0]["net_vorp"] is None
+    assert cursor.execute.call_args_list[0].args[1] == (2026, 2, "8")
+    league.box_scores.assert_not_called()
