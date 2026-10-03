@@ -49,6 +49,7 @@ WAIVER_RETRY_WINDOW_SECONDS = 24 * 60 * 60
 # The lineup gateway retains keys for 30 minutes. Never retry an ambiguous
 # delivery once that protection could have expired.
 LINEUP_RETRY_WINDOW_SECONDS = 20 * 60
+FAILED_JOB_MARKER_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 class RunOutcome:
@@ -78,6 +79,7 @@ class RunOutcome:
             actions_failed=0,
         )
         self.signals = {}
+        self.deferred_signals = set()
         self.missing_signals = set()
 
     def add(self, name, count=1):
@@ -92,7 +94,11 @@ class RunOutcome:
     def finalize(self, error):
         d = self.details
         d["signal_reasons"] = dict(Counter(self.signals.values()))
-        d["signals_unaccounted"] = d["signal_reasons"].get("pending", 0)
+        d["signals_deferred"] = len(self.deferred_signals)
+        d["signals_unaccounted"] = sum(
+            reason == "pending" and signal_id not in self.deferred_signals
+            for signal_id, reason in self.signals.items()
+        )
         d["actions_unaccounted"] = max(
             0,
             d["actions_proposed"]
@@ -358,13 +364,32 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
     outcome.signals = {s["id"]: "pending" for s in signals}
     entries = state["signals"]
     actions = state["actions"]
-    # Failed-job latches only matter for extra pods in the current Kubernetes Job.
-    # Retain that one marker and discard history from completed Jobs.
-    failed_jobs = state.get("failed_jobs", {})
-    state["failed_jobs"] = {job: failed_jobs[job]} if job and job in failed_jobs else {}
+    # Keep latches across unrelated runs so an HTTP/manual trigger cannot turn a
+    # failed Kubernetes Job into success. Expire old Job IDs after a week.
+    now = time.time()
+    failed_jobs = {}
+    for failed_job, marker in state.get("failed_jobs", {}).items():
+        if isinstance(marker, dict):
+            reason = marker.get("reason", "Previous rumor-action Job failed")
+            updated_at = marker.get("updated_at", now)
+        else:
+            reason, updated_at = marker, now
+        if now - updated_at < FAILED_JOB_MARKER_TTL_SECONDS:
+            failed_jobs[failed_job] = {"reason": reason, "updated_at": updated_at}
+    state["failed_jobs"] = failed_jobs
     # Drop details are written to execution_log; they are not retry state.
     state["drops"] = {}
-    errors = [state["failed_jobs"][job]] if job in state["failed_jobs"] else []
+    errors = (
+        [state["failed_jobs"][job]["reason"]]
+        if job and job in state["failed_jobs"]
+        else []
+    )
+
+    def record_job_failure(reason):
+        if job:
+            state["failed_jobs"].setdefault(
+                job, {"reason": reason, "updated_at": time.time()}
+            )
 
     # Only unprepared signals participate in latest-per-player selection. A prepared
     # action must retain its payload and identity, even if new rumors arrive.
@@ -390,7 +415,11 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             BOOST_WAIVER_ACTION: "waiver",
             BENCH_WATCH_ACTION: "lineup",
         }.get(signal["suggested_action"])
-        if kind == "lineup" and pending_lineup_actions:
+        if (
+            kind == "lineup"
+            and signal["confidence"] >= RUMOR_ACTION_CONFIDENCE_THRESHOLD
+            and pending_lineup_actions
+        ):
             entries[str(signal["id"])] = {
                 "reason": "pending_lineup_action",
                 "actions": [],
@@ -400,6 +429,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 "player_id": signal["player_id"],
             }
             deferred_lineup.add(signal["id"])
+            outcome.deferred_signals.add(signal["id"])
         elif (
             kind
             and signal["confidence"] >= RUMOR_ACTION_CONFIDENCE_THRESHOLD
@@ -457,10 +487,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                     error=error,
                 )
                 outcome.details["dropped_signals"].append(detail)
-        if job:
-            state["failed_jobs"][
-                job
-            ] = f"Rumor actions deliberately dropped: {reason}: {error}"
+        record_job_failure(f"Rumor actions deliberately dropped: {reason}: {error}")
 
     for kind, targets, helper in (
         ("waiver", waiver_targets, _prepare_waiver_claims),
@@ -521,10 +548,9 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                         error=str(exc),
                     )
                     outcome.details["dropped_signals"].append(detail)
-                    if job:
-                        state["failed_jobs"][
-                            job
-                        ] = f"Rumor signal {signal['id']} evaluation retry limit exceeded; inspect execution outcome details"
+                    record_job_failure(
+                        f"Rumor signal {signal['id']} evaluation retry limit exceeded; inspect execution outcome details"
+                    )
             errors.append(str(exc))
             save()
             continue
@@ -578,12 +604,10 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         if missing_ids:
             outcome.details["failure_reason"] = "missing_identity"
             errors.append("Missing ESPN identity for proposed rumor actions")
-            if job:
-                state["failed_jobs"][job] = errors[-1]
-    if outcome.details["dropped_signals"] and job:
-        state["failed_jobs"].setdefault(
-            job,
-            "Rumor signals were deliberately dropped; inspect execution outcome details",
+            record_job_failure(errors[-1])
+    if outcome.details["dropped_signals"]:
+        record_job_failure(
+            "Rumor signals were deliberately dropped; inspect execution outcome details"
         )
     # Commit immutable payloads BEFORE any HTTP calls. A failed commit must prevent
     # publishing, and a process death after delivery replays the same gateway key.
@@ -682,7 +706,10 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         logger.warning("Could not mirror rumor-action watermark to Redis: %s", exc)
     if errors:
         raise RuntimeError("; ".join(errors))
-    if any(reason == "pending" for reason in outcome.signals.values()):
+    if any(
+        reason == "pending" and signal_id not in outcome.deferred_signals
+        for signal_id, reason in outcome.signals.items()
+    ):
         raise RuntimeError("Unaccounted rumor signals remain pending")
     return {
         "considered": len(signals),

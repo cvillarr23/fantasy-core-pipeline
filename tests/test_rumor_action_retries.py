@@ -215,15 +215,22 @@ def test_lineup_replays_saved_payload_and_job_key(retry_env, monkeypatch, failur
 
 
 def test_lineup_signals_wait_while_another_lineup_action_is_pending(retry_env):
-    rows, _, database, _ = retry_env
+    rows, _, database, record = retry_env
     rows[:] = [{**rows[0], "suggested_action": ras.BENCH_WATCH_ACTION}]
-    swaps = [{"drop_player_id": "p1", "add_player_id": "bench", "slot": "RB"}]
+    swaps = [
+        {"drop_player_id": "p1", "add_player_id": "bench", "slot": "RB"},
+        {
+            "drop_player_id": "different-player",
+            "add_player_id": "another-bench",
+            "slot": "WR",
+        },
+    ]
     evaluations = []
     publishes = []
 
     def evaluate(*args, **kwargs):
         evaluations.append(args)
-        return {"swaps": swaps}
+        return {"swaps": [swaps[min(len(evaluations) - 1, 1)]]}
 
     def publish(*args, **kwargs):
         publishes.append(args)
@@ -245,14 +252,19 @@ def test_lineup_signals_wait_while_another_lineup_action_is_pending(retry_env):
         rows.append(
             {**rows[0], "id": 2, "player_id": "different-player", "sentiment": "new"}
         )
-        with pytest.raises(RuntimeError, match="pending"):
-            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
         assert len(evaluations) == 1
         assert database["7"][1]["signals"]["2"]["prepared"] is False
         assert database["7"][1]["watermark"] == 1
+        assert not any(
+            action["status"] == "pending"
+            for action in database["7"][1]["actions"].values()
+        )
+        assert result["watermark"] == 1
+        assert record.call_args.kwargs["status"] == "success"
         ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert len(evaluations) == 2
-    assert len(publishes) == 2
+    assert len(publishes) == 3
 
 
 def test_checkpoint_prunes_completed_drop_and_job_failure_history(retry_env):
@@ -263,7 +275,14 @@ def test_checkpoint_prunes_completed_drop_and_job_failure_history(retry_env):
             "watermark": 0,
             "signals": {},
             "actions": {},
-            "failed_jobs": {"old-job": "old failure"},
+            "failed_jobs": {
+                "old-job": {
+                    "reason": "old failure",
+                    "updated_at": ras.time.time()
+                    - ras.FAILED_JOB_MARKER_TTL_SECONDS
+                    - 1,
+                }
+            },
             "drops": {str(i): {"reason": "old"} for i in range(100)},
         },
     )
@@ -272,6 +291,35 @@ def test_checkpoint_prunes_completed_drop_and_job_failure_history(retry_env):
     _, state = database["7"]
     assert state["failed_jobs"] == {}
     assert state["drops"] == {}
+
+
+def test_failed_job_marker_survives_an_unrelated_http_invocation(
+    retry_env, monkeypatch
+):
+    _, _, database, _ = retry_env
+    database["7"] = (
+        1,
+        {
+            "watermark": 0,
+            "signals": {},
+            "actions": {},
+            "failed_jobs": {
+                "failed-job": {
+                    "reason": "retry limit exceeded",
+                    "updated_at": ras.time.time(),
+                }
+            },
+        },
+    )
+    monkeypatch.delenv("JOB_NAME")
+    with patch.object(ras, "fetch_new_signals", return_value=[]):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4, source="http")
+    assert "failed-job" in database["7"][1]["failed_jobs"]
+    monkeypatch.setenv("JOB_NAME", "failed-job")
+    with patch.object(ras, "fetch_new_signals", return_value=[]), pytest.raises(
+        RuntimeError, match="retry limit exceeded"
+    ):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
 
 
 def test_expired_lineup_is_dropped_before_gateway_dedupe_expires(retry_env):
