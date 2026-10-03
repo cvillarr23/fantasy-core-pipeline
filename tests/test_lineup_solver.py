@@ -818,6 +818,38 @@ def test_evaluate_lineup_raises_on_insufficient_input():
         ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
 
 
+# K/D-ST with target-week metrics (#183): sync_kicker_dst now writes rostered K/D-ST
+# projections before vorp_matrix runs, so their slots are optimized, not held.
+ROSTER_WITH_BENCH_K = ROSTER + [("k_bench", "Bench K", "K", "DAL", None)]
+KDST_VORP = dict(BASE_VORP, dst1=2.0, k1=1.0, k_bench=3.0)
+
+
+def test_evaluate_lineup_holds_no_slots_and_swaps_kicker_when_kdst_have_target_week_metrics(caplog):
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER_WITH_BENCH_K, _metric_rows(TARGET_WEEK, KDST_VORP), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         caplog.at_level("INFO", logger="LineupSolver"):
+        result = ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+    assert result["source"]["source_mode"] == "target_week"
+    assert result["source"]["held_slots"] == []
+    assert "held slots without metrics: none" in caplog.text
+    [swap] = result["swaps"]
+    assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == ("k1", "k_bench", "K")
+    assert swap["decision_inputs"]["held_slots"] == []
+
+
+def test_evaluate_lineup_still_holds_kdst_slots_when_their_target_week_metrics_are_missing():
+    skill_only = {pid: vorp for pid, vorp in KDST_VORP.items() if pid not in ("dst1", "k1", "k_bench")}
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER_WITH_BENCH_K, _metric_rows(TARGET_WEEK, skill_only), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS):
+        result = ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+    assert result["source"]["held_slots"] == ["D/ST", "K"]
+    assert result["swaps"] == []
+
+
 # ---------------------------------------------------------------------------
 # Idempotent, retried publishing (#189)
 # ---------------------------------------------------------------------------

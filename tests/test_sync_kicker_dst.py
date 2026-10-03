@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -122,60 +123,141 @@ def test_persist_projections_writes_team_so_the_pool_query_never_sees_a_null(): 
     assert rows == [("WAS", 2026, 1, 6.5, "WAS")]
 
 
-def test_persist_projections_defaults_missing_week_stats_to_zero():
+def test_persist_projections_skips_players_with_no_projection_for_the_week():
+    """A player with no target-week projection (a bye) must get no row at all:
+    lineup_solver.load_pregame_roster_pool reads "no target-week row" as "on bye", so a
+    0.0 row would make a bye-week K/D-ST look startable (#183)."""
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    espn_player = _espn_player("Houston D/ST", "HOU", -16034, week=1, projected_points=7.25)
-    # Requesting week 2 stats from a player object that only has week 1 populated.
-    written = skd.persist_projections(mock_conn, [("HOU", espn_player)], season=2026, week=2)
+    on_bye = _espn_player("Houston D/ST", "HOU", -16034, week=1, projected_points=7.25)
+    playing = _espn_player("SF D/ST", "SF", -16025, week=2, projected_points=5.5)
+    written = skd.persist_projections(mock_conn, [("HOU", on_bye), ("SF", playing)], season=2026, week=2)
 
     assert written == 1
     _, rows = mock_cursor.executemany.call_args.args
-    assert rows == [("HOU", 2026, 2, 0.0, "HOU")]
+    assert rows == [("SF", 2026, 2, 5.5, "SF")]
 
 
-def test_fetch_espn_kicker_dst_tags_each_player_with_its_requested_position():
+def test_persist_projections_noop_when_no_match_has_a_projection():
+    mock_conn = MagicMock()
+    on_bye = _espn_player("Houston D/ST", "HOU", -16034, week=1)
+
+    assert skd.persist_projections(mock_conn, [("HOU", on_bye)], season=2026, week=2) == 0
+    mock_conn.cursor.assert_not_called()
+
+
+def _raw_kona_player(player_id, name, pro_team_id, slot_id, week, projected_points=None, on_team_id=0):
+    """A kona_player_info entry, shaped like ESPN's raw JSON so espn_api's Player parses it."""
+    stats = []
+    if projected_points is not None:
+        stats.append({
+            "seasonId": 2026, "scoringPeriodId": week, "statSourceId": 1, "statSplitTypeId": 1,
+            "appliedTotal": projected_points,
+        })
+    return {
+        "id": player_id,
+        "onTeamId": on_team_id,
+        "player": {
+            "id": player_id, "fullName": name, "proTeamId": pro_team_id,
+            "eligibleSlots": [slot_id], "ownership": {}, "stats": stats,
+        },
+    }
+
+
+# espn_api POSITION_MAP slot ids / PRO_TEAM_MAP team ids.
+K_SLOT, DST_SLOT = 17, 16
+MIN_TEAM_ID, PHI_TEAM_ID = 16, 21
+
+
+def _kona_league(raw_by_slot):
     mock_league = MagicMock()
-    k_players = [_espn_player("Some Kicker", "SF", 1)]
-    dst_players = [_espn_player("Houston D/ST", "HOU", -16034)]
+    mock_league.year = 2026
 
-    def fake_free_agents(week, size, position):
-        return k_players if position == "K" else dst_players
+    def league_get(params, headers):
+        slot = json.loads(headers["x-fantasy-filter"])["players"]["filterSlotIds"]["value"][0]
+        return {"players": raw_by_slot.get(slot, [])}
 
-    mock_league.free_agents.side_effect = fake_free_agents
-    result = skd.fetch_espn_kicker_dst(mock_league, week=1)
-
-    assert ("K", k_players[0]) in result
-    assert ("D/ST", dst_players[0]) in result
-    assert len(result) == 2
+    mock_league.espn_request.league_get.side_effect = league_get
+    return mock_league
 
 
-def test_sync_kicker_dst_backfills_espn_ids_and_projections():
-    dst_player = _espn_player("Houston D/ST", "HOU", -16034, week=1, projected_points=6.0)
-    k_player = _espn_player("Some Kicker", "SF", 12345, week=1, projected_points=8.0)
+def test_fetch_espn_kicker_dst_queries_target_week_with_no_ownership_filter():
+    mock_league = _kona_league({})
+
+    skd.fetch_espn_kicker_dst(mock_league, week=5)
+
+    assert mock_league.espn_request.league_get.call_count == 2
+    for call in mock_league.espn_request.league_get.call_args_list:
+        params, headers = call.kwargs["params"], call.kwargs["headers"]
+        assert params == {"view": "kona_player_info", "scoringPeriodId": 5}
+        # filterStatus is what limits League.free_agents() to unowned players.
+        assert "filterStatus" not in json.loads(headers["x-fantasy-filter"])["players"]
+    mock_league.free_agents.assert_not_called()
+
+
+def test_fetch_espn_kicker_dst_returns_rostered_and_free_agent_players_with_week_projections():
+    mock_league = _kona_league({
+        K_SLOT: [
+            _raw_kona_player(4567104, "Will Reichard", MIN_TEAM_ID, K_SLOT, week=5, projected_points=8.4, on_team_id=8),
+            _raw_kona_player(1, "Free Kicker", PHI_TEAM_ID, K_SLOT, week=5, projected_points=6.1),
+        ],
+        DST_SLOT: [
+            _raw_kona_player(-16021, "Eagles D/ST", PHI_TEAM_ID, DST_SLOT, week=5, projected_points=7.0, on_team_id=8),
+        ],
+    })
+
+    result = skd.fetch_espn_kicker_dst(mock_league, week=5)
+
+    by_id = {player.playerId: (position, player) for position, player in result}
+    assert set(by_id) == {4567104, 1, -16021}
+    assert by_id[4567104][0] == "K"
+    assert by_id[-16021][0] == "D/ST"
+    assert by_id[-16021][1].proTeam == "PHI"
+    assert by_id[4567104][1].stats[5]["projected_points"] == 8.4
+    assert by_id[-16021][1].stats[5]["projected_points"] == 7.0
+
+
+def test_match_kicker_espn_ids_prefers_existing_espn_id_over_a_stale_team():
+    # players.team is stale (signed elsewhere since the last sync_players run), but the
+    # row's espn_id still identifies the kicker.
+    player_rows = [{"player_id": "11792", "position": "K", "team": "LV", "name": "Will Reichard", "espn_id": "4567104"}]
+    espn_k = [_espn_player("Will Reichard", "MIN", 4567104)]
+
+    matches, unmatched = skd.match_kicker_espn_ids(player_rows, espn_k)
+
+    assert unmatched == []
+    assert matches == [("11792", espn_k[0])]
+
+
+def test_sync_kicker_dst_writes_target_week_projections_for_rostered_kicker_and_dst():
+    week = 5
+    mock_league = _kona_league({
+        K_SLOT: [_raw_kona_player(4567104, "Will Reichard", MIN_TEAM_ID, K_SLOT, week, 8.4, on_team_id=8)],
+        DST_SLOT: [_raw_kona_player(-16021, "Eagles D/ST", PHI_TEAM_ID, DST_SLOT, week, 7.0, on_team_id=8)],
+    })
 
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("HOU", "D/ST", "HOU", "Houston Texans"),
-        ("9999", "K", "SF", "Some Kicker"),
+        ("PHI", "D/ST", "PHI", "Philadelphia Eagles", "-16021"),
+        ("11792", "K", "MIN", "Will Reichard", "4567104"),
     ]
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    with patch("src.ingestion.sync_kicker_dst.build_league") as mock_build_league, \
+    with patch("src.ingestion.sync_kicker_dst.build_league", return_value=mock_league), \
          patch("src.ingestion.sync_kicker_dst.get_db_connection") as mock_get_conn:
-        mock_league = MagicMock()
-        mock_league.free_agents.side_effect = (
-            lambda week, size, position: [dst_player] if position == "D/ST" else [k_player]
-        )
-        mock_build_league.return_value = mock_league
         mock_get_conn.return_value.__enter__.return_value = mock_conn
 
-        result = skd.sync_kicker_dst(season=2026, week=1)
+        result = skd.sync_kicker_dst(season=2026, week=week)
 
-    assert result["espn_id_written"] == 2
     assert result["projections_written"] == 2
     assert result["dst_unmatched"] == []
     assert result["k_unmatched"] == []
+    espn_id_call, projection_call = mock_cursor.executemany.call_args_list
+    assert sorted(espn_id_call.args[1]) == [("-16021", "PHI"), ("4567104", "11792")]
+    assert sorted(projection_call.args[1]) == [
+        ("11792", 2026, week, 8.4, "MIN"),
+        ("PHI", 2026, week, 7.0, "PHI"),
+    ]

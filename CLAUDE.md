@@ -85,15 +85,21 @@
   ESPN, since `sync_id_crosswalk`'s DynastyProcess crosswalk has zero coverage for either
   position and Sleeper has no projections endpoint for them; it needs `sync_players`'s
   K/D-ST rows to match against and reuses `sync_league.build_league`'s ESPN connection, so
-  it slots in right after `sync_league`.
+  it slots in right after `sync_league`. It is also scheduled daily in
+  `fantasy-draft-prep-refresher` (fantasy-infra) between `sync_projections` and
+  `vorp_matrix`, for the upcoming target week (#183).
 - `sync_skill_position_crosswalk` (#150) backfills `players.espn_id` for the ~18% of
   QB/RB/WR/TE players `sync_id_crosswalk`'s DynastyProcess crosswalk still misses (see
-  `src/models.py`'s coverage note). Unlike `sync_kicker_dst`, it can't use
-  `League.free_agents()` — that only returns unowned players, which was fine for #83
-  because it ran pre-draft; post-draft, most unmatched skill players are rostered
-  somewhere. So it queries the raw `kona_player_info` view with no `filterStatus`
-  ownership filter instead, matching by (name, team) with a high-cutoff `rapidfuzz`
-  fallback for stale `players.team` values.
+  `src/models.py`'s coverage note). It can't use `League.free_agents()`, which only returns
+  unowned players; post-draft, most unmatched skill players are rostered somewhere. So it
+  queries the raw `kona_player_info` view with no `filterStatus` ownership filter instead,
+  matching by (name, team) with a high-cutoff `rapidfuzz` fallback for stale
+  `players.team` values. `sync_kicker_dst` originally used `free_agents()` (fine pre-draft)
+  and now uses the same unfiltered query with `scoringPeriodId` set to the target week, so
+  rostered K/D-ST get projections too (#183). Kickers match by existing `espn_id` first,
+  then (name, team); D/ST by team. A matched player with no projection for that week (a
+  bye) gets **no** `weekly_stats` row, never a 0.0 one, because the pregame pool reads a
+  missing row as "on bye".
 
 ## CORE-06: PuLP lineup optimizer
 
@@ -126,9 +132,10 @@
   (`load_teams_playing`), since prior-week rows say nothing about the target week. The
   source (`source_mode`, `source_season`, `source_weeks`, `held_slots`, plus `season`/`week`)
   is logged and merged into each swap's `decision_inputs` → `bot_decisions`.
-- K and D/ST normally have no `vorp_score` (Sleeper projections are QB/RB/WR/TE only;
-  `sync_kicker_dst` is free-agent-only and unscheduled). A `HOLDABLE_WITHOUT_METRICS` slot
-  no pool player can fill is **held**: removed from the ILP, and its current starter is
+- K and D/ST get their target-week `vorp_score` from `sync_kicker_dst`'s ESPN projections
+  (Sleeper's are QB/RB/WR/TE only), run in the daily refresher before `vorp_matrix` (#183).
+  When that data is missing, a `HOLDABLE_WITHOUT_METRICS` slot no pool player can fill is
+  **held**: removed from the ILP, and its current starter is
   left out of the diff so it's never dropped. An unfillable skill slot is an error.
 - Exit codes: `main()` returns 0 for a real decision (swaps published *or* lineup already
   optimal) and 1 for `InsufficientLineupInputError` (no roster, no usable/stale metrics,

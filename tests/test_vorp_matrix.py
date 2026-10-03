@@ -549,3 +549,42 @@ def test_load_league_config_falls_back_when_no_settings_row():
     config = vm.load_league_config(mock_cursor)
     assert config["team_count"] == 10
     assert config["lineup_slot_counts"]["RB/WR/TE"] == 1
+
+
+# ---------------------------------------------------------------------------
+# run_vorp_pipeline — rostered K/D-ST get a vorp_score once projections exist (#183)
+# ---------------------------------------------------------------------------
+
+def test_run_vorp_pipeline_scores_rostered_kicker_and_dst_against_free_agent_baseline():
+    def stat_row(player_id, position, projected, team, is_rostered, is_starter):
+        return (player_id, position, projected, None, None, None, None, team, None,
+                is_rostered, is_starter, None)
+
+    stats_rows = [
+        stat_row("11792", "K", 8.4, "MIN", True, True),
+        stat_row("fa_k", "K", 6.1, "PHI", False, None),
+        stat_row("PHI", "D/ST", 7.0, "PHI", True, True),
+        stat_row("NYG", "D/ST", 5.0, "NYG", False, None),
+    ]
+    roster_positions = [("K", "K"), ("D/ST", "D/ST")]
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (2, {"QB": 1, "K": 1, "D/ST": 1})
+    mock_cursor.fetchall.side_effect = [roster_positions, stats_rows]
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.optimization.vorp_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        written = vm.run_vorp_pipeline(season=2026, week=5)
+
+    assert written == 4
+    _, persisted = mock_cursor.executemany.call_args.args
+    vorp_by_player = {row[6]: row[4] for row in persisted}
+    assert all(row[7:] == (2026, 5) for row in persisted)
+    # Replacement level is the best free agent at each position, so rostered starters
+    # score above it and the free agents sit at exactly replacement.
+    assert vorp_by_player["11792"] > 0
+    assert vorp_by_player["PHI"] > 0
+    assert vorp_by_player["fa_k"] == 0
+    assert vorp_by_player["NYG"] == 0
