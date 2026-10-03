@@ -235,7 +235,8 @@ def test_expired_lineup_is_dropped_before_gateway_dedupe_expires(retry_env):
 
 
 def test_shared_evaluation_failure_does_not_consume_signal_attempts(retry_env):
-    _, redis, database, record = retry_env
+    rows, redis, database, record = retry_env
+    rows[:] = rows[:1]
     with patch.object(
         ras, "load_live_waiver_inputs", side_effect=RuntimeError("projections missing")
     ), patch.object(ras, "publish_waiver_claim") as publish:
