@@ -3,6 +3,7 @@ src.database eagerly opens a real ThreadedConnectionPool at import time, which
 would otherwise require a live Postgres to even import src.api.routes. Stub the
 pool class out before any test module imports that chain.
 """
+
 import os
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -40,5 +41,47 @@ def client():
     with patch("src.api.main.run_migrations"):
         from src.api.main import app
 
-        with TestClient(app, headers={"X-API-Key": os.environ["TRIGGER_API_KEY"]}) as test_client:
+        with TestClient(
+            app, headers={"X-API-Key": os.environ["TRIGGER_API_KEY"]}
+        ) as test_client:
             yield test_client
+
+
+@pytest.fixture
+def rumor_checkpoint():
+    """Durable storage boundary for rumor service tests; SQL is tested separately."""
+    from copy import deepcopy
+    from src.services import rumor_action_service as ras
+
+    data = {}
+
+    def load(team, initial=None):
+        legacy_watermark = (
+            int(ras._redis_client().get(ras.WATERMARK_REDIS_KEY) or 0)
+            if initial is None
+            else initial
+        )
+        return deepcopy(
+            data.get(
+                team,
+                (
+                    0,
+                    {
+                        "watermark": legacy_watermark,
+                        "signals": {},
+                        "actions": {},
+                        "failed_jobs": {},
+                    },
+                ),
+            )
+        )
+
+    def save(team, version, state):
+        assert data.get(team, (0,))[0] == version
+        data[team] = (version + 1, deepcopy(state))
+        return version + 1
+
+    with patch.object(ras, "_load_checkpoint", side_effect=load), patch.object(
+        ras, "_save_checkpoint", side_effect=save
+    ):
+        yield data

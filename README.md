@@ -187,18 +187,59 @@ team/season/week, watermark range, signal reasons and separate action counts. No
 signals, non-qualifying/superseded signals, no beneficial move, and already-queued
 responses are healthy `success` outcomes. Unresolved identities for proposed actions,
 unaccounted work or exceptions produce `failure`, or `partial_failure` if other actions
-were accepted/already queued. Exceptions still propagate to the CLI/HTTP caller;
-non-raising incomplete results are visible through the application signal even when
-the process exits zero. The public response shape is unchanged.
+were accepted/already queued. Incomplete work now raises to the CLI/HTTP caller, so
+the CLI exits nonzero and HTTP returns 500. The public response shape is unchanged.
 
-Action acceptance means queued by the core API, not completed in ESPN. Lineup response
-lists retain their existing resolved-swap semantics; structured counts distinguish
-newly accepted versus duplicate swaps. A structured `rumor_action_outcome` log is emitted
+Action acceptance means queued by the core API, not completed in ESPN. Response lists
+contain only newly accepted actions; structured counts distinguish accepted versus
+duplicate actions. A structured `rumor_action_outcome` log is emitted
 for every invocation before the best-effort database write, so it remains searchable
 even when that write fails.
 
 The Grafana rule/dashboard/runbook are owned by fantasy-infra. The rule counts failures
 in a 26-hour window, so a later empty success cannot conceal lost work. It does not alert
-on zero action volume. Retry safety and the existing fail-open watermark remain #192's
-responsibility; this change does not make replay safe. Reuse this outcome accounting
-when implementing bounded retries or permanent error-related drops.
+on zero action volume.
+
+### Rumor-action retries (#192)
+
+Deploy the API migration creating `rumor_action_checkpoints` before running the new
+CronJob image. This per-team PostgreSQL checkpoint owns the watermark after its first
+initialization from Redis's legacy `rumor_action:last_processed_id`. Redis remains a
+compatibility mirror; clearing Redis does not replay completed work. Initial migration
+preserves the old cursor and cannot recover signals older versions already skipped.
+The legacy cursor assumes the existing single configured team at cutover.
+
+Only a contiguous prefix of handled signals advances the cursor. Prepared payloads,
+original lineup idempotency keys, and successful deliveries beyond a gap survive pod
+restarts. New waiver signals for a player with a pending prepared waiver action are
+covered by that action and cannot queue a second copy. New bench-watch signals wait
+behind any pending lineup action and remain behind the watermark until a later invocation
+can evaluate them. Checkpoints commit before publishing and after each outcome, using
+optimistic version checks so overlapping invocations fail instead of overwriting progress.
+No DB connection is held across publishing. A lost acknowledgement or failed
+post-publish checkpoint replays the saved payload under its original gateway key.
+
+Three exhausted publisher calls deliberately drop an action with `retry_limit_exceeded`;
+internal HTTP attempts count as one call. Drop details (signal IDs, attempts, reason,
+last error) are retained in the `execution_log` outcome. The checkpoint retains only
+pending work and bounded retry state. Non-qualifying, superseded, and no-beneficial-move
+signals are healthy no-ops. Missing ESPN identities are deliberate drops that fail the
+invocation. Shared DB/projection/solver failures
+leave signals pending without consuming their publish allowance; three failed evaluation
+runs or a 24-hour age limit eventually record an evaluation drop.
+
+Ambiguous lineup actions expire 20 minutes after preparation, before the gateway's
+30-minute dedupe TTL; they are recorded as `lineup_retry_window_expired` without replay.
+Waiver actions expire after 24 hours as `waiver_retry_window_expired`.
+Prepared actions from a different season/week are dropped as `decision_week_expired`.
+The invocation that drops work still fails. Its `JOB_NAME` is recorded as failed so extra
+pods of that Job cannot report empty success; later Jobs may proceed. Until the infra
+rollout supplies `JOB_NAME`, only rumor-trigger CLI pods use their generated pod hostname
+to identify OnFailure restarts; local CLI runs do not persist a host-wide failure marker.
+Pending actions are still retried even if another action has already made the Job
+permanently fail.
+Failed-Job markers expire after seven days.
+
+The infra follow-up sets `restartPolicy: Never`, `backoffLimit: 2`, and `JOB_NAME` from
+`metadata.labels['batch.kubernetes.io/job-name']`, only after this core image and schema
+are deployed. Waiver keys remain scoped to claim/week without `JOB_NAME`.

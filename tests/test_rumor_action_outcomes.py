@@ -1,10 +1,13 @@
 """Application outcomes, independent of the Kubernetes Job's exit status."""
 
 from unittest.mock import MagicMock, patch
+from contextlib import nullcontext
 
 import pytest
 
 from src.services import rumor_action_service as ras
+
+pytestmark = pytest.mark.usefixtures("rumor_checkpoint")
 
 
 @pytest.fixture
@@ -64,7 +67,8 @@ def test_waiver_action_outcomes(run_env, resolution, publish_result, status, rea
     ), patch.object(
         ras, "publish_waiver_claim", return_value=publish_result
     ):
-        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        with nullcontext() if resolution else pytest.raises(RuntimeError, match="Missing ESPN identity"):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     details = record.call_args.kwargs["outcome_details"]
     assert record.call_args.kwargs["status"] == status
     assert details["reason"] == reason
@@ -161,7 +165,7 @@ def test_lineup_duplicate_or_partial_identity_resolution(
     cursor, _, record = run_env
     cursor.fetchall.return_value = [(1, "p", "negative", 0.9, ras.BENCH_WATCH_ACTION)]
     # One signal can yield several actions: accounting must not compare action and signal totals.
-    swaps = [{"drop_player_id": "p", "add_player_id": f"b{i}"} for i in range(2)]
+    swaps = [{"drop_player_id": "p", "add_player_id": f"b{i}", "slot": "RB"} for i in range(2)]
     resolved = swaps[:1] if missing else swaps
     with patch.object(
         ras.lineup_solver, "evaluate_lineup", return_value={"swaps": swaps}
@@ -170,7 +174,8 @@ def test_lineup_duplicate_or_partial_identity_resolution(
     ), patch.object(
         ras.lineup_solver, "publish_lineup_swaps", return_value=accepted
     ):
-        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        with pytest.raises(RuntimeError, match="Missing ESPN identity") if missing else nullcontext():
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert record.call_args.kwargs["status"] == status
     details = record.call_args.kwargs["outcome_details"]
     assert details["actions_missing_identity"] == int(missing)
@@ -182,7 +187,7 @@ def test_lineup_duplicate_or_partial_identity_resolution(
 def test_unaccounted_signals_cannot_succeed(run_env):
     cursor, _, record = run_env
     cursor.fetchall.return_value = [(1, "p", "positive", 0.9, ras.BOOST_WAIVER_ACTION)]
-    with patch.object(ras, "_evaluate_and_publish_waiver_claims", return_value=[]):
+    with patch.object(ras, "_prepare_waiver_claims", return_value=[]), pytest.raises(RuntimeError, match="Unaccounted"):
         ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert record.call_args.kwargs["status"] == "failure"
     assert record.call_args.kwargs["outcome_details"]["reason"] == "unaccounted_work"
