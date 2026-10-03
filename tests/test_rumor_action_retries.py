@@ -24,7 +24,11 @@ def retry_env(monkeypatch):
                 (
                     0,
                     {
-                        "watermark": initial if initial is not None else ras._get_watermark(redis),
+                        "watermark": (
+                            initial
+                            if initial is not None
+                            else ras._get_watermark(redis)
+                        ),
                         "signals": {},
                         "actions": {},
                         "failed_jobs": {},
@@ -210,6 +214,66 @@ def test_lineup_replays_saved_payload_and_job_key(retry_env, monkeypatch, failur
     assert redis[ras.WATERMARK_REDIS_KEY] == "1"
 
 
+def test_lineup_signals_wait_while_another_lineup_action_is_pending(retry_env):
+    rows, _, database, _ = retry_env
+    rows[:] = [{**rows[0], "suggested_action": ras.BENCH_WATCH_ACTION}]
+    swaps = [{"drop_player_id": "p1", "add_player_id": "bench", "slot": "RB"}]
+    evaluations = []
+    publishes = []
+
+    def evaluate(*args, **kwargs):
+        evaluations.append(args)
+        return {"swaps": swaps}
+
+    def publish(*args, **kwargs):
+        publishes.append(args)
+        if len(publishes) == 1:
+            raise RuntimeError("temporary gateway failure")
+        return True
+
+    with patch.object(
+        ras.lineup_solver, "evaluate_lineup", side_effect=evaluate
+    ), patch.object(
+        ras.lineup_solver,
+        "resolve_lineup_swaps",
+        side_effect=lambda conn, proposed: proposed,
+    ), patch.object(
+        ras.lineup_solver, "publish_lineup_swaps", side_effect=publish
+    ):
+        with pytest.raises(RuntimeError, match="temporary gateway failure"):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        rows.append(
+            {**rows[0], "id": 2, "player_id": "different-player", "sentiment": "new"}
+        )
+        with pytest.raises(RuntimeError, match="pending"):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        assert len(evaluations) == 1
+        assert database["7"][1]["signals"]["2"]["prepared"] is False
+        assert database["7"][1]["watermark"] == 1
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert len(evaluations) == 2
+    assert len(publishes) == 2
+
+
+def test_checkpoint_prunes_completed_drop_and_job_failure_history(retry_env):
+    _, _, database, _ = retry_env
+    database["7"] = (
+        1,
+        {
+            "watermark": 0,
+            "signals": {},
+            "actions": {},
+            "failed_jobs": {"old-job": "old failure"},
+            "drops": {str(i): {"reason": "old"} for i in range(100)},
+        },
+    )
+    with patch.object(ras, "fetch_new_signals", return_value=[]):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    _, state = database["7"]
+    assert state["failed_jobs"] == {}
+    assert state["drops"] == {}
+
+
 def test_expired_lineup_is_dropped_before_gateway_dedupe_expires(retry_env):
     rows, _, database, record = retry_env
     rows[:] = [{**rows[0], "suggested_action": ras.BENCH_WATCH_ACTION}]
@@ -247,7 +311,12 @@ def test_shared_evaluation_failure_does_not_consume_signal_attempts(retry_env):
             ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
         publish.assert_not_called()
     assert database["7"][1]["actions"] == {}
-    assert database["7"][1]["drops"]["1"]["reason"] == "evaluation_retry_limit_exceeded"
+    assert record.call_args_list[2].kwargs["outcome_details"]["dropped_signals"][0][
+        "reason"
+    ] == ("evaluation_retry_limit_exceeded")
+    assert database["7"][1]["watermark"] == 1
+    assert database["7"][1]["signals"] == {}
+    assert database["7"][1]["drops"] == {}
     assert redis[ras.WATERMARK_REDIS_KEY] == "1"
     assert all(c.kwargs["status"] == "failure" for c in record.call_args_list)
 
@@ -320,8 +389,10 @@ def test_stable_local_hostname_is_not_a_job_failure_key(retry_env, monkeypatch):
     assert record.call_args.kwargs["outcome_details"]["job_name"] is None
 
 
-def test_covered_signal_is_released_when_old_action_is_dropped(retry_env, monkeypatch):
-    rows, _, database, _ = retry_env
+def test_covered_signal_is_dropped_with_old_action_without_republishing(
+    retry_env, monkeypatch
+):
+    rows, _, database, record = retry_env
     rows[:] = rows[:1]
     calls = []
 
@@ -331,9 +402,7 @@ def test_covered_signal_is_released_when_old_action_is_dropped(retry_env, monkey
             raise RuntimeError("ambiguous timeout")
         return True
 
-    with patch.object(
-        ras, "publish_waiver_claim", side_effect=publish
-    ), patch.object(
+    with patch.object(ras, "publish_waiver_claim", side_effect=publish), patch.object(
         ras.waiver_strategy,
         "propose_waiver_moves",
         return_value=[{"add_player_id": "p1"}],
@@ -345,13 +414,16 @@ def test_covered_signal_is_released_when_old_action_is_dropped(retry_env, monkey
         rows.append({**rows[0], "id": 2, "sentiment": "new signal"})
         with pytest.raises(RuntimeError, match="waiver_retry_window_expired"):
             ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
-        assert database["7"][1]["watermark"] == 1
-        assert database["7"][1]["signals"]["2"]["prepared"] is False
+        assert database["7"][1]["watermark"] == 2
+        dropped = record.call_args_list[-1].kwargs["outcome_details"]["dropped_signals"]
         monkeypatch.setenv("JOB_NAME", "rumor-job-2")
-        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        with patch.object(ras, "fetch_new_signals", return_value=[]):
+            result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert result["watermark"] == 2
-    assert len(calls) == 2
-    assert propose.call_count == 2
+    assert len(calls) == 1
+    assert propose.call_count == 1
+    assert [d["signal_id"] for d in dropped] == [1, 2]
+    assert dropped[1]["reason"] == "covered_action_dropped:waiver_retry_window_expired"
 
 
 def test_redis_mirror_failure_does_not_fail_checkpointed_run(retry_env):

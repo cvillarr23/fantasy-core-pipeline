@@ -358,28 +358,49 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
     outcome.signals = {s["id"]: "pending" for s in signals}
     entries = state["signals"]
     actions = state["actions"]
+    # Failed-job latches only matter for extra pods in the current Kubernetes Job.
+    # Retain that one marker and discard history from completed Jobs.
+    failed_jobs = state.get("failed_jobs", {})
+    state["failed_jobs"] = {job: failed_jobs[job]} if job and job in failed_jobs else {}
+    # Drop details are written to execution_log; they are not retry state.
+    state["drops"] = {}
     errors = [state["failed_jobs"][job]] if job in state["failed_jobs"] else []
 
     # Only unprepared signals participate in latest-per-player selection. A prepared
     # action must retain its payload and identity, even if new rumors arrive.
     fresh = [
-        s for s in signals
+        s
+        for s in signals
         if str(s["id"]) not in entries or not entries[str(s["id"])].get("prepared")
     ]
     pending_actions_by_player = {}
+    pending_lineup_actions = []
     for action_id, action in actions.items():
         if action["status"] == "pending":
+            if action["kind"] == "lineup":
+                pending_lineup_actions.append(action_id)
             for player_id in action.get("signal_players", []):
                 pending_actions_by_player.setdefault(
                     (action["kind"], str(player_id)), action_id
                 )
     covered = set()
+    deferred_lineup = set()
     for signal in fresh:
         kind = {
             BOOST_WAIVER_ACTION: "waiver",
             BENCH_WATCH_ACTION: "lineup",
         }.get(signal["suggested_action"])
-        if (
+        if kind == "lineup" and pending_lineup_actions:
+            entries[str(signal["id"])] = {
+                "reason": "pending_lineup_action",
+                "actions": [],
+                "prepared": False,
+                "evaluation_attempts": 0,
+                "first_seen_at": time.time(),
+                "player_id": signal["player_id"],
+            }
+            deferred_lineup.add(signal["id"])
+        elif (
             kind
             and signal["confidence"] >= RUMOR_ACTION_CONFIDENCE_THRESHOLD
             and (kind, str(signal["player_id"])) in pending_actions_by_player
@@ -396,7 +417,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             if signal["id"] not in covered_ids:
                 covered_ids.append(signal["id"])
             covered.add(signal["id"])
-    fresh = [s for s in fresh if s["id"] not in covered]
+    fresh = [s for s in fresh if s["id"] not in covered | deferred_lineup]
     waiver_targets = _qualifying_signals_by_action(fresh, BOOST_WAIVER_ACTION)
     bench_targets = _qualifying_signals_by_action(fresh, BENCH_WATCH_ACTION)
     selected = {s["id"] for s in [*waiver_targets.values(), *bench_targets.values()]}
@@ -421,14 +442,21 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 signal_id=sid, reason=reason, attempts=action["attempts"], error=error
             )
             outcome.details["dropped_signals"].append(detail)
-            state.setdefault("drops", {})[str(sid)] = detail
             entry = entries.get(str(sid))
             if entry:
                 entry.update(reason=reason, prepared=True)
         for covered_id in action.get("covered_signal_ids", []):
             entry = entries.get(str(covered_id))
             if entry:
-                entry.update(reason="pending_action_dropped", prepared=False)
+                covered_reason = f"covered_action_dropped:{reason}"
+                entry.update(reason=covered_reason, prepared=True)
+                detail = dict(
+                    signal_id=int(covered_id),
+                    reason=covered_reason,
+                    attempts=action["attempts"],
+                    error=error,
+                )
+                outcome.details["dropped_signals"].append(detail)
         if job:
             state["failed_jobs"][
                 job
@@ -460,11 +488,13 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             if now - entry["first_seen_at"] >= SIGNAL_RETRY_WINDOW_SECONDS:
                 entry["reason"] = "evaluation_retry_window_expired"
                 entry["prepared"] = True
-                detail = dict(signal_id=sid, reason=entry["reason"],
-                              attempts=entry["evaluation_attempts"],
-                              error=entry.get("error", "Rumor action could not be evaluated"))
+                detail = dict(
+                    signal_id=sid,
+                    reason=entry["reason"],
+                    attempts=entry["evaluation_attempts"],
+                    error=entry.get("error", "Rumor action could not be evaluated"),
+                )
                 outcome.details["dropped_signals"].append(detail)
-                state.setdefault("drops", {})[str(sid)] = detail
                 errors.append(detail["reason"])
                 continue
             eligible[signal["player_id"]] = signal
@@ -484,14 +514,17 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 if entry["evaluation_attempts"] >= MAX_SIGNAL_EVALUATION_FAILURES:
                     entry["reason"] = "evaluation_retry_limit_exceeded"
                     entry["prepared"] = True
-                    detail = dict(signal_id=signal["id"], reason=entry["reason"],
-                                  attempts=entry["evaluation_attempts"], error=str(exc))
+                    detail = dict(
+                        signal_id=signal["id"],
+                        reason=entry["reason"],
+                        attempts=entry["evaluation_attempts"],
+                        error=str(exc),
+                    )
                     outcome.details["dropped_signals"].append(detail)
-                    state.setdefault("drops", {})[str(signal["id"])] = detail
                     if job:
-                        state["failed_jobs"][job] = (
-                            f"Rumor signal {signal['id']} evaluation retry limit exceeded; inspect execution outcome details"
-                        )
+                        state["failed_jobs"][
+                            job
+                        ] = f"Rumor signal {signal['id']} evaluation retry limit exceeded; inspect execution outcome details"
             errors.append(str(exc))
             save()
             continue
@@ -542,7 +575,6 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                     error="No ESPN identity",
                 )
                 outcome.details["dropped_signals"].append(detail)
-                state.setdefault("drops", {})[str(sid)] = detail
         if missing_ids:
             outcome.details["failure_reason"] = "missing_identity"
             errors.append("Missing ESPN identity for proposed rumor actions")
@@ -550,7 +582,8 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 state["failed_jobs"][job] = errors[-1]
     if outcome.details["dropped_signals"] and job:
         state["failed_jobs"].setdefault(
-            job, "Rumor signals were deliberately dropped; inspect execution outcome details"
+            job,
+            "Rumor signals were deliberately dropped; inspect execution outcome details",
         )
     # Commit immutable payloads BEFORE any HTTP calls. A failed commit must prevent
     # publishing, and a process death after delivery replays the same gateway key.
