@@ -437,7 +437,7 @@ def test_stable_local_hostname_is_not_a_job_failure_key(retry_env, monkeypatch):
     assert record.call_args.kwargs["outcome_details"]["job_name"] is None
 
 
-def test_covered_signal_is_dropped_with_old_action_without_republishing(
+def test_expired_action_does_not_cover_a_new_signal_for_the_same_player(
     retry_env, monkeypatch
 ):
     rows, _, database, record = retry_env
@@ -468,10 +468,45 @@ def test_covered_signal_is_dropped_with_old_action_without_republishing(
         with patch.object(ras, "fetch_new_signals", return_value=[]):
             result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert result["watermark"] == 2
-    assert len(calls) == 1
-    assert propose.call_count == 1
-    assert [d["signal_id"] for d in dropped] == [1, 2]
-    assert dropped[1]["reason"] == "covered_action_dropped:waiver_retry_window_expired"
+    assert len(calls) == 2
+    assert calls[1]["decision_inputs"]["rumor_signal_id"] == 2
+    assert propose.call_count == 2
+    assert [d["signal_id"] for d in dropped] == [1]
+
+
+def test_covered_signal_stays_dropped_when_parent_action_expires(retry_env):
+    rows, _, database, record = retry_env
+    rows[:] = rows[:1]
+    calls = []
+
+    def publish(team, target):
+        calls.append(deepcopy(target))
+        if len(calls) < 3:
+            raise RuntimeError("ambiguous timeout")
+        return True
+
+    with patch.object(ras, "publish_waiver_claim", side_effect=publish), patch.object(
+        ras.waiver_strategy,
+        "propose_waiver_moves",
+        return_value=[{"add_player_id": "p1"}],
+    ) as propose:
+        with pytest.raises(RuntimeError):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        rows.append({**rows[0], "id": 2, "sentiment": "covered signal"})
+        with pytest.raises(RuntimeError):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        action = next(iter(database["7"][1]["actions"].values()))
+        assert database["7"][1]["signals"]["2"]["covered_action_id"]
+        action["prepared_at"] -= ras.WAIVER_RETRY_WINDOW_SECONDS
+        rows.append({**rows[0], "id": 3, "sentiment": "fresh signal"})
+        with pytest.raises(RuntimeError, match="waiver_retry_window_expired"):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+
+    assert len(calls) == 3
+    assert calls[2]["decision_inputs"]["rumor_signal_id"] == 3
+    assert propose.call_count == 2
+    dropped = record.call_args.kwargs["outcome_details"]["dropped_signals"]
+    assert sorted(detail["signal_id"] for detail in dropped) == [1, 2]
 
 
 def test_redis_mirror_failure_does_not_fail_checkpointed_run(retry_env):

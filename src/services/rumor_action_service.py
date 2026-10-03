@@ -400,14 +400,49 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
     ]
     pending_actions_by_player = {}
     pending_lineup_actions = []
+    now = time.time()
     for action_id, action in actions.items():
         if action["status"] == "pending":
+            retry_window = (
+                LINEUP_RETRY_WINDOW_SECONDS
+                if action["kind"] == "lineup"
+                else WAIVER_RETRY_WINDOW_SECONDS
+            )
+            expired = now - action["prepared_at"] >= retry_window
+            stale = (action["season"], action["week"]) != (season, week)
+            if expired or stale:
+                reason = (
+                    f"{action['kind']}_retry_window_expired"
+                    if expired
+                    else "decision_week_expired"
+                )
+                for covered_id in action.get("covered_signal_ids", []):
+                    entry = entries.get(str(covered_id))
+                    if entry and entry.get("covered_action_id") == action_id:
+                        covered_reason = f"covered_action_dropped:{reason}"
+                        entry.update(reason=covered_reason, prepared=True)
+                        outcome.details["dropped_signals"].append(
+                            dict(
+                                signal_id=int(covered_id),
+                                reason=covered_reason,
+                                attempts=action["attempts"],
+                                error="Covered action is no longer safe to replay",
+                            )
+                        )
+                continue
             if action["kind"] == "lineup":
                 pending_lineup_actions.append(action_id)
             for player_id in action.get("signal_players", []):
                 pending_actions_by_player.setdefault(
                     (action["kind"], str(player_id)), action_id
                 )
+    # Signals covered by an expired action in an earlier run are terminal drops;
+    # newly fetched signals remain eligible for fresh evaluation below.
+    fresh = [
+        signal
+        for signal in fresh
+        if not entries.get(str(signal["id"]), {}).get("prepared")
+    ]
     covered = set()
     deferred_lineup = set()
     for signal in fresh:
@@ -477,7 +512,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 entry.update(reason=reason, prepared=True)
         for covered_id in action.get("covered_signal_ids", []):
             entry = entries.get(str(covered_id))
-            if entry:
+            if entry and not entry.get("prepared"):
                 covered_reason = f"covered_action_dropped:{reason}"
                 entry.update(reason=covered_reason, prepared=True)
                 detail = dict(
