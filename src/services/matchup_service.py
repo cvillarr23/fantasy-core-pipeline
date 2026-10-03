@@ -78,15 +78,15 @@ def _apply_badges(player_lines: list, deficits_by_position: dict, swap_suggestio
             line["suggested_swap"] = swap_suggestions[line["player_id"]]
 
 
-def _load_vorp_by_espn_id(season: int, week: int, team_id: str) -> dict:
-    """espn_id -> net_vorp for every rostered player, not just lineup_solver's candidate
+def _load_weekly_metrics_by_espn_id(season: int, week: int, team_id: str) -> dict:
+    """espn_id -> current-week VORP/projection for every rostered player, not just the candidate
     pool (which excludes bye/OUT players via INNER JOIN weekly_stats) - the lineup editor
     shows every player on the roster, so a missing row here should mean "unknown", handled
     by the caller defaulting to None rather than this function guessing a fallback."""
     with get_db_cursor() as cursor:
         cursor.execute(
             """
-            SELECT p.espn_id, s.vorp_score
+            SELECT p.espn_id, s.vorp_score, s.projected_points
             FROM league_rosters r
             JOIN players p ON r.player_id = p.player_id
             LEFT JOIN weekly_stats s ON s.player_id = r.player_id AND s.season = %s AND s.week = %s
@@ -94,15 +94,18 @@ def _load_vorp_by_espn_id(season: int, week: int, team_id: str) -> dict:
             """,
             (season, week, team_id),
         )
-        return {espn_id: vorp for espn_id, vorp in cursor.fetchall() if vorp is not None}
+        return {
+            espn_id: {"net_vorp": vorp, "projected_points": projected_points}
+            for espn_id, vorp, projected_points in cursor.fetchall()
+        }
 
 
-def _apply_vorp(player_lines: list, vorp_by_espn_id: dict) -> None:
-    """Mutates player_lines in place. Leaves net_vorp as None (its shaped default) for any
+def _apply_weekly_metrics(player_lines: list, metrics_by_espn_id: dict) -> None:
+    """Mutates player_lines in place. Leaves metrics as None (their shaped defaults) for any
     player missing a row - e.g. dropped/added outside our own sync, not yet ingested."""
     for line in player_lines:
-        if line["espn_id"] in vorp_by_espn_id:
-            line["net_vorp"] = vorp_by_espn_id[line["espn_id"]]
+        if line["espn_id"] in metrics_by_espn_id:
+            line.update(metrics_by_espn_id[line["espn_id"]])
 
 
 def _load_rumor_signal_by_espn_id(team_id: str) -> dict:
@@ -166,6 +169,7 @@ def _shape_lineup_player_line(player) -> dict:
         "deficit_flag": False,
         "suggested_swap": None,
         "net_vorp": None,
+        "projected_points": None,
         "rumor_sentiment": None,
         "rumor_confidence": None,
         "rumor_suggested_action": None,
@@ -308,9 +312,9 @@ def get_current_team_roster(season: int) -> dict:
     swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
     _apply_badges(starters, deficits_by_position, swap_suggestions)
 
-    vorp_by_espn_id = _load_vorp_by_espn_id(season, week, our_team_id)
-    _apply_vorp(starters, vorp_by_espn_id)
-    _apply_vorp(bench, vorp_by_espn_id)
+    metrics_by_espn_id = _load_weekly_metrics_by_espn_id(season, week, our_team_id)
+    _apply_weekly_metrics(starters, metrics_by_espn_id)
+    _apply_weekly_metrics(bench, metrics_by_espn_id)
 
     rumor_signal_by_espn_id = _load_rumor_signal_by_espn_id(our_team_id)
     _apply_rumor_signal(starters, rumor_signal_by_espn_id)
