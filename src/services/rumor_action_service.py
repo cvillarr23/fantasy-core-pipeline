@@ -331,8 +331,7 @@ def evaluate_and_publish_rumor_actions(
 
 
 def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
-    redis_client = _redis_client()
-    version, state = _load_checkpoint(team_id, _get_watermark(redis_client))
+    version, state = _load_checkpoint(team_id)
     watermark = state["watermark"]
     outcome.details.update(
         watermark_start=watermark, watermark_end=watermark, dropped_signals=[]
@@ -367,12 +366,13 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         s for s in signals
         if str(s["id"]) not in entries or not entries[str(s["id"])].get("prepared")
     ]
-    pending_players = {
-        (action["kind"], str(player_id))
-        for action in actions.values()
-        if action["status"] == "pending"
-        for player_id in action.get("signal_players", [])
-    }
+    pending_actions_by_player = {}
+    for action_id, action in actions.items():
+        if action["status"] == "pending":
+            for player_id in action.get("signal_players", []):
+                pending_actions_by_player.setdefault(
+                    (action["kind"], str(player_id)), action_id
+                )
     covered = set()
     for signal in fresh:
         kind = {
@@ -382,14 +382,19 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         if (
             kind
             and signal["confidence"] >= RUMOR_ACTION_CONFIDENCE_THRESHOLD
-            and (kind, str(signal["player_id"])) in pending_players
+            and (kind, str(signal["player_id"])) in pending_actions_by_player
         ):
+            action_id = pending_actions_by_player[(kind, str(signal["player_id"]))]
             entries[str(signal["id"])] = {
                 "reason": "covered_by_pending_action",
                 "actions": [],
-                "prepared": True,
+                "prepared": False,
                 "player_id": signal["player_id"],
+                "covered_action_id": action_id,
             }
+            covered_ids = actions[action_id].setdefault("covered_signal_ids", [])
+            if signal["id"] not in covered_ids:
+                covered_ids.append(signal["id"])
             covered.add(signal["id"])
     fresh = [s for s in fresh if s["id"] not in covered]
     waiver_targets = _qualifying_signals_by_action(fresh, BOOST_WAIVER_ACTION)
@@ -417,6 +422,13 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             )
             outcome.details["dropped_signals"].append(detail)
             state.setdefault("drops", {})[str(sid)] = detail
+            entry = entries.get(str(sid))
+            if entry:
+                entry.update(reason=reason, prepared=True)
+        for covered_id in action.get("covered_signal_ids", []):
+            entry = entries.get(str(covered_id))
+            if entry:
+                entry.update(reason="pending_action_dropped", prepared=False)
         if job:
             state["failed_jobs"][
                 job
@@ -443,6 +455,8 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                     "player_id": signal["player_id"],
                 },
             )
+            entry.setdefault("evaluation_attempts", 0)
+            entry.setdefault("first_seen_at", now)
             if now - entry["first_seen_at"] >= SIGNAL_RETRY_WINDOW_SECONDS:
                 entry["reason"] = "evaluation_retry_window_expired"
                 entry["prepared"] = True
@@ -586,6 +600,10 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 drop(action, "retry_limit_exceeded", str(exc))
         else:
             action["status"] = "already_queued" if accepted is False else "accepted"
+            for covered_id in action.get("covered_signal_ids", []):
+                entry = entries.get(str(covered_id))
+                if entry:
+                    entry.update(reason="covered_by_pending_action", prepared=True)
             outcome.add(
                 "actions_already_queued" if accepted is False else "actions_accepted",
                 count,
@@ -600,6 +618,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         outcome.signals[sid] = (
             entry["reason"]
             if entry
+            and entry.get("prepared")
             and all(actions[aid]["status"] != "pending" for aid in entry["actions"])
             else "pending"
         )
@@ -623,8 +642,11 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         if any(sid > new_watermark for sid in action["signal_ids"])
     }
     save()
-    _set_watermark(redis_client, new_watermark)
     outcome.details["watermark_end"] = new_watermark
+    try:
+        _set_watermark(_redis_client(), new_watermark)
+    except Exception as exc:
+        logger.warning("Could not mirror rumor-action watermark to Redis: %s", exc)
     if errors:
         raise RuntimeError("; ".join(errors))
     if any(reason == "pending" for reason in outcome.signals.values()):

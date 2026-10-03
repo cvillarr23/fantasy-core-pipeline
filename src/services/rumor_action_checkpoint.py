@@ -10,7 +10,24 @@ from psycopg2.extras import Json
 from src.database import get_db_connection
 
 
-def load_checkpoint(team_id, initial_watermark):
+def load_checkpoint(team_id, initial_watermark=None):
+    """Read durable state without consulting Redis after the first initialization."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT version, state FROM rumor_action_checkpoints WHERE team_id = %s",
+                (str(team_id),),
+            )
+            row = cursor.fetchone()
+            if row is not None:
+                return row
+
+    # Preserve the legacy cursor only when creating a team's first durable checkpoint.
+    if initial_watermark is None:
+        from src.api.draft import _redis_client
+
+        value = _redis_client().get("rumor_action:last_processed_id")
+        initial_watermark = int(value) if value is not None else 0
     initial = {
         "watermark": initial_watermark,
         "signals": {},

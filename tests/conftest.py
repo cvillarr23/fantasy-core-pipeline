@@ -55,14 +55,19 @@ def rumor_checkpoint():
 
     data = {}
 
-    def load(team, initial):
+    def load(team, initial=None):
+        legacy_watermark = (
+            int(ras._redis_client().get(ras.WATERMARK_REDIS_KEY) or 0)
+            if initial is None
+            else initial
+        )
         return deepcopy(
             data.get(
                 team,
                 (
                     0,
                     {
-                        "watermark": initial,
+                        "watermark": legacy_watermark,
                         "signals": {},
                         "actions": {},
                         "failed_jobs": {},

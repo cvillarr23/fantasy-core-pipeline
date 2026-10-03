@@ -17,14 +17,14 @@ def retry_env(monkeypatch):
     redis.set.side_effect = lambda k, v: redis_store.__setitem__(k, v)
     database = {}
 
-    def load(team, initial):
+    def load(team, initial=None):
         return deepcopy(
             database.get(
                 team,
                 (
                     0,
                     {
-                        "watermark": initial,
+                        "watermark": initial if initial is not None else ras._get_watermark(redis),
                         "signals": {},
                         "actions": {},
                         "failed_jobs": {},
@@ -318,3 +318,47 @@ def test_stable_local_hostname_is_not_a_job_failure_key(retry_env, monkeypatch):
         ras.evaluate_and_publish_rumor_actions("7", 2026, 4, source="cli")
     assert database["7"][1]["failed_jobs"] == {}
     assert record.call_args.kwargs["outcome_details"]["job_name"] is None
+
+
+def test_covered_signal_is_released_when_old_action_is_dropped(retry_env, monkeypatch):
+    rows, _, database, _ = retry_env
+    rows[:] = rows[:1]
+    calls = []
+
+    def publish(team, target):
+        calls.append(deepcopy(target))
+        if len(calls) == 1:
+            raise RuntimeError("ambiguous timeout")
+        return True
+
+    with patch.object(
+        ras, "publish_waiver_claim", side_effect=publish
+    ), patch.object(
+        ras.waiver_strategy,
+        "propose_waiver_moves",
+        return_value=[{"add_player_id": "p1"}],
+    ) as propose:
+        with pytest.raises(RuntimeError):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        action = next(iter(database["7"][1]["actions"].values()))
+        action["prepared_at"] -= ras.WAIVER_RETRY_WINDOW_SECONDS
+        rows.append({**rows[0], "id": 2, "sentiment": "new signal"})
+        with pytest.raises(RuntimeError, match="waiver_retry_window_expired"):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        assert database["7"][1]["watermark"] == 1
+        assert database["7"][1]["signals"]["2"]["prepared"] is False
+        monkeypatch.setenv("JOB_NAME", "rumor-job-2")
+        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert result["watermark"] == 2
+    assert len(calls) == 2
+    assert propose.call_count == 2
+
+
+def test_redis_mirror_failure_does_not_fail_checkpointed_run(retry_env):
+    _, _, _, record = retry_env
+    with patch.object(ras, "fetch_new_signals", return_value=[]), patch.object(
+        ras, "_redis_client", side_effect=RuntimeError("redis down")
+    ):
+        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert result["considered"] == 0
+    assert record.call_args.kwargs["status"] == "success"

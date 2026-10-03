@@ -20,13 +20,13 @@ def test_load_initializes_once_and_reads_existing_state():
     conn = MagicMock()
     cursor = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
     state = {"watermark": 42}
-    cursor.fetchone.return_value = (3, state)
+    cursor.fetchone.side_effect = [None, (3, state)]
     with patch.object(checkpoint, "get_db_connection", return_value=conn):
         assert checkpoint.load_checkpoint("7", 0) == (3, state)
-    assert (
-        "ON CONFLICT (team_id) DO NOTHING" in cursor.execute.call_args_list[0].args[0]
-    )
-    conn.__exit__.assert_called_once_with(None, None, None)
+    sql = [call.args[0] for call in cursor.execute.call_args_list]
+    assert "SELECT version, state FROM rumor_action_checkpoints" in sql[0]
+    assert "ON CONFLICT (team_id) DO NOTHING" in sql[1]
+    assert conn.__exit__.call_count == 2
 
 
 def test_save_requires_matching_version_and_commits_new_state():
