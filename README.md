@@ -243,3 +243,44 @@ Failed-Job markers expire after seven days.
 The infra follow-up sets `restartPolicy: Never`, `backoffLimit: 2`, and `JOB_NAME` from
 `metadata.labels['batch.kubernetes.io/job-name']`, only after this core image and schema
 are deployed. Waiver keys remain scoped to claim/week without `JOB_NAME`.
+
+### Human approval of staged trade offers
+
+`GET /v1/trade/offers?status=awaiting_approval` lists worker-staged offers, newest
+first. Optional `league_id`, `season`, `limit` (1–200, default 50), and `offset`
+filter/page the results. Player names resolve through `players.espn_id`; unknown
+players retain their ESPN IDs and a null name. The exact manager message is shown.
+Pod-local screenshots are not served.
+
+`POST /v1/trade/offers/{offer_key}/approve` accepts only
+`{"approved_by":"your-name"}`. As with the existing trade evaluation route, there
+is no application-layer authentication: the approver is self-reported, and access
+relies on the deployment's trust boundary. No offer fields may be supplied in the
+request. The stored offer must match the worker's SHA-256 contract and configured
+`ESPN_LEAGUE_ID`/`ESPN_TEAM_ID`. IDs inside this trade JSON are explicitly **ESPN**
+IDs, including negative D/ST IDs; do not translate them as internal player IDs.
+
+Successful publication returns 202 (`status: approved` means enqueued, not sent in
+ESPN). A repeated confirmed approval returns 200 and the original tracking ID,
+without another publish. Unknown keys return 404; invalid/edited offers and
+non-approvable states return 409. Blank approvers and extra body fields return 422.
+The worker still enforces its dry-run, trade-enable, approval, and selector gates.
+
+Approval uses PostgreSQL locking across all rows for an offer key, with the
+approver, timestamp, tracking ID, and exact payload persisted under
+`execution_log.outcome_details.approval`. A `bot_decisions` entry with action
+`trade_offer` commits in the same transaction. The `approval_pending` claim commits
+**before** AMQP publication; only a confirmed publish changes it to `approved`.
+Failures proven to precede publication release the claim. An ambiguous failure or
+process crash leaves it pending indefinitely, so retries cannot enqueue twice.
+There is no automatic retry or expiry for uncertain publications.
+
+For a stuck pending approval, reconcile its tracking ID with broker/worker logs
+and the worker's `submitting`/`submitted` rows (and ESPN outcome when necessary).
+Do not reset or republish merely because an HTTP request failed or timed out. Only
+an operator who has established that nothing was queued/sent may release the
+claim; an unknown outcome must stay blocked. No recovery endpoint is provided.
+
+Offline regression tests: `python -m pytest tests/test_trade_offers.py`. Hash
+fixtures were generated from fantasy-browser-worker's `computeOfferKey` on main;
+they cover exact whitespace, Unicode, null messages, sorted IDs, and D/ST IDs.
