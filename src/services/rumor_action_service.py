@@ -496,7 +496,9 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             if job:
                 state["failed_jobs"][job] = errors[-1]
     if outcome.details["dropped_signals"] and job:
-        state["failed_jobs"][job] = "Rumor signals were deliberately dropped; inspect execution outcome details"
+        state["failed_jobs"].setdefault(
+            job, "Rumor signals were deliberately dropped; inspect execution outcome details"
+        )
     # Commit immutable payloads BEFORE any HTTP calls. A failed commit must prevent
     # publishing, and a process death after delivery replays the same gateway key.
     save()
