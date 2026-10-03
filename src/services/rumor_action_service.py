@@ -340,7 +340,11 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
     job = os.getenv("JOB_NAME")
     # Before the infra rollout, OnFailure restarts share a pod hostname. HTTP calls
     # must not use the long-lived API pod's hostname as a Job identity.
-    if not job and outcome.details["source"] == "cli":
+    if (
+        not job
+        and outcome.details["source"] == "cli"
+        and os.getenv("HOSTNAME", "").startswith("fantasy-rumor-action-trigger-")
+    ):
         job = os.getenv("HOSTNAME")
     outcome.details["job_name"] = job
 
@@ -363,6 +367,31 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         s for s in signals
         if str(s["id"]) not in entries or not entries[str(s["id"])].get("prepared")
     ]
+    pending_players = {
+        (action["kind"], str(player_id))
+        for action in actions.values()
+        if action["status"] == "pending"
+        for player_id in action.get("signal_players", [])
+    }
+    covered = set()
+    for signal in fresh:
+        kind = {
+            BOOST_WAIVER_ACTION: "waiver",
+            BENCH_WATCH_ACTION: "lineup",
+        }.get(signal["suggested_action"])
+        if (
+            kind
+            and signal["confidence"] >= RUMOR_ACTION_CONFIDENCE_THRESHOLD
+            and (kind, str(signal["player_id"])) in pending_players
+        ):
+            entries[str(signal["id"])] = {
+                "reason": "covered_by_pending_action",
+                "actions": [],
+                "prepared": True,
+                "player_id": signal["player_id"],
+            }
+            covered.add(signal["id"])
+    fresh = [s for s in fresh if s["id"] not in covered]
     waiver_targets = _qualifying_signals_by_action(fresh, BOOST_WAIVER_ACTION)
     bench_targets = _qualifying_signals_by_action(fresh, BENCH_WATCH_ACTION)
     selected = {s["id"] for s in [*waiver_targets.values(), *bench_targets.values()]}
@@ -403,10 +432,17 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
         now = time.time()
         for signal in targets.values():
             sid = signal["id"]
-            entry = entries.setdefault(str(sid), {
-                "reason": "pending", "actions": [], "prepared": False,
-                "evaluation_attempts": 0, "first_seen_at": now,
-            })
+            entry = entries.setdefault(
+                str(sid),
+                {
+                    "reason": "pending",
+                    "actions": [],
+                    "prepared": False,
+                    "evaluation_attempts": 0,
+                    "first_seen_at": now,
+                    "player_id": signal["player_id"],
+                },
+            )
             if now - entry["first_seen_at"] >= SIGNAL_RETRY_WINDOW_SECONDS:
                 entry["reason"] = "evaluation_retry_window_expired"
                 entry["prepared"] = True
@@ -465,6 +501,9 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 kind=kind,
                 payload=group,
                 signal_ids=ids,
+                signal_players=sorted(
+                    {entries[str(sid)]["player_id"] for sid in ids}, key=str
+                ),
                 attempts=0,
                 status="pending",
                 season=season,

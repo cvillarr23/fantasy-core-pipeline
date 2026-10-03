@@ -280,3 +280,41 @@ def test_prepared_actions_are_not_replayed_in_a_different_week(retry_env):
         with pytest.raises(RuntimeError, match="decision_week_expired"):
             ras.evaluate_and_publish_rumor_actions("7", 2026, 5)
         assert publish.call_count == 3
+
+
+def test_new_signal_for_pending_player_is_covered_by_saved_action(retry_env):
+    rows, _, database, _ = retry_env
+    rows[:] = rows[:1]
+    calls = []
+
+    def publish(team, target):
+        calls.append(deepcopy(target))
+        if len(calls) == 1:
+            raise RuntimeError("ambiguous timeout")
+        return True
+
+    with patch.object(ras, "publish_waiver_claim", side_effect=publish), patch.object(
+        ras.waiver_strategy,
+        "propose_waiver_moves",
+        return_value=[{"add_player_id": "p1"}],
+    ) as propose:
+        with pytest.raises(RuntimeError):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        rows.append({**rows[0], "id": 2, "sentiment": "very positive"})
+        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert propose.call_count == 1
+    assert result["considered"] == 2
+    assert result["watermark"] == 2
+    assert database["7"][1]["watermark"] == 2
+
+
+def test_stable_local_hostname_is_not_a_job_failure_key(retry_env, monkeypatch):
+    _, _, database, record = retry_env
+    monkeypatch.delenv("JOB_NAME")
+    monkeypatch.setenv("HOSTNAME", "workstation")
+    with patch.object(ras, "fetch_new_signals", return_value=[]):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4, source="cli")
+    assert database["7"][1]["failed_jobs"] == {}
+    assert record.call_args.kwargs["outcome_details"]["job_name"] is None

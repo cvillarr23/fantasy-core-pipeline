@@ -211,7 +211,8 @@ The legacy cursor assumes the existing single configured team at cutover.
 
 Only a contiguous prefix of handled signals advances the cursor. Prepared payloads,
 original lineup idempotency keys, and successful deliveries beyond a gap survive pod
-restarts. Checkpoints commit before publishing and after each outcome, using optimistic
+restarts. New qualifying signals for a player with a pending prepared action are covered by
+that action and cannot queue a second copy. Checkpoints commit before publishing and after each outcome, using optimistic
 version checks so overlapping invocations fail instead of overwriting progress. No DB
 connection is held across publishing. A lost acknowledgement or failed post-publish
 checkpoint replays the saved payload under its original gateway key.
@@ -230,7 +231,8 @@ Waiver actions expire after 24 hours as `waiver_retry_window_expired`.
 Prepared actions from a different season/week are dropped as `decision_week_expired`.
 The invocation that drops work still fails. Its `JOB_NAME` is recorded as failed so extra
 pods of that Job cannot report empty success; later Jobs may proceed. Until the infra
-rollout supplies `JOB_NAME`, CLI runs use `HOSTNAME` to identify OnFailure pod restarts. Pending actions
+rollout supplies `JOB_NAME`, only rumor-trigger CLI pods use their generated pod hostname
+to identify OnFailure restarts; local CLI runs do not persist a host-wide failure marker. Pending actions
 are still retried even if another action has already made the Job permanently fail.
 
 The infra follow-up sets `restartPolicy: Never`, `backoffLimit: 2`, and `JOB_NAME` from
