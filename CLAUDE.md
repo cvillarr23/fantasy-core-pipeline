@@ -98,8 +98,9 @@
   and now uses the same unfiltered query with `scoringPeriodId` set to the target week, so
   rostered K/D-ST get projections too (#183). Kickers match by existing `espn_id` first,
   then (name, team); D/ST by team. A matched player with no projection for that week (a
-  bye) gets **no** `weekly_stats` row, never a 0.0 one, because the pregame pool reads a
-  missing row as "on bye".
+  bye, or a since-released kicker) gets **no** `weekly_stats` row, never a 0.0 one, because
+  the pregame pool reads a missing row as "on bye"; a row an earlier daily run wrote for
+  that week is deleted (only `sync_kicker_dst` writes K/D-ST rows).
 
 ## CORE-06: PuLP lineup optimizer
 
@@ -124,8 +125,9 @@
   `InsufficientLineupInputError` it logs and shows no badges), and `rumor_action_service`'s
   bench_watch path (lets the error raise, like the optimizer). It uses
   `load_pregame_roster_pool`, not `load_roster_pool`. Source order, always within the
-  target season: (1) the target week's own `vorp_score` if any rostered player has one
-  (pregame Sleeper projections written by `fantasy-draft-prep-refresher`, 05:00 CT daily);
+  target season: (1) the target week's own `vorp_score` if any rostered **non-K/D-ST**
+  player has one (pregame projections written by `fantasy-draft-prep-refresher`, 05:00 CT
+  daily; K/D-ST rows alone don't count, since ESPN's can land before Sleeper's, #183);
   otherwise (2) each player's mean `vorp_score` over the up-to-3 prior weeks of the same
   season. Week 1 never reads the prior season. Mode (2) needs the newest usable week to be
   `target - 1` (else "stale"), and takes byes from the nflverse schedule

@@ -106,9 +106,10 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
     (pool, vorp_by_player, source).
 
     Source order, always within `season` only - week 1 never reads last season's rows:
-      1. target_week's own vorp_score, if any rostered player has one. These are pregame
-         Sleeper projections (draft-prep-refresher: sync_projections -> vorp_matrix), and
-         a player without a row is on bye, same as load_roster_pool.
+      1. target_week's own vorp_score, if any rostered non-K/D-ST player has one. These
+         are pregame projections (draft-prep-refresher: sync_projections and
+         sync_kicker_dst -> vorp_matrix), and a player without a row is on bye, same as
+         load_roster_pool.
       2. Otherwise, each player's mean vorp_score over the up-to-`window` prior weeks of
          the same season. Byes come from the nflverse schedule, since prior-week rows say
          nothing about the target week. The newest usable week must be target_week - 1,
@@ -142,7 +143,11 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
     metrics = cursor.fetchall()
 
     target_rows = [row for row in metrics if row[1] == target_week]
-    if target_rows:
+    # K/D-ST target-week rows (ESPN, sync_kicker_dst) can land before Sleeper's skill
+    # projections for that week; on their own they must not select target_week mode,
+    # which would read every skill player's missing row as a bye.
+    position_by_player = {pid: position for pid, _, position, _, _ in roster}
+    if any(position_by_player.get(row[0]) not in HOLDABLE_WITHOUT_METRICS for row in target_rows):
         vorp_by_player = {pid: vorp for pid, _, vorp, _ in target_rows}
         multiplier_by_player = {pid: mult for pid, _, _, mult in target_rows}
         mode, weeks = "target_week", [target_week]
