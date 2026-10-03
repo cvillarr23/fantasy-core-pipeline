@@ -514,3 +514,13 @@ CREATE INDEX IF NOT EXISTS idx_bot_decisions_tracking_id ON bot_decisions(tracki
 ADD_EXECUTION_LOG_OUTCOME_DETAILS_COLUMN = """
 ALTER TABLE execution_log ADD COLUMN IF NOT EXISTS outcome_details JSONB;
 """
+
+
+CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE = """
+CREATE TABLE IF NOT EXISTS rumor_action_checkpoints (
+    team_id TEXT PRIMARY KEY,
+    version BIGINT NOT NULL DEFAULT 0,
+    state JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""

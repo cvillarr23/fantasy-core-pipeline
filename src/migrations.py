@@ -34,6 +34,7 @@ from src.models import (
     CREATE_DEFENSE_POSITION_STRENGTH_TABLE,
     CREATE_BOT_DECISIONS_TABLE,
     CREATE_RUMOR_SIGNALS_TABLE,
+    CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE,
     CREATE_INDICES
 )
 
@@ -136,6 +137,7 @@ def run_migrations():
             # 4i. Execute rumor-signal interpretation ledger (WORKER-13)
             logger.info("Validating 'rumor_signals' interpretation ledger...")
             cursor.execute(CREATE_RUMOR_SIGNALS_TABLE)
+            cursor.execute(CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")

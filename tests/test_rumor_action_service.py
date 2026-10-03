@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 from src.optimization import lineup_solver
 from src.services import rumor_action_service as ras
 
+pytestmark = pytest.mark.usefixtures("rumor_checkpoint")
+
 
 def _fake_redis(initial_watermark=None):
     store = {} if initial_watermark is None else {ras.WATERMARK_REDIS_KEY: str(initial_watermark)}
@@ -89,7 +91,10 @@ def test_waiver_claims_publish_outside_the_db_block_and_skip_already_queued():
         {"player_id": "e-2", "drop_player_id": "e-8", "name": "Brand New", "team": "SF"},
     ]
     moves = [{"add_player_id": "1"}, {"add_player_id": "2"}]
-    signals = {"1": {}, "2": {}}
+    waiver_cursor.fetchall.return_value = [
+        (1, "1", "positive", 0.9, ras.BOOST_WAIVER_ACTION),
+        (2, "2", "positive", 0.9, ras.BOOST_WAIVER_ACTION),
+    ]
 
     def _publish(team_id, target):
         assert not waiver_conn_open["open"], "published while a DB connection was checked out"
@@ -99,9 +104,9 @@ def test_waiver_claims_publish_outside_the_db_block_and_skip_already_queued():
          patch("src.services.rumor_action_service.load_live_waiver_inputs", return_value=({}, {})), \
          patch("src.services.rumor_action_service.waiver_strategy.propose_waiver_moves", return_value=moves), \
          patch("src.services.rumor_action_service.resolve_live_waiver_moves", side_effect=[[targets[0]], [targets[1]]]), \
-         patch("src.services.rumor_action_service._decorate_decision_inputs", return_value={}), \
+         patch("src.services.rumor_action_service._redis_client", return_value=_fake_redis()), \
          patch("src.services.rumor_action_service.publish_waiver_claim", side_effect=_publish) as mock_publish:
-        published = ras._evaluate_and_publish_waiver_claims("7", 2026, 4, signals)
+        published = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)["waiver_claims_published"]
 
     assert mock_publish.call_count == 2
     assert [t["name"] for t in published] == ["Brand New"]
@@ -128,7 +133,8 @@ def test_qualifying_bench_watch_signal_publishes_matching_swap():
 
     # Matched on the internal drop id (the signal's player_id), published with ESPN ids (#187).
     published = result["lineup_swaps_published"]
-    mock_publish.assert_called_once_with("7", published)
+    assert mock_publish.call_args.args == ("7", published)
+    assert mock_publish.call_args.kwargs["idempotency_key"].startswith("lineup-7-")
     assert len(published) == 1
     assert published[0]["drop_player_id"] == "espn-9001"
     assert published[0]["add_player_id"] == "espn-bench2"
@@ -156,11 +162,11 @@ def test_bench_watch_fails_loudly_on_insufficient_lineup_input():
          patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
          patch("src.services.rumor_action_service.lineup_solver.evaluate_lineup", side_effect=error), \
          patch("src.services.rumor_action_service.lineup_solver.publish_lineup_swaps") as mock_publish, \
-         pytest.raises(lineup_solver.InsufficientLineupInputError):
+         pytest.raises(RuntimeError, match="stale weekly_stats"):
         ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
 
     mock_publish.assert_not_called()
-    assert redis_client.store[ras.WATERMARK_REDIS_KEY] == "21"
+    assert redis_client.store[ras.WATERMARK_REDIS_KEY] == "0"
 
 
 def test_signal_below_threshold_is_never_published():
