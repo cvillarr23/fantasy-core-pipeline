@@ -52,10 +52,10 @@ DEFAULT_LINEUP_SLOT_COUNTS = {
     "K": 1,
     "RB/WR/TE": 1,
 }
-# Sleeper projections (sync_projections, the only scheduled vorp_score source) cover
-# QB/RB/WR/TE only, and sync_kicker_dst is free-agent-only, so rostered K/D-ST normally
-# have no weekly_stats metrics at all. When no rostered player has data for one of these
-# slots, its current starter is held rather than failing the whole run.
+# Sleeper projections (sync_projections) cover QB/RB/WR/TE only; K/D-ST target-week
+# projections come from ESPN via sync_kicker_dst, run in the same daily refresher (#183).
+# If that data is missing (ESPN down, refresher failed), no rostered player can fill one of
+# these slots, and its current starter is held rather than failing the whole run.
 HOLDABLE_WITHOUT_METRICS = {"K", "D/ST"}
 PREGAME_WINDOW_WEEKS = 3
 METRIC_SOURCE = "weekly_stats.vorp_score"
