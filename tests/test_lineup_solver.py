@@ -839,6 +839,22 @@ def test_evaluate_lineup_holds_no_slots_and_swaps_kicker_when_kdst_have_target_w
     assert swap["decision_inputs"]["held_slots"] == []
 
 
+def test_evaluate_lineup_ignores_kdst_only_target_week_rows_when_choosing_the_source():
+    """sync_kicker_dst (ESPN) can land target-week K/D-ST rows before Sleeper has
+    skill-position projections for that week. Those alone must not switch the pool to
+    target_week mode, which would treat every QB/RB/WR/TE as on bye."""
+    metrics = _metric_rows(TARGET_WEEK - 1, BASE_VORP) + _metric_rows(TARGET_WEEK, {"k1": 1.0, "dst1": 2.0})
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER, metrics, CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         patch("src.optimization.lineup_solver.load_teams_playing", return_value=ALL_TEAMS_PLAYING):
+        result = ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+    assert result["source"]["source_mode"] == "rolling_prior_weeks"
+    assert result["source"]["source_weeks"] == [TARGET_WEEK - 1]
+    assert {p["player_id"] for p in result["roster_pool"]} >= set(BASE_VORP)
+
+
 def test_evaluate_lineup_still_holds_kdst_slots_when_their_target_week_metrics_are_missing():
     skill_only = {pid: vorp for pid, vorp in KDST_VORP.items() if pid not in ("dst1", "k1", "k_bench")}
     mock_cursor = MagicMock()

@@ -153,15 +153,20 @@ def persist_projections(conn, matches: list, season: int, week: int) -> int:
     normalized, is ESPN's current team for the matched player, so there's no separate
     lookup needed.
 
-    A match with no `week` projection (a bye) gets no row: lineup_solver's pregame pool
-    reads "no target-week row" as "on bye", so a 0.0 row would make it look startable."""
-    rows = [
-        (player_id, season, week, points, _normalize_team(espn_player.proTeam))
-        for player_id, espn_player in matches
-        if (points := _projected_points(espn_player, week)) is not None
-    ]
-    if not rows:
+    A match with no `week` projection (a bye, or a kicker released since an earlier run)
+    gets no row: lineup_solver's pregame pool reads "no target-week row" as "on bye", so a
+    0.0 row would make it look startable. The refresher re-targets the same week daily, so
+    a row an earlier run wrote for such a player is deleted. Only this module writes K/D-ST
+    weekly_stats rows (metrics_extractor is QB/RB/WR/TE only), so nothing else is lost."""
+    if not matches:
         return 0
+    rows, without_projection = [], []
+    for player_id, espn_player in matches:
+        points = _projected_points(espn_player, week)
+        if points is None:
+            without_projection.append(player_id)
+        else:
+            rows.append((player_id, season, week, points, _normalize_team(espn_player.proTeam)))
     upsert_query = """
         INSERT INTO weekly_stats (player_id, season, week, projected_points, team)
         VALUES (%s, %s, %s, %s, %s)
@@ -169,8 +174,16 @@ def persist_projections(conn, matches: list, season: int, week: int) -> int:
             projected_points = EXCLUDED.projected_points,
             team = EXCLUDED.team;
     """
+    delete_query = """
+        DELETE FROM weekly_stats s USING players p
+        WHERE p.player_id = s.player_id AND p.position IN ('K', 'D/ST')
+          AND s.player_id = ANY(%s) AND s.season = %s AND s.week = %s;
+    """
     with conn.cursor() as cursor:
-        cursor.executemany(upsert_query, rows)
+        if rows:
+            cursor.executemany(upsert_query, rows)
+        if without_projection:
+            cursor.execute(delete_query, (without_projection, season, week))
     return len(rows)
 
 

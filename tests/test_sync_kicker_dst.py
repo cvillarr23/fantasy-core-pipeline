@@ -140,11 +140,29 @@ def test_persist_projections_skips_players_with_no_projection_for_the_week():
     assert rows == [("SF", 2026, 2, 5.5, "SF")]
 
 
-def test_persist_projections_noop_when_no_match_has_a_projection():
+def test_persist_projections_deletes_an_earlier_runs_row_once_espn_drops_the_projection():
+    """The refresher re-targets the same week daily (Tue-Sun). If ESPN drops a K/D-ST's
+    projection mid-week (e.g. a released kicker), the row an earlier run wrote must go too,
+    or the pregame pool keeps treating him as playing on stale points."""
     mock_conn = MagicMock()
-    on_bye = _espn_player("Houston D/ST", "HOU", -16034, week=1)
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    dropped = _espn_player("Released Kicker", "SF", 12345, week=1)
 
-    assert skd.persist_projections(mock_conn, [("HOU", on_bye)], season=2026, week=2) == 0
+    written = skd.persist_projections(mock_conn, [("9999", dropped)], season=2026, week=2)
+
+    assert written == 0
+    mock_cursor.executemany.assert_not_called()
+    query, params = mock_cursor.execute.call_args.args
+    assert query.lstrip().startswith("DELETE FROM weekly_stats")
+    # Scoped to K/D-ST rows: no other ingestion step writes those, so nothing else is lost.
+    assert "position IN ('K', 'D/ST')" in query
+    assert params == (["9999"], 2026, 2)
+
+
+def test_persist_projections_noop_on_empty_matches():
+    mock_conn = MagicMock()
+    assert skd.persist_projections(mock_conn, [], season=2026, week=2) == 0
     mock_conn.cursor.assert_not_called()
 
 
