@@ -440,7 +440,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                     state.setdefault("drops", {})[str(signal["id"])] = detail
                     if job:
                         state["failed_jobs"][job] = (
-                            "Rumor signal evaluation retry limit exceeded; inspect execution outcome details"
+                            f"Rumor signal {signal['id']} evaluation retry limit exceeded; inspect execution outcome details"
                         )
             errors.append(str(exc))
             save()
