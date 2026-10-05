@@ -190,8 +190,23 @@ def shape_player(p):
     }
 
 
+def normalize_card(p):
+    # espn_api's json_parsing() returns [] (not None) for absent keys, and player_info()
+    # keys schedule by the raw JSON scoring period strings; downstream code expects
+    # scalar statuses and int weeks.
+    if not isinstance(p.injuryStatus, str) or not p.injuryStatus:
+        p.injuryStatus = None
+    if not isinstance(getattr(p, "onTeamId", 0), (int, str)):
+        p.onTeamId = 0
+    p.schedule = {
+        int(k): v for k, v in (p.schedule or {}).items() if str(k).lstrip("-").isdigit()
+    }
+    return p
+
+
 def point_projection(p, week, current):
-    if p.injuryStatus in {
+    status = p.injuryStatus if isinstance(p.injuryStatus, str) else None
+    if status in {
         "OUT",
         "Out",
         "INJURY_RESERVE",
@@ -303,7 +318,7 @@ def move_preview(payload):
         playerId=[int(pid) for pid in roster_ids | set(incoming)]
     )
     cards = cards if isinstance(cards, list) else [cards] if cards else []
-    by_id = {str(p.playerId): p for p in cards}
+    by_id = {str(p.playerId): normalize_card(p) for p in cards}
     if not roster_ids | set(incoming) <= by_id.keys():
         raise ValueError("Some player details are unavailable from ESPN.")
     for p in team.roster:
