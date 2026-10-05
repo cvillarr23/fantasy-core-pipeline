@@ -8,6 +8,7 @@ exporter/processor are only constructed inside the function body - so importing 
 module never requires patching in tests/conftest.py the way src.database's eager
 ThreadedConnectionPool does.
 """
+import json
 import logging
 import os
 
@@ -62,12 +63,41 @@ class TraceIdLogFilter(logging.Filter):
         return True
 
 
-_LOG_FORMAT = "%(asctime)s %(levelname)s [trace_id=%(trace_id)s] %(name)s: %(message)s"
+class LogfmtFormatter(logging.Formatter):
+    """One logfmt line per record, with no timestamp: the container runtime and Loki
+    already stamp every line, so a second in-band timestamp is just noise. key=value
+    pairs let Grafana detect the level and `| logfmt` pull trace_id without a regex.
+    The message is JSON-quoted so spaces, quotes and multi-line tracebacks stay inside
+    a single msg field and a single Loki entry."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        if record.exc_info:
+            message += "\n" + self.formatException(record.exc_info)
+        if record.stack_info:
+            message += "\n" + self.formatStack(record.stack_info)
+        trace_id = getattr(record, "trace_id", "-")
+        return (
+            f"level={record.levelname} logger={record.name} "
+            f"trace_id={trace_id} msg={json.dumps(message)}"
+        )
+
+
+class HealthCheckAccessFilter(logging.Filter):
+    """Drops uvicorn access lines for the kubelet's /v1/health probe, which otherwise
+    dominate the gateway's log volume without carrying any signal."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args if isinstance(record.args, tuple) else ()
+        return not (len(args) >= 3 and args[2] == "/v1/health")
+
+
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 _logging_configured = False
 
 
 def configure_trace_logging() -> None:
-    """Attaches TraceIdLogFilter and a trace_id-aware format to the root logger's handlers.
+    """Attaches TraceIdLogFilter and LogfmtFormatter to the root logger's handlers.
 
     Idempotent, same as configure_tracing() above: several modules in this repo call this
     at their own import time (e.g. draft_matrix.py imports vorp_matrix.py, which calls
@@ -89,7 +119,7 @@ def configure_trace_logging() -> None:
     only runs for records that logger itself originates, not for records propagated up
     from a child logger (e.g. "GatewayEngine" -> root) - since every module logger in
     this repo is a child of root, a root-Logger-level filter would silently never fire
-    and every formatted record would KeyError on %(trace_id)s.
+    and every line would carry trace_id=- even inside an active span.
     """
     global _logging_configured
     if _logging_configured:
@@ -100,6 +130,13 @@ def configure_trace_logging() -> None:
     if not root.handlers:
         root.addHandler(logging.StreamHandler())
     for handler in root.handlers:
-        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        handler.setFormatter(LogfmtFormatter())
         handler.addFilter(TraceIdLogFilter())
+    # uvicorn installs its own handlers and formatters before importing the app, so its
+    # access/error lines would bypass the format above; hand them to root instead.
+    for name in _UVICORN_LOGGERS:
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers = []
+        uvicorn_logger.propagate = True
+    logging.getLogger("uvicorn.access").addFilter(HealthCheckAccessFilter())
     _logging_configured = True

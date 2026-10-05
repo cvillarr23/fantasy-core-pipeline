@@ -140,3 +140,45 @@ def test_trace_id_log_filter_stamps_placeholder_without_active_span():
     log_filter.filter(record)
 
     assert record.trace_id == "-"
+
+
+def _record(msg, *args, name="x", level=logging.INFO, exc_info=None):
+    record = logging.LogRecord(name, level, __file__, 1, msg, args, exc_info)
+    record.trace_id = "-"
+    return record
+
+
+def test_logfmt_formatter_omits_timestamp_and_quotes_message():
+    line = telemetry.LogfmtFormatter().format(_record('said "hi" to %s', "bob", name="GatewayEngine"))
+
+    assert line == 'level=INFO logger=GatewayEngine trace_id=- msg="said \\"hi\\" to bob"'
+
+
+def test_logfmt_formatter_keeps_traceback_on_one_line():
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        import sys
+
+        line = telemetry.LogfmtFormatter().format(_record("failed", level=logging.ERROR, exc_info=sys.exc_info()))
+
+    assert "\n" not in line
+    assert line.startswith("level=ERROR ") and "ValueError: boom" in line
+
+
+def test_configure_trace_logging_routes_uvicorn_through_root_and_drops_health_checks():
+    root = logging.getLogger()
+    root.handlers = [logging.StreamHandler()]
+    access = logging.getLogger("uvicorn.access")
+    access.handlers = [logging.StreamHandler()]
+    access.propagate = False
+    access.filters = []
+    telemetry._logging_configured = False
+
+    telemetry.configure_trace_logging()
+
+    assert access.handlers == [] and access.propagate
+    health = _record('%s - "%s %s HTTP/%s" %d', "10.1.0.40:5598", "GET", "/v1/health", "1.1", 200)
+    other = _record('%s - "%s %s HTTP/%s" %d', "10.1.0.40:5598", "POST", "/v1/roster/move-preview", "1.1", 500)
+    assert not access.filter(health)
+    assert access.filter(other)
