@@ -41,7 +41,9 @@ BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 # Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
 # parses as vhost "" (empty string) in pika, not "/", and RabbitMQ then rejects the
 # connection with "vhost  not found" instead of connecting to the default vhost.
-AMQP_URL = os.getenv("AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f")
+AMQP_URL = os.getenv(
+    "AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f"
+)
 
 # Guards /v1/trigger/*, which bypass oauth2-proxy when called in-cluster. No default -
 # OpenBao-injected in deployed environments, same convention as DB_PASSWORD.
@@ -50,7 +52,9 @@ TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 
 def require_trigger_api_key(x_api_key: str = Header(...)) -> None:
     if not TRIGGER_API_KEY:
-        raise HTTPException(status_code=500, detail="TRIGGER_API_KEY is not configured on this service.")
+        raise HTTPException(
+            status_code=500, detail="TRIGGER_API_KEY is not configured on this service."
+        )
     if not secrets.compare_digest(x_api_key, TRIGGER_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key.")
 
@@ -59,9 +63,17 @@ def require_trigger_api_key(x_api_key: str = Header(...)) -> None:
 # PYDANTIC DATA TRANSFER OBJECTS (SCHEMAS)
 # ------------------------------------------------------------------------------
 class SwapInstruction(BaseModel):
-    drop_player_id: str = Field(..., description="ESPN player id of the starter to bench. Must be ESPN's, not the internal Sleeper players.player_id - the two id spaces overlap numerically, so the wrong namespace can silently swap a different player (#187)")
-    add_player_id: str = Field(..., description="ESPN player id of the player to elevate to the active lineup. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap as drop_player_id")
-    slot: str = Field(..., description="Target lineup position frame (e.g., RB1, WR2, FLEX)")
+    drop_player_id: str = Field(
+        ...,
+        description="ESPN player id of the starter to bench. Must be ESPN's, not the internal Sleeper players.player_id - the two id spaces overlap numerically, so the wrong namespace can silently swap a different player (#187)",
+    )
+    add_player_id: str = Field(
+        ...,
+        description="ESPN player id of the player to elevate to the active lineup. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap as drop_player_id",
+    )
+    slot: str = Field(
+        ..., description="Target lineup position frame (e.g., RB1, WR2, FLEX)"
+    )
     drop_player_name: Optional[str] = Field(
         None,
         description=(
@@ -95,9 +107,14 @@ class SwapInstruction(BaseModel):
         ),
     )
 
+
 class LineupTriggerPayload(BaseModel):
-    team_id: str = Field(..., description="Target local league team identification number")
-    optimized_swaps: List[SwapInstruction] = Field(..., description="Array of mathematical player reallocations")
+    team_id: str = Field(
+        ..., description="Target local league team identification number"
+    )
+    optimized_swaps: List[SwapInstruction] = Field(
+        ..., description="Array of mathematical player reallocations"
+    )
     idempotency_key: Optional[str] = Field(
         None,
         description=(
@@ -109,21 +126,24 @@ class LineupTriggerPayload(BaseModel):
         ),
     )
 
+
 class WaiverTriggerPayload(BaseModel):
-    idempotency_key: Optional[str] = Field(
-        None,
-        description=(
-            "Stable key for this claim in this waiver week. Repeats within "
-            "WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS - or any keyed repeat of a claim already "
-            "in bot_decisions for the same team/season/week/add/drop - return status "
-            "'duplicate' instead of queueing a second ESPN claim. Omit it to force a "
-            "deliberately independent claim, e.g. re-queueing one the worker failed to make."
-        ),
+    idempotency_key: Optional[str] = None
+    team_id: str = Field(
+        ..., description="Target local league team identification number"
     )
-    team_id: str = Field(..., description="Target local league team identification number")
-    player_id: str = Field(..., description="ESPN player id of the free agent to claim. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap DraftPickTriggerPayload guards against")
-    name: str = Field(..., description="Display name of the player to claim, as expected by the click bot")
-    team: str = Field(..., description="NFL team abbreviation of the player to claim, for a name+team match against ESPN's own player pool")
+    player_id: str = Field(
+        ...,
+        description="ESPN player id of the free agent to claim. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap DraftPickTriggerPayload guards against",
+    )
+    name: str = Field(
+        ...,
+        description="Display name of the player to claim, as expected by the click bot",
+    )
+    team: str = Field(
+        ...,
+        description="NFL team abbreviation of the player to claim, for a name+team match against ESPN's own player pool",
+    )
     drop_player_id: Optional[str] = Field(
         None,
         description=(
@@ -141,11 +161,25 @@ class WaiverTriggerPayload(BaseModel):
 
 
 class DraftPickTriggerPayload(BaseModel):
-    team_id: str = Field(..., description="Target local league team identification number")
-    player_id: str = Field(..., description="ESPN player id of the recommended draft target. Must be ESPN's, not the internal Sleeper players.player_id: the worker clicks button.Button--draft[data-player-id=...] in the draft room, and the two id spaces overlap numerically, so the wrong namespace silently matches a different player")
-    name: str = Field(..., description="Display name of the recommended draft target, as expected by the click bot")
-    position: str = Field(..., description="Player's position, for a name+position+team match against ESPN's own player pool")
-    pro_team: str = Field(..., description="Player's NFL team abbreviation, for a name+position+team match against ESPN's own player pool")
+    team_id: str = Field(
+        ..., description="Target local league team identification number"
+    )
+    player_id: str = Field(
+        ...,
+        description="ESPN player id of the recommended draft target. Must be ESPN's, not the internal Sleeper players.player_id: the worker clicks button.Button--draft[data-player-id=...] in the draft room, and the two id spaces overlap numerically, so the wrong namespace silently matches a different player",
+    )
+    name: str = Field(
+        ...,
+        description="Display name of the recommended draft target, as expected by the click bot",
+    )
+    position: str = Field(
+        ...,
+        description="Player's position, for a name+position+team match against ESPN's own player pool",
+    )
+    pro_team: str = Field(
+        ...,
+        description="Player's NFL team abbreviation, for a name+position+team match against ESPN's own player pool",
+    )
     idempotency_key: Optional[str] = Field(
         None,
         description=(
@@ -203,6 +237,7 @@ class DraftPickTriggerPayload(BaseModel):
         ),
     )
 
+
 # ------------------------------------------------------------------------------
 # ROUTE ENDPOINTS
 # ------------------------------------------------------------------------------
@@ -218,7 +253,9 @@ def health_check():
             cursor.execute("SELECT 1;")
     except Exception as e:
         logger.error(f"Liveness probe failed database connection check: {e}")
-        raise HTTPException(status_code=503, detail="Stateful database tier connection unreachable.")
+        raise HTTPException(
+            status_code=503, detail="Stateful database tier connection unreachable."
+        )
 
     # 2. Validate RabbitMQ broker link parameters
     try:
@@ -227,126 +264,34 @@ def health_check():
         connection.close()
     except Exception as e:
         logger.error(f"Liveness probe failed message broker connection check: {e}")
-        raise HTTPException(status_code=503, detail="Event message bus broker unreachable.")
+        raise HTTPException(
+            status_code=503, detail="Event message bus broker unreachable."
+        )
 
     return {"status": "healthy", "database": "connected", "broker": "connected"}
 
-@router.post("/trigger/lineup", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_trigger_api_key)])
+
+@router.post(
+    "/trigger/lineup",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_trigger_api_key)],
+)
 def trigger_lineup_swap(payload: LineupTriggerPayload):
     """
     Asymmetric API gateway: Translates incoming high-level HTTP payloads into structured
     persistent queue messages inside RabbitMQ to activate automated browser worker scripts.
     """
-    tracking_id = str(uuid.uuid4())
-    logger.info(f"Gateway processing roster realignment command sequence for Team ID {payload.team_id} (tracking_id={tracking_id})...")
-
     for swap in payload.optimized_swaps:
         _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
         _reject_internal_player_id(swap.add_player_id, swap.add_player_name)
+    return _accept_durable("lineup_updates", payload)
 
-    # Same claim/mark/release protocol as trigger_draft_pick - see _claim_idempotency_key.
-    claim = _claim_idempotency_key(
-        payload.idempotency_key, tracking_id, namespace="lineup", ttl=LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-    )
-    if claim == "published":
-        logger.info(
-            f"Lineup swaps for Team {payload.team_id} already enqueued under idempotency key "
-            f"{payload.idempotency_key}; not queueing a duplicate."
-        )
-        return {
-            "status": "duplicate",
-            "queue": "lineup_updates",
-            "team_id": payload.team_id,
-            "tracking_id": tracking_id,
-        }
-    if claim == "pending":
-        logger.info(
-            f"Lineup swaps for Team {payload.team_id} are still in flight under idempotency key "
-            f"{payload.idempotency_key}; asking the caller to retry."
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="An earlier request for this lineup decision is still in flight; retry shortly.",
-        )
 
-    publish_attempted = False
-    try:
-        # 1. Establish an on-demand transaction connection channel to the cluster broker
-        params = pika.URLParameters(AMQP_URL)
-        connection = pika.BlockingConnection(params)
-        channel = connection.channel()
-
-        # The broker owns the queue's durable and dead-letter configuration.
-        channel.queue_declare(queue="lineup_updates", passive=True)
-
-        # W3C trace context, separate from tracking_id below: tracking_id stays the
-        # human/log-facing correlation UUID already returned to callers; traceparent is
-        # the machine-facing OTel context so fantasy-browser-worker's eventual consumer
-        # span (WORKER-09) can link back into this same trace instead of starting a
-        # disconnected one. Per #26's spec this rides in the AMQP JSON body itself
-        # (alongside tracking_id), not only in AMQP message properties, so a consumer
-        # that only parses the body - not pika headers - can still recover it.
-        carrier: dict = {}
-        propagate.inject(carrier)
-
-        # 3. Serialize our structured Pydantic body, stamped with a correlation ID and
-        # trace context, into a compact system string mapping
-        message_body = json.dumps({
-            "tracking_id": tracking_id,
-            "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"optimized_swaps": {"__all__": {"decision_inputs"}}}),
-        })
-
-        # 4. Publish message with high persistence markers to survive unexpected broker reboots
-        publish_attempted = True
-        channel.basic_publish(
-            exchange="",
-            routing_key="lineup_updates",
-            body=message_body,
-            properties=pika.BasicProperties(
-                delivery_mode=2, # Make message persistent on disk
-                content_type="application/json",
-                headers=carrier,
-            )
-        )
-        _mark_idempotency_key_published(
-            payload.idempotency_key, namespace="lineup", ttl=LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-        )
-        connection.close()
-        logger.info(f"Asymmetric event transaction committed securely to RabbitMQ for Team {payload.team_id}.")
-
-        for swap in payload.optimized_swaps:
-            _record_bot_decision(
-                tracking_id=tracking_id,
-                bot_name="lineup_bot",
-                action="lineup_swap",
-                team_id=payload.team_id,
-                target_player_id=swap.add_player_id,
-                drop_player_id=swap.drop_player_id,
-                decision_inputs=swap.decision_inputs,
-            )
-
-        return {
-            "status": "accepted",
-            "queue": "lineup_updates",
-            "team_id": payload.team_id,
-            "tracking_id": tracking_id,
-        }
-
-    except Exception as e:
-        # Before basic_publish (or a provably pre-write broker error) nothing can have been
-        # enqueued, so release the claim and let the caller's retry publish. At or after it,
-        # the message may exist: keep the claim as "published" so a retry reports duplicate.
-        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
-            _release_idempotency_key(payload.idempotency_key, tracking_id, namespace="lineup")
-        else:
-            _mark_idempotency_key_published(
-                payload.idempotency_key, namespace="lineup", ttl=LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-            )
-        logger.error(f"Gateway failed to push transaction onto system exchange queue: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
-
-@router.post("/trigger/waiver", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_trigger_api_key)])
+@router.post(
+    "/trigger/waiver",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_trigger_api_key)],
+)
 def trigger_waiver_claim(payload: WaiverTriggerPayload):
     """
     Waiver-claim counterpart to /trigger/lineup (CORE-15/#117): publishes a live waiver
@@ -355,107 +300,11 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     clock), but the same idempotency claim protocol, week-scoped: see
     WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS.
     """
-    tracking_id = str(uuid.uuid4())
-    logger.info(f"Gateway processing waiver claim command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
-
     _reject_internal_player_id(payload.player_id, payload.name)
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
+    return _accept_durable("waiver_actions", payload)
 
-    # The in-flight claim gets a short TTL; only a published mark lasts the waiver week, so
-    # a gateway killed mid-request can't wedge the key as "pending" (503s) for days.
-    claim = _claim_idempotency_key(
-        payload.idempotency_key, tracking_id, namespace="waiver", ttl=WAIVER_TRIGGER_CLAIM_TTL_SECONDS,
-    )
-    inputs = payload.decision_inputs or {}
-    if claim == "claimed" and payload.idempotency_key and waiver_service.waiver_claim_already_recorded(
-        payload.team_id, inputs.get("season"), inputs.get("week"), payload.player_id, payload.drop_player_id,
-    ):
-        # Redis didn't know the key (claim predates keys, or Redis lost it this week), but
-        # the durable ledger shows this exact claim was already queued.
-        _mark_idempotency_key_published(
-            payload.idempotency_key, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-        )
-        claim = "published"
-    if claim == "published":
-        logger.info(
-            f"Waiver claim for Team {payload.team_id} -> {payload.name} already queued under idempotency "
-            f"key {payload.idempotency_key}; not queueing a duplicate."
-        )
-        return {
-            "status": "duplicate",
-            "queue": "waiver_actions",
-            "team_id": payload.team_id,
-            "tracking_id": tracking_id,
-        }
-    if claim == "pending":
-        raise HTTPException(
-            status_code=503,
-            detail="An earlier request for this waiver claim is still in flight; retry shortly.",
-        )
-
-    publish_attempted = False
-    try:
-        params = pika.URLParameters(AMQP_URL)
-        connection = pika.BlockingConnection(params)
-        channel = connection.channel()
-
-        channel.queue_declare(queue="waiver_actions", passive=True)
-
-        carrier: dict = {}
-        propagate.inject(carrier)
-
-        message_body = json.dumps({
-            "tracking_id": tracking_id,
-            "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"decision_inputs"}),
-        })
-
-        publish_attempted = True
-        channel.basic_publish(
-            exchange="",
-            routing_key="waiver_actions",
-            body=message_body,
-            properties=pika.BasicProperties(
-                delivery_mode=2,
-                content_type="application/json",
-                headers=carrier,
-            )
-        )
-        _mark_idempotency_key_published(
-            payload.idempotency_key, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-        )
-        connection.close()
-        logger.info(f"Waiver claim committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
-
-        _record_bot_decision(
-            tracking_id=tracking_id,
-            bot_name="waiver_sniper",
-            action="waiver_claim",
-            team_id=payload.team_id,
-            target_player_id=payload.player_id,
-            drop_player_id=payload.drop_player_id,
-            decision_inputs=payload.decision_inputs,
-        )
-
-        return {
-            "status": "accepted",
-            "queue": "waiver_actions",
-            "team_id": payload.team_id,
-            "tracking_id": tracking_id,
-        }
-
-    except Exception as e:
-        # Same split as /trigger/lineup: provably pre-publish -> release so the retry
-        # publishes; at/after basic_publish -> the claim may exist, so a retry is a duplicate.
-        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
-            _release_idempotency_key(payload.idempotency_key, tracking_id, namespace="waiver")
-        else:
-            _mark_idempotency_key_published(
-                payload.idempotency_key, namespace="waiver", ttl=WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
-            )
-        logger.error(f"Gateway failed to push waiver claim onto system exchange queue: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
 
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
@@ -502,26 +351,39 @@ def _reject_internal_player_id(player_id: str, name: Optional[str] = None) -> No
     submitted = _normalized_name(name) if name is not None else None
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT name FROM players WHERE espn_id = %s LIMIT 1;", (str(player_id),))
+            cursor.execute(
+                "SELECT name FROM players WHERE espn_id = %s LIMIT 1;",
+                (str(player_id),),
+            )
             espn_match = cursor.fetchone()
-            cursor.execute("SELECT name FROM players WHERE player_id = %s LIMIT 1;", (str(player_id),))
+            cursor.execute(
+                "SELECT name FROM players WHERE player_id = %s LIMIT 1;",
+                (str(player_id),),
+            )
             internal_match = cursor.fetchone()
     except HTTPException:
         raise
     except Exception as e:
         # Fail open: the click bot is the draft-day safety valve and a database blip must not
         # block a manual pick. The check is a guard against a caller bug, not an authz gate.
-        logger.warning(f"Could not validate player id namespace for '{name}' ({player_id}): {e}")
+        logger.warning(
+            f"Could not validate player id namespace for '{name}' ({player_id}): {e}"
+        )
         return
 
-    if espn_match and (submitted is None or _normalized_name(espn_match[0]) == submitted):
+    if espn_match and (
+        submitted is None or _normalized_name(espn_match[0]) == submitted
+    ):
         return
 
     # An id absent from players.espn_id but present as a players.player_id is the wrong namespace
     # regardless of the name attached to it: a typo in the payload does not make a Sleeper id an
     # ESPN one. Only when the id lives in BOTH namespaces (and a name was actually given) does the
     # name decide which was meant.
-    if internal_match and (not espn_match or (submitted is not None and _normalized_name(internal_match[0]) == submitted)):
+    if internal_match and (
+        not espn_match
+        or (submitted is not None and _normalized_name(internal_match[0]) == submitted)
+    ):
         owner = internal_match[0]
         detail = (
             f"player_id '{player_id}' is {owner}'s internal Sleeper id, not an ESPN id. "
@@ -573,7 +435,11 @@ def _record_bot_decision(
     transaction_cursor = cursor
     inputs = decision_inputs or {}
     try:
-        with (nullcontext(transaction_cursor) if transaction_cursor is not None else get_db_cursor()) as cursor:
+        with (
+            nullcontext(transaction_cursor)
+            if transaction_cursor is not None
+            else get_db_cursor()
+        ) as cursor:
             cursor.execute(
                 """
                 INSERT INTO bot_decisions
@@ -582,9 +448,16 @@ def _record_bot_decision(
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """,
                 (
-                    tracking_id, bot_name, action, team_id, league_id,
-                    inputs.get("season"), inputs.get("week"),
-                    target_player_id, drop_player_id, json.dumps(inputs),
+                    tracking_id,
+                    bot_name,
+                    action,
+                    team_id,
+                    league_id,
+                    inputs.get("season"),
+                    inputs.get("week"),
+                    target_player_id,
+                    drop_player_id,
+                    json.dumps(inputs),
                 ),
             )
     except Exception as e:
@@ -601,10 +474,17 @@ def _record_bot_decision(
             span = trace.get_current_span()
             span.set_attribute("bot_decision.write_failed", True)
             span.record_exception(
-                e, attributes={"tracking_id": tracking_id, "bot_name": bot_name, "action": action}
+                e,
+                attributes={
+                    "tracking_id": tracking_id,
+                    "bot_name": bot_name,
+                    "action": action,
+                },
             )
         except Exception:
-            logger.debug("Could not mark bot_decisions write failure on the span", exc_info=True)
+            logger.debug(
+                "Could not mark bot_decisions write failure on the span", exc_info=True
+            )
 
 
 def _idempotency_redis_key(namespace: str, key: str) -> str:
@@ -612,7 +492,9 @@ def _idempotency_redis_key(namespace: str, key: str) -> str:
 
 
 def _claim_idempotency_key(
-    key: Optional[str], token: str, namespace: str = "draft",
+    key: Optional[str],
+    token: str,
+    namespace: str = "draft",
     ttl: int = DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
 ) -> str:
     """Claims `key` for this request. Returns "claimed", "pending" or "published".
@@ -644,12 +526,16 @@ def _claim_idempotency_key(
         # still in flight rather than published; the caller retrying is the safe reading.
         return "published" if client.get(redis_key) == "published" else "pending"
     except Exception as e:
-        logger.warning(f"Idempotency check unavailable for key {key}; proceeding without it: {e}")
+        logger.warning(
+            f"Idempotency check unavailable for key {key}; proceeding without it: {e}"
+        )
         return "claimed"
 
 
 def _mark_idempotency_key_published(
-    key: Optional[str], namespace: str = "draft", ttl: int = DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
+    key: Optional[str],
+    namespace: str = "draft",
+    ttl: int = DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS,
 ) -> None:
     """Promotes a claim from "pending" once the message provably may exist, so that later
     retries for this pick get "duplicate" instead of being told to try again."""
@@ -669,7 +555,9 @@ return 0
 """
 
 
-def _release_idempotency_key(key: Optional[str], token: str, namespace: str = "draft") -> None:
+def _release_idempotency_key(
+    key: Optional[str], token: str, namespace: str = "draft"
+) -> None:
     """Releases a claim for a request that provably never enqueued anything.
 
     Called only from the pre-publish failure path. Leaving the claim there would turn a
@@ -682,7 +570,10 @@ def _release_idempotency_key(key: Optional[str], token: str, namespace: str = "d
         # Compare-and-delete: a retry may already hold a fresh "pending" claim by the time
         # this runs, and a blind DELETE would drop it and let a third request enqueue too.
         _redis_client().eval(
-            _RELEASE_CLAIM_LUA, 1, _idempotency_redis_key(namespace, key), f"pending:{token}",
+            _RELEASE_CLAIM_LUA,
+            1,
+            _idempotency_redis_key(namespace, key),
+            f"pending:{token}",
         )
     except Exception as e:
         # The TTL is the backstop. Worst case the retries for this pick all report duplicate
@@ -690,7 +581,9 @@ def _release_idempotency_key(key: Optional[str], token: str, namespace: str = "d
         logger.warning(f"Could not release idempotency key {key}: {e}")
 
 
-def _pick_slot_already_filled(league_id: Optional[str], pick_number: Optional[int]) -> bool:
+def _pick_slot_already_filled(
+    league_id: Optional[str], pick_number: Optional[int]
+) -> bool:
     """Last-moment supersession check. hold_and_publish's cancel_event cannot interrupt an
     attempt already blocked inside requests.post, so the slot can be taken while the request
     is in flight; enqueueing then puts the click on a later team's pick. The listener writes
@@ -702,7 +595,9 @@ def _pick_slot_already_filled(league_id: Optional[str], pick_number: Optional[in
     if not league_id or pick_number is None:
         return False
     try:
-        last_processed = _redis_client().hget(f"draft:{league_id}:board", "last_processed_pick_number")
+        last_processed = _redis_client().hget(
+            f"draft:{league_id}:board", "last_processed_pick_number"
+        )
         return last_processed is not None and int(last_processed) >= int(pick_number)
     except Exception as e:
         logger.warning(f"Could not check pick supersession for league {league_id}: {e}")
@@ -728,171 +623,74 @@ def _close_broker_connection(connection) -> None:
         logger.warning(f"Could not close broker connection cleanly: {e}")
 
 
-@router.post("/trigger/draft-pick", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_trigger_api_key)])
+@router.post(
+    "/trigger/draft-pick",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_trigger_api_key)],
+)
 def trigger_draft_pick(payload: DraftPickTriggerPayload):
     """
     Draft-day counterpart to /trigger/lineup (CORE-08): publishes the live optimizer's
     recommended draft target to the click-bot queue. Same asymmetric gateway shape -
     HTTP in, durable AMQP message out - the optimizer module never touches pika directly.
     """
-    tracking_id = str(uuid.uuid4())
-    logger.info(f"Gateway processing draft pick command for Team ID {payload.team_id} -> {payload.name} (tracking_id={tracking_id})...")
-
     _reject_internal_player_id(payload.player_id, payload.name)
-
-    claim = _claim_idempotency_key(payload.idempotency_key, tracking_id)
-    if claim == "published":
-        logger.info(
-            f"Draft pick for Team {payload.team_id} -> {payload.name} already enqueued under "
-            f"idempotency key {payload.idempotency_key}; not queueing a duplicate."
-        )
-        return {
-            "status": "duplicate",
-            "queue": "draft_targets",
-            "team_id": payload.team_id,
-            "tracking_id": tracking_id,
-        }
-    if claim == "pending":
-        # Another request holds the key but has not reached the broker yet. It may still fail
-        # pre-publish and release, so reporting success here could lose the pick entirely.
-        # 503 is retryable, which sends the caller back for another attempt.
-        logger.info(
-            f"Draft pick for Team {payload.team_id} -> {payload.name} is still in flight under "
-            f"idempotency key {payload.idempotency_key}; asking the caller to retry."
-        )
+    if _pick_slot_already_filled(payload.league_id, payload.pick_number):
+        raise HTTPException(409, "The targeted pick slot has already been filled.")
+    if payload.expires_at is not None and time.time() >= payload.expires_at:
         raise HTTPException(
-            status_code=503,
-            detail="An earlier request for this pick is still in flight; retry shortly.",
+            409, "Pick deadline passed before the target could be queued."
         )
+    return _accept_durable("draft_targets", payload)
 
-    connection = None
-    publish_attempted = False
+
+def _accept_durable(queue, payload):
+    from src.services.activity_service import create_action
+    from src.services.activity_runner import publish_one
+
+    body = payload.model_dump()
+    carrier = {}
+    propagate.inject(carrier)
+    body["traceparent"] = carrier.get("traceparent")
     try:
-        params = pika.URLParameters(AMQP_URL)
-        if payload.expires_at is not None:
-            # Without this, a wedged broker blocks the handler past the deadline and the
-            # expiry check below only discards work we already spent the pick clock on.
-            budget = max(1.0, min(BROKER_SOCKET_TIMEOUT_SECONDS, payload.expires_at - time.time()))
-            params.socket_timeout = budget
-            params.blocked_connection_timeout = budget
-        connection = pika.BlockingConnection(params)
-        channel = connection.channel()
-        # Without this, basic_publish below is fire-and-forget: it writes the frame to the
-        # socket and returns immediately, before the broker has actually received/routed it.
-        # _close_broker_connection() below then tears the connection down right after, which
-        # can race the broker's own processing and silently drop the message - the gateway
-        # logs success, draft_matrix.py logs "Published", and the click bot never sees it.
-        # Confirms make basic_publish block for and validate the broker's ack, turning that
-        # silent drop into a raised exception the except block below already retries.
-        channel.confirm_delivery()
-
-        channel.queue_declare(queue="draft_targets", passive=True)
-
-        carrier: dict = {}
-        propagate.inject(carrier)
-
-        # expires_at is gateway-only state with no consumer use today - the click bot has no
-        # deadline concept of its own. idempotency_key and pick_number USED to be excluded
-        # alongside it (comment used to read "gateway-only state with no consumer use"), but
-        # issue #108's draft_pick_rejected feedback channel needs the click bot to echo both
-        # back on a confirmed ESPN rejection, so fantasy-core-pipeline's hold_and_publish can
-        # match the rejection to the pick it's currently holding - forwarding them is required,
-        # not merely harmless. league_id is likewise NOT excluded (used to be, alongside those
-        # three) - the click bot needs it to know which league's draft it's acting on. It used
-        # to fall back silently to its own pod's ESPN_LEAGUE_ID env var for every message
-        # regardless of which league the target was actually for, which is safe only for a
-        # single-league deployment; a shared worker processing a practice league's target while
-        # configured for the live league would otherwise read/act against the wrong draft
-        # entirely (confirmed live: the worker's own log line named the live league while it was
-        # actually processing a practice message).
-        message_body = json.dumps({
-            "tracking_id": tracking_id,
-            "traceparent": carrier.get("traceparent"),
-            **payload.model_dump(exclude={"expires_at", "decision_inputs"}),
-        })
-
-        # Last possible moment before the message becomes durable. Everything above can
-        # block for an unbounded time on a wedged broker, so the caller's deadline has to be
-        # re-checked here rather than trusted at request entry.
-        if _pick_slot_already_filled(payload.league_id, payload.pick_number):
-            logger.warning(
-                f"Draft pick for Team {payload.team_id} -> {payload.name} targets slot "
-                f"{payload.pick_number}, which has already been filled; discarding."
-            )
-            _release_idempotency_key(payload.idempotency_key, tracking_id)
-            raise HTTPException(
-                status_code=409,
-                detail="The targeted pick slot has already been filled.",
-            )
-
-        if payload.expires_at is not None and time.time() >= payload.expires_at:
-            logger.warning(
-                f"Draft pick for Team {payload.team_id} -> {payload.name} expired before it could be "
-                f"queued (deadline {payload.expires_at}); discarding rather than clicking a stale pick."
-            )
-            _release_idempotency_key(payload.idempotency_key, tracking_id)
-            raise HTTPException(
-                status_code=409,
-                detail="Pick deadline passed before the target could be queued.",
-            )
-
-        publish_attempted = True
-        channel.basic_publish(
-            exchange="",
-            routing_key="draft_targets",
-            body=message_body,
-            properties=pika.BasicProperties(
-                delivery_mode=2,
-                content_type="application/json",
-                headers=carrier,
-            )
-        )
-        logger.info(f"Draft pick target committed to RabbitMQ for Team {payload.team_id}: {payload.name}.")
-        _mark_idempotency_key_published(payload.idempotency_key)
-
-        _record_bot_decision(
-            tracking_id=tracking_id,
-            bot_name="draft_clicker",
-            action="draft_pick",
-            team_id=payload.team_id,
-            league_id=payload.league_id,
-            target_player_id=payload.player_id,
-            decision_inputs=payload.decision_inputs,
-        )
-
-        return {
-            "status": "accepted",
-            "queue": "draft_targets",
-            "team_id": payload.team_id,
-            "tracking_id": tracking_id,
-        }
-
-    except HTTPException:
-        # The deadline check above raises this deliberately and has already released the
-        # claim; the generic handler below would relabel it a 500 and hide the reason.
-        raise
-    except Exception as e:
-        # Everything up to basic_publish is provably pre-publish: no message can exist, so
-        # holding the claim would be actively harmful. The caller's retry would come back
-        # "duplicate", hold_and_publish would read that as success and stop retrying, and
-        # the pick would be silently ceded to autodraft by the very mechanism meant to
-        # prevent it - a broker blip converted into a guaranteed miss. Releasing restores
-        # the plain retry. A failure at or after basic_publish is genuinely ambiguous, so
-        # the claim stands and a possible duplicate is preferred to a possible miss.
-        if not publish_attempted or isinstance(e, PRE_WRITE_BROKER_ERRORS):
-            # A wrong-state error from basic_publish is raised before any frame is emitted,
-            # so it is provably pre-write despite happening inside the call. Treating it as
-            # ambiguous would hand the retry a 202 duplicate for a message that never was.
-            _release_idempotency_key(payload.idempotency_key, tracking_id)
+        proposed_id = str(uuid.uuid4())
+        identity = create_action(queue, body, proposed_id)
+    except Exception as exc:
+        logger.exception("Could not persist submission")
+        raise HTTPException(
+            503, "Submission was not accepted. Durable tracking is unavailable."
+        ) from exc
+    if identity == proposed_id:
+        if queue == "lineup_updates":
+            for swap in payload.optimized_swaps:
+                _record_bot_decision(
+                    tracking_id=identity,
+                    bot_name="lineup_bot",
+                    action="lineup_swap",
+                    team_id=payload.team_id,
+                    target_player_id=swap.add_player_id,
+                    drop_player_id=swap.drop_player_id,
+                    decision_inputs=swap.decision_inputs,
+                )
         else:
-            # Ambiguous: the bytes may have landed. Promote the claim so a retry gets a clean
-            # "duplicate" rather than being told to keep retrying an outcome we cannot resolve.
-            _mark_idempotency_key_published(payload.idempotency_key)
-        logger.error(f"Gateway failed to push draft pick target onto system exchange queue: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to submit message to background execution broker: {str(e)}")
-    finally:
-        # Every exit path closes exactly once. The optimizer retries this endpoint for the
-        # length of the pick clock, so a failure after the TCP connection opened - a
-        # queue_declare that raises, or either 409 below - used to leak a socket per attempt
-        # and could exhaust the gateway or the broker mid-draft.
-        _close_broker_connection(connection)
+            _record_bot_decision(
+                tracking_id=identity,
+                bot_name="waiver_sniper"
+                if queue == "waiver_actions"
+                else "draft_clicker",
+                action="waiver_claim" if queue == "waiver_actions" else "draft_pick",
+                team_id=payload.team_id,
+                target_player_id=payload.player_id,
+                drop_player_id=getattr(payload, "drop_player_id", None),
+                decision_inputs=payload.decision_inputs,
+            )
+    try:
+        publish_one(identity)
+    except Exception:
+        logger.exception("Submission persisted; background outbox will retry delivery")
+    return {
+        "status": "accepted",
+        "queue": queue,
+        "team_id": payload.team_id,
+        "tracking_id": identity,
+    }

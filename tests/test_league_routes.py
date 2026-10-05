@@ -26,7 +26,7 @@ def test_get_team_names_db_failure_returns_500(client):
 
 
 def test_get_current_week_success(client):
-    with patch("src.api.league.resolve_default_week", return_value=3):
+    with patch("src.services.league_dashboard.current_context", return_value={"week":3}):
         response = client.get("/v1/league/current-week")
 
     assert response.status_code == 200

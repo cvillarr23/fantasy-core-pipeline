@@ -135,9 +135,9 @@ class RosterResponse(BaseModel):
 
 
 @matchup_router.get("/roster", response_model=RosterResponse)
-def get_lineup_roster(season: int):
+def get_lineup_roster(season: int, week: int | None = None):
     try:
-        return get_current_team_roster(season)
+        return get_current_team_roster(season, week) if week is not None else get_current_team_roster(season)
     except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as e:
         logger.error(f"ESPN unreachable while building roster for season={season}: {e}")
         raise HTTPException(status_code=502, detail="Could not reach ESPN")

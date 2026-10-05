@@ -1,3 +1,7 @@
+import asyncio
+from src.services.activity_runner import run as run_activity
+from src.api.dashboard import dashboard_router
+from src.api.activity import activity_router
 import logging
 from contextlib import asynccontextmanager
 
@@ -43,10 +47,18 @@ async def lifespan(app: FastAPI):
         run_migrations()
         logger.info("Gateway cluster interfaces verified active.")
     except Exception as e:
-        logger.critical(f"Gateway failed to bootstrap due to database migration panic: {e}")
+        logger.critical(
+            f"Gateway failed to bootstrap due to database migration panic: {e}"
+        )
         raise
-    async with mcp.session_manager.run():
-        yield
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_activity(stop))
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        stop.set()
+        await task
 
 
 app = FastAPI(
@@ -55,6 +67,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
 
 @app.middleware("http")
 async def catch_exceptions_middleware(request: Request, call_next):
@@ -65,13 +78,22 @@ async def catch_exceptions_middleware(request: Request, call_next):
     try:
         return await call_next(request)
     except Exception as e:
-        logger.error(f"HTTP Gateway intercepted unhandled thread exception: {e}", exc_info=True)
+        logger.error(
+            f"HTTP Gateway intercepted unhandled thread exception: {e}", exc_info=True
+        )
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": "Internal control plane server panic.", "details": str(e)}
+            content={
+                "status": "error",
+                "message": "Internal control plane server panic.",
+                "details": str(e),
+            },
         )
 
+
 # Bind the unified API route configurations
+app.include_router(dashboard_router, prefix="/v1")
+app.include_router(activity_router, prefix="/v1/activity")
 app.include_router(router, prefix="/v1")
 app.include_router(draft_router, prefix="/v1/draft")
 app.include_router(player_router, prefix="/v1/players")

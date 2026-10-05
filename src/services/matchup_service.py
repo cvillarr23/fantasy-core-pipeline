@@ -295,7 +295,7 @@ def get_league_scoreboard(season: int, week: int) -> dict:
     return {"season": season, "week": week, "matchups": matchups}
 
 
-def get_current_team_roster(season: int) -> dict:
+def get_current_team_roster(season: int, selected_week: int | None = None) -> dict:
     """Bye-week-safe roster view: sourced from league.teams/Team.roster, not box_scores(),
     so it works even when no opponent is scheduled (unlike get_current_team_matchup)."""
     our_team_id = os.getenv("ESPN_TEAM_ID")
@@ -306,7 +306,7 @@ def get_current_team_roster(season: int) -> dict:
 
     starters, bench = _split_roster_starters_bench(our_team.roster)
 
-    week = resolve_default_week()
+    week = selected_week if selected_week is not None else resolve_default_week()
     deficits = compute_roster_deficits(season, week)
     deficits_by_position = deficits["teams"].get(our_team_id, {})
     swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
