@@ -2,11 +2,16 @@
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 from src.ingestion.sync_league import build_league, fetch_raw_league_data
 from src.services.read_cache import cached
 
+
+# ESPN player position identifiers are distinct from lineup slot identifiers.
+DEFAULT_POSITIONS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "D/ST"}
+LEADER_FETCH_BUDGET_SECONDS = 12
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
@@ -80,7 +85,11 @@ def leaders(season, week, totals=False):
         offset = 0
         coverage = None
         # Explicit page offsets prevent silently ranking only the first ESPN page.
+        deadline = time.monotonic() + LEADER_FETCH_BUDGET_SECONDS
         for _ in range(20):
+            if time.monotonic() >= deadline:
+                coverage = "Player fetch time budget reached; rankings cover returned players only."
+                break
             filters = {
                 "players": {
                     "limit": 500,
@@ -127,7 +136,7 @@ def leaders(season, week, totals=False):
                 items[pid] = {
                     "id": pid,
                     "name": player.get("fullName", "Unknown player"),
-                    "position": POSITION_MAP.get(player.get("defaultPositionId"), "—"),
+                    "position": DEFAULT_POSITIONS.get(player.get("defaultPositionId"), "—"),
                     "team": PRO_TEAM_MAP.get(player.get("proTeamId"), "—"),
                     "owner": owners.get(owner_id),
                     "owner_id": owner_id,

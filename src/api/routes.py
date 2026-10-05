@@ -686,10 +686,12 @@ def _accept_durable(queue, payload):
             )
     try:
         publish_one(identity)
-    except Exception:
+    except Exception as exc:
         logger.exception("Submission persisted; background outbox will retry delivery")
+        if queue == "draft_targets":
+            raise HTTPException(503, "Draft target saved but not delivered. Retry immediately with the same idempotency key.") from exc
     return {
-        "status": "accepted",
+        "status": "accepted" if identity == proposed_id else "duplicate",
         "queue": queue,
         "team_id": payload.team_id,
         "tracking_id": identity,

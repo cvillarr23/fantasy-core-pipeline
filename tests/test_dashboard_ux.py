@@ -167,4 +167,4 @@ def test_legacy_keyed_waiver_reuses_original_tracking_without_new_outbox():
     assert not any(
         "activity_outbox" in call.args[0] for call in cursor.execute.call_args_list
     )
-    assert cursor.execute.call_args_list[0].args[1] == ("8", 2026, 5, "1", "2")
+    assert next(call.args[1] for call in cursor.execute.call_args_list if "SELECT tracking_id" in call.args[0]) == ("8", 2026, 5, "1", "2")

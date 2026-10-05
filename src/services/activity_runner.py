@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import re
 import pika
 from src.database import get_db_cursor
 from src.services.activity_service import action_detail, record_event
@@ -14,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 def publish_one(identity=None):
     connection = None
+    action_id = None
     try:
         with get_db_cursor() as c:
             c.execute(
                 """SELECT o.action_id,o.queue,o.body FROM activity_outbox o
-              WHERE o.published_at IS NULL AND (%s IS NULL OR o.action_id=%s)
-              ORDER BY o.action_id LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                (identity, identity),
+              WHERE o.published_at IS NULL AND (%s IS NOT NULL OR o.next_attempt_at<=now()) AND (%s IS NULL OR o.action_id=%s)
+              ORDER BY o.next_attempt_at,o.action_id LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                (identity, identity, identity),
             )
             row = c.fetchone()
             if not row:
@@ -62,9 +64,11 @@ def publish_one(identity=None):
                     body=json.dumps(body),
                     mandatory=True,
                     properties=pika.BasicProperties(
-                        delivery_mode=2, content_type="application/json"
+                        delivery_mode=2, content_type="application/json",
+                        headers={"traceparent": body["traceparent"]} if body.get("traceparent") else {}
                     ),
                 )
+                c.execute("UPDATE activity_actions SET execution='delivered',updated_at=now() WHERE id=%s AND execution='queued'", (action_id,))
                 c.execute(
                     "INSERT INTO activity_events(action_id,stage) VALUES (%s,'delivered_to_worker_queue')",
                     (action_id,),
@@ -74,6 +78,14 @@ def publish_one(identity=None):
                 (action_id,),
             )
         return True
+    except Exception as exc:
+        if action_id:
+            # Failure accounting is a new transaction: the delivery transaction rolled back.
+            with get_db_cursor() as c:
+                c.execute("""UPDATE activity_outbox SET attempts=attempts+1,
+                    next_attempt_at=now()+least(300, 5*power(2,least(attempts,6))) * interval '1 second',
+                    last_error=%s WHERE action_id=%s AND published_at IS NULL""", (type(exc).__name__, action_id))
+        raise
     finally:
         if connection:
             try:
@@ -82,7 +94,12 @@ def publish_one(identity=None):
                 logger.warning("Could not close outbox connection")
 
 
-def reconcile_action(identity):
+def normalize_slot(slot):
+    slot = re.sub(r"\d+$", "", str(slot).upper())
+    return {"FLEX": "RB/WR/TE", "BENCH": "BE"}.get(slot, slot)
+
+
+def reconcile_action(identity, leagues=None):
     action = action_detail(identity)
     if (
         not action
@@ -93,6 +110,8 @@ def reconcile_action(identity):
         return
     if action["execution"] == "queued":
         publish_one(identity)
+        return
+    if action["execution"] == "delivered":
         return
     body = action["payload"]
     kind = action["kind"]
@@ -106,10 +125,11 @@ def reconcile_action(identity):
         return
     from src.ingestion.sync_league import build_league
 
-    league = build_league(
-        body.get("season") or int(os.getenv("CURRENT_YEAR", time.gmtime().tm_year)),
-        request_timeout_seconds=10,
-    )
+    season = body.get("season") or int(os.getenv("CURRENT_YEAR", time.gmtime().tm_year))
+    cache = leagues if leagues is not None else {}
+    if season not in cache:
+        cache[season] = build_league(season, request_timeout_seconds=10)
+    league = cache[season]
     team = next(
         (
             t
@@ -157,8 +177,8 @@ def reconcile_action(identity):
             {
                 "add": s["add_player_id"],
                 "drop": s["drop_player_id"],
-                "confirmed": roster.get(str(s["add_player_id"])) == s["slot"]
-                and roster.get(str(s["drop_player_id"])) in {"BE", "Bench"},
+                "confirmed": normalize_slot(roster.get(str(s["add_player_id"]))) == normalize_slot(s["slot"])
+                and normalize_slot(roster.get(str(s["drop_player_id"]))) == "BE",
             }
             for s in swaps
         ]
@@ -192,15 +212,21 @@ def tick():
                 break
         except Exception:
             logger.exception("Outbox delivery deferred")
-            break
+            continue
     with get_db_cursor() as c:
         c.execute(
-            "SELECT id FROM activity_actions WHERE outcome NOT IN ('verified_complete','rejected','cancelled','expired') AND execution!='skipped' AND next_check_at<=now() ORDER BY next_check_at LIMIT 20"
+            """WITH due AS (
+              SELECT id FROM activity_actions WHERE outcome NOT IN ('verified_complete','rejected','cancelled','expired')
+              AND execution!='skipped' AND NOT (payload @> '{"historical":true}'::jsonb)
+              AND next_check_at<=now() ORDER BY next_check_at LIMIT 20 FOR UPDATE SKIP LOCKED
+            ) UPDATE activity_actions a SET next_check_at=now()+interval '5 minutes'
+              FROM due WHERE a.id=due.id RETURNING a.id"""
         )
         ids = [r[0] for r in c.fetchall()]
+    leagues = {}
     for identity in ids:
         try:
-            reconcile_action(identity)
+            reconcile_action(identity, leagues)
         except Exception:
             logger.exception("Reconciliation deferred for %s", identity)
     days = max(1, int(os.getenv("LLM_CONTENT_RETENTION_DAYS", "90")))

@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS activity_outbox (
  action_id TEXT PRIMARY KEY REFERENCES activity_actions(id), queue TEXT NOT NULL,
  body JSONB NOT NULL, published_at TIMESTAMPTZ, attempts INT NOT NULL DEFAULT 0
 );
+ALTER TABLE activity_outbox ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE activity_outbox ADD COLUMN IF NOT EXISTS last_error TEXT;
+CREATE INDEX IF NOT EXISTS activity_outbox_due ON activity_outbox(next_attempt_at) WHERE published_at IS NULL;
 CREATE TABLE IF NOT EXISTS activity_sessions (
  id TEXT PRIMARY KEY, league_id TEXT NOT NULL, action_id TEXT,
  title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', content JSONB NOT NULL DEFAULT '[]',
@@ -67,10 +70,16 @@ def redact(value):
     return value
 
 
+IDEMPOTENCY_TTL_SECONDS = {"lineup_updates": 1800, "draft_targets": 900, "waiver_actions": 604800}
+
+
 def create_action(queue, payload, tracking_id=None):
     identity = tracking_id or payload.get("tracking_id") or str(uuid.uuid4())
     league = str(payload.get("league_id") or league_id())
     key = payload.get("idempotency_key")
+    inputs = payload.get("decision_inputs") or {}
+    if key and inputs.get("season") is not None and inputs.get("week") is not None:
+        key = f"{key}:season:{inputs['season']}:week:{inputs['week']}"
     body = {**payload, "tracking_id": identity, "league_id": league}
     queue_body = {k: v for k, v in body.items() if k != "decision_inputs"}
     if "optimized_swaps" in queue_body:
@@ -80,6 +89,13 @@ def create_action(queue, payload, tracking_id=None):
         ]
     title = f"{queue.replace('_', ' ')} · {payload.get('name') or payload.get('team_id', 'Background task')}"
     with get_db_cursor() as c:
+        if key:
+            # Keep pending work protected even if delivery outlives the normal retry window.
+            c.execute("""UPDATE activity_actions SET idempotency_key=NULL
+              WHERE league_id=%s AND kind=%s AND idempotency_key=%s
+              AND execution NOT IN ('queued','delivered','running')
+              AND created_at<now()-(%s * interval '1 second')""",
+              (league, queue, key, IDEMPOTENCY_TTL_SECONDS.get(queue, 1800)))
         inputs = payload.get("decision_inputs") or {}
         if (
             queue == "waiver_actions"
@@ -209,6 +225,7 @@ def action_detail(identity):
 def session_start(title, action_id=None, identity=None):
     identity = identity or str(uuid.uuid4())
     with get_db_cursor() as c:
+        c.execute("SELECT set_config('statement_timeout', '1000ms', true)")
         c.execute(
             """INSERT INTO activity_sessions(id,league_id,action_id,title) VALUES (%s,%s,%s,%s)
             ON CONFLICT(id) DO NOTHING""",
@@ -219,6 +236,7 @@ def session_start(title, action_id=None, identity=None):
 
 def session_event(identity, role, content, status=None):
     with get_db_cursor() as c:
+        c.execute("SELECT set_config('statement_timeout', '1000ms', true)")
         c.execute(
             """UPDATE activity_sessions SET content=content || %s::jsonb,
         status=COALESCE(%s,status),updated_at=now() WHERE id=%s AND league_id=%s""",
@@ -261,7 +279,7 @@ def bot_summary():
     with get_db_cursor() as c:
         c.execute(
             """SELECT DISTINCT ON(kind) kind,title,execution,outcome,updated_at,
-          (SELECT count(*) FROM activity_actions b WHERE b.kind=a.kind AND b.league_id=a.league_id AND b.execution IN ('queued','running')) AS active_count
+          (SELECT count(*) FROM activity_actions b WHERE b.kind=a.kind AND b.league_id=a.league_id AND b.execution IN ('queued','delivered','running')) AS active_count
           FROM activity_actions a WHERE league_id=%s ORDER BY kind,updated_at DESC""",
             (league_id(),),
         )
@@ -271,12 +289,12 @@ def bot_summary():
 def import_legacy(cursor):
     """Only import execution records explicitly scoped to this league; no inferred joins."""
     cursor.execute(
-        """INSERT INTO activity_actions(id,league_id,team_id,season,kind,title,execution,outcome,payload,created_at,updated_at)
+        """INSERT INTO activity_actions(id,league_id,team_id,season,kind,title,execution,outcome,payload,created_at,updated_at,next_check_at)
       SELECT 'legacy-execution-' || id,league_id,NULL,season,COALESCE(bot_name,transaction_type,'legacy'),
         'Historical run · ' || COALESCE(bot_name,transaction_type,'bot'),
         CASE WHEN status IN ('failure','failed') THEN 'failed' ELSE 'finished' END,'unknown',
         jsonb_build_object('historical',true,'recorded_status',status,'player_name',player_name,'note','Completion evidence was not captured for this historical record.'),
-        executed_at,executed_at FROM execution_log WHERE league_id=%s
+        executed_at,executed_at,'infinity'::timestamptz FROM execution_log WHERE league_id=%s
       ORDER BY executed_at DESC LIMIT 1000 ON CONFLICT DO NOTHING""",
         (league_id(),),
     )
