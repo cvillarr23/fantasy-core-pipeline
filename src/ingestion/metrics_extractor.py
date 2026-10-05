@@ -45,6 +45,16 @@ UPSERT_COLUMNS = [
 ]
 
 
+class IncompletePlayByPlayError(RuntimeError):
+    """The week's play-by-play doesn't cover every game the schedule marks final (or the
+    schedule couldn't be loaded to check). Writing anyway would leave a partial week that
+    nothing reruns (#184)."""
+
+    def __init__(self, missing_game_ids: list[str], message: str | None = None):
+        self.missing_game_ids = missing_game_ids
+        super().__init__(message or f"play-by-play is missing final game(s): {', '.join(missing_game_ids)}")
+
+
 def normalize_team(abbr) -> str | None:
     """Maps legacy/alternate team abbreviations onto the current nflverse code."""
     if abbr is None:
@@ -61,6 +71,20 @@ def filter_week_plays(df_pbp: pl.DataFrame, week: int) -> pl.DataFrame:
         .filter((pl.col("week") == week) & (pl.col("play_type").is_in(RELEVANT_PLAY_TYPES)))
         .with_columns(pl.col("posteam").map_elements(normalize_team, return_dtype=pl.Utf8).alias("team"))
     )
+
+
+def missing_final_games(df_pbp: pl.DataFrame, df_schedules: pl.DataFrame, week: int) -> list[str]:
+    """game_ids the schedule marks final for the week that have no play-by-play yet. The
+    schedule's scores and pbp are published separately, so Monday night's game can be final
+    in one and absent from the other when the Tuesday CronJob runs. Checks raw pbp, not
+    filter_week_plays' pass/run subset."""
+    final = df_schedules.filter(
+        (pl.col("week") == week) & pl.col("home_score").is_not_null() & pl.col("away_score").is_not_null()
+    )["game_id"].unique()
+    covered = set()
+    if not df_pbp.is_empty():
+        covered = set(df_pbp.filter(pl.col("week") == week)["game_id"].unique().to_list())
+    return sorted(g for g in final.to_list() if g not in covered)
 
 
 def compute_usage_shares(df_week: pl.DataFrame) -> pl.DataFrame:
@@ -611,7 +635,9 @@ def _safe_load(loader, label: str, *args, **kwargs) -> pl.DataFrame:
 def extract_weekly_metrics(year: int, week: int) -> int:
     """Ingests play-by-play, NGS, FTN charting, depth charts, and schedule/Vegas data for
     a given season/week, computes leading-indicator utilization metrics, and upserts them
-    into weekly_stats. Returns the number of rows written."""
+    into weekly_stats. Returns the number of rows written. Raises IncompletePlayByPlayError,
+    before writing anything, when pbp is missing a game the schedule marks final or the
+    schedule can't be loaded to check."""
     logger.info(f"Beginning nflverse advanced metrics extraction for {year} Week {week}...")
 
     try:
@@ -619,6 +645,18 @@ def extract_weekly_metrics(year: int, week: int) -> int:
     except Exception as e:
         logger.error(f"Failed to load play-by-play data, aborting: {e}")
         return 0
+
+    try:
+        df_schedules = nfl.load_schedules(year)
+    except Exception as e:
+        raise IncompletePlayByPlayError(
+            [], f"failed to load the {year} schedule, so pbp completeness can't be verified: {e}"
+        ) from e
+    if df_schedules.is_empty():
+        raise IncompletePlayByPlayError([], f"the {year} schedule is empty, so pbp completeness can't be verified")
+    missing =missing_final_games(df_pbp, df_schedules, week)
+    if missing:
+        raise IncompletePlayByPlayError(missing)
 
     df_week = filter_week_plays(df_pbp, week)
     if df_week.is_empty():
@@ -639,7 +677,6 @@ def extract_weekly_metrics(year: int, week: int) -> int:
     df_ngs_receiving = _safe_load(nfl.load_nextgen_stats, "ngs_receiving", year, stat_type="receiving")
     df_ftn = _safe_load(nfl.load_ftn_charting, "ftn_charting", year)
     df_depth = _safe_load(nfl.load_depth_charts, "depth_charts", year)
-    df_schedules = _safe_load(nfl.load_schedules, "schedules", year)
 
     usage = compute_usage_shares(df_week)
     snaps = compute_snap_share(df_snaps, week, crosswalk)
@@ -724,8 +761,9 @@ def resolve_default_year_week(year: int | None = None) -> tuple[int, int | None]
 
 
 def main(argv=None) -> int:
-    """CronJob entrypoint. Nonzero when a completed week yields no rows, so a failed
-    ingestion fails the Job instead of logging a warning and exiting 0."""
+    """CronJob entrypoint. Nonzero when a completed week yields no rows or its pbp is
+    missing final games, so a failed or partial ingestion fails the Job instead of
+    logging a warning and exiting 0."""
     parser = argparse.ArgumentParser(description="Extract nflverse advanced weekly metrics into weekly_stats.")
     parser.add_argument("--year", type=int, default=None)
     parser.add_argument("--week", type=int, default=None, help="defaults to the last completed week")
@@ -744,7 +782,11 @@ def main(argv=None) -> int:
     elif year is None:
         parser.error("--week requires --year: weekly_stats is keyed by (season, week)")
 
-    written = extract_weekly_metrics(year=year, week=week)
+    try:
+        written = extract_weekly_metrics(year=year, week=week)
+    except IncompletePlayByPlayError as exc:
+        logger.error(f"{year} Week {week}: {exc}; not writing a partial week. Rerun once nflverse pbp catches up.")
+        return 1
     if written == 0:
         logger.error(f"Wrote 0 weekly_stats rows for {year} Week {week}, a week that should have been played.")
         return 1

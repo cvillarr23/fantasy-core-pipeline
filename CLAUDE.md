@@ -159,7 +159,12 @@
 - `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week
-  exits 1; preseason (no completed week yet) exits 0.
+  exits 1; preseason (no completed week yet) exits 0. Schedule scores and play-by-play are
+  published separately, so before writing it checks (`missing_final_games`) that the week's
+  raw pbp covers every `game_id` the schedule marks final. If any are missing, or the
+  schedule can't be loaded to check, it raises `IncompletePlayByPlayError` and exits 1,
+  naming the games, rather than writing a partial week (#184). A rerun fills the week,
+  because the upsert is idempotent.
 - Swaps are computed on internal `players.player_id` but **published with `players.espn_id`**
   (#187): `lineup_solver.resolve_lineup_swaps` translates both ids through the shared
   `src/espn_identity.resolve_espn_identity` (also used by `waiver_evaluator`) and adds
