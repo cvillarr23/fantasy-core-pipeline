@@ -151,6 +151,13 @@ class WaiverTriggerPayload(BaseModel):
             "add-only claim into an already-open bench slot omits this."
         ),
     )
+    dry_run: Optional[bool] = Field(
+        None,
+        description=(
+            "Per-request override of the worker's DRY_RUN setting. The web UI sends an "
+            "explicit value; omitted (automated triggers) keeps the worker's default."
+        ),
+    )
     decision_inputs: Optional[dict] = Field(
         None,
         description=(
@@ -303,7 +310,31 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     _reject_internal_player_id(payload.player_id, payload.name)
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
+    _reject_player_rostered_elsewhere(payload)
     return _accept_durable("waiver_actions", payload)
+
+
+def _reject_player_rostered_elsewhere(payload):
+    """A player on another manager's roster can't be claimed; ESPN would only reject it
+    later in the click bot. Our own team holding them is allowed through so a retried
+    submission of an already-completed claim still dedupes to its original tracking id.
+    Lookup failures fail open - the claim proceeds and the worker reports the outcome."""
+    from datetime import datetime
+
+    from src.ingestion.sync_league import refresh_rosters_if_stale
+    from src.services.waiver_service import rostered_team_for_espn_id
+
+    try:
+        refresh_rosters_if_stale(int(os.getenv("CURRENT_YEAR", datetime.now().year)))
+        owner = rostered_team_for_espn_id(payload.player_id)
+    except Exception as exc:
+        logger.warning(f"Could not verify waiver target ownership: {exc}")
+        return
+    if owner and owner != str(payload.team_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{payload.name} is on another team's roster. Propose a trade instead.",
+        )
 
 
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}

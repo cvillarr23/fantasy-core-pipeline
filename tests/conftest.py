@@ -127,3 +127,17 @@ def read_cache_redis(monkeypatch):
     fake = FakeRedis()
     monkeypatch.setattr(read_cache, "get_redis_client", lambda: fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def no_live_roster_refresh():
+    """Waiver reads and the waiver trigger re-sync league_rosters from ESPN and look up
+    target ownership in Postgres; route/service tests here mock the DB generically, so
+    both default to "nothing to refresh, nobody owns the player". Tests for those paths
+    patch over this or call the real functions imported at module load."""
+    with (
+        patch("src.ingestion.sync_league.refresh_rosters_if_stale", return_value=False),
+        patch("src.services.waiver_service.refresh_rosters_if_stale", return_value=False),
+        patch("src.services.waiver_service.rostered_team_for_espn_id", return_value=None),
+    ):
+        yield
