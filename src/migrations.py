@@ -1,3 +1,4 @@
+from src.services.activity_service import SCHEMA as ACTIVITY_SCHEMA, import_legacy
 import logging
 from src.database import get_db_cursor
 from src.models import (
@@ -142,6 +143,8 @@ def run_migrations():
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")
             cursor.execute(CREATE_INDICES)
+            cursor.execute(ACTIVITY_SCHEMA)
+            import_legacy(cursor)
             
         logger.info("Database migrations executed cleanly. System is ready.")
     except Exception as e:

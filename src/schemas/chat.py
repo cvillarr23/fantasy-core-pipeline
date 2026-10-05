@@ -10,6 +10,7 @@ class TradeProposal(BaseModel):
 
 
 class ChatQueryRequest(BaseModel):
+    session_id: Optional[str] = None
     question: str
     season: int
     week: int
@@ -26,6 +27,7 @@ class ChatGrounding(BaseModel):
 
 
 class ChatQueryResponse(BaseModel):
+    session_id: Optional[str] = None
     answer: str
     provider: str
     model: str

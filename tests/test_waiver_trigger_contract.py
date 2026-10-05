@@ -18,21 +18,12 @@ VALID_CLAIM = {
 
 
 def test_authorized_claim_publishes_contract_and_returns_tracking_id():
-    channel = MagicMock()
-    connection = MagicMock()
-    connection.channel.return_value = channel
-    with patch("src.api.routes.pika.BlockingConnection", return_value=connection), \
-         patch("src.api.routes._reject_internal_player_id"), \
-         patch("src.api.routes._record_bot_decision"):
-        response = client.post("/v1/trigger/waiver", json=VALID_CLAIM,
-                               headers={"X-API-Key": "test-trigger-api-key"})
-
-    assert response.status_code == 202
-    tracking_id = response.json()["tracking_id"]
-    assert tracking_id
-    published = json.loads(channel.basic_publish.call_args.kwargs["body"])
-    assert published["tracking_id"] == tracking_id
-    assert {field: published[field] for field in VALID_CLAIM} == VALID_CLAIM
+    with patch('src.services.activity_service.create_action',return_value='claim-id') as persist, patch('src.services.activity_runner.publish_one') as publish, patch('src.api.routes._reject_internal_player_id'):
+        response=client.post('/v1/trigger/waiver',json=VALID_CLAIM,headers={'X-API-Key':'test-trigger-api-key'})
+    assert response.status_code==202
+    assert response.json()['tracking_id']=='claim-id'
+    assert {k:persist.call_args.args[1][k] for k in VALID_CLAIM}==VALID_CLAIM
+    publish.assert_called_once_with('claim-id')
 
 
 def test_unauthorized_claim_never_publishes():

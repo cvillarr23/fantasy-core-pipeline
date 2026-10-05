@@ -9,6 +9,8 @@ best-effort per-attempt metrics into the shared `llm_call_metrics` table (CORE-1
 writes through this app's own connection pool (src.database.get_db_cursor) instead of a
 second dedicated pool, since there's no cross-process boundary to justify one here.
 """
+from src.services.llm_history import record_call, observe
+
 import logging
 import os
 import subprocess
@@ -282,6 +284,7 @@ def _record_llm_call_metric(*, provider: str, model: str, call_site: Optional[st
         logger.error(f"[LLM Client] Failed to record LLM call metric: {e}")
 
 
+@record_call
 def complete_with_fallback(
     prompt: str,
     *,
@@ -334,6 +337,7 @@ def complete_with_fallback(
         started_at = time.monotonic()
 
         try:
+            observe("provider_attempt", {"provider":provider,"model":model,"attempt":attempt_number})
             text = call_fn(model, prompt, system_prompt, max_tokens, temperature, api_key)
             latency_ms = int((time.monotonic() - started_at) * 1000)
             logger.info(f'[LLM Client] "{provider}:{model}" served the request successfully (attempt {attempt_number}).')
@@ -358,6 +362,7 @@ def complete_with_fallback(
                 success=False, latency_ms=latency_ms, error_type=error_type,
                 fallback_triggered=attempt_number > 1,
             )
+            observe("provider_error", {"provider":provider,"model":model,"attempt":attempt_number,"error_type":error_type})
             last_error = error
 
     message = f"All configured LLM providers exhausted or unavailable ({attempt_number} attempt(s))."
