@@ -71,8 +71,9 @@ def _depth_new_frame(rows):
 
 def _schedule_frame(rows):
     schema = {"week": pl.Int64, "home_team": pl.Utf8, "away_team": pl.Utf8, "spread_line": pl.Float64,
-              "total_line": pl.Float64, "home_moneyline": pl.Int64, "away_moneyline": pl.Int64, "gameday": pl.Utf8}
-    defaults = {"week": 1}
+              "total_line": pl.Float64, "home_moneyline": pl.Int64, "away_moneyline": pl.Int64, "gameday": pl.Utf8,
+              "game_id": pl.Utf8, "home_score": pl.Int64, "away_score": pl.Int64}
+    defaults = {"week": 1, "game_id": "2023_01_BUF_NYJ"}
     return pl.DataFrame([{**defaults, **r} for r in rows], schema=schema)
 
 
@@ -474,6 +475,11 @@ def test_persist_weekly_metrics_no_op_on_empty_batch():
 # extract_weekly_metrics (pipeline-level, mocked loaders + DB)
 # ---------------------------------------------------------------------------
 
+def _final_schedule():
+    """Week 1 with _pbp_frame's default game final, so the pbp completeness check passes."""
+    return _schedule_frame([{"home_team": "BUF", "away_team": "NYJ", "home_score": 24, "away_score": 17}])
+
+
 def _patch_loaders(**overrides):
     """Patches every nflreadpy loader metrics_extractor uses, defaulting to empty frames."""
     defaults = {
@@ -484,7 +490,7 @@ def _patch_loaders(**overrides):
         "load_nextgen_stats": pl.DataFrame(),
         "load_ftn_charting": pl.DataFrame(),
         "load_depth_charts": pl.DataFrame(),
-        "load_schedules": pl.DataFrame(),
+        "load_schedules": _final_schedule(),
     }
     defaults.update(overrides)
     patches = [patch(f"src.ingestion.metrics_extractor.nfl.{name}", return_value=frame) for name, frame in defaults.items()]
@@ -537,7 +543,7 @@ def test_extract_weekly_metrics_survives_missing_supplementary_dataset():
          patch("src.ingestion.metrics_extractor.nfl.load_nextgen_stats", return_value=pl.DataFrame()), \
          patch("src.ingestion.metrics_extractor.nfl.load_ftn_charting", side_effect=Exception("FTN feed down")), \
          patch("src.ingestion.metrics_extractor.nfl.load_depth_charts", return_value=pl.DataFrame()), \
-         patch("src.ingestion.metrics_extractor.nfl.load_schedules", return_value=pl.DataFrame()), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", return_value=_final_schedule()), \
          patch("src.ingestion.metrics_extractor.get_db_connection", return_value=ctx):
         written = me.extract_weekly_metrics(2023, 1)
 
@@ -559,11 +565,98 @@ def test_extract_weekly_metrics_aborts_when_pbp_load_fails():
 def test_extract_weekly_metrics_no_plays_for_week_writes_nothing():
     ctx, mock_conn, mock_cursor = _mock_db([])
     with patch("src.ingestion.metrics_extractor.nfl.load_pbp", return_value=_pbp_frame([]).clear()), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", return_value=_schedule_frame([{"home_team": "BUF", "away_team": "NYJ"}])), \
          patch("src.ingestion.metrics_extractor.get_db_connection", return_value=ctx):
         written = me.extract_weekly_metrics(2023, 1)
 
     assert written == 0
     mock_cursor.executemany.assert_not_called()
+
+
+def _run_extract_with(pbp, schedules):
+    """Runs extract_weekly_metrics(2023, 1) with the given pbp and schedule loader results
+    (a frame, or an Exception to raise); returns (outcome, mock_cursor)."""
+    schedule_kw = {"side_effect": schedules} if isinstance(schedules, Exception) else {"return_value": schedules}
+    patches = _patch_loaders(load_pbp=pbp)
+    patches.append(patch("src.ingestion.metrics_extractor.nfl.load_schedules", **schedule_kw))
+    ctx, mock_conn, mock_cursor = _mock_db([("WR1", "player_1")])
+    for p in patches:
+        p.start()
+    try:
+        with patch("src.ingestion.metrics_extractor.get_db_connection", return_value=ctx):
+            try:
+                return me.extract_weekly_metrics(2023, 1), mock_cursor
+            except me.IncompletePlayByPlayError as exc:
+                return exc, mock_cursor
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
+def test_extract_weekly_metrics_refuses_partial_week_when_pbp_lacks_a_final_game():
+    """Tuesday 03:00 with Monday night final in the schedule but not yet in pbp must not
+    write the rest of the week and exit 0 (#184)."""
+    schedules = _schedule_frame([
+        {"game_id": "2023_01_BUF_NYJ", "home_team": "NYJ", "away_team": "BUF", "home_score": 22, "away_score": 16},
+        {"game_id": "2023_01_SEA_LAR", "home_team": "SEA", "away_team": "LAR", "home_score": 13, "away_score": 30},
+    ])
+    outcome, mock_cursor = _run_extract_with(_pbp_frame([{"receiver_id": "WR1"}]), schedules)
+
+    assert isinstance(outcome, me.IncompletePlayByPlayError)
+    assert outcome.missing_game_ids == ["2023_01_SEA_LAR"]
+    mock_cursor.executemany.assert_not_called()
+
+
+def test_extract_weekly_metrics_fails_closed_when_schedule_cannot_load():
+    outcome, mock_cursor = _run_extract_with(_pbp_frame([{"receiver_id": "WR1"}]), RuntimeError("schedule feed down"))
+
+    assert isinstance(outcome, me.IncompletePlayByPlayError)
+    assert "schedule" in str(outcome)
+    mock_cursor.executemany.assert_not_called()
+
+
+def test_extract_weekly_metrics_fails_closed_on_empty_schedule():
+    outcome, mock_cursor = _run_extract_with(_pbp_frame([{"receiver_id": "WR1"}]), pl.DataFrame())
+
+    assert isinstance(outcome, me.IncompletePlayByPlayError)
+    mock_cursor.executemany.assert_not_called()
+
+
+def test_missing_final_games_names_the_final_game_absent_from_pbp():
+    schedules = _schedule_frame([
+        {"game_id": "2023_01_BUF_NYJ", "home_score": 22, "away_score": 16},
+        {"game_id": "2023_01_SEA_LAR", "home_score": 13, "away_score": 30},
+    ])
+    assert me.missing_final_games(_pbp_frame([{}]), schedules, 1) == ["2023_01_SEA_LAR"]
+
+
+def test_missing_final_games_empty_when_pbp_covers_every_final_game():
+    schedules = _schedule_frame([
+        {"game_id": "2023_01_BUF_NYJ", "home_score": 22, "away_score": 16},
+        {"game_id": "2023_01_SEA_LAR", "home_score": 13, "away_score": 30},
+    ])
+    pbp = _pbp_frame([{"game_id": "2023_01_BUF_NYJ"}, {"game_id": "2023_01_SEA_LAR"}])
+    assert me.missing_final_games(pbp, schedules, 1) == []
+
+
+def test_missing_final_games_ignores_unplayed_games_and_other_weeks():
+    schedules = _schedule_frame([
+        {"game_id": "2023_01_BUF_NYJ", "home_score": 22, "away_score": 16},
+        {"game_id": "2023_01_SEA_LAR", "home_score": None, "away_score": None},
+        {"week": 2, "game_id": "2023_02_KC_JAX", "home_score": 9, "away_score": 17},
+    ])
+    assert me.missing_final_games(_pbp_frame([{}]), schedules, 1) == []
+
+
+def test_missing_final_games_counts_a_game_with_only_non_offensive_plays_as_covered():
+    """Coverage is checked against raw pbp, not filter_week_plays' pass/run subset."""
+    schedules = _schedule_frame([{"game_id": "2023_01_BUF_NYJ", "home_score": 22, "away_score": 16}])
+    assert me.missing_final_games(_pbp_frame([{"play_type": "kickoff"}]), schedules, 1) == []
+
+
+def test_missing_final_games_reports_every_final_game_when_pbp_is_empty():
+    schedules = _schedule_frame([{"game_id": "2023_01_BUF_NYJ", "home_score": 22, "away_score": 16}])
+    assert me.missing_final_games(pl.DataFrame(), schedules, 1) == ["2023_01_BUF_NYJ"]
 
 
 def _schedule(games):
@@ -634,6 +727,13 @@ def test_main_exits_nonzero_when_a_completed_week_writes_nothing(caplog):
     with patch("src.ingestion.metrics_extractor.extract_weekly_metrics", return_value=0):
         assert me.main(["--year", "2026", "--week", "4"]) == 1
     assert "0 weekly_stats rows" in caplog.text
+
+
+def test_main_exits_nonzero_and_names_games_when_pbp_is_incomplete(caplog):
+    with patch("src.ingestion.metrics_extractor.extract_weekly_metrics",
+               side_effect=me.IncompletePlayByPlayError(["2026_04_DEN_KC"])):
+        assert me.main(["--year", "2026", "--week", "4"]) == 1
+    assert "2026_04_DEN_KC" in caplog.text
 
 
 def test_main_exits_zero_when_rows_written():
