@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 import threading
 from concurrent.futures import Future
 from src.database import get_redis_client
@@ -11,6 +12,12 @@ logger = logging.getLogger(__name__)
 _guard = threading.Lock()
 _inflight = {}
 MAX_INFLIGHT_KEYS = 128
+
+
+def league_key(season):
+    # The league id must be the second key element: cached() reads it to find the
+    # invalidate_league() version counter for the entry.
+    return [os.getenv("ESPN_LEAGUE_ID"), season]
 
 
 def cached(key, ttl, load):

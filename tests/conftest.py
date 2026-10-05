@@ -85,3 +85,45 @@ def rumor_checkpoint():
         ras, "_save_checkpoint", side_effect=save
     ):
         yield data
+
+
+class FakeRedis:
+    """Dict-backed stand-in for the read-cache calls (get/setex/incr); TTLs are recorded,
+    not enforced."""
+
+    def __init__(self):
+        self.store = {}
+        self.ttls = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def setex(self, key, ttl, value):
+        self.store[key] = value
+        self.ttls[key] = ttl
+
+    def incr(self, key):
+        self.store[key] = str(int(self.store.get(key) or 0) + 1)
+        return int(self.store[key])
+
+
+@pytest.fixture(autouse=True)
+def _read_cache_disabled(monkeypatch):
+    """Service reads go through read_cache.cached(); without this every test would try the
+    real Redis host, and a reachable one would leak payloads between tests. Tests that
+    exercise caching opt in with the read_cache_redis fixture."""
+    from src.services import read_cache
+
+    def unavailable():
+        raise ConnectionError("read cache disabled in tests")
+
+    monkeypatch.setattr(read_cache, "get_redis_client", unavailable)
+
+
+@pytest.fixture
+def read_cache_redis(monkeypatch):
+    from src.services import read_cache
+
+    fake = FakeRedis()
+    monkeypatch.setattr(read_cache, "get_redis_client", lambda: fake)
+    return fake

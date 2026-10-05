@@ -290,13 +290,6 @@ def _make_team(team_id=8, team_name="Our Team", logo_url="https://logo"):
     return team
 
 
-@contextmanager
-def _no_op_cache():
-    matchup_service._MATCHUP_CACHE.clear()
-    yield
-    matchup_service._MATCHUP_CACHE.clear()
-
-
 def test_get_current_team_matchup_shapes_both_sides_and_badges_our_starters_only(monkeypatch):
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     our_starter = _make_box_player(playerId=1, position="RB", slot_position="RB")
@@ -310,8 +303,7 @@ def test_get_current_team_matchup_shapes_both_sides_and_badges_our_starters_only
     mock_league = MagicMock()
     mock_league.box_scores.return_value = [box]
 
-    with _no_op_cache(), \
-         patch("src.services.matchup_service.build_league", return_value=mock_league), \
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
          patch("src.services.matchup_service.compute_roster_deficits",
                return_value={"teams": {"8": {"RB": {"deficit": 1}}}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
@@ -331,7 +323,7 @@ def test_get_current_team_matchup_raises_when_our_team_in_no_box_score(monkeypat
     mock_league = MagicMock()
     mock_league.box_scores.return_value = [box]
 
-    with _no_op_cache(), patch("src.services.matchup_service.build_league", return_value=mock_league):
+    with patch("src.services.matchup_service.build_league", return_value=mock_league):
         with pytest.raises(matchup_service.NoMatchupFoundError):
             matchup_service.get_current_team_matchup(season=2026, week=2)
 
@@ -342,19 +334,18 @@ def test_get_current_team_matchup_raises_on_bye_week_when_opposing_side_is_none(
     mock_league = MagicMock()
     mock_league.box_scores.return_value = [box]
 
-    with _no_op_cache(), patch("src.services.matchup_service.build_league", return_value=mock_league):
+    with patch("src.services.matchup_service.build_league", return_value=mock_league):
         with pytest.raises(matchup_service.NoMatchupFoundError):
             matchup_service.get_current_team_matchup(season=2026, week=2)
 
 
-def test_get_current_team_matchup_caches_within_ttl(monkeypatch):
+def test_get_current_team_matchup_caches_within_ttl(monkeypatch, read_cache_redis):
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     box = _make_box_score(home_team=_make_team(team_id=8), away_team=_make_team(team_id=9))
     mock_league = MagicMock()
     mock_league.box_scores.return_value = [box]
 
-    with _no_op_cache(), \
-         patch("src.services.matchup_service.build_league", return_value=mock_league) as mock_build, \
+    with patch("src.services.matchup_service.build_league", return_value=mock_league) as mock_build, \
          patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
         matchup_service.get_current_team_matchup(season=2026, week=2)

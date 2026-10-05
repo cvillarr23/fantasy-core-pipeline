@@ -185,6 +185,11 @@ def reconcile_action(identity, leagues=None):
         complete = bool(checks) and all(s["confirmed"] for s in checks)
         evidence = {"items": checks, "source": "ESPN current roster"}
     if complete:
+        from src.services.read_cache import invalidate_league
+
+        # Invalidate before publishing the outcome: the web UI refetches as soon as it sees
+        # verified_complete, and a refetch that lands first would re-cache pre-move reads.
+        invalidate_league(action["league_id"])
         record_event(
             identity,
             "verified_complete",
@@ -192,9 +197,6 @@ def reconcile_action(identity, leagues=None):
             execution="submitted",
             outcome="verified_complete",
         )
-        from src.services.read_cache import invalidate_league
-
-        invalidate_league(action["league_id"])
     else:
         # A missing roster change could mean a pending waiver, failed submission or unknown outcome.
         record_event(identity, "status_checked", evidence)

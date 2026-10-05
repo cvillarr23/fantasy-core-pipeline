@@ -7,7 +7,6 @@ ESPN's side.
 """
 import logging
 import os
-import time
 
 import requests
 
@@ -18,13 +17,15 @@ from src.optimization.lineup_solver import (
     evaluate_lineup,
     resolve_default_week,
 )
+from src.services.read_cache import cached, league_key
 from src.services.roster_service import compute_roster_deficits
 
 logger = logging.getLogger("MatchupService")
 
-MATCHUP_CACHE_TTL_SECONDS = 60
-# (season, week) -> (cached_at_epoch_seconds, payload)
-_MATCHUP_CACHE: dict = {}
+# Live scores move every play, so box-score reads stay short-lived. The roster changes only
+# through moves, which invalidate the league version once ESPN confirms them.
+BOX_SCORE_CACHE_TTL_SECONDS = 60
+ROSTER_CACHE_TTL_SECONDS = 120
 
 ESPN_REQUEST_TIMEOUT_SECONDS = 10
 
@@ -221,12 +222,15 @@ def _shape_team_side(team, lineup, score, projected) -> dict:
 
 
 def get_current_team_matchup(season: int, week: int) -> dict:
-    cache_key = (season, week)
-    cached = _MATCHUP_CACHE.get(cache_key)
-    if cached and (time.time() - cached[0]) < MATCHUP_CACHE_TTL_SECONDS:
-        return cached[1]
-
     our_team_id = os.getenv("ESPN_TEAM_ID")
+    return cached(
+        ["matchup", *league_key(season), our_team_id, week],
+        BOX_SCORE_CACHE_TTL_SECONDS,
+        lambda: _load_current_team_matchup(season, week, our_team_id),
+    )
+
+
+def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict:
     box_scores = _fetch_box_scores(season, week)
 
     matched_box = None
@@ -262,9 +266,7 @@ def get_current_team_matchup(season: int, week: int) -> dict:
     swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
     _apply_badges(our_side["starters"], deficits_by_position, swap_suggestions)
 
-    payload = {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
-    _MATCHUP_CACHE[cache_key] = (time.time(), payload)
-    return payload
+    return {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
 
 
 def _shape_scoreboard_team(team, score: float, projected: float) -> dict | None:
@@ -283,6 +285,14 @@ def get_league_scoreboard(season: int, week: int) -> dict:
     """Every matchup in the league for a week, score-only (no rosters) - mirrors ESPN's
     own Scoreboard tab. Unlike get_current_team_matchup, doesn't filter box_scores() down
     to our team's matchup."""
+    return cached(
+        ["scoreboard", *league_key(season), week],
+        BOX_SCORE_CACHE_TTL_SECONDS,
+        lambda: _load_league_scoreboard(season, week),
+    )
+
+
+def _load_league_scoreboard(season: int, week: int) -> dict:
     box_scores = _fetch_box_scores(season, week)
 
     matchups = [
@@ -299,6 +309,17 @@ def get_current_team_roster(season: int, selected_week: int | None = None) -> di
     """Bye-week-safe roster view: sourced from league.teams/Team.roster, not box_scores(),
     so it works even when no opponent is scheduled (unlike get_current_team_matchup)."""
     our_team_id = os.getenv("ESPN_TEAM_ID")
+    # Resolve the default week before keying, so "current week" and an explicit week share
+    # one entry and a week rollover never serves the previous week's badges.
+    week = selected_week if selected_week is not None else resolve_default_week()
+    return cached(
+        ["lineup-roster", *league_key(season), our_team_id, week],
+        ROSTER_CACHE_TTL_SECONDS,
+        lambda: _load_current_team_roster(season, week, our_team_id),
+    )
+
+
+def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     league = build_league(season)
     our_team = next((t for t in league.teams if str(t.team_id) == our_team_id), None)
     if our_team is None:
@@ -306,7 +327,6 @@ def get_current_team_roster(season: int, selected_week: int | None = None) -> di
 
     starters, bench = _split_roster_starters_bench(our_team.roster)
 
-    week = selected_week if selected_week is not None else resolve_default_week()
     deficits = compute_roster_deficits(season, week)
     deficits_by_position = deficits["teams"].get(our_team_id, {})
     swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
