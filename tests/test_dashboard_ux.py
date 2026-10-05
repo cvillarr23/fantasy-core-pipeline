@@ -168,3 +168,54 @@ def test_legacy_keyed_waiver_reuses_original_tracking_without_new_outbox():
         "activity_outbox" in call.args[0] for call in cursor.execute.call_args_list
     )
     assert next(call.args[1] for call in cursor.execute.call_args_list if "SELECT tracking_id" in call.args[0]) == ("8", 2026, 5, "1", "2")
+
+
+def espn_card(pid, position="RB", pts=10, team_id=0):
+    # Mirrors espn_api Player cards from league.player_info(): json_parsing() yields []
+    # for absent keys, and schedule keys are the raw string scoring periods.
+    p = player(pid, position, pts, status=[])
+    p.onTeamId = [] if team_id == 0 else team_id
+    p.schedule = {"5": [{}], "6": [{}]}
+    return p
+
+
+def preview_league(cards, roster_ids):
+    return SimpleNamespace(
+        current_week=5,
+        teams=[
+            SimpleNamespace(
+                team_id=8,
+                roster=[SimpleNamespace(playerId=pid, lineupSlot="BE") for pid in roster_ids],
+            )
+        ],
+        player_info=lambda playerId: [c for c in cards if c.playerId in playerId],
+    )
+
+
+def test_move_preview_handles_espn_card_shapes(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    cards = [espn_card(1, pts=12), espn_card(2, pts=6), espn_card(3, pts=20)]
+    raw = {"settings": {"rosterSettings": {"lineupSlotCounts": {"2": 1, "20": 2}}}}
+    payload = SimpleNamespace(
+        kind="waiver",
+        season=2026,
+        start_week=5,
+        end_week=5,
+        incoming_espn_ids=["3"],
+        outgoing_espn_ids=["2"],
+    )
+    with (
+        patch.object(dashboard, "build_league", return_value=preview_league(cards, [1, 2])),
+        patch.object(dashboard, "fetch_raw_league_data", return_value=raw),
+    ):
+        result = dashboard.move_preview(payload)
+    week = result["weeks"][0]
+    assert (week["before"], week["after"], week["delta"]) == (12, 20, 8)
+    assert result["incoming"][0]["injury_status"] is None
+    assert not any("[]" in w or "rostered by another team" in w for w in result["warnings"])
+    assert not any("byes" in w for w in result["warnings"])
+
+
+def test_point_projection_treats_missing_injury_status_as_available():
+    p = player(1, status=[])
+    assert dashboard.point_projection(p, 5, 5) == (10, "Published projection")
