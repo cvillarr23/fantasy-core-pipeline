@@ -24,7 +24,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from src.services.roster_service import compute_roster_deficits
+from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.trade_service import evaluate_trade
 
 logger = logging.getLogger("MCPEngine")
@@ -110,7 +110,10 @@ class GoogleTokenVerifier(TokenVerifier):
 
 mcp = FastMCP(
     name="fantasy-core-mcp",
-    instructions="Structured tools for reasoning about this fantasy football league's roster construction and trade math.",
+    instructions=(
+        "Structured tools for reasoning about this fantasy football league's roster construction "
+        "and trade math, including one team's roster player by player (get_team_roster)."
+    ),
     token_verifier=GoogleTokenVerifier(),
     auth=AuthSettings(
         issuer_url="https://accounts.google.com",
@@ -134,6 +137,21 @@ def get_league_roster_deficits(season: int, week: int) -> dict:
     weekly_stats). Requesting a past week's VORP still combines it with today's rosters.
     """
     return compute_roster_deficits(season, week)
+
+
+@mcp.tool()
+def get_team_roster(team_id: str, season: int, week: int) -> dict:
+    """
+    One team's roster player by player - name, position, NFL team, lineup slot, injury
+    status, and that week's vorp_score/projected_points - split into starters and bench,
+    each sorted by vorp_score descending. Use this for player-level questions (weakest
+    starters, who to bench); get_league_roster_deficits only has per-position aggregates.
+
+    Roster composition is the CURRENT league_rosters snapshot; only vorp_score/
+    projected_points are scoped to `season`/`week`. A null vorp_score/projected_points
+    means no weekly_stats row for that week (bye, not synced yet), not a zero projection.
+    """
+    return get_team_roster_players(team_id, season, week)
 
 
 @mcp.tool()

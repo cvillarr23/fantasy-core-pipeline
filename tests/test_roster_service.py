@@ -85,3 +85,54 @@ def test_compute_roster_deficits_queries_scoped_to_season_and_week():
     params = roster_query_call.args[1]
     assert params[0] == 2026
     assert params[1] == 5
+
+
+def test_get_team_roster_players_splits_starters_and_bench_sorted_by_vorp():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("p1", "Low Starter", "WR", "KC", None, "WR", True, 1.5, 9.0),
+        ("p2", "High Starter", "RB", "SF", "Questionable", "RB", True, 8.0, 17.2),
+        ("p3", "Bye Starter", "TE", "DET", None, "TE", True, None, None),
+        ("p4", "Bench Guy", "WR", "NYJ", None, "BE", False, -0.5, 6.1),
+    ]
+
+    with patch("src.services.roster_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = roster_service.get_team_roster_players("10", season=2026, week=3)
+
+    assert cursor.execute.call_args.args[1] == (2026, 3, "10")
+    assert result["team_id"] == "10"
+    assert result["roster_snapshot"] == "current"
+    # Highest VORP first; a missing weekly_stats row sorts last instead of as 0.0.
+    assert [p["name"] for p in result["starters"]] == ["High Starter", "Low Starter", "Bye Starter"]
+    assert [p["name"] for p in result["bench"]] == ["Bench Guy"]
+    assert result["starters"][0] == {
+        "player_id": "p2", "name": "High Starter", "position": "RB", "nfl_team": "SF", "slot": "RB",
+        "injury_status": "Questionable", "vorp_score": 8.0, "projected_points": 17.2,
+    }
+    bye = result["starters"][2]
+    assert bye["vorp_score"] is None and bye["projected_points"] is None
+
+
+def test_get_team_roster_players_falls_back_to_slot_when_is_starter_is_null():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("p1", "Legacy Starter", "QB", "BUF", None, "QB", None, 5.0, 20.0),
+        ("p2", "Legacy Bench", "RB", "MIA", None, "BE", None, 1.0, 8.0),
+        ("p3", "Legacy IR", "WR", "LAR", "Out", "IR", None, None, None),
+    ]
+
+    with patch("src.services.roster_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = roster_service.get_team_roster_players("10", season=2026, week=3)
+
+    assert [p["name"] for p in result["starters"]] == ["Legacy Starter"]
+    assert [p["name"] for p in result["bench"]] == ["Legacy Bench", "Legacy IR"]
+
+
+def test_get_team_roster_players_unknown_team_returns_empty_lists():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+
+    with patch("src.services.roster_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = roster_service.get_team_roster_players("nope", season=2026, week=3)
+
+    assert result["starters"] == [] and result["bench"] == []

@@ -22,6 +22,7 @@ class ChatQueryRequest(BaseModel):
 
 
 class ChatGrounding(BaseModel):
+    team_roster: dict
     roster_deficits: dict
     trade_evaluation: Optional[dict] = None
 

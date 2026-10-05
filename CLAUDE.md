@@ -44,6 +44,12 @@
   module docstrings. Services raise domain-specific exceptions for "expected" not-found
   conditions (e.g. `NoMatchupFoundError`, `BacktestResultNotFoundError`,
   `PlayerNotFoundError`) instead of returning `None` for the router to check.
+- `chat_service.answer_chat_query` grounds the LLM in `roster_service.get_team_roster_players`
+  (the calling team's own roster, player by player, with that week's
+  `vorp_score`/`projected_points`) plus `compute_roster_deficits` (league-wide per-position
+  aggregates). Other teams' full rosters are deliberately left out to keep the prompt small.
+  `llm_client` has no tool calling, so chat calls these in process; the same function backs
+  the `get_team_roster` MCP tool for remote callers.
 - Pydantic request/response models live in `src/schemas/<domain>.py`, not inline in the
   router. **Do not confuse this with `src/models.py`**, which holds only raw DB DDL string
   constants consumed by `run_migrations()` and has nothing to do with the API layer — a

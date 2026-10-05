@@ -55,6 +55,15 @@ def test_get_league_roster_deficits_delegates_to_roster_service():
     assert result["season"] == 2026
 
 
+def test_get_team_roster_delegates_to_roster_service():
+    with patch("src.api.mcp_server.get_team_roster_players") as mock_roster:
+        mock_roster.return_value = {"team_id": "10", "season": 2026, "week": 3, "starters": [], "bench": []}
+        result = mcp_server.get_team_roster(team_id="10", season=2026, week=3)
+
+    mock_roster.assert_called_once_with("10", 2026, 3)
+    assert result["team_id"] == "10"
+
+
 def test_evaluate_proposed_trade_delegates_to_trade_service():
     with patch("src.api.mcp_server.evaluate_trade") as mock_evaluate:
         mock_evaluate.return_value = {

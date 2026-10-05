@@ -1,6 +1,7 @@
 """
-Shared roster-deficit computation, used by both the MCP tool (src/api/mcp_server.py) and
-the REST endpoint (src/api/roster.py) so the two transport layers stay thin controllers
+Shared roster-deficit and per-team roster computation, used by the MCP tools
+(src/api/mcp_server.py), the chat endpoint (src/services/chat_service.py), and
+the REST endpoint (src/api/roster.py) so each transport layer stays a thin controller
 over one implementation.
 """
 from src.database import get_db_cursor
@@ -67,3 +68,70 @@ def compute_roster_deficits(season: int, week: int) -> dict:
             "net_vorp": net_vorp,
         }
     return {"season": season, "week": week, "roster_snapshot": "current", "teams": deficits}
+
+
+BENCH_AND_IR_SLOTS = ("BE", "IR")
+
+
+def _vorp_sort_key(player: dict):
+    # Highest VORP first; players with no weekly_stats row for the week sink to the bottom
+    # rather than sorting as if they were 0.0.
+    return (player["vorp_score"] is None, -(player["vorp_score"] or 0.0))
+
+
+def get_team_roster_players(team_id: str, season: int, week: int) -> dict:
+    """
+    One team's roster player by player - name, position, NFL team, lineup slot, injury
+    status, and that week's vorp_score/projected_points - split into starters and bench,
+    each sorted by vorp_score descending. Backs both the get_team_roster MCP tool and the
+    chat endpoint's player-level grounding (compute_roster_deficits only has per-position
+    aggregates, so it can't answer "who are my weakest starters?").
+
+    Same caveat as compute_roster_deficits: roster composition and starter/bench status are
+    the CURRENT league_rosters snapshot; only vorp_score/projected_points are scoped to
+    `season`/`week`. A player with no weekly_stats row for that week (bye, not synced yet)
+    gets None for both, never 0.0. An unknown team_id returns empty lists, not an error.
+    """
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT p.player_id, p.name, p.position, p.team, p.injury_status,
+                   r.slot_position, r.is_starter, s.vorp_score, s.projected_points
+            FROM league_rosters r
+            JOIN players p ON r.player_id = p.player_id
+            LEFT JOIN weekly_stats s
+                ON s.player_id = r.player_id AND s.season = %s AND s.week = %s
+            WHERE r.team_id = %s;
+            """,
+            (season, week, team_id),
+        )
+        rows = cursor.fetchall()
+
+    starters, bench = [], []
+    for player_id, name, position, nfl_team, injury_status, slot, is_starter, vorp, projected in rows:
+        # is_starter was added after league_rosters existed, so older rows may hold NULL until
+        # the next sync - fall back to the slot itself, the same rule the column is derived by.
+        if is_starter is None:
+            is_starter = slot not in BENCH_AND_IR_SLOTS
+        player = {
+            "player_id": player_id,
+            "name": name,
+            "position": position,
+            "nfl_team": nfl_team,
+            "slot": slot,
+            "injury_status": injury_status,
+            "vorp_score": vorp,
+            "projected_points": projected,
+        }
+        (starters if is_starter else bench).append(player)
+
+    starters.sort(key=_vorp_sort_key)
+    bench.sort(key=_vorp_sort_key)
+    return {
+        "team_id": team_id,
+        "season": season,
+        "week": week,
+        "roster_snapshot": "current",
+        "starters": starters,
+        "bench": bench,
+    }
