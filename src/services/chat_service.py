@@ -2,9 +2,10 @@
 Chat query orchestration (CORE-153), used by the REST endpoint (src/api/chat.py).
 
 Grounds an LLM answer in real roster/VORP data by calling the same service functions the MCP
-tools in src/api/mcp_server.py wrap (compute_roster_deficits, evaluate_trade) directly, in
-process -- not a round trip through this app's own MCP/OAuth transport, which exists for
-remote callers like fantasy-browser-worker's trade_bot.js, not for a same-process caller.
+tools in src/api/mcp_server.py wrap (compute_roster_deficits, get_team_roster_players,
+evaluate_trade) directly, in process -- not a round trip through this app's own MCP/OAuth
+transport, which exists for remote callers like fantasy-browser-worker's trade_bot.js, not
+for a same-process caller.
 
 Read-only by construction: this module only ever imports read/compute functions, never
 anything that publishes a waiver claim or lineup change -- that stays behind the existing
@@ -21,15 +22,18 @@ from typing import Optional
 
 from src.llm_client import complete_with_fallback, parse_priority_chain
 from src.schemas.chat import TradeProposal
-from src.services.roster_service import compute_roster_deficits
+from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.trade_service import evaluate_trade
 
 SYSTEM_PROMPT = (
     "You are a fantasy football assistant answering questions about one manager's team. "
     "Answer only using the JSON context provided below the question -- never invent roster, "
     "VORP, or trade numbers. If the context doesn't cover what's asked, say so explicitly "
-    "instead of guessing. You are read-only: never claim to have made a trade, waiver claim, "
-    "or lineup change -- you can only describe and recommend, not act."
+    "instead of guessing. Answer player-level questions (weakest starters, who to bench, who to "
+    "start) from the manager's own roster section; a null vorp_score or projected_points means no "
+    "data for that week (bye or not yet synced), not a zero. You are read-only: never claim to "
+    "have made a trade, waiver claim, or lineup change -- you can only describe and recommend, "
+    "not act."
 )
 
 
@@ -43,11 +47,17 @@ def _chat_provider_chain() -> list[tuple[str, str]]:
 
 
 def _build_prompt(
-    question: str, team_id: str, roster_deficits: dict, trade_evaluation: Optional[dict]
+    question: str,
+    team_id: str,
+    team_roster: dict,
+    roster_deficits: dict,
+    trade_evaluation: Optional[dict],
 ) -> str:
     sections = [
         f'You are advising the manager of team_id "{team_id}".',
         f"Question: {question}",
+        "The manager's own roster, player by player (starters + bench, with vorp_score/projected_points "
+        f"for this week):\n{json.dumps(team_roster)}",
         f"League roster/VORP context (all teams):\n{json.dumps(roster_deficits)}",
     ]
     if trade_evaluation is not None:
@@ -79,6 +89,9 @@ def answer_chat_query(
     token = current_session.set(identity)
     try:
         observe("stage", "Fetching current roster context")
+        # Only the calling team's roster at player level -- every team's full roster would bloat
+        # the prompt for little benefit; league-wide comparisons are covered by the deficits.
+        team_roster = get_team_roster_players(team_id, season, week)
         roster_deficits = compute_roster_deficits(season, week)
 
         trade_evaluation = None
@@ -94,9 +107,15 @@ def answer_chat_query(
 
         observe(
             "tool_result",
-            {"roster_deficits": roster_deficits, "trade_evaluation": trade_evaluation},
+            {
+                "team_roster": team_roster,
+                "roster_deficits": roster_deficits,
+                "trade_evaluation": trade_evaluation,
+            },
         )
-        prompt = _build_prompt(question, team_id, roster_deficits, trade_evaluation)
+        prompt = _build_prompt(
+            question, team_id, team_roster, roster_deficits, trade_evaluation
+        )
         if history:
             prompt += (
                 "\nPrevious conversation (context, not current roster facts):\n"
@@ -117,6 +136,7 @@ def answer_chat_query(
             "model": result.model,
             "latency_ms": result.latency_ms,
             "grounding": {
+                "team_roster": team_roster,
                 "roster_deficits": roster_deficits,
                 "trade_evaluation": trade_evaluation,
             },

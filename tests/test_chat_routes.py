@@ -10,10 +10,16 @@ def _llm_result(**overrides):
     return LlmResult(**defaults)
 
 
+EMPTY_ROSTER = {
+    "team_id": "10", "season": 2026, "week": 3, "roster_snapshot": "current", "starters": [], "bench": [],
+}
+
+
 def test_chat_query_success_without_trade_proposal(client):
     roster_deficits = {"season": 2026, "week": 3, "roster_snapshot": "current", "teams": {}}
 
     with patch("src.services.chat_service.compute_roster_deficits", return_value=roster_deficits), \
+         patch("src.services.chat_service.get_team_roster_players", return_value=EMPTY_ROSTER), \
          patch("src.services.chat_service.complete_with_fallback", return_value=_llm_result()):
         response = client.post(
             "/v1/chat/query",
@@ -32,6 +38,7 @@ def test_chat_query_success_with_trade_proposal(client):
     trade_evaluation = {"incoming_total": 10.0, "outgoing_total": 4.0, "delta_vorp": 6.0, "missing_player_ids": []}
 
     with patch("src.services.chat_service.compute_roster_deficits", return_value=roster_deficits), \
+         patch("src.services.chat_service.get_team_roster_players", return_value=EMPTY_ROSTER), \
          patch("src.services.chat_service.evaluate_trade", return_value=trade_evaluation), \
          patch("src.services.chat_service.complete_with_fallback", return_value=_llm_result()):
         response = client.post(
@@ -47,7 +54,8 @@ def test_chat_query_success_with_trade_proposal(client):
 
 
 def test_chat_query_rejects_overlapping_trade_ids_with_422(client):
-    with patch("src.services.chat_service.compute_roster_deficits", return_value={}):
+    with patch("src.services.chat_service.compute_roster_deficits", return_value={}), \
+         patch("src.services.chat_service.get_team_roster_players", return_value=EMPTY_ROSTER):
         response = client.post(
             "/v1/chat/query",
             json={
@@ -61,6 +69,7 @@ def test_chat_query_rejects_overlapping_trade_ids_with_422(client):
 
 def test_chat_query_returns_503_when_provider_chain_exhausted(client):
     with patch("src.services.chat_service.compute_roster_deficits", return_value={}), \
+         patch("src.services.chat_service.get_team_roster_players", return_value=EMPTY_ROSTER), \
          patch("src.services.chat_service.complete_with_fallback",
                side_effect=LlmProviderChainExhaustedError("all providers failed")):
         response = client.post(
