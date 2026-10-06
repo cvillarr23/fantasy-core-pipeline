@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 from src.ingestion.sync_league import build_league, fetch_raw_league_data
-from src.services.read_cache import cached
+from src.services.read_cache import cached, league_key
 
 
 # ESPN player position identifiers are distinct from lineup slot identifiers.
@@ -15,10 +15,6 @@ LEADER_FETCH_BUDGET_SECONDS = 12
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
-
-
-def league_key(season):
-    return [os.getenv("ESPN_LEAGUE_ID"), season]
 
 
 def current_context(season):
@@ -62,7 +58,8 @@ def standings(season):
             "scoring": "ESPN league scoring",
         }
 
-    return cached(["standings", *league_key(season)], 60, load)
+    # Standings only move when games finalise, and verified moves bump the league version.
+    return cached(["standings", *league_key(season)], 300, load)
 
 
 def stat_value(player, season, week, source):
@@ -175,7 +172,8 @@ def leaders(season, week, totals=False):
             "coverage": coverage,
         }
 
-    return cached(["leaders", *league_key(season), week, totals], 60, load)
+    # Player points change during live games; two minutes keeps leaders close to ESPN.
+    return cached(["leaders", *league_key(season), week, totals], 120, load)
 
 
 def shape_player(p):
