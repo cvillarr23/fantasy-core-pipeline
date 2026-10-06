@@ -31,8 +31,8 @@ class PlayerLine(BaseModel):
     position: str
     jersey: Optional[str] = None
     slot: str
-    points: float
-    projected_points: float
+    points: Optional[float]
+    projected_points: Optional[float]
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
@@ -42,7 +42,7 @@ class TeamInfo(BaseModel):
     name: str
     logo_url: str
     score: float
-    projected: float
+    projected: Optional[float]
 
 
 class TeamSide(BaseModel):
@@ -80,7 +80,7 @@ class ScoreboardTeamInfo(BaseModel):
     name: str
     logo_url: str
     score: float
-    projected: float
+    projected: Optional[float]
 
 
 class ScoreboardMatchup(BaseModel):

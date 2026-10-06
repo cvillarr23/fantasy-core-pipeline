@@ -503,6 +503,56 @@ CREATE TABLE IF NOT EXISTS bot_decisions (
 );
 """
 
+ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS = """
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_source VARCHAR(80);
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_updated_at TIMESTAMPTZ;
+"""
+
+CREATE_FANTASY_SCORE_HISTORY_TABLES = """
+CREATE TABLE IF NOT EXISTS fantasy_matchups (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    matchup_period INT NOT NULL,
+    team_id VARCHAR(50) NOT NULL,
+    scoring_weeks INT[] NOT NULL,
+    opponent_team_id VARCHAR(50),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('scheduled', 'bye', 'unavailable')),
+    is_home BOOLEAN NOT NULL,
+    is_regular_season BOOLEAN NOT NULL,
+    winner VARCHAR(20),
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (league_id, season, matchup_period, team_id)
+);
+CREATE TABLE IF NOT EXISTS fantasy_team_week_scores (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    week INT NOT NULL CHECK (week BETWEEN 1 AND 18),
+    team_id VARCHAR(50) NOT NULL,
+    matchup_period INT NOT NULL,
+    actual_points DOUBLE PRECISION NOT NULL,
+    payload JSONB NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (league_id, season, week, team_id),
+    FOREIGN KEY (league_id, season, matchup_period, team_id)
+        REFERENCES fantasy_matchups (league_id, season, matchup_period, team_id)
+);
+CREATE TABLE IF NOT EXISTS fantasy_player_week_scores (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    week INT NOT NULL,
+    team_id VARCHAR(50) NOT NULL,
+    espn_id VARCHAR(20) NOT NULL,
+    player_id VARCHAR(50) REFERENCES players(player_id) ON DELETE SET NULL,
+    actual_points DOUBLE PRECISION,
+    payload JSONB NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (league_id, season, week, team_id, espn_id),
+    UNIQUE (league_id, season, week, espn_id),
+    FOREIGN KEY (league_id, season, week, team_id)
+        REFERENCES fantasy_team_week_scores (league_id, season, week, team_id) ON DELETE CASCADE
+);
+"""
+
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);

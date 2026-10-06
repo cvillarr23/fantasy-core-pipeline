@@ -288,6 +288,72 @@ they cover exact whitespace, Unicode, null messages, sorted IDs, and D/ST IDs.
 
 ## League trade context
 
+### ESPN score and schedule ingestion
+
+`python -m src.ingestion.sync_actual_scores --season 2026` refreshes all completed
+scoring weeks plus the fantasy schedule. It uses `ESPN_LEAGUE_ID`, `ESPN_S2` and
+`ESPN_SWID`, the same OpenBao-injected environment as `sync_league`; never put cookies
+in command arguments or files. The configured league is required, with no default.
+
+For initial backfill, validate with:
+
+```bash
+python -m src.ingestion.sync_actual_scores --season 2026 --start-week 1 --end-week 4 --dry-run
+```
+
+After operator approval for the destination database, omit `--dry-run` to persist.
+`--week N` selects one week; a range selects several. Dry-run does not import the database
+module or connect to Postgres/Redis. Upcoming weeks fail rather than silently resolving to
+ESPN's current week. Preseason runs refresh schedule evidence without inventing scores.
+
+A completed scoring week requires every game from ESPN's professional schedule to appear
+as completed in the NFL scoreboard, ESPN's professional `statsOfficial` flags, complete
+league-team coverage, historical lineups, and
+finite actual scores. A completed fantasy matchup period also needs ESPN's decided result.
+Multiweek periods keep per-scoring-week scores separate from cumulative matchup totals.
+The final season week can complete without a scoring-period rollover. "Completed" means
+available final results, not immunity from subsequent ESPN stat corrections.
+
+`fantasy_matchups` stores league/season/period/team pairings and scoring-week mappings,
+including explicit byes and unavailable schedule evidence. `fantasy_team_week_scores`
+stores completed team scores and historical display lineups. `fantasy_player_week_scores`
+retains every historical roster player, including bench/IR, unmapped ESPN identities and
+negative D/ST IDs; it does not claim coverage of all unrostered NFL players. Missing
+player actuals/projections remain null; zero and negative actuals remain real values.
+
+Each completed week is validated before one transaction writes its schedule, team and player
+history. A league/season advisory lock serializes writes; reruns replace the week's rows and
+upsert results, including corrections and withdrawn lineup entries. Failures roll back the
+whole week. Previously committed weeks remain valid if a later week in a range fails.
+After commit, ingestion invalidates the existing league read-cache version.
+
+Mapped player actuals update existing `(player_id, season, week)` `weekly_stats` rows only,
+with `actual_points_source='espn:<league>'` and `actual_points_updated_at`. Projection,
+VORP and metric fields are preserved; ingestion never creates default-filled metric rows.
+Unmapped or ambiguous identities remain in score history and can be mirrored on a later
+rerun after crosswalk/metrics ingestion. Actuals withdrawn from this job's previous snapshot
+are cleared instead of leaving stale values. Existing default-zero rows without source
+metadata must not be treated as observed ESPN results.
+
+Completed matchup/scoreboard reads use stored historical lineups and omit current lineup
+advice. Un-ingested/current weeks retain live ESPN reads and the existing 60-second cache.
+Current roster ownership, injury and IR eligibility remain live. Historical projections and
+missing player points may be null in matchup responses.
+
+**Separate fantasy-infra follow-up:** add a score-ingestion CronJob after the later Tuesday
+weekly ingestor from fantasy-infra#137, plus Friday reconciliation. Reprocess all completed
+weeks to recover missed/late-final weeks and corrections; keep the professional-game gate,
+bounded ESPN requests, failed-job alerts, and `concurrencyPolicy: Forbid`. The job should run
+after player crosswalks and weekly metrics, before downstream consumers needing stored
+results. No cluster manifests are changed here. Initial production migration/backfill is an
+operator action, separate from code verification.
+
+Optional local integration checks use a disposable localhost database:
+`SCORE_HISTORY_TEST_DSN='host=127.0.0.1 port=<port> dbname=<db> user=<user> password=<test password>'
+DB_PASSWORD=test python -m pytest tests/test_score_history_postgres.py`.
+
+### Trade context reads
+
 `GET /v1/trade/context?league_id=<configured ESPN league>&season=2026&week=3&horizon=4`
 returns league-wide current roster ownership and upcoming fantasy head-to-head schedule
 context. The MCP tool `get_league_trade_context_model` uses the same service. The service
@@ -307,8 +373,9 @@ does not reconstruct historical ownership. Successful responses are cached for 6
 and invalidated by the existing verified-move league cache version.
 
 The `completed_fantasy_points_per_week_z` strength metric uses each team's completed
-regular-season fantasy matchup totals before both the selected and observed ESPN week,
-divided by the number of scoring weeks represented. Scores from in-progress or later
+stored ESPN regular-season scores before both the selected and observed ESPN week,
+divided by the number of scoring weeks represented. Every scoring week of a fantasy
+matchup period must be ingested before that period contributes. Scores from in-progress or later
 matchups do not enter the metric. The league mean and population standard deviation
 standardize teams with observations; positive z means stronger. Fewer than two observed
 teams produces unknown z scores; equal observed strengths produce zero. Sample counts and
@@ -316,6 +383,8 @@ teams produces unknown z scores; equal observed strengths produce zero. Sample c
 scoring and does not predict win probabilities or measure NFL defense difficulty.
 
 Each schedule week distinguishes `scheduled`, explicit `bye`, and `unavailable` pairings.
+Pairings and strength come from the ingestion tables; missing stored history does not fall
+back to live ESPN totals. Current ownership and the observed ESPN week remain live.
 A team's `schedule_strength_z` is the mean opponent z across non-bye scoring weeks, and
 is null unless every such week has a known pairing and strength. Missing/ambiguous
 pairings and unknown scores are reported in `schedule_coverage` rather than treated as

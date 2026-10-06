@@ -1,9 +1,6 @@
 """
-Weekly head-to-head matchup view (fantasy-web-ui's Matchup page). Unlike roster_service's
-DB-backed deficits, this fetches live from ESPN via the same authenticated League client
-sync_league.py already builds - weekly_stats.actual_points is never populated by any live
-job (only the backtesting harness writes it), so real per-player scoring only exists on
-ESPN's side.
+Weekly head-to-head matchup view. Completed ingested weeks use historical ESPN scores
+and lineups in Postgres; current or un-ingested weeks use the authenticated ESPN client.
 """
 import logging
 import os
@@ -20,6 +17,7 @@ from src.optimization.lineup_solver import (
 )
 from src.services.read_cache import cached, league_key
 from src.services.roster_service import compute_roster_deficits
+from src.services.score_history import load_completed_week, stored_scoreboard
 
 logger = logging.getLogger("MatchupService")
 
@@ -252,6 +250,21 @@ def get_current_team_matchup(season: int, week: int) -> dict:
 
 
 def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict:
+    stored = load_completed_week(season, week)
+    if stored:
+        by_id = {side["team_id"]: side for side in stored}
+        ours = by_id.get(our_team_id)
+        opponent = by_id.get(ours["opponent_team_id"]) if ours else None
+        if ours is None or opponent is None:
+            raise NoMatchupFoundError(f"No opponent for team {our_team_id} in week {week}.")
+
+        def shape(side):
+            return {key: side[key] for key in ("team", "starters", "bench")}
+
+        return {
+            "season": season, "week": week,
+            "our_team": shape(ours), "opponent": shape(opponent),
+        }
     box_scores = _fetch_box_scores(season, week)
 
     matched_box = None
@@ -314,6 +327,9 @@ def get_league_scoreboard(season: int, week: int) -> dict:
 
 
 def _load_league_scoreboard(season: int, week: int) -> dict:
+    stored = load_completed_week(season, week)
+    if stored:
+        return stored_scoreboard(stored, season, week)
     box_scores = _fetch_box_scores(season, week)
 
     matchups = [

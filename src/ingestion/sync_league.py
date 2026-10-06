@@ -15,13 +15,23 @@ import os
 from espn_api.football import League
 from espn_api.football.constant import POSITION_MAP
 
-from src.database import get_db_connection, get_redis_client
 from src.ingestion.espn_client import TimedEspnFantasyRequests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LeagueSync")
 
 BENCH_AND_IR_SLOT_IDS = {20, 21}
+
+
+def get_db_connection():
+    # Read-only ESPN tools must not open the database pool just to build a client.
+    from src.database import get_db_connection as connect
+    return connect()
+
+
+def get_redis_client():
+    from src.database import get_redis_client as connect
+    return connect()
 
 
 def _require_env(name: str) -> str:
