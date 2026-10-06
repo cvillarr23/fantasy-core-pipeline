@@ -38,7 +38,9 @@ from src.models import (
     CREATE_BOT_DECISIONS_TABLE,
     CREATE_RUMOR_SIGNALS_TABLE,
     CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE,
-    CREATE_INDICES
+    CREATE_INDICES,
+    ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS,
+    CREATE_FANTASY_SCORE_HISTORY_TABLES,
 )
 
 logger = logging.getLogger("MigrationsEngine")
@@ -63,6 +65,7 @@ def run_migrations():
             cursor.execute(ADD_WEEKLY_STATS_ADVANCED_COLUMNS)
             cursor.execute(ADD_WEEKLY_STATS_VORP_COLUMNS)
             cursor.execute(ADD_WEEKLY_STATS_DEFENSE_MATCHUP_COLUMN)
+            cursor.execute(ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS)
             cursor.execute(MIGRATE_WEEKLY_STATS_PK_ADD_SEASON)
             # MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (via a Postgres NOTICE, not
             # an error) if pre-existing rows have a NULL season. If that happened, the CORE-04
@@ -94,6 +97,7 @@ def run_migrations():
             logger.info("Validating 'league_teams' name-mapping table...")
             cursor.execute(CREATE_LEAGUE_TEAMS_TABLE)
             cursor.execute(ADD_LEAGUE_TEAMS_IR_SLOTS_USED_COLUMN)
+            cursor.execute(CREATE_FANTASY_SCORE_HISTORY_TABLES)
 
             # 4. Execute worker execution telemetry table (INFRA-06)
             logger.info("Validating 'execution_log' worker telemetry table...")
@@ -158,4 +162,3 @@ def run_migrations():
 if __name__ == "__main__":
     # Allows manual migration execution blocks during debugging phases
     run_migrations()
-

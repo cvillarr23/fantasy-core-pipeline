@@ -19,6 +19,7 @@ from src.ingestion.sync_league import (
     fetch_raw_league_data,
 )
 from src.services.read_cache import cached
+from src.services.score_history import load_stored_events
 
 
 class TradeContextUnavailable(Exception):
@@ -135,9 +136,17 @@ def _schedule_events(raw, teams, periods):
 
 
 def shape_trade_context(
-    raw, identities, metrics, league_id, season, week, horizon, fetched_at
+    raw,
+    identities,
+    metrics,
+    league_id,
+    season,
+    week,
+    horizon,
+    fetched_at,
+    stored_events=None,
 ):
-    """Shape one ESPN snapshot; scores after the requested week never inform strength.
+    """Shape current ownership with schedule/history evidence and no future leakage.
 
     Strength is mean fantasy points per scoring week from completed regular-season
     matchups, standardized across teams with observations. Positive z means stronger.
@@ -161,7 +170,11 @@ def shape_trade_context(
         str(team["id"]): {"team_id": str(team["id"]), "name": _extract_team_name(team)}
         for team in source_teams
     }
-    events = _schedule_events(raw, teams, periods)
+    events = (
+        _schedule_events(raw, teams, periods)
+        if stored_events is None
+        else defaultdict(list, stored_events)
+    )
     unmapped = set()
     missing_metrics = 0
     for source in source_teams:
@@ -327,7 +340,11 @@ def shape_trade_context(
         },
         "strength_metric": {
             "name": "completed_fantasy_points_per_week_z",
-            "source": "ESPN completed regular-season matchup totals",
+            "source": (
+                "ESPN completed regular-season matchup totals"
+                if stored_events is None
+                else "Stored ESPN completed regular-season scoring weeks"
+            ),
             "league_mean": league_mean,
             "league_stddev": league_stddev,
             "teams_with_strength": len(observed),
@@ -397,7 +414,15 @@ def get_league_trade_context(
                         for player_id, target_week, vorp, projected in cursor.fetchall()
                     }
         return shape_trade_context(
-            raw, identities, metrics, league_id, season, week, horizon, fetched_at
+            raw,
+            identities,
+            metrics,
+            league_id,
+            season,
+            week,
+            horizon,
+            fetched_at,
+            stored_events=load_stored_events(league_id, season),
         )
 
     return cached(["trade-context", league_id, season, week, horizon], 60, load)
