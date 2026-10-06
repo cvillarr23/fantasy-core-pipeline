@@ -20,10 +20,12 @@ from pydantic import BaseModel
 
 from src.services.trade_service import evaluate_trade
 from src.schemas.trade_context import LeagueTradeContext
+from src.schemas.trade_score import TradeScore, TradeScoreRequest
 from src.services.trade_context_service import (
     TradeContextUnavailable,
     get_league_trade_context,
 )
+from src.services.trade_score_service import TradeOwnershipError, score_trade
 
 from src.schemas.trade import (
     OfferStatus,
@@ -116,11 +118,37 @@ def league_trade_context(
 ):
     try:
         return get_league_trade_context(league_id, season, week, horizon)
-    except ValueError as error:
+    except Exception as error:
+        _raise_for_trade_read_error(error)
+
+
+@trade_router.post("/score", response_model=TradeScore)
+def score_trade_endpoint(payload: TradeScoreRequest):
+    try:
+        return score_trade(
+            payload.league_id,
+            payload.season,
+            payload.week,
+            payload.horizon,
+            payload.our_team_id,
+            payload.counterparty_team_id,
+            payload.send_espn_ids,
+            payload.receive_espn_ids,
+        )
+    except Exception as error:
+        _raise_for_trade_read_error(error)
+
+
+def _raise_for_trade_read_error(error: Exception):
+    """Shared status mapping for routes built on the live ESPN trade context."""
+    if isinstance(error, ValueError):
         raise HTTPException(422, str(error)) from error
-    except TradeContextUnavailable as error:
+    if isinstance(error, TradeOwnershipError):
+        raise HTTPException(409, str(error)) from error
+    if isinstance(error, TradeContextUnavailable):
         raise HTTPException(503, str(error)) from error
-    except requests.Timeout as error:
+    if isinstance(error, requests.Timeout):
         raise HTTPException(504, "ESPN request timed out") from error
-    except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as error:
+    if isinstance(error, (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError)):
         raise HTTPException(502, "Could not reach ESPN") from error
+    raise error

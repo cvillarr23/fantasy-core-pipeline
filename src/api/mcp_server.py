@@ -27,6 +27,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.trade_service import evaluate_trade
 from src.services.trade_context_service import get_league_trade_context
+from src.services.trade_score_service import score_trade
 
 logger = logging.getLogger("MCPEngine")
 
@@ -113,7 +114,8 @@ mcp = FastMCP(
     name="fantasy-core-mcp",
     instructions=(
         "Structured tools for reasoning about this fantasy football league's roster construction "
-        "and trade math, including one team's roster player by player (get_team_roster)."
+        "and trade math, including one team's roster player by player (get_team_roster) and a "
+        "deterministic schedule-aware trade score (score_trade_proposal)."
     ),
     token_verifier=GoogleTokenVerifier(),
     auth=AuthSettings(
@@ -187,6 +189,33 @@ def get_league_trade_context_model(
     ownership, not a historical roster reconstruction. NFL matchup difficulty is separate.
     """
     return get_league_trade_context(league_id, season, week, horizon)
+
+
+@mcp.tool()
+def score_trade_proposal(
+    league_id: str,
+    season: int,
+    week: int,
+    horizon: int,
+    our_team_id: str,
+    counterparty_team_id: str,
+    send_espn_ids: list[str],
+    receive_espn_ids: list[str],
+) -> dict:
+    """Deterministic both-team trade score; quote its numbers, never estimate your own.
+
+    All player ids are ESPN ids (D/ST ids are negative) and must be on the sending team's
+    current ESPN roster. Returns raw single-week VORP (same as evaluate_proposed_trade),
+    each team's before/after optimal-lineup VORP per horizon week, the fantasy-opponent
+    schedule weights, and final_score = our weighted gain + the weighted benefit of
+    weakening the counterparty. Positive is good for our_team_id. Weeks without exact
+    metrics are unscored, and unknown opponent strength leaves final_score null with a
+    reason - neither is ever treated as zero.
+    """
+    return score_trade(
+        league_id, season, week, horizon, our_team_id, counterparty_team_id,
+        send_espn_ids, receive_espn_ids,
+    )
 
 
 mcp_asgi_app = mcp.streamable_http_app()

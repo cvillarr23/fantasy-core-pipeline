@@ -320,3 +320,58 @@ A team's `schedule_strength_z` is the mean opponent z across non-bye scoring wee
 is null unless every such week has a known pairing and strength. Missing/ambiguous
 pairings and unknown scores are reported in `schedule_coverage` rather than treated as
 byes or zero-strength opponents. A bye-only or empty horizon has no schedule score.
+
+## Trade scoring
+
+`POST /v1/trade/score` (MCP tool `score_trade_proposal`, same service) scores one proposal
+deterministically on top of the league trade context:
+
+```json
+{"league_id": "123", "season": 2026, "week": 5, "horizon": 4,
+ "our_team_id": "1", "counterparty_team_id": "2",
+ "send_espn_ids": ["4241457"], "receive_espn_ids": ["-16002"]}
+```
+
+Player IDs are **ESPN** IDs only (D/ST IDs are negative). They never match internal
+`player_id`s, which can be numerically equal to a different player's ESPN ID. Each sent
+player must be on `our_team_id`'s current ESPN roster and each received player on
+`counterparty_team_id`'s, or the route returns 409. Malformed proposals or unknown teams
+return 422. Context failures map like `/v1/trade/context` (503/504/502).
+`POST /v1/trade/evaluate` is unchanged.
+
+Positive numbers are good for `our_team_id`. For each horizon week, both teams' optimal
+starting lineups are solved before and after the trade with the lineup optimizer's ILP,
+over current rosters and that week's `vorp_score`. Bench and IR are worth nothing. ΔL is
+after minus before.
+
+- `our_lineup_gain` G is the sum of our ΔL. `counterparty_lineup_change` I is the sum of
+  theirs; negative means they got weaker.
+- `m(z) = 1 + 0.25 × clamp(z, −2, 2)`, where z is that week's fantasy opponent strength
+  from the trade context. A fantasy bye weighs 0.
+- `our_weighted_gain` G* = Σ our ΔL × m(our opponent's z).
+  `our_schedule_adjustment` = G* − G.
+- `counterparty_weighted_benefit` C* = Σ −(their ΔL) × c. In a week they play us,
+  c = our own m. Otherwise c = 0.25 × m(their opponent's z), so weakening them ahead of
+  tougher matchups counts more, but less than head-to-head.
+- `final_score` = G* + C*.
+
+The constants are echoed in `weights`, and `scoring_version` names the formula.
+`raw_vorp` is `/v1/trade/evaluate`'s result for the as-of week, using the mapped internal
+IDs. Per-week `starters_before`/`starters_after`, `held_slots` and `excluded_players`,
+plus the per-week schedule rows, are the evidence an explanation should quote. Uneven
+trades set `exceeds_roster_limit`; drops are not simulated.
+
+Nothing is filled in:
+
+- A week is **unscored**, with reasons, if a traded player lacks a mapping or that week's
+  metrics, or a lineup can't be filled. A traded player whose NFL team is on a bye simply
+  sits that week.
+- An unfillable K or D/ST slot is held on both sides.
+- Untraded players without metrics are left out and reported in
+  `coverage.partial_roster_weeks`.
+- If the NFL schedule can't be read, a missing projection can't be confirmed as a bye.
+- Unknown opponent strength or pairing leaves G*, C* or `final_score` null, with a reason.
+- An empty or bye-only horizon has no final score.
+
+Projections and VORP are currently refreshed for the upcoming week only, so later horizon
+weeks usually come back unscored and `complete_horizon` is false.

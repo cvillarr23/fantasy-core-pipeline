@@ -50,6 +50,13 @@
   aggregates). Other teams' full rosters are deliberately left out to keep the prompt small.
   `llm_client` has no tool calling, so chat calls these in process; the same function backs
   the `get_team_roster` MCP tool for remote callers.
+- `trade_score_service` (`POST /v1/trade/score`, MCP `score_trade_proposal`) is the
+  schedule-aware trade scorer, kept separate from `evaluate_trade`, whose raw-VORP
+  contract the worker still calls and which the scorer reuses as `raw_vorp`. Request ids
+  are ESPN ids only. Ownership comes from the live trade context (409 on mismatch). Each
+  week is scored only from its own `weekly_stats` rows, never carried forward. The formula
+  constants live in the service docstring and the README "Trade scoring" section; change
+  `SCORING_VERSION` if they change.
 - Pydantic request/response models live in `src/schemas/<domain>.py`, not inline in the
   router. **Do not confuse this with `src/models.py`**, which holds only raw DB DDL string
   constants consumed by `run_migrations()` and has nothing to do with the API layer — a
