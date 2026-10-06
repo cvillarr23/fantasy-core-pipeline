@@ -174,7 +174,15 @@ def reconcile_action(identity, leagues=None):
     else:
         swaps = body.get("optimized_swaps", [])
         checks = [
+            # An IR entry moves one player into or out of IR, so only that player's slot
+            # is checked; espn_api reports IR as "IR" and bench as "BE".
             {
+                "player": s["player_id"],
+                "kind": s["kind"],
+                "confirmed": normalize_slot(roster.get(str(s["player_id"]))) == normalize_slot(s["slot"]),
+            }
+            if s.get("kind") in ("ir", "activate_ir")
+            else {
                 "add": s["add_player_id"],
                 "drop": s["drop_player_id"],
                 "confirmed": normalize_slot(roster.get(str(s["add_player_id"]))) == normalize_slot(s["slot"])

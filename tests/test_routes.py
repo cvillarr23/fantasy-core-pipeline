@@ -757,3 +757,207 @@ def test_new_actions_keep_decision_audit_and_duplicates_do_not_repeat_it():
     with patch('src.services.activity_service.create_action',return_value='previous'),patch('src.services.activity_runner.publish_one'),patch('src.api.routes._record_bot_decision') as audit:
         routes._accept_durable('waiver_actions',payload)
         audit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# /trigger/lineup IR entries: {kind: "ir" | "activate_ir", player_id, slot}
+# ---------------------------------------------------------------------------
+
+LEGACY_SWAP = {
+    "drop_player_id": "16737", "add_player_id": "4360761", "slot": "FLEX",
+    "add_player_name": "Somebody", "matchup_multiplier": 1.02,
+    "decision_inputs": {"season": 2026, "week": 5},
+}
+IR_ENTRY = {"kind": "ir", "player_id": "4046", "slot": "IR", "decision_inputs": {"season": 2026, "week": 5}}
+ACTIVATE_ENTRY = {"kind": "activate_ir", "player_id": "4983", "slot": "BENCH"}
+
+
+def _post_lineup_capturing(client, payload, cursor=None):
+    """Runs the real route and _accept_durable, capturing the body handed to the durable
+    outbox and every bot_decisions write instead of touching a database or broker."""
+    captured = {}
+
+    def create(queue, body, identity):
+        captured["queue"], captured["body"] = queue, body
+        return identity
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(cursor or _namespace_ok_cursor())), \
+         patch("src.services.activity_service.create_action", side_effect=create), \
+         patch("src.services.activity_runner.publish_one") as publish, \
+         patch("src.api.routes._record_bot_decision") as audit:
+        response = client.post("/v1/trigger/lineup", json=payload)
+    captured["publish"], captured["audit"] = publish, audit
+    return response, captured
+
+
+def test_trigger_lineup_publishes_a_legacy_swap_exactly_as_before(client):
+    response, captured = _post_lineup_capturing(client, {"team_id": "8", "optimized_swaps": [LEGACY_SWAP]})
+
+    assert response.status_code == 202
+    [swap] = captured["body"]["optimized_swaps"]
+    assert swap == {
+        "drop_player_id": "16737", "add_player_id": "4360761", "slot": "FLEX",
+        "drop_player_name": None, "add_player_name": "Somebody", "matchup_multiplier": 1.02,
+        "decision_inputs": {"season": 2026, "week": 5},
+    }
+    [audit] = captured["audit"].call_args_list
+    assert audit.kwargs["action"] == "lineup_swap"
+    assert (audit.kwargs["target_player_id"], audit.kwargs["drop_player_id"]) == ("4360761", "16737")
+
+
+def test_trigger_lineup_accepts_an_explicit_swap_kind_and_publishes_it_without_kind(client):
+    response, captured = _post_lineup_capturing(
+        client, {"team_id": "8", "optimized_swaps": [{**LEGACY_SWAP, "kind": "swap"}]}
+    )
+
+    assert response.status_code == 202
+    assert "kind" not in captured["body"]["optimized_swaps"][0]
+
+
+def test_trigger_lineup_publishes_ir_and_activate_entries_in_order(client):
+    response, captured = _post_lineup_capturing(client, {
+        "team_id": "8", "optimized_swaps": [LEGACY_SWAP, IR_ENTRY, ACTIVATE_ENTRY],
+    })
+
+    assert response.status_code == 202
+    assert captured["queue"] == "lineup_updates"
+    swap, ir, activate = captured["body"]["optimized_swaps"]
+    assert swap["add_player_id"] == "4360761" and "kind" not in swap
+    assert ir == {
+        "kind": "ir", "player_id": "4046", "slot": "IR", "player_name": None,
+        "decision_inputs": {"season": 2026, "week": 5},
+    }
+    assert activate == {
+        "kind": "activate_ir", "player_id": "4983", "slot": "BENCH", "player_name": None,
+        "decision_inputs": None,
+    }
+    captured["publish"].assert_called_once()
+
+
+def test_create_action_strips_decision_inputs_from_ir_entries_on_the_queue_body():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("t-1",)
+    body = routes.LineupTriggerPayload(team_id="8", optimized_swaps=[IR_ENTRY]).model_dump()
+    from src.services import activity_service
+
+    with patch.object(activity_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch.object(activity_service, "league_id", return_value="123"):
+        activity_service.create_action("lineup_updates", body, "t-1")
+
+    [outbox] = [c for c in cursor.execute.call_args_list if "activity_outbox" in c.args[0]]
+    queued = json.loads(outbox.args[1][2])
+    assert queued["optimized_swaps"] == [{"kind": "ir", "player_id": "4046", "slot": "IR", "player_name": None}]
+
+
+def test_trigger_lineup_records_one_bot_decision_per_entry_kind(client):
+    response, captured = _post_lineup_capturing(client, {
+        "team_id": "8", "optimized_swaps": [LEGACY_SWAP, IR_ENTRY, ACTIVATE_ENTRY],
+    })
+
+    assert response.status_code == 202
+    rows = [
+        (c.kwargs["action"], c.kwargs["target_player_id"], c.kwargs["drop_player_id"], c.kwargs["decision_inputs"])
+        for c in captured["audit"].call_args_list
+    ]
+    assert rows == [
+        ("lineup_swap", "4360761", "16737", {"season": 2026, "week": 5}),
+        ("lineup_ir_move", "4046", None, {"season": 2026, "week": 5}),
+        ("lineup_ir_activate", "4983", None, None),
+    ]
+    assert {c.kwargs["bot_name"] for c in captured["audit"].call_args_list} == {"lineup_bot"}
+
+
+def test_trigger_lineup_duplicate_ir_submission_records_no_bot_decisions():
+    payload = routes.LineupTriggerPayload(team_id="8", optimized_swaps=[IR_ENTRY])
+    with patch("src.services.activity_service.create_action", return_value="previous"), \
+         patch("src.services.activity_runner.publish_one"), \
+         patch("src.api.routes._record_bot_decision") as audit:
+        result = routes._accept_durable("lineup_updates", payload)
+
+    assert result["status"] == "duplicate"
+    audit.assert_not_called()
+
+
+@pytest.mark.parametrize("entry", [
+    {"kind": "ir", "player_id": "4046", "slot": "BENCH"},
+    {"kind": "ir", "player_id": "4046", "slot": "RB1"},
+    {"kind": "activate_ir", "player_id": "4046", "slot": "IR"},
+    {"kind": "activate_ir", "player_id": "4046", "slot": " ir "},
+    {"kind": "activate_ir", "player_id": "4046", "slot": ""},
+    {"kind": "ir", "slot": "IR"},
+    {"kind": "ir", "player_id": "4046"},
+    {"kind": "drop", "player_id": "4046", "slot": "IR"},
+    # No kind means a swap, so an IR-shaped entry without one is a swap missing its ids.
+    {"player_id": "4046", "slot": "IR"},
+])
+def test_trigger_lineup_rejects_malformed_ir_entries(client, entry):
+    response, captured = _post_lineup_capturing(
+        client, {"team_id": "8", "optimized_swaps": [LEGACY_SWAP, entry]}
+    )
+
+    assert response.status_code == 422
+    assert "body" not in captured
+    captured["publish"].assert_not_called()
+
+
+def test_trigger_lineup_ir_entry_rejects_an_internal_sleeper_id(client):
+    cursor = MagicMock()
+    # player 2216: no espn_id row, but an internal player_id row.
+    cursor.fetchone.side_effect = [None, ("Some Starter",)]
+
+    response, captured = _post_lineup_capturing(
+        client, {"team_id": "8", "optimized_swaps": [{"kind": "ir", "player_id": "2216", "slot": "IR"}]},
+        cursor=cursor,
+    )
+
+    assert response.status_code == 422
+    assert "internal Sleeper id" in response.json()["detail"]
+    assert "body" not in captured
+
+
+def test_trigger_lineup_ir_entry_rejects_the_real_stafford_bech_collision(client):
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Matthew Stafford",), ("Jack Bech",)]
+
+    response, captured = _post_lineup_capturing(client, {
+        "team_id": "8",
+        "optimized_swaps": [{"kind": "activate_ir", "player_id": "12483", "player_name": "Jack Bech", "slot": "BENCH"}],
+    }, cursor=cursor)
+
+    assert response.status_code == 422
+    assert "Matthew Stafford" in response.json()["detail"]
+    assert "body" not in captured
+
+
+def test_trigger_lineup_ir_entry_accepts_an_unnamed_espn_id(client):
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Some Back",), None]
+
+    response, captured = _post_lineup_capturing(
+        client, {"team_id": "8", "optimized_swaps": [{"kind": "ir", "player_id": "4046", "slot": "IR"}]},
+        cursor=cursor,
+    )
+
+    assert response.status_code == 202
+    assert captured["body"]["optimized_swaps"][0]["player_id"] == "4046"
+
+
+def test_trigger_lineup_ir_entry_requires_the_api_key(client):
+    payload = {"team_id": "8", "optimized_swaps": [IR_ENTRY]}
+    with patch("src.services.activity_service.create_action") as create:
+        missing = client.post("/v1/trigger/lineup", json=payload, headers={"X-API-Key": ""})
+        wrong = client.post("/v1/trigger/lineup", json=payload, headers={"X-API-Key": "not-the-key"})
+
+    assert (missing.status_code, wrong.status_code) == (401, 401)
+    create.assert_not_called()
+
+
+def test_acceptance_persists_an_ir_payload_before_delivery():
+    order = []
+    payload = routes.LineupTriggerPayload(team_id="8", optimized_swaps=[IR_ENTRY, ACTIVATE_ENTRY])
+    with patch("src.services.activity_service.create_action", side_effect=lambda q, b, i: order.append("persist") or "original"), \
+         patch("src.services.activity_runner.publish_one", side_effect=lambda i: order.append("publish")):
+        result = routes._accept_durable("lineup_updates", payload)
+
+    assert order == ["persist", "publish"]
+    assert result["tracking_id"] == "original"

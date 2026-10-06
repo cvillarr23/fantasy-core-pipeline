@@ -6,10 +6,11 @@ import secrets
 import uuid
 import time
 import pika
-from typing import List, Literal, Optional
+import re
+from typing import Annotated, List, Literal, Optional, Union
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from opentelemetry import propagate, trace
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, Tag, model_validator
 from src.api.draft import _redis_client
 from src.database import get_db_cursor
 from src.services import waiver_service
@@ -63,6 +64,13 @@ def require_trigger_api_key(x_api_key: str = Header(...)) -> None:
 # PYDANTIC DATA TRANSFER OBJECTS (SCHEMAS)
 # ------------------------------------------------------------------------------
 class SwapInstruction(BaseModel):
+    # Excluded from the dump so a swap's published body stays exactly what it was before
+    # entries had kinds; the worker reads a missing kind as a swap.
+    kind: Literal["swap"] = Field(
+        "swap",
+        exclude=True,
+        description="Optional. Omitted or 'swap' means bench drop_player_id and promote add_player_id into slot.",
+    )
     drop_player_id: str = Field(
         ...,
         description="ESPN player id of the starter to bench. Must be ESPN's, not the internal Sleeper players.player_id - the two id spaces overlap numerically, so the wrong namespace can silently swap a different player (#187)",
@@ -108,12 +116,77 @@ class SwapInstruction(BaseModel):
     )
 
 
+IR_MOVE_KINDS = ("ir", "activate_ir")
+# bot_decisions.action per IR entry kind. An IR move promotes nobody, so its row has no drop.
+IR_MOVE_ACTIONS = {"ir": "lineup_ir_move", "activate_ir": "lineup_ir_activate"}
+
+
+class IrMoveInstruction(BaseModel):
+    kind: Literal["ir", "activate_ir"] = Field(
+        ...,
+        description=(
+            "'ir' moves player_id into an IR slot; 'activate_ir' moves them out of IR into "
+            "slot. One player, nobody promoted."
+        ),
+    )
+    player_id: str = Field(
+        ...,
+        description="ESPN player id of the player to move. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap as SwapInstruction's ids",
+    )
+    slot: str = Field(
+        ...,
+        description="Target slot: IR for 'ir'; any non-IR slot (normally BENCH) for 'activate_ir'",
+    )
+    player_name: Optional[str] = Field(
+        None,
+        description="Display name of the player, for the gateway's id-namespace cross-check.",
+    )
+    decision_inputs: Optional[dict] = Field(
+        None,
+        description="Why this move was proposed. Recorded to bot_decisions; never forwarded to the click bot.",
+    )
+
+    @model_validator(mode="after")
+    def _slot_matches_kind(self):
+        # Normalized the way the worker resolves slots ("RB1" and "RB" are one ESPN slot).
+        # IR eligibility, a full IR slot and "not in IR" are left to the worker, which reads
+        # ESPN's live roster; core only has a synced snapshot.
+        slot = re.sub(r"\d+$", "", self.slot.strip().upper())
+        if not slot:
+            raise ValueError("slot is required")
+        if self.kind == "ir" and slot != "IR":
+            raise ValueError(f"kind 'ir' must target slot IR, got '{self.slot}'")
+        if self.kind == "activate_ir" and slot == "IR":
+            raise ValueError("kind 'activate_ir' moves a player out of IR, so its slot cannot be IR")
+        return self
+
+
+def _lineup_entry_tag(value) -> str:
+    # A plain Field(discriminator="kind") rejects an entry with no kind even when the swap
+    # model defaults it, and every existing caller sends none, so the tag is computed here.
+    kind = value.get("kind", "swap") if isinstance(value, dict) else getattr(value, "kind", "swap")
+    return "ir_move" if kind in IR_MOVE_KINDS else kind
+
+
+LineupEntry = Annotated[
+    Union[
+        Annotated[SwapInstruction, Tag("swap")],
+        Annotated[IrMoveInstruction, Tag("ir_move")],
+    ],
+    Discriminator(_lineup_entry_tag),
+]
+
+
 class LineupTriggerPayload(BaseModel):
     team_id: str = Field(
         ..., description="Target local league team identification number"
     )
-    optimized_swaps: List[SwapInstruction] = Field(
-        ..., description="Array of mathematical player reallocations"
+    optimized_swaps: List[LineupEntry] = Field(
+        ...,
+        description=(
+            "Lineup moves, applied in one ESPN transaction. An entry without kind is a bench + "
+            "promote swap; kind 'ir' / 'activate_ir' moves one player into or out of IR."
+        ),
     )
     idempotency_key: Optional[str] = Field(
         None,
@@ -289,6 +362,9 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
     persistent queue messages inside RabbitMQ to activate automated browser worker scripts.
     """
     for swap in payload.optimized_swaps:
+        if isinstance(swap, IrMoveInstruction):
+            _reject_internal_player_id(swap.player_id, swap.player_name)
+            continue
         _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
         _reject_internal_player_id(swap.add_player_id, swap.add_player_name)
     return _accept_durable("lineup_updates", payload)
@@ -694,13 +770,17 @@ def _accept_durable(queue, payload):
     if identity == proposed_id:
         if queue == "lineup_updates":
             for swap in payload.optimized_swaps:
+                if isinstance(swap, IrMoveInstruction):
+                    action, target, drop = IR_MOVE_ACTIONS[swap.kind], swap.player_id, None
+                else:
+                    action, target, drop = "lineup_swap", swap.add_player_id, swap.drop_player_id
                 _record_bot_decision(
                     tracking_id=identity,
                     bot_name="lineup_bot",
-                    action="lineup_swap",
+                    action=action,
                     team_id=payload.team_id,
-                    target_player_id=swap.add_player_id,
-                    drop_player_id=swap.drop_player_id,
+                    target_player_id=target,
+                    drop_player_id=drop,
                     decision_inputs=swap.decision_inputs,
                 )
         else:
