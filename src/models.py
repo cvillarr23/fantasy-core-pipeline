@@ -503,7 +503,6 @@ CREATE TABLE IF NOT EXISTS bot_decisions (
 );
 """
 
-# Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS = """
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_source VARCHAR(80);
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_updated_at TIMESTAMPTZ;
@@ -554,6 +553,7 @@ CREATE TABLE IF NOT EXISTS fantasy_player_week_scores (
 );
 """
 
+# Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
 CREATE INDEX IF NOT EXISTS idx_weekly_stats_lookup ON weekly_stats(week);

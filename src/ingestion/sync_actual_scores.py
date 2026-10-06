@@ -10,6 +10,11 @@ import re
 
 import requests
 from espn_api.football.constant import POSITION_MAP
+from espn_api.requests.espn_requests import (
+    ESPNAccessDenied,
+    ESPNInvalidLeague,
+    ESPNUnknownError,
+)
 
 from src.espn_positions import DEFAULT_POSITIONS
 from src.ingestion.sync_league import (
@@ -92,7 +97,7 @@ def shape_schedule(raw, league_id, season):
     validate_scope(raw, league_id, season)
     periods, regular_count = period_settings(raw)
     teams = {str(integer(t["id"])) for t in raw.get("teams", [])}
-    if not teams:
+    if not teams or len(teams) != len(raw.get("teams", [])):
         raise IncompleteScoresError("Missing ESPN teams")
     rows = {}
     for game in raw.get("schedule", []):
@@ -254,7 +259,10 @@ def shape_week(snapshot, box, board, league_id, season, week):
             if score is None or total is None:
                 raise IncompleteScoresError("Missing scoring-week team score")
             if (
-                max(row["weeks"]) < snapshot["scoringPeriodId"]
+                (
+                    max(row["weeks"]) < snapshot["scoringPeriodId"]
+                    or week == snapshot["scoringPeriodId"] == max(row["weeks"])
+                )
                 and row["status"] != "bye"
                 and game.get("winner") not in {"HOME", "AWAY", "TIE"}
             ):
@@ -552,6 +560,9 @@ def main(argv=None):
         requests.RequestException,
         RuntimeError,
         KeyError,
+        ESPNAccessDenied,
+        ESPNInvalidLeague,
+        ESPNUnknownError,
     ) as exc:
         # HTTP exception text can contain request information; log only its class.
         logger.error(

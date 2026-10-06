@@ -275,6 +275,36 @@ def test_final_season_week_can_complete_without_rollover(snapshot):
     assert 18 in sync.completed_weeks(snapshot)
 
 
+def test_final_season_box_still_requires_decided_result(snapshot):
+    snapshot["scoringPeriodId"] = 18
+    snapshot["schedule"][0]["matchupPeriodId"] = 18
+    box = deepcopy(snapshot)
+    box["schedule"][0]["winner"] = "UNDECIDED"
+    for side in ("home", "away"):
+        box["schedule"][0][side]["pointsByScoringPeriod"] = {"18": 10}
+        box["schedule"][0][side]["rosterForCurrentScoringPeriod"]["entries"][0][
+            "playerPoolEntry"
+        ]["player"]["stats"][0]["scoringPeriodId"] = 18
+    with pytest.raises(sync.IncompleteScoresError):
+        sync.shape_week(snapshot, box, scoreboard(18), "123", 2026, 18)
+
+
+def test_duplicate_source_team_is_rejected(snapshot):
+    snapshot["teams"].append(deepcopy(snapshot["teams"][0]))
+    with pytest.raises(sync.IncompleteScoresError):
+        sync.shape_week(snapshot, box_for(snapshot), scoreboard(), "123", 2026, 4)
+
+
+def test_access_failure_logs_no_request_or_cookie_details(caplog):
+    from espn_api.requests.espn_requests import ESPNAccessDenied
+
+    with patch.object(
+        sync, "build_league", side_effect=ESPNAccessDenied("private-cookie-value")
+    ):
+        assert sync.main(["--season", "2026", "--dry-run"]) == 1
+    assert "private-cookie-value" not in caplog.text
+
+
 def test_invalid_range_and_zero_week_fail(snapshot):
     with patch.object(sync, "fetch_snapshot", return_value=snapshot), patch.object(
         sync, "fetch_week"
