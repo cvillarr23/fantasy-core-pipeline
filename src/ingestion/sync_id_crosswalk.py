@@ -35,14 +35,16 @@ def persist_crosswalk(conn, crosswalk: pl.DataFrame, existing_player_ids: set) -
     """
     Updates only rows for player_ids already present in `players` (inserted by
     sync_players). COALESCE on gsis_id so a crosswalk miss (NULL) never erases a good
-    existing value from Sleeper's own payload. Returns the number of players actually
+    existing value from Sleeper's own payload, and on espn_id so it never erases one
+    sync_kicker_dst or sync_skill_position_crosswalk backfilled: the crosswalk lists
+    kickers (as "PK") and some skill players with a sleeper_id but no espn_id. Returns the number of players actually
     matched, computed against `existing_player_ids` rather than cursor.rowcount, whose
     accumulation semantics across executemany() batches aren't guaranteed by psycopg2.
     """
     if crosswalk.is_empty():
         return 0
     update_query = """
-        UPDATE players SET espn_id = %s, gsis_id = COALESCE(%s, gsis_id)
+        UPDATE players SET espn_id = COALESCE(%s, espn_id), gsis_id = COALESCE(%s, gsis_id)
         WHERE player_id = %s;
     """
     rows = [

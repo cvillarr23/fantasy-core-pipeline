@@ -8,9 +8,9 @@ the decision math is identical, only whether the result gets published to ESPN d
 waiver_strategy's queries key moves by players.player_id (Sleeper-namespaced), but
 POST /v1/trigger/waiver's id-namespace guard requires players.espn_id, so each move is
 translated through resolve_live_waiver_moves before publishing. A move involving a
-player with no espn_id yet is skipped rather than published - the DynastyProcess
-crosswalk covers ~82% of players (see sync_id_crosswalk.py), so an unresolved id is an
-expected gap, not a bug, and there is no ESPN identity to safely act on.
+player with no espn_id yet is skipped rather than published - not every player has one
+resolved (see src/espn_identity.py), so an unresolved id is an expected gap, not a bug,
+and there is no ESPN identity to safely act on.
 
 Neither publisher here (the weekly CronJob, rumor_action_service's boost_waiver path)
 drops an IR-eligible player while an IR slot is open. plan_live_waiver_moves uses the

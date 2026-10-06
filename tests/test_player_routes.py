@@ -10,7 +10,7 @@ def _fake_db_cursor(cursor=None):
 
 def test_get_player_summary_success(client):
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", "Questionable")
+    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", "Questionable", "4362628")
     mock_cursor.fetchall.return_value = [
         ("rotowire", "Some Back is questionable for Sunday.", "https://example.com/1", datetime(2026, 8, 17, 12, 0, 0)),
     ]
@@ -22,6 +22,7 @@ def test_get_player_summary_success(client):
     body = response.json()
     assert body["player_id"] == "p1"
     assert body["name"] == "Some Back"
+    assert body["espn_id"] == "4362628"
     assert body["injury_status"] == "Questionable"
     assert len(body["recent_news"]) == 1
     assert body["recent_news"][0]["source"] == "rotowire"
@@ -32,7 +33,7 @@ def test_get_player_summary_serializes_real_datetime_published_at(client):
     a string - a raw datetime object passed straight through would fail FastAPI's Pydantic
     response validation (str field) and turn this endpoint into a 500."""
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None)
+    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None, None)
     mock_cursor.fetchall.return_value = [
         ("rotowire", "Some Back looked good in practice.", None, datetime(2026, 8, 17, 12, 0, 0)),
     ]
@@ -68,7 +69,7 @@ def test_get_player_summary_db_failure(client):
 
 def test_get_player_summary_no_news_returns_empty_list(client):
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None)
+    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None, None)
     mock_cursor.fetchall.return_value = []
 
     with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
@@ -77,6 +78,8 @@ def test_get_player_summary_no_news_returns_empty_list(client):
     assert response.status_code == 200
     assert response.json()["recent_news"] == []
     assert response.json()["injury_status"] is None
+    # Unresolved espn_id serializes as null rather than failing response validation.
+    assert response.json()["espn_id"] is None
 
 
 def test_search_players_success(client):

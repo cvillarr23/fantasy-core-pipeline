@@ -375,8 +375,8 @@ def _reject_internal_player_id(player_id: str, name: Optional[str] = None) -> No
     the wrong namespace whatever the payload calls it - and (when a name is given) an id that is
     both, where the payload names the internal owner rather than the ESPN one.
 
-    Allowed: an identity match; an id in neither column (the crosswalk covers ~82% of players and
-    no K or D/ST, so a legitimate ESPN id for an uncovered player must stay draftable); and the
+    Allowed: an identity match; an id in neither column (players.espn_id is not resolved for every
+    player, so a legitimate ESPN id for an uncovered player must stay draftable); and the
     genuinely ambiguous case, which is logged instead.
     """
     submitted = _normalized_name(name) if name is not None else None
