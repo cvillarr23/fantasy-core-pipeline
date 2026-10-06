@@ -110,56 +110,80 @@ def _bench(**statuses):
     }
 
 
-def test_split_ir_moves_turns_an_ir_eligible_drop_into_ir_plus_add():
-    bench = _bench(RB=[("hurt", -1.0, "OUT"), ("healthy", 2.0, "ACTIVE")])
-    moves = [_move("RB", "hurt", "fa", 4.0, -1.0)]
+def _fa(**agents):
+    return {pos: {"player_id": pid, "vorp_score": vorp} for pos, (pid, vorp) in agents.items()}
 
-    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=1)
+
+def test_plan_waiver_moves_stashes_an_injured_star_instead_of_dropping_a_healthy_player():
+    """The injured player isn't the worst on the bench (prior-week VORP stays high), so a
+    plain swap would drop the healthy one. With IR open: stash the star, add, no drop."""
+    bench = _bench(RB=[("star", 8.0, "OUT"), ("healthy", 1.0, "ACTIVE")])
+
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(bench, _fa(RB=("fa", 5.0)), open_ir_slots=1, margin=0.0)
 
     assert swaps == []
     assert ir_adds == [{
-        "kind": "ir_and_add", "position": "RB", "ir_player_id": "hurt", "drop_player_id": None,
-        "add_player_id": "fa", "add_vorp_score": 4.0, "ir_vorp_score": -1.0,
+        "kind": "ir_and_add", "position": "RB", "ir_player_id": "star", "ir_position": "RB",
+        "drop_player_id": None, "add_player_id": "fa", "add_vorp_score": 5.0, "ir_vorp_score": 8.0,
     }]
 
 
-def test_split_ir_moves_keeps_the_drop_when_no_ir_slot_is_open():
-    bench = _bench(RB=[("hurt", -1.0, "OUT")])
-    moves = [_move("RB", "hurt", "fa", 4.0, -1.0)]
+def test_plan_waiver_moves_pairs_the_freed_spot_with_the_best_agent_at_any_position():
+    bench = _bench(RB=[("hurt_rb", 0.0, "OUT")], WR=[("wr_bench", 1.0, None)])
+    agents = _fa(RB=("fa_rb", 2.0), WR=("fa_wr", 9.0))
 
-    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=0)
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(bench, agents, open_ir_slots=1, margin=0.0)
 
-    assert swaps == moves
-    assert ir_adds == []
-
-
-def test_split_ir_moves_never_drops_an_ir_eligible_player_while_a_slot_is_open():
-    """Two IR-eligible drops, one open slot: the better add becomes IR + add, and the other
-    is withheld rather than dropped, since the slot is still open until someone acts."""
-    bench = _bench(RB=[("hurt_rb", 0.0, "OUT")], WR=[("hurt_wr", 0.0, "INJURY_RESERVE")])
-    moves = [_move("RB", "hurt_rb", "fa_rb", 3.0, 0.0), _move("WR", "hurt_wr", "fa_wr", 6.0, 0.0)]
-
-    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=1)
-
+    assert [(m["ir_player_id"], m["add_player_id"], m["position"]) for m in ir_adds] == [("hurt_rb", "fa_wr", "WR")]
+    # WR's agent is taken by the stash; RB has no healthy bench player to swap.
     assert swaps == []
-    assert [m["ir_player_id"] for m in ir_adds] == ["hurt_wr"]
 
 
-def test_split_ir_moves_passes_through_healthy_and_unknown_drops():
-    bench = _bench(RB=[("healthy", 1.0, "QUESTIONABLE")])
-    moves = [_move("RB", "healthy", "fa", 5.0, 1.0), _move("WR", "not_in_bench", "fa2", 5.0, 1.0)]
+def test_plan_waiver_moves_is_a_plain_swap_when_ir_is_full():
+    bench = _bench(RB=[("hurt", -1.0, "OUT")])
 
-    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=1)
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(bench, _fa(RB=("fa", 4.0)), open_ir_slots=0, margin=0.0)
 
-    assert swaps == moves
+    assert [m["drop_player_id"] for m in swaps] == ["hurt"]
     assert ir_adds == []
 
 
-def test_ir_stash_candidates_lists_eligible_bench_players_by_value():
+def test_plan_waiver_moves_never_drops_an_ir_eligible_player_while_a_slot_is_open():
+    """Two eligible players, one slot: the better one is stashed, and the other is neither
+    stashed nor dropped, since dropping is only right once IR is full."""
+    bench = _bench(RB=[("hurt_rb", 0.0, "OUT")], WR=[("hurt_wr", 3.0, "INJURY_RESERVE")])
+    agents = _fa(RB=("fa_rb", 6.0), WR=("fa_wr", 4.0))
+
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(bench, agents, open_ir_slots=1, margin=0.0)
+
+    assert [(m["ir_player_id"], m["add_player_id"]) for m in ir_adds] == [("hurt_wr", "fa_rb")]
+    assert swaps == []
+
+
+def test_plan_waiver_moves_still_swaps_healthy_players_at_other_positions():
+    bench = _bench(RB=[("hurt", 0.0, "OUT")], WR=[("wr_bad", -2.0, "QUESTIONABLE")])
+    agents = _fa(RB=("fa_rb", 6.0), WR=("fa_wr", 4.0))
+
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(bench, agents, open_ir_slots=1, margin=3.0)
+
+    assert [m["add_player_id"] for m in ir_adds] == ["fa_rb"]
+    assert [(m["drop_player_id"], m["add_player_id"]) for m in swaps] == [("wr_bad", "fa_wr")]
+
+
+def test_plan_waiver_moves_needs_a_free_add_to_clear_the_margin():
+    bench = _bench(RB=[("hurt", 0.0, "OUT")])
+
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(bench, _fa(RB=("fa", 2.0)), open_ir_slots=1, margin=3.0)
+
+    assert (swaps, ir_adds) == ([], [])
+
+
+def test_ir_stash_candidates_lists_eligible_bench_players_by_value_up_to_the_open_slots():
     bench = _bench(RB=[("a", 1.0, "OUT"), ("b", 0.0, "ACTIVE")], WR=[("c", 3.0, "INJURY_RESERVE")])
 
-    assert waiver_strategy.ir_stash_candidates(bench, open_ir_slots=1) == [
+    assert waiver_strategy.ir_stash_candidates(bench, open_ir_slots=2) == [
         {"position": "WR", "player_id": "c", "vorp_score": 3.0, "espn_injury_status": "INJURY_RESERVE"},
         {"position": "RB", "player_id": "a", "vorp_score": 1.0, "espn_injury_status": "OUT"},
     ]
+    assert [p["player_id"] for p in waiver_strategy.ir_stash_candidates(bench, open_ir_slots=1)] == ["c"]
     assert waiver_strategy.ir_stash_candidates(bench, open_ir_slots=0) == []

@@ -81,7 +81,8 @@ def propose_waiver_moves(bench_by_position: dict, free_agents_by_position: dict,
     return moves
 
 
-def _ir_eligible_bench(bench_by_position: dict) -> dict:
+def ir_eligible_bench(bench_by_position: dict) -> dict:
+    """player_id -> bench entry (plus its position) for every IR-eligible bench player."""
     return {
         player["player_id"]: {"position": position, **player}
         for position, players in bench_by_position.items()
@@ -91,38 +92,56 @@ def _ir_eligible_bench(bench_by_position: dict) -> dict:
 
 
 def ir_stash_candidates(bench_by_position: dict, open_ir_slots: int) -> list:
-    """Pure: IR-eligible bench players, most valuable first, or [] with no open IR slot."""
+    """Pure: the IR-eligible bench players to stash, most valuable first, at most one per
+    open IR slot."""
     if open_ir_slots <= 0:
         return []
-    return sorted(_ir_eligible_bench(bench_by_position).values(), key=lambda p: p["vorp_score"], reverse=True)
+    eligible = sorted(ir_eligible_bench(bench_by_position).values(), key=lambda p: p["vorp_score"], reverse=True)
+    return eligible[:open_ir_slots]
 
 
-def split_ir_moves(moves: list, bench_by_position: dict, open_ir_slots: int) -> tuple:
-    """Pure: (swaps, ir_and_adds) from propose_waiver_moves' output.
+def plan_waiver_moves(bench_by_position: dict, free_agents_by_position: dict, open_ir_slots: int,
+                      margin: float = MARGIN_THRESHOLD) -> tuple:
+    """Pure: (swaps, ir_and_adds), IR-aware propose_waiver_moves.
 
-    While an IR slot is open, no move may drop an IR-eligible player: the player goes to IR
-    and the free agent is added with no drop. The open slots go to the best adds. A further
-    eligible drop is withheld from both lists, since the slot is still open until someone
-    makes the IR move and dropping that player is only right after it."""
-    if open_ir_slots <= 0:
-        return list(moves), []
-    eligible = _ir_eligible_bench(bench_by_position)
-    swaps = [m for m in moves if m["drop_player_id"] not in eligible]
-    ir_moves = sorted(
-        (m for m in moves if m["drop_player_id"] in eligible),
-        key=lambda m: m["add_vorp_score"], reverse=True,
+    While an IR slot is open no IR-eligible player is dropped, wherever they rank on the
+    bench. Each stash frees a roster spot, so the best free agents (any position, worth more
+    than `margin` on their own since nobody leaves) become "ir_and_add" moves first. Only the
+    remaining positions' free agents are weighed against healthy bench players as swaps.
+    Eligible players beyond the open slots are neither stashed nor dropped: dropping them is
+    only right once the stashes have filled IR."""
+    eligible = ir_eligible_bench(bench_by_position) if open_ir_slots > 0 else {}
+    if not eligible:
+        return propose_waiver_moves(bench_by_position, free_agents_by_position, margin=margin), []
+
+    ranked_agents = sorted(
+        ((position, agent) for position, agent in free_agents_by_position.items() if agent["vorp_score"] > margin),
+        key=lambda item: item[1]["vorp_score"], reverse=True,
     )
     ir_and_adds = [
         {
             "kind": "ir_and_add",
-            "position": m["position"],
-            "ir_player_id": m["drop_player_id"],
+            "position": position,
+            "ir_player_id": stashed["player_id"],
+            "ir_position": stashed["position"],
             "drop_player_id": None,
-            "add_player_id": m["add_player_id"],
-            "add_vorp_score": m["add_vorp_score"],
-            "ir_vorp_score": m["drop_vorp_score"],
+            "add_player_id": agent["player_id"],
+            "add_vorp_score": agent["vorp_score"],
+            "ir_vorp_score": stashed["vorp_score"],
         }
-        for m in ir_moves[:open_ir_slots]
+        for stashed, (position, agent) in zip(ir_stash_candidates(bench_by_position, open_ir_slots), ranked_agents)
+    ]
+    claimed_positions = {move["position"] for move in ir_and_adds}
+    healthy_bench = {
+        position: [p for p in players if p["player_id"] not in eligible]
+        for position, players in bench_by_position.items()
+    }
+    remaining_agents = {
+        position: agent for position, agent in free_agents_by_position.items() if position not in claimed_positions
+    }
+    swaps = [
+        move for move in propose_waiver_moves(healthy_bench, remaining_agents, margin=margin)
+        if move["drop_player_id"] not in eligible
     ]
     return swaps, ir_and_adds
 

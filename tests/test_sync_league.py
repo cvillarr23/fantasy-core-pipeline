@@ -209,6 +209,8 @@ def test_sync_league_persists_team_names_alongside_rosters(monkeypatch):
         sl.sync_league(season=2026)
 
     mock_persist_names.assert_called_once_with(mock_conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
+    persisted_sql = [c.args[0] for c in mock_cursor.executemany.call_args_list]
+    assert any("ir_slots_used" in sql for sql in persisted_sql)
 
 
 
@@ -251,3 +253,47 @@ def test_sync_rosters_never_wipes_rosters_on_an_empty_espn_response():
         with pytest.raises(RuntimeError):
             sl.sync_rosters(2026)
     persist.assert_not_called()
+
+
+def test_build_roster_rows_reads_injury_status_from_the_bare_player_shape():
+    teams = [{"id": 1, "roster": {"entries": [
+        {"playerId": 3117251, "lineupSlotId": 20, "player": {"id": 3117251, "injuryStatus": "INJURY_RESERVE"}},
+    ]}}]
+    [row] = sl.build_roster_rows(teams, ESPN_TO_PLAYER_ID)
+    assert row[4] == "INJURY_RESERVE"
+
+
+def test_build_ir_occupancy_rows_counts_unmatched_ir_players_too():
+    """999999 has no espn_id crosswalk, so it has no league_rosters row, but it still fills
+    team 1's IR slot. Counting league_rosters would report the slot as open."""
+    assert sl.build_ir_occupancy_rows(RAW_TEAMS) == [("1", 1), ("2", 0)]
+
+
+def test_persist_ir_occupancy_updates_league_teams():
+    mock_conn = MagicMock()
+    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+
+    sl.persist_ir_occupancy(mock_conn, "1248158344", [("1", 1)])
+
+    sql, rows = mock_cursor.executemany.call_args.args
+    assert "UPDATE league_teams" in sql and "ir_slots_used" in sql
+    assert rows == [(1, "1248158344", "1")]
+
+
+def test_sync_rosters_refreshes_team_rows_and_ir_occupancy(monkeypatch):
+    _require_env_vars(monkeypatch)
+    league = MagicMock()
+    league.espn_request.league_get.return_value = {"teams": RAW_TEAMS_WITH_NAMES}
+    with (
+        patch("src.ingestion.sync_league.build_league", return_value=league),
+        patch("src.ingestion.sync_league.get_db_connection") as mock_get_conn,
+        patch("src.ingestion.sync_league.persist_rosters", return_value=0),
+        patch("src.ingestion.sync_league.persist_team_names") as mock_names,
+        patch("src.ingestion.sync_league.persist_ir_occupancy") as mock_ir,
+    ):
+        conn = mock_get_conn.return_value.__enter__.return_value
+        conn.cursor.return_value.__enter__.return_value.fetchall.return_value = []
+        sl.sync_rosters(2026)
+
+    mock_names.assert_called_once_with(conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
+    mock_ir.assert_called_once_with(conn, "1248158344", [("1", 0), ("2", 0)])

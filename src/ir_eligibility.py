@@ -48,15 +48,28 @@ def load_ir_slot_count(cursor, season: int) -> int:
 
 
 def load_open_ir_slots(cursor, team_id: str, season: int) -> int:
-    """IR slots this team can still fill, from league_settings and our league_rosters rows."""
+    """IR slots this team can still fill. Occupancy comes from league_teams.ir_slots_used
+    (counted off ESPN's raw roster, so it includes players with no espn_id match); before
+    that's synced, from our league_rosters rows."""
     slot_count = load_ir_slot_count(cursor, season)
     if slot_count == 0:
         return 0
     cursor.execute(
-        "SELECT COUNT(*) FROM league_rosters WHERE team_id = %s AND slot_position = 'IR';",
+        """
+        SELECT ir_slots_used FROM league_teams
+        WHERE team_id = %s AND ir_slots_used IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1;
+        """,
         (str(team_id),),
     )
     row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            "SELECT COUNT(*) FROM league_rosters WHERE team_id = %s AND slot_position = 'IR';",
+            (str(team_id),),
+        )
+        row = cursor.fetchone()
     return max(0, slot_count - (int(row[0]) if row else 0))
 
 

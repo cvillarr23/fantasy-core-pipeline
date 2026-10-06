@@ -186,7 +186,8 @@ def test_target_week_rows_are_used_without_fallback(monkeypatch):
 
     assert result["source_mode"] == "target_week"
     assert result["source_weeks"] == [4]
-    cursor.execute.assert_not_called()
+    # Only the IR slot reads ran, never the prior-week fallback query.
+    assert not any("weekly_stats" in c.args[0] for c in cursor.execute.call_args_list)
     mock_schedule.assert_not_called()
 
 
@@ -313,11 +314,26 @@ def test_ir_eligible_player_is_dropped_normally_when_ir_is_full(monkeypatch):
     assert result["ir_moves"] == []
 
 
-def test_ir_slots_are_not_read_when_no_bench_player_is_ir_eligible(monkeypatch):
+def test_open_ir_slots_is_reported_even_with_nobody_to_stash(monkeypatch):
     bench = {"RB": [{"player_id": "healthy_rb", "vorp_score": 1.0, "espn_injury_status": "ACTIVE"}]}
 
-    result, mock_slots = _run_ir_case(monkeypatch, bench, IR_FREE_AGENTS, 1, IR_DISPLAY_ROWS)
+    result, mock_slots = _run_ir_case(monkeypatch, bench, IR_FREE_AGENTS, 2, IR_DISPLAY_ROWS)
 
-    mock_slots.assert_not_called()
+    mock_slots.assert_called_once()
+    assert result["open_ir_slots"] == 2
     assert result["recommendations"][0]["kind"] == "swap"
     assert result["ir_moves"] == []
+
+
+def test_injured_star_is_stashed_rather_than_a_healthy_player_dropped(monkeypatch):
+    bench = {"RB": [
+        {"player_id": "hurt_rb", "vorp_score": 8.0, "espn_injury_status": "OUT"},
+        {"player_id": "healthy_rb", "vorp_score": 1.0, "espn_injury_status": "ACTIVE"},
+    ]}
+
+    result, _ = _run_ir_case(monkeypatch, bench, IR_FREE_AGENTS, 1, IR_DISPLAY_ROWS)
+
+    [rec] = result["recommendations"]
+    assert rec["kind"] == "ir_and_add"
+    assert rec["ir_player"]["name"] == "Hurt Back"
+    assert rec["bench_player"] is None

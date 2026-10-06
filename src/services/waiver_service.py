@@ -21,7 +21,7 @@ from src.backtesting import waiver_strategy
 from src.database import get_db_cursor
 from src.ingestion.metrics_extractor import normalize_team
 from src.ingestion.sync_league import refresh_rosters_if_stale
-from src.ir_eligibility import is_ir_eligible, load_open_ir_slots
+from src.ir_eligibility import load_open_ir_slots
 from src.optimization.lineup_solver import METRIC_SOURCE, PREGAME_WINDOW_WEEKS, load_teams_playing
 
 logger = logging.getLogger("WaiverService")
@@ -153,13 +153,6 @@ def _shape_recommendation(move: dict, display_by_player_id: dict) -> dict:
     }
 
 
-def _has_ir_eligible_bench(bench_by_position: dict) -> bool:
-    return any(
-        is_ir_eligible(player.get("espn_injury_status"))
-        for players in bench_by_position.values() for player in players
-    )
-
-
 def rostered_team_for_espn_id(espn_id: str):
     """team_id currently holding this ESPN player in league_rosters, or None."""
     with get_db_cursor() as cursor:
@@ -193,12 +186,11 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
                 f"No Season {season} Week {week} rows yet; waiver recommendations use "
                 f"{METRIC_SOURCE} means from Weeks {source['source_weeks']}."
             )
-        moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position, margin=0.0)
-        # Only worth a query when there's someone to stash.
-        open_ir_slots = (
-            load_open_ir_slots(cursor, our_team_id, season) if _has_ir_eligible_bench(bench_by_position) else 0
+        open_ir_slots = load_open_ir_slots(cursor, our_team_id, season)
+        swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(
+            bench_by_position, free_agents_by_position, open_ir_slots, margin=0.0,
         )
-        swaps, ir_and_adds = waiver_strategy.split_ir_moves(moves, bench_by_position, open_ir_slots)
+        # Bench only: an IR-eligible starter is the lineup page's move_to_ir hint.
         stash = waiver_strategy.ir_stash_candidates(bench_by_position, open_ir_slots)
         moves = swaps + ir_and_adds
 

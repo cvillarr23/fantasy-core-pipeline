@@ -21,7 +21,7 @@ def test_open_ir_slots_subtracts_occupied_and_never_goes_negative():
     assert ir.open_ir_slots({"BE": 7}, occupied=0) == 0
 
 
-def test_load_open_ir_slots_reads_slot_count_and_our_ir_rows():
+def test_load_open_ir_slots_prefers_espn_ir_occupancy_from_league_teams():
     cursor = MagicMock()
     cursor.fetchone.side_effect = [({"IR": 2, "BE": 7},), (1,)]
 
@@ -30,6 +30,17 @@ def test_load_open_ir_slots_reads_slot_count_and_our_ir_rows():
     settings_sql, settings_params = cursor.execute.call_args_list[0].args
     assert "league_settings" in settings_sql and settings_params == (2026,)
     sql, params = cursor.execute.call_args_list[1].args
+    assert "ir_slots_used" in sql and "league_teams" in sql
+    assert params == ("8",)
+
+
+def test_load_open_ir_slots_falls_back_to_league_rosters_before_occupancy_is_synced():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [({"IR": 1},), None, (1,)]
+
+    assert ir.load_open_ir_slots(cursor, "8", 2026) == 0
+
+    sql, params = cursor.execute.call_args_list[2].args
     assert "slot_position = 'IR'" in sql
     assert params == ("8",)
 

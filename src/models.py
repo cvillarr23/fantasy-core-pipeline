@@ -192,6 +192,13 @@ CREATE TABLE IF NOT EXISTS league_teams (
 );
 """
 
+# IR slots each team is using, counted from ESPN's raw roster by sync_league. Kept here
+# rather than derived from league_rosters, which drops players with no espn_id match, so an
+# unmatched player in IR would make the slot look open. NULL until the first sync.
+ADD_LEAGUE_TEAMS_IR_SLOTS_USED_COLUMN = """
+ALTER TABLE league_teams ADD COLUMN IF NOT EXISTS ir_slots_used INT;
+"""
+
 # One row per browser-worker transaction (lineup update, waiver claim), written on
 # completion (INFRA-06) so Grafana can chart worker execution latency/success rate.
 CREATE_EXECUTION_LOG_TABLE = """
