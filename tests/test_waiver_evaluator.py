@@ -275,6 +275,36 @@ def test_run_weekly_waivers_live_warns_when_every_proposed_move_is_dropped(caplo
     assert "3" in record.getMessage()
 
 
+def test_run_weekly_waivers_live_withholds_ir_eligible_drops_while_ir_is_open(caplog):
+    """Auto-publish of IR moves stays off, so a claim whose drop should go to IR is
+    withheld (and logged) rather than published as a drop or swapped for another drop."""
+    pools = (
+        {"RB": [{"player_id": "hurt", "vorp_score": -1.0, "espn_injury_status": "OUT"},
+                {"player_id": "healthy", "vorp_score": 2.0, "espn_injury_status": "ACTIVE"}]},
+        {"RB": {"player_id": "4046", "vorp_score": 9.0}},
+    )
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=pools), \
+         patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[]) as mock_resolve, \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish, \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        assert we.run_weekly_waivers_live("7", 2026, 5) == []
+
+    mock_publish.assert_not_called()
+    assert mock_resolve.call_args.args[1] == []
+    [record] = [r for r in caplog.records if "IR" in r.getMessage() and "hurt" in r.getMessage()]
+    assert "not published" in record.getMessage()
+
+
+def test_withhold_ir_moves_skips_the_ir_slot_lookup_when_no_drop_is_eligible():
+    moves = [{"position": "RB", "drop_player_id": "b", "add_player_id": "f", "add_vorp_score": 5.0, "drop_vorp_score": 1.0}]
+    bench = {"RB": [{"player_id": "b", "vorp_score": 1.0, "espn_injury_status": "QUESTIONABLE"}]}
+    with patch("src.optimization.waiver_evaluator.load_open_ir_slots") as mock_slots:
+        assert we.withhold_ir_moves(MagicMock(), "7", 2026, moves, bench) == moves
+    mock_slots.assert_not_called()
+
+
 def test_main_exits_zero_when_no_moves_are_worth_making():
     with patch("src.optimization.waiver_evaluator.run_weekly_waivers_live", return_value=[]) as mock_run:
         assert we.main(WAIVER_ARGV) == 0

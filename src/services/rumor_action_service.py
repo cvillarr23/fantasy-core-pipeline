@@ -31,6 +31,7 @@ from src.optimization.waiver_evaluator import (
     load_live_waiver_inputs,
     publish_waiver_claim,
     resolve_live_waiver_moves,
+    withhold_ir_moves,
 )
 
 logger = logging.getLogger("RumorActionService")
@@ -219,8 +220,14 @@ def _prepare_waiver_claims(
             bench_by_position, free_agents_by_position = load_live_waiver_inputs(
                 cursor, team_id, season, week
             )
-            moves = waiver_strategy.propose_waiver_moves(
-                bench_by_position, free_agents_by_position
+            moves = withhold_ir_moves(
+                cursor,
+                team_id,
+                season,
+                waiver_strategy.propose_waiver_moves(
+                    bench_by_position, free_agents_by_position
+                ),
+                bench_by_position,
             )
             matched_moves = [
                 move for move in moves if move["add_player_id"] in waiver_targets

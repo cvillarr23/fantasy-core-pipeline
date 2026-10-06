@@ -20,7 +20,8 @@ RAW_TEAMS = [
         "roster": {
             "entries": [
                 {"playerId": 3117251, "lineupSlotId": 2},
-                {"playerId": 4360438, "lineupSlotId": 20},
+                {"playerId": 4360438, "lineupSlotId": 20,
+                 "playerPoolEntry": {"player": {"id": 4360438, "injuryStatus": "OUT"}}},
                 {"playerId": 999999, "lineupSlotId": 21},
             ]
         },
@@ -86,8 +87,17 @@ def test_fetch_league_config_translates_slot_ids_to_position_labels():
 def test_build_roster_rows_maps_espn_id_to_player_id():
     rows = sl.build_roster_rows(RAW_TEAMS, ESPN_TO_PLAYER_ID)
 
-    assert ("1", "4046", "RB", True) in rows
-    assert ("1", "8112", "BE", False) in rows
+    assert ("1", "4046", "RB", True, None) in rows
+    assert ("1", "8112", "BE", False, "OUT") in rows
+
+
+def test_build_roster_rows_carries_espn_injury_status():
+    """ESPN, not Sleeper, decides IR eligibility, so its status rides along on the roster row."""
+    rows = sl.build_roster_rows(RAW_TEAMS, ESPN_TO_PLAYER_ID)
+    by_player = {r[1]: r for r in rows}
+
+    assert by_player["8112"][4] == "OUT"
+    assert by_player["4046"][4] is None
 
 
 def test_build_roster_rows_skips_unmatched_players():
@@ -117,12 +127,15 @@ def test_persist_rosters_deletes_before_insert_in_one_transaction():
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    written = sl.persist_rosters(mock_conn, [("1", "4046", "RB", True)])
+    written = sl.persist_rosters(mock_conn, [("1", "4046", "RB", True, "OUT")])
 
     assert written == 1
     calls = [c[0][0] for c in mock_cursor.execute.call_args_list]
     assert "DELETE FROM league_rosters" in calls[0]
     mock_cursor.executemany.assert_called_once()
+    insert_sql, insert_rows = mock_cursor.executemany.call_args.args
+    assert "espn_injury_status" in insert_sql
+    assert insert_rows == [("1", "4046", "RB", True, "OUT")]
 
 
 def test_persist_rosters_empty_rows_still_deletes():

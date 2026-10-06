@@ -70,11 +70,23 @@ def test_apply_waiver_moves_empty_noop():
 
 def test_load_bench_by_position_excludes_starters():
     mock_cursor = MagicMock()
-    mock_cursor.fetchall.return_value = [("p1", "RB", 2.0), ("p2", "WR", 4.0)]
+    mock_cursor.fetchall.return_value = [("p1", "RB", 2.0, "OUT"), ("p2", "WR", 4.0, None)]
     result = waiver_strategy.load_bench_by_position(mock_cursor, "team1", 2023, 5)
-    assert result == {"RB": [{"player_id": "p1", "vorp_score": 2.0}], "WR": [{"player_id": "p2", "vorp_score": 4.0}]}
+    assert result == {
+        "RB": [{"player_id": "p1", "vorp_score": 2.0, "espn_injury_status": "OUT"}],
+        "WR": [{"player_id": "p2", "vorp_score": 4.0, "espn_injury_status": None}],
+    }
     query = mock_cursor.execute.call_args.args[0]
     assert "is_starter" in query
+
+
+def test_load_bench_by_position_never_offers_an_ir_slot_player_as_a_drop():
+    """IR rows are also is_starter = FALSE; without this a stashed player was droppable."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    waiver_strategy.load_bench_by_position(mock_cursor, "team1", 2023, 5)
+    query = mock_cursor.execute.call_args.args[0]
+    assert "r.slot_position <> 'IR'" in query
 
 
 def test_load_best_free_agent_by_position_keeps_highest_per_position():
@@ -83,3 +95,71 @@ def test_load_best_free_agent_by_position_keeps_highest_per_position():
     result = waiver_strategy.load_best_free_agent_by_position(mock_cursor, 2023, 5)
     assert result["RB"] == {"player_id": "p2", "vorp_score": 6.0}
     assert result["WR"] == {"player_id": "p3", "vorp_score": 3.0}
+
+
+def _move(position, drop, add, add_vorp, drop_vorp):
+    return {"position": position, "drop_player_id": drop, "add_player_id": add,
+            "add_vorp_score": add_vorp, "drop_vorp_score": drop_vorp}
+
+
+def _bench(**statuses):
+    """position -> [(player_id, vorp, espn_injury_status)]"""
+    return {
+        pos: [{"player_id": pid, "vorp_score": vorp, "espn_injury_status": status} for pid, vorp, status in rows]
+        for pos, rows in statuses.items()
+    }
+
+
+def test_split_ir_moves_turns_an_ir_eligible_drop_into_ir_plus_add():
+    bench = _bench(RB=[("hurt", -1.0, "OUT"), ("healthy", 2.0, "ACTIVE")])
+    moves = [_move("RB", "hurt", "fa", 4.0, -1.0)]
+
+    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=1)
+
+    assert swaps == []
+    assert ir_adds == [{
+        "kind": "ir_and_add", "position": "RB", "ir_player_id": "hurt", "drop_player_id": None,
+        "add_player_id": "fa", "add_vorp_score": 4.0, "ir_vorp_score": -1.0,
+    }]
+
+
+def test_split_ir_moves_keeps_the_drop_when_no_ir_slot_is_open():
+    bench = _bench(RB=[("hurt", -1.0, "OUT")])
+    moves = [_move("RB", "hurt", "fa", 4.0, -1.0)]
+
+    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=0)
+
+    assert swaps == moves
+    assert ir_adds == []
+
+
+def test_split_ir_moves_never_drops_an_ir_eligible_player_while_a_slot_is_open():
+    """Two IR-eligible drops, one open slot: the better add becomes IR + add, and the other
+    is withheld rather than dropped, since the slot is still open until someone acts."""
+    bench = _bench(RB=[("hurt_rb", 0.0, "OUT")], WR=[("hurt_wr", 0.0, "INJURY_RESERVE")])
+    moves = [_move("RB", "hurt_rb", "fa_rb", 3.0, 0.0), _move("WR", "hurt_wr", "fa_wr", 6.0, 0.0)]
+
+    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=1)
+
+    assert swaps == []
+    assert [m["ir_player_id"] for m in ir_adds] == ["hurt_wr"]
+
+
+def test_split_ir_moves_passes_through_healthy_and_unknown_drops():
+    bench = _bench(RB=[("healthy", 1.0, "QUESTIONABLE")])
+    moves = [_move("RB", "healthy", "fa", 5.0, 1.0), _move("WR", "not_in_bench", "fa2", 5.0, 1.0)]
+
+    swaps, ir_adds = waiver_strategy.split_ir_moves(moves, bench, open_ir_slots=1)
+
+    assert swaps == moves
+    assert ir_adds == []
+
+
+def test_ir_stash_candidates_lists_eligible_bench_players_by_value():
+    bench = _bench(RB=[("a", 1.0, "OUT"), ("b", 0.0, "ACTIVE")], WR=[("c", 3.0, "INJURY_RESERVE")])
+
+    assert waiver_strategy.ir_stash_candidates(bench, open_ir_slots=1) == [
+        {"position": "WR", "player_id": "c", "vorp_score": 3.0, "espn_injury_status": "INJURY_RESERVE"},
+        {"position": "RB", "player_id": "a", "vorp_score": 1.0, "espn_injury_status": "OUT"},
+    ]
+    assert waiver_strategy.ir_stash_candidates(bench, open_ir_slots=0) == []

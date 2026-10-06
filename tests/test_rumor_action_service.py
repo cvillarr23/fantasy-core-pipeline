@@ -75,6 +75,29 @@ def test_qualifying_boost_waiver_signal_publishes_matching_move():
     assert redis_client.store[ras.WATERMARK_REDIS_KEY] == "10"
 
 
+def test_boost_waiver_never_drops_an_ir_eligible_player_while_ir_is_open():
+    redis_client = _fake_redis()
+    signals_cursor = MagicMock()
+    signals_cursor.fetchall.return_value = [(10, "4046", "positive", 0.9, ras.BOOST_WAIVER_ACTION)]
+    move = {"position": "RB", "drop_player_id": "hurt", "add_player_id": "4046", "add_vorp_score": 5.0, "drop_vorp_score": -1.0}
+
+    with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
+         patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
+         patch("src.services.rumor_action_service.load_live_waiver_inputs", return_value=(
+             {"RB": [{"player_id": "hurt", "vorp_score": -1.0, "espn_injury_status": "INJURY_RESERVE"}]},
+             {"RB": {"player_id": "4046", "vorp_score": 5.0}},
+         )), \
+         patch("src.services.rumor_action_service.waiver_strategy.propose_waiver_moves", return_value=[move]), \
+         patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.services.rumor_action_service.resolve_live_waiver_moves") as mock_resolve, \
+         patch("src.services.rumor_action_service.publish_waiver_claim") as mock_publish:
+        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
+
+    mock_resolve.assert_not_called()
+    mock_publish.assert_not_called()
+    assert result["waiver_claims_published"] == []
+
+
 def test_waiver_claims_publish_outside_the_db_block_and_skip_already_queued():
     """publish_waiver_claim retries with backoff (up to ~2 min), so it must not run while a
     pooled connection is checked out; and a claim the gateway reports as already queued

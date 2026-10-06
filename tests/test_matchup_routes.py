@@ -81,7 +81,22 @@ def test_get_lineup_roster_success(client):
         response = client.get("/v1/matchup/roster?season=2026")
 
     assert response.status_code == 200
-    assert response.json() == fixture
+    assert response.json() == {**fixture, "ir_blocking_transactions": False}
+
+
+def test_get_lineup_roster_serializes_ir_suggestions(client):
+    line = {
+        "player_id": "5", "espn_id": "5", "name": "Hurt WR", "position": "WR", "jersey": None,
+        "slot": "BE", "pro_team": "DET", "injury_status": "OUT", "headshot_url": "h",
+        "deficit_flag": False,
+        "ir_suggestion": {"action": "move_to_ir", "reason": "OUT with an open IR slot"},
+    }
+    fixture = {"starters": [], "bench": [line], "ir_blocking_transactions": False}
+    with patch("src.api.matchup.get_current_team_roster", return_value=fixture):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 200
+    assert response.json()["bench"][0]["ir_suggestion"] == {"action": "move_to_ir", "reason": "OUT with an open IR slot"}
 
 
 def test_get_lineup_roster_espn_error_returns_502(client):

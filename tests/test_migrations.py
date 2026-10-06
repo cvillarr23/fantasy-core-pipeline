@@ -220,3 +220,15 @@ def test_run_migrations_raises_when_weekly_stats_pk_migration_was_skipped():
         mock_get_cursor.return_value.__enter__.return_value = cursor
         with pytest.raises(RuntimeError, match="season"):
             migrations.run_migrations()
+
+
+def test_run_migrations_adds_league_rosters_espn_injury_status_after_the_table():
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+
+    executed = [call.args[0] for call in cursor.execute.call_args_list if call.args]
+    table_idx = next(i for i, s in enumerate(executed) if "CREATE TABLE IF NOT EXISTS league_rosters" in s)
+    column_idx = next(i for i, s in enumerate(executed) if "espn_injury_status" in s)
+    assert table_idx < column_idx

@@ -12,6 +12,7 @@ import requests
 
 from src.database import get_db_cursor
 from src.ingestion.sync_league import build_league
+from src.ir_eligibility import lineup_ir_hints, load_ir_slot_count
 from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
     evaluate_lineup,
@@ -174,6 +175,7 @@ def _shape_lineup_player_line(player) -> dict:
         "rumor_sentiment": None,
         "rumor_confidence": None,
         "rumor_suggested_action": None,
+        "ir_suggestion": None,
     }
 
 
@@ -183,6 +185,25 @@ def _split_roster_starters_bench(players: list) -> tuple[list, list]:
         line = _shape_lineup_player_line(player)
         (bench if player.lineupSlot in BENCH_AND_IR_SLOTS else starters).append(line)
     return starters, bench
+
+
+def _load_ir_slot_count(season: int) -> int:
+    """Display-only, like the swap badges: a DB failure means no IR hints, not a failed page."""
+    try:
+        with get_db_cursor() as cursor:
+            return load_ir_slot_count(cursor, season)
+    except Exception as exc:
+        logger.warning(f"No IR hints for Season {season}: could not read the IR slot count: {exc}")
+        return 0
+
+
+def _apply_ir_hints(player_lines: list, ir_slot_count: int) -> bool:
+    """Overlays move_to_ir / activate_from_ir from ESPN's live injuryStatus and slot.
+    Returns whether an active player in IR is blocking new ESPN transactions."""
+    hints, blocking = lineup_ir_hints(player_lines, ir_slot_count)
+    for line in player_lines:
+        line["ir_suggestion"] = hints.get(line["player_id"])
+    return blocking
 
 
 def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
@@ -340,4 +361,6 @@ def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     _apply_rumor_signal(starters, rumor_signal_by_espn_id)
     _apply_rumor_signal(bench, rumor_signal_by_espn_id)
 
-    return {"starters": starters, "bench": bench}
+    ir_blocking = _apply_ir_hints(starters + bench, _load_ir_slot_count(season))
+
+    return {"starters": starters, "bench": bench, "ir_blocking_transactions": ir_blocking}

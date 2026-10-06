@@ -127,11 +127,15 @@ class LineupPlayerLine(BaseModel):
     rumor_sentiment: Optional[str] = None
     rumor_confidence: Optional[float] = None
     rumor_suggested_action: Optional[str] = None
+    # {"action": "move_to_ir" | "activate_from_ir", "reason": ...}; display-only.
+    ir_suggestion: Optional[dict] = None
 
 
 class RosterResponse(BaseModel):
     starters: list[LineupPlayerLine]
     bench: list[LineupPlayerLine]
+    # An active player sitting in IR; ESPN rejects new transactions until they leave it.
+    ir_blocking_transactions: bool = False
 
 
 @matchup_router.get("/roster", response_model=RosterResponse)

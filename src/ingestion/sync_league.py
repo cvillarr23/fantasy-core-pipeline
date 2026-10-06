@@ -114,11 +114,17 @@ def _extract_espn_player_id(entry: dict) -> str | None:
     return None
 
 
+def _extract_espn_injury_status(entry: dict) -> str | None:
+    status = (entry.get("playerPoolEntry", {}).get("player") or {}).get("injuryStatus")
+    return status if isinstance(status, str) and status else None
+
+
 def build_roster_rows(raw_teams: list, espn_to_player_id: dict) -> list:
     """
     Pure function: maps each ESPN roster entry -> (team_id, player_id, slot_position,
-    is_starter), via the espn_id -> player_id crosswalk populated by sync_id_crosswalk.
-    Unmatched entries (no espn_id crosswalk hit) are skipped, not errors.
+    is_starter, espn_injury_status), via the espn_id -> player_id crosswalk populated by
+    sync_id_crosswalk. Unmatched entries (no espn_id crosswalk hit) are skipped, not errors.
+    espn_injury_status is ESPN's own label, which decides IR eligibility (src/ir_eligibility).
     """
     rows = []
     skipped = 0
@@ -134,7 +140,7 @@ def build_roster_rows(raw_teams: list, espn_to_player_id: dict) -> list:
             slot_id = entry.get("lineupSlotId")
             slot_position = POSITION_MAP.get(slot_id, str(slot_id))
             is_starter = slot_id not in BENCH_AND_IR_SLOT_IDS
-            rows.append((team_id, player_id, slot_position, is_starter))
+            rows.append((team_id, player_id, slot_position, is_starter, _extract_espn_injury_status(entry)))
     if skipped:
         logger.warning(f"Skipped {skipped} roster entr(y/ies) with no espn_id -> player_id match.")
     return rows
@@ -180,8 +186,8 @@ def persist_rosters(conn, rows: list) -> int:
         if rows:
             cursor.executemany(
                 """
-                INSERT INTO league_rosters (team_id, player_id, slot_position, is_starter)
-                VALUES (%s, %s, %s, %s);
+                INSERT INTO league_rosters (team_id, player_id, slot_position, is_starter, espn_injury_status)
+                VALUES (%s, %s, %s, %s, %s);
                 """,
                 rows,
             )

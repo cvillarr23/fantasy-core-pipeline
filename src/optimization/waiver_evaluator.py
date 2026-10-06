@@ -12,6 +12,12 @@ player with no espn_id yet is skipped rather than published - the DynastyProcess
 crosswalk covers ~82% of players (see sync_id_crosswalk.py), so an unresolved id is an
 expected gap, not a bug, and there is no ESPN identity to safely act on.
 
+Neither publisher here (the weekly CronJob, rumor_action_service's boost_waiver path)
+drops an IR-eligible player while an IR slot is open. The right move is IR + add,
+which isn't published until fantasy-browser-worker has a confirmed slot-21 move, so
+withhold_ir_moves logs it and leaves that position alone this run instead of
+substituting a different drop.
+
 No FAAB/budget modeling: neither players nor weekly_stats carries such a column, and
 waiver_strategy's margin-threshold rule has none either - out of scope for #117,
 tracked as a follow-up.
@@ -28,6 +34,7 @@ from opentelemetry import trace
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
+from src.ir_eligibility import is_ir_eligible, load_open_ir_slots
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
 
@@ -139,6 +146,36 @@ def load_live_waiver_inputs(cursor, team_id: str, season: int, week: int) -> tup
     return bench_by_position, free_agents_by_position
 
 
+def withhold_ir_moves(cursor, team_id: str, season: int, moves: list, bench_by_position: dict) -> list:
+    """The moves that are safe to publish: any whose drop is IR-eligible while an IR slot is
+    open is held back and logged as an IR + add suggestion. IR slots are only queried when
+    some drop is eligible."""
+    eligible_drops = {
+        player["player_id"]
+        for players in bench_by_position.values() for player in players
+        if is_ir_eligible(player.get("espn_injury_status"))
+    }
+    if not any(move.get("drop_player_id") in eligible_drops for move in moves):
+        return moves
+    swaps, ir_and_adds = waiver_strategy.split_ir_moves(
+        moves, bench_by_position, load_open_ir_slots(cursor, team_id, season),
+    )
+    suggested = {m["ir_player_id"]: m for m in ir_and_adds}
+    for move in moves:
+        if move in swaps:
+            continue
+        ir_move = suggested.get(move["drop_player_id"])
+        detail = (
+            f"suggest IR {move['drop_player_id']} + add {move['add_player_id']}"
+            if ir_move else "another IR-eligible drop already claims the open IR slot"
+        )
+        logger.info(
+            f"Team {team_id}: not published, {move['drop_player_id']} is IR-eligible with an IR slot open "
+            f"({detail}); IR moves are suggestions only."
+        )
+    return swaps
+
+
 def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_url: str = CORE_API_BASE_URL) -> list:
     logger.info(f"Evaluating live waivers for Team {team_id} Season {season} Week {week}...")
 
@@ -147,6 +184,7 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
             with conn.cursor() as cursor:
                 bench_by_position, free_agents_by_position = load_live_waiver_inputs(cursor, team_id, season, week)
                 moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
+                moves = withhold_ir_moves(cursor, team_id, season, moves, bench_by_position)
                 resolved = resolve_live_waiver_moves(cursor, moves, season, week)
 
         if not moves:

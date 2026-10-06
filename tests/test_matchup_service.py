@@ -148,6 +148,7 @@ def test_shape_lineup_player_line_maps_roster_player_fields():
         "rumor_sentiment": None,
         "rumor_confidence": None,
         "rumor_suggested_action": None,
+        "ir_suggestion": None,
     }
 
 
@@ -394,3 +395,50 @@ def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):
     with patch("src.services.matchup_service.build_league", return_value=mock_league):
         with pytest.raises(ValueError):
             matchup_service.get_current_team_roster(season=2026)
+
+
+
+def _roster_with(players, ir_slot_count, monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    our_team = _make_team(team_id=8, team_name="Our Team")
+    our_team.roster = players
+    mock_league = MagicMock()
+    mock_league.teams = [our_team]
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
+         patch("src.services.matchup_service.resolve_default_week", return_value=2), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
+         patch("src.services.matchup_service._load_weekly_metrics_by_espn_id", return_value={}), \
+         patch("src.services.matchup_service._load_rumor_signal_by_espn_id", return_value={}), \
+         patch("src.services.matchup_service._load_ir_slot_count", return_value=ir_slot_count):
+        return matchup_service.get_current_team_roster(season=2026)
+
+
+def test_get_current_team_roster_suggests_moving_an_out_player_to_ir(monkeypatch):
+    result = _roster_with([
+        _make_roster_player(playerId=1, position="RB", lineupSlot="RB", injuryStatus="OUT"),
+        _make_roster_player(playerId=2, position="WR", lineupSlot="BE", injuryStatus="ACTIVE"),
+    ], ir_slot_count=1, monkeypatch=monkeypatch)
+
+    assert result["starters"][0]["ir_suggestion"]["action"] == "move_to_ir"
+    assert result["bench"][0]["ir_suggestion"] is None
+    assert result["ir_blocking_transactions"] is False
+
+
+def test_get_current_team_roster_flags_an_active_player_in_ir(monkeypatch):
+    result = _roster_with([
+        _make_roster_player(playerId=3, position="TE", lineupSlot="IR", injuryStatus="ACTIVE"),
+    ], ir_slot_count=1, monkeypatch=monkeypatch)
+
+    assert result["bench"][0]["ir_suggestion"]["action"] == "activate_from_ir"
+    assert result["ir_blocking_transactions"] is True
+
+
+def test_load_ir_slot_count_reads_league_settings_and_fails_soft():
+    cursor = MagicMock()
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.load_ir_slot_count", return_value=2) as mock_count:
+        assert matchup_service._load_ir_slot_count(2026) == 2
+    mock_count.assert_called_once_with(cursor, 2026)
+    with patch("src.services.matchup_service.get_db_cursor", side_effect=RuntimeError("db down")):
+        assert matchup_service._load_ir_slot_count(2026) == 0

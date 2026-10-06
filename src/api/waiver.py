@@ -25,19 +25,32 @@ class WaiverPlayerSummary(BaseModel):
 
 
 class WaiverRecommendation(BaseModel):
+    # "swap" (add free_agent, drop bench_player) or "ir_and_add" (move ir_player to IR,
+    # add free_agent, no drop).
+    kind: str = "swap"
     position: str
     vorp_delta: float
     free_agent: WaiverPlayerSummary
-    bench_player: WaiverPlayerSummary
+    bench_player: Optional[WaiverPlayerSummary] = None
+    ir_player: Optional[WaiverPlayerSummary] = None
     rumor_sentiment: Optional[str] = None
     rumor_confidence: Optional[float] = None
     rumor_suggested_action: Optional[str] = None
+
+
+class WaiverIrMove(BaseModel):
+    action: str
+    position: str
+    player: WaiverPlayerSummary
 
 
 class WaiverRecommendationsResponse(BaseModel):
     season: int
     week: int
     recommendations: List[WaiverRecommendation]
+    # IR-eligible bench players worth stashing while an IR slot is open.
+    open_ir_slots: int = 0
+    ir_moves: List[WaiverIrMove] = []
     # "target_week", or "rolling_prior_weeks" before the week's projections land (#185).
     source_mode: Optional[str] = None
     source_weeks: Optional[List[int]] = None
