@@ -3,6 +3,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.ingestion import sync_league as sl
+# Captured at import, before conftest's autouse stub replaces the module attribute.
+from src.ingestion.sync_league import refresh_rosters_if_stale as real_refresh_rosters_if_stale
 
 
 RAW_MSETTINGS = {
@@ -194,3 +196,45 @@ def test_sync_league_persists_team_names_alongside_rosters(monkeypatch):
         sl.sync_league(season=2026)
 
     mock_persist_names.assert_called_once_with(mock_conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
+
+
+
+def test_roster_refresh_skips_when_another_request_refreshed_recently():
+    redis = MagicMock()
+    redis.set.return_value = None
+    with (
+        patch("src.ingestion.sync_league.get_redis_client", return_value=redis),
+        patch("src.ingestion.sync_league.sync_rosters") as sync,
+    ):
+        assert real_refresh_rosters_if_stale(2026) is False
+    sync.assert_not_called()
+
+
+def test_roster_refresh_runs_once_per_window_and_survives_espn_failure():
+    redis = MagicMock()
+    redis.set.return_value = True
+    with (
+        patch("src.ingestion.sync_league.get_redis_client", return_value=redis),
+        patch("src.ingestion.sync_league.sync_rosters", return_value=160) as sync,
+    ):
+        assert real_refresh_rosters_if_stale(2026) is True
+    assert redis.set.call_args.kwargs == {"nx": True, "ex": 600}
+    sync.assert_called_once_with(2026)
+
+    with (
+        patch("src.ingestion.sync_league.get_redis_client", return_value=redis),
+        patch("src.ingestion.sync_league.sync_rosters", side_effect=TimeoutError("espn")),
+    ):
+        assert real_refresh_rosters_if_stale(2026) is False
+
+
+def test_sync_rosters_never_wipes_rosters_on_an_empty_espn_response():
+    league = MagicMock()
+    league.espn_request.league_get.return_value = {"teams": []}
+    with (
+        patch("src.ingestion.sync_league.build_league", return_value=league),
+        patch("src.ingestion.sync_league.persist_rosters") as persist,
+    ):
+        with pytest.raises(RuntimeError):
+            sl.sync_rosters(2026)
+    persist.assert_not_called()

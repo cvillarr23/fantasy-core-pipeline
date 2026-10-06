@@ -185,6 +185,9 @@ def shape_player(p):
         "injury_status": p.injuryStatus,
         "slot": getattr(p, "lineupSlot", ""),
         "eligible_slots": p.eligibleSlots,
+        # ESPN's onTeamId is 0 for free agents; lets clients tell a waiver target from a
+        # player that can only be traded for.
+        "on_team_id": str(p.onTeamId) if getattr(p, "onTeamId", 0) not in (None, 0, "0") else None,
     }
 
 

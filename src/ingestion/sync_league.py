@@ -15,7 +15,7 @@ import os
 from espn_api.football import League
 from espn_api.football.constant import POSITION_MAP
 
-from src.database import get_db_connection
+from src.database import get_db_connection, get_redis_client
 from src.ingestion.espn_client import TimedEspnFantasyRequests
 
 logging.basicConfig(level=logging.INFO)
@@ -186,6 +186,49 @@ def persist_rosters(conn, rows: list) -> int:
                 rows,
             )
     return len(rows)
+
+
+# Roster changes (pickups, drops, trades) happen all week, but sync_league only runs from
+# the weekly ingestor; reads that decide waiver moves re-sync rosters at most this often.
+ROSTER_REFRESH_SECONDS = 600
+
+
+def sync_rosters(season: int, request_timeout_seconds: int = 10) -> int:
+    """Rosters-only refresh of league_rosters from live ESPN data, cheap enough to run on
+    request. Refuses to replace the table with an empty snapshot when ESPN returned no
+    teams, since persist_rosters is a full DELETE+INSERT."""
+    league = build_league(season, request_timeout_seconds=request_timeout_seconds)
+    raw = league.espn_request.league_get(params={"view": ["mRoster", "mTeam"]})
+    teams = raw.get("teams") or []
+    if not teams:
+        raise RuntimeError("ESPN returned no teams; keeping the existing roster snapshot")
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT espn_id, player_id FROM players WHERE espn_id IS NOT NULL;")
+            espn_to_player_id = {row[0]: row[1] for row in cursor.fetchall()}
+        return persist_rosters(conn, build_roster_rows(teams, espn_to_player_id))
+
+
+def refresh_rosters_if_stale(season: int, max_age_seconds: int = ROSTER_REFRESH_SECONDS) -> bool:
+    """Re-sync league_rosters unless another request did so within max_age_seconds.
+
+    A Redis SET NX key elects one refresher per window across gateway workers. Failures
+    are logged and swallowed: callers fall back to the existing snapshot, and the key is
+    left in place so an ESPN outage doesn't turn into one slow retry per request.
+    Returns True when this call refreshed the table."""
+    key = f"league_rosters:fresh:{os.getenv('ESPN_LEAGUE_ID')}:{season}"
+    try:
+        if not get_redis_client().set(key, "1", nx=True, ex=max_age_seconds):
+            return False
+    except Exception:
+        logger.warning("Redis unavailable for the roster refresh gate; refreshing anyway")
+    try:
+        written = sync_rosters(season)
+    except Exception as exc:
+        logger.warning(f"Roster refresh failed; using the existing snapshot: {exc}")
+        return False
+    logger.info(f"Refreshed league_rosters from ESPN ({written} row(s)).")
+    return True
 
 
 def sync_league(season: int) -> int:

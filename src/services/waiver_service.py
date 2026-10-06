@@ -16,6 +16,7 @@ import os
 from src.backtesting import waiver_strategy
 from src.database import get_db_cursor
 from src.ingestion.metrics_extractor import normalize_team
+from src.ingestion.sync_league import refresh_rosters_if_stale
 from src.optimization.lineup_solver import METRIC_SOURCE, PREGAME_WINDOW_WEEKS, load_teams_playing
 
 logger = logging.getLogger("WaiverService")
@@ -131,8 +132,26 @@ def _shape_recommendation(move: dict, display_by_player_id: dict) -> dict:
     }
 
 
+def rostered_team_for_espn_id(espn_id: str):
+    """team_id currently holding this ESPN player in league_rosters, or None."""
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT r.team_id FROM league_rosters r
+            JOIN players p ON p.player_id = r.player_id
+            WHERE p.espn_id = %s LIMIT 1;
+            """,
+            (str(espn_id),),
+        )
+        row = cursor.fetchone()
+    return str(row[0]) if row else None
+
+
 def compute_waiver_recommendations(season: int, week: int) -> dict:
     our_team_id = os.getenv("ESPN_TEAM_ID")
+    # The free-agent pool is "not in league_rosters"; a week-old snapshot suggests
+    # players other managers have since picked up.
+    refresh_rosters_if_stale(season)
     with get_db_cursor() as cursor:
         bench_by_position = waiver_strategy.load_bench_by_position(cursor, our_team_id, season, week)
         free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
