@@ -12,6 +12,14 @@ player with no espn_id yet is skipped rather than published - the DynastyProcess
 crosswalk covers ~82% of players (see sync_id_crosswalk.py), so an unresolved id is an
 expected gap, not a bug, and there is no ESPN identity to safely act on.
 
+Neither publisher here (the weekly CronJob, rumor_action_service's boost_waiver path)
+drops an IR-eligible player while an IR slot is open. plan_live_waiver_moves uses the
+same waiver_strategy.plan_waiver_moves as the waiver page: free agents that should come
+in through an IR stash are logged as suggestions, not published, until
+fantasy-browser-worker has a confirmed slot-21 move, and they are never claimed with a
+healthy player's drop instead. Rosters are refreshed first, since a week-old snapshot
+would misstate who sits in IR.
+
 No FAAB/budget modeling: neither players nor weekly_stats carries such a column, and
 waiver_strategy's margin-threshold rule has none either - out of scope for #117,
 tracked as a follow-up.
@@ -28,6 +36,8 @@ from opentelemetry import trace
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
+from src.ingestion import sync_league
+from src.ir_eligibility import load_open_ir_slots
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
 
@@ -139,14 +149,33 @@ def load_live_waiver_inputs(cursor, team_id: str, season: int, week: int) -> tup
     return bench_by_position, free_agents_by_position
 
 
+def plan_live_waiver_moves(cursor, team_id: str, season: int, bench_by_position: dict,
+                           free_agents_by_position: dict) -> list:
+    """The swaps safe to publish. IR + add moves are logged at WARNING and not published,
+    since nothing can make the slot-21 move yet; a manager has to. IR slots are only
+    queried when a bench player is IR-eligible."""
+    open_slots = (
+        load_open_ir_slots(cursor, team_id, season)
+        if waiver_strategy.ir_eligible_bench(bench_by_position) else 0
+    )
+    swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(bench_by_position, free_agents_by_position, open_slots)
+    for move in ir_and_adds:
+        logger.warning(
+            f"Team {team_id}: not published, suggest IR {move['ir_player_id']} + add {move['add_player_id']} "
+            f"({move['add_vorp_score']:.2f} VORP); IR moves are suggestions only."
+        )
+    return swaps
+
+
 def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_url: str = CORE_API_BASE_URL) -> list:
     logger.info(f"Evaluating live waivers for Team {team_id} Season {season} Week {week}...")
 
     with tracer.start_as_current_span("waiver_evaluator.run", attributes={"team_id": team_id, "season": season, "week": week}):
+        sync_league.refresh_rosters_if_stale(season)
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 bench_by_position, free_agents_by_position = load_live_waiver_inputs(cursor, team_id, season, week)
-                moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position)
+                moves = plan_live_waiver_moves(cursor, team_id, season, bench_by_position, free_agents_by_position)
                 resolved = resolve_live_waiver_moves(cursor, moves, season, week)
 
         if not moves:

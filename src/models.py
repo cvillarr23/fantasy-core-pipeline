@@ -154,6 +154,13 @@ ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN = """
 ALTER TABLE league_rosters ADD COLUMN IF NOT EXISTS is_starter BOOLEAN;
 """
 
+# ESPN's injuryStatus (OUT, INJURY_RESERVE, ...) per rostered player, written by sync_league.
+# IR eligibility is ESPN's call, and players.injury_status is Sleeper's labels on a daily
+# refresh, so the waiver path reads this instead. NULL when ESPN sent none.
+ADD_LEAGUE_ROSTERS_ESPN_INJURY_STATUS_COLUMN = """
+ALTER TABLE league_rosters ADD COLUMN IF NOT EXISTS espn_injury_status VARCHAR(30);
+"""
+
 # League-level config synced from ESPN (CORE-05): team count, scoring format, and lineup
 # slot counts, needed to compute replacement baselines and FLEX allocation. Single-league
 # for now (no league_id FK elsewhere) - see CORE-05 planning notes for why multi-league
@@ -183,6 +190,13 @@ CREATE TABLE IF NOT EXISTS league_teams (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (league_id, team_id)
 );
+"""
+
+# IR slots each team is using, counted from ESPN's raw roster by sync_league. Kept here
+# rather than derived from league_rosters, which drops players with no espn_id match, so an
+# unmatched player in IR would make the slot look open. NULL until the first sync.
+ADD_LEAGUE_TEAMS_IR_SLOTS_USED_COLUMN = """
+ALTER TABLE league_teams ADD COLUMN IF NOT EXISTS ir_slots_used INT;
 """
 
 # One row per browser-worker transaction (lineup update, waiver claim), written on

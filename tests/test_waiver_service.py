@@ -28,7 +28,7 @@ def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
     monkeypatch.setattr(
         waiver_service.waiver_strategy,
         "load_bench_by_position",
-        lambda cur, team_id, season, week: {"placeholder": True},
+        lambda cur, team_id, season, week: {"RB": []},
     )
     monkeypatch.setattr(
         waiver_service.waiver_strategy,
@@ -133,14 +133,15 @@ TEAMS_PLAYING = {"SEA", "NYJ", "DAL", "MIA", "KC"}
 
 
 def _fallback_rows():
-    """(player_id, position, team, week, vorp_score, on_our_bench) for Weeks 2-3."""
+    """(player_id, position, team, week, vorp_score, on_our_bench, espn_injury_status)
+    for Weeks 2-3."""
     return [
-        ("rb_bench", "RB", "NYJ", 2, 2.0, True), ("rb_bench", "RB", "NYJ", 3, 4.0, True),
-        ("wr_bench", "WR", "MIA", 3, 1.0, True),
-        ("rb_fa", "RB", "SEA", 2, 6.0, False), ("rb_fa", "RB", "SEA", 3, 10.0, False),
-        ("rb_fa_worse", "RB", "DAL", 3, 5.0, False),
-        ("wr_fa_on_bye", "WR", "BUF", 3, 50.0, False),
-        ("wr_fa", "WR", "KC", 3, 3.0, False),
+        ("rb_bench", "RB", "NYJ", 2, 2.0, True, None), ("rb_bench", "RB", "NYJ", 3, 4.0, True, None),
+        ("wr_bench", "WR", "MIA", 3, 1.0, True, "OUT"),
+        ("rb_fa", "RB", "SEA", 2, 6.0, False, None), ("rb_fa", "RB", "SEA", 3, 10.0, False, None),
+        ("rb_fa_worse", "RB", "DAL", 3, 5.0, False, None),
+        ("wr_fa_on_bye", "WR", "BUF", 3, 50.0, False, None),
+        ("wr_fa", "WR", "KC", 3, 3.0, False, None),
     ]
 
 
@@ -185,7 +186,8 @@ def test_target_week_rows_are_used_without_fallback(monkeypatch):
 
     assert result["source_mode"] == "target_week"
     assert result["source_weeks"] == [4]
-    cursor.execute.assert_not_called()
+    # Only the IR slot reads ran, never the prior-week fallback query.
+    assert not any("weekly_stats" in c.args[0] for c in cursor.execute.call_args_list)
     mock_schedule.assert_not_called()
 
 
@@ -195,8 +197,8 @@ def test_empty_target_week_falls_back_to_prior_week_means(monkeypatch):
     assert result["source_mode"] == "rolling_prior_weeks"
     assert result["source_weeks"] == [2, 3]
     assert captured["bench"] == {
-        "RB": [{"player_id": "rb_bench", "vorp_score": 3.0}],
-        "WR": [{"player_id": "wr_bench", "vorp_score": 1.0}],
+        "RB": [{"player_id": "rb_bench", "vorp_score": 3.0, "espn_injury_status": None}],
+        "WR": [{"player_id": "wr_bench", "vorp_score": 1.0, "espn_injury_status": "OUT"}],
     }
     # Best free agent per position by mean VORP; the BUF player is on bye in Week 4.
     assert captured["free_agents"] == {
@@ -212,6 +214,8 @@ def test_fallback_query_stays_in_season_and_excludes_other_teams_rosters(monkeyp
     assert "s.season = %s" in query
     assert "vorp_score IS NOT NULL" in query
     assert "r.player_id IS NULL OR (r.team_id = %s" in query
+    # A player stashed in IR is never a drop candidate.
+    assert "r.slot_position <> 'IR'" in query
     assert params == (2026, 1, 3, "8")
 
 
@@ -253,3 +257,83 @@ def test_fallback_fails_when_a_side_is_empty_after_bye_exclusion(monkeypatch):
 
     assert isinstance(result, waiver_service.WaiverInputsUnavailableError)
     assert "free-agent" in str(result)
+
+
+
+# ---------------------------------------------------------------------------
+# An IR-eligible drop target becomes "IR X + add Y" while an IR slot is open.
+# ---------------------------------------------------------------------------
+
+def _run_ir_case(monkeypatch, bench, free_agents, open_ir_slots, display_rows):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = display_rows
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position", lambda cur, team_id, season, week: bench)
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position", lambda cur, season, week: free_agents)
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.waiver_service.load_open_ir_slots", return_value=open_ir_slots) as mock_slots:
+        result = waiver_service.compute_waiver_recommendations(season=2026, week=5)
+    return result, mock_slots
+
+
+IR_DISPLAY_ROWS = [
+    ("hurt_rb", "e-hurt", "Hurt Back", "NYJ", "Out"),
+    ("healthy_rb", "e-healthy", "Healthy Back", "MIA", None),
+    ("fa_rb", "e-fa", "FA Back", "SEA", None),
+]
+IR_BENCH = {"RB": [
+    {"player_id": "hurt_rb", "vorp_score": -2.0, "espn_injury_status": "OUT"},
+    {"player_id": "healthy_rb", "vorp_score": 1.0, "espn_injury_status": "ACTIVE"},
+]}
+IR_FREE_AGENTS = {"RB": {"player_id": "fa_rb", "vorp_score": 4.0}}
+
+
+def test_ir_eligible_drop_becomes_ir_and_add_when_a_slot_is_open(monkeypatch):
+    result, _ = _run_ir_case(monkeypatch, IR_BENCH, IR_FREE_AGENTS, 1, IR_DISPLAY_ROWS)
+
+    [rec] = result["recommendations"]
+    assert rec["kind"] == "ir_and_add"
+    assert rec["bench_player"] is None
+    assert rec["ir_player"]["name"] == "Hurt Back"
+    assert rec["ir_player"]["net_vorp"] == -2.0
+    assert rec["free_agent"]["name"] == "FA Back"
+    # Nobody leaves the roster, so the gain is the add's whole value.
+    assert rec["vorp_delta"] == 4.0
+    assert result["open_ir_slots"] == 1
+    assert [m["player"]["name"] for m in result["ir_moves"]] == ["Hurt Back"]
+    assert result["ir_moves"][0]["action"] == "move_to_ir"
+
+
+def test_ir_eligible_player_is_dropped_normally_when_ir_is_full(monkeypatch):
+    result, _ = _run_ir_case(monkeypatch, IR_BENCH, IR_FREE_AGENTS, 0, IR_DISPLAY_ROWS)
+
+    [rec] = result["recommendations"]
+    assert rec["kind"] == "swap"
+    assert rec["bench_player"]["name"] == "Hurt Back"
+    assert rec["ir_player"] is None
+    assert result["ir_moves"] == []
+
+
+def test_open_ir_slots_is_reported_even_with_nobody_to_stash(monkeypatch):
+    bench = {"RB": [{"player_id": "healthy_rb", "vorp_score": 1.0, "espn_injury_status": "ACTIVE"}]}
+
+    result, mock_slots = _run_ir_case(monkeypatch, bench, IR_FREE_AGENTS, 2, IR_DISPLAY_ROWS)
+
+    mock_slots.assert_called_once()
+    assert result["open_ir_slots"] == 2
+    assert result["recommendations"][0]["kind"] == "swap"
+    assert result["ir_moves"] == []
+
+
+def test_injured_star_is_stashed_rather_than_a_healthy_player_dropped(monkeypatch):
+    bench = {"RB": [
+        {"player_id": "hurt_rb", "vorp_score": 8.0, "espn_injury_status": "OUT"},
+        {"player_id": "healthy_rb", "vorp_score": 1.0, "espn_injury_status": "ACTIVE"},
+    ]}
+
+    result, _ = _run_ir_case(monkeypatch, bench, IR_FREE_AGENTS, 1, IR_DISPLAY_ROWS)
+
+    [rec] = result["recommendations"]
+    assert rec["kind"] == "ir_and_add"
+    assert rec["ir_player"]["name"] == "Hurt Back"
+    assert rec["bench_player"] is None

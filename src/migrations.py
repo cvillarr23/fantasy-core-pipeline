@@ -12,6 +12,8 @@ from src.models import (
     MIGRATE_WEEKLY_STATS_PK_ADD_SEASON,
     CREATE_LEAGUE_ROSTERS_TABLE,
     ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
+    ADD_LEAGUE_ROSTERS_ESPN_INJURY_STATUS_COLUMN,
+    ADD_LEAGUE_TEAMS_IR_SLOTS_USED_COLUMN,
     CREATE_LEAGUE_SETTINGS_TABLE,
     CREATE_LEAGUE_TEAMS_TABLE,
     CREATE_EXECUTION_LOG_TABLE,
@@ -84,12 +86,14 @@ def run_migrations():
             logger.info("Validating 'league_rosters' target matrices...")
             cursor.execute(CREATE_LEAGUE_ROSTERS_TABLE)
             cursor.execute(ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN)
+            cursor.execute(ADD_LEAGUE_ROSTERS_ESPN_INJURY_STATUS_COLUMN)
 
             logger.info("Validating 'league_settings' configuration table...")
             cursor.execute(CREATE_LEAGUE_SETTINGS_TABLE)
 
             logger.info("Validating 'league_teams' name-mapping table...")
             cursor.execute(CREATE_LEAGUE_TEAMS_TABLE)
+            cursor.execute(ADD_LEAGUE_TEAMS_IR_SLOTS_USED_COLUMN)
 
             # 4. Execute worker execution telemetry table (INFRA-06)
             logger.info("Validating 'execution_log' worker telemetry table...")

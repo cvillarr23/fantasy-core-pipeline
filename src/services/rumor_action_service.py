@@ -21,6 +21,7 @@ import time
 from src.api.draft import _redis_client
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
+from src.ingestion import sync_league
 from src.services.rumor_action_checkpoint import (
     load_checkpoint as _load_checkpoint,
     save_checkpoint as _save_checkpoint,
@@ -31,6 +32,7 @@ from src.optimization.waiver_evaluator import (
     load_live_waiver_inputs,
     publish_waiver_claim,
     resolve_live_waiver_moves,
+    plan_live_waiver_moves,
 )
 
 logger = logging.getLogger("RumorActionService")
@@ -214,13 +216,14 @@ def _prepare_waiver_claims(
     signals - any other move the evaluator would also propose today is left for the
     regular weekly cadence, not published early just because this endpoint happened to
     run."""
+    sync_league.refresh_rosters_if_stale(season)
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             bench_by_position, free_agents_by_position = load_live_waiver_inputs(
                 cursor, team_id, season, week
             )
-            moves = waiver_strategy.propose_waiver_moves(
-                bench_by_position, free_agents_by_position
+            moves = plan_live_waiver_moves(
+                cursor, team_id, season, bench_by_position, free_agents_by_position
             )
             matched_moves = [
                 move for move in moves if move["add_player_id"] in waiver_targets

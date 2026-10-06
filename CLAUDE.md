@@ -162,6 +162,22 @@
   gate and schedule bye exclusion as the lineup fallback (#185). Our bench plus unrostered
   players only. The response's `source_mode`/`source_weeks` say which source was used,
   and `WaiverInputsUnavailableError` maps to 503 rather than an empty list.
+- IR suggestions (#215) are **display-only**. IR eligibility is ESPN's call, so it reads ESPN's
+  `injuryStatus` (`src/ir_eligibility.py`), never `players.injury_status` (Sleeper's labels,
+  refreshed daily): `league_rosters.espn_injury_status` (written by `sync_league`) for waivers,
+  live `Team.roster` for `/v1/matchup/roster`. `IR_ELIGIBLE_ESPN_STATUSES` (`OUT`,
+  `INJURY_RESERVE`) is ESPN's default, not read from the league, and unconfirmed until the
+  worker captures a real slot-21 move. Open IR slots = `lineup_slot_counts['IR']` minus
+  `league_teams.ir_slots_used` (counted off ESPN's raw roster, since `league_rosters` drops
+  players with no espn_id match). A player in an IR slot is never a waiver drop. While a slot is
+  open, `waiver_strategy.plan_waiver_moves` never drops an IR-eligible player, wherever they
+  rank: each stash frees a spot, filled first by the best free agents (`kind: "ir_and_add"`, no
+  drop), and only the remaining positions are swapped against healthy bench players. Both live
+  publishers (the waiver CronJob, rumor boost_waiver) use the same planner via
+  `waiver_evaluator.plan_live_waiver_moves`, refresh rosters first, publish only the swaps and
+  log `ir_and_add` at WARNING. The lineup roster adds per-line `ir_suggestion` (`move_to_ir` /
+  `activate_from_ir`) and `ir_blocking_transactions` (an active player in IR, which makes ESPN
+  reject new moves).
 - `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week

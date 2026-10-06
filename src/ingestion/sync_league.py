@@ -114,11 +114,18 @@ def _extract_espn_player_id(entry: dict) -> str | None:
     return None
 
 
+def _extract_espn_injury_status(entry: dict) -> str | None:
+    player = entry.get("playerPoolEntry", {}).get("player") or entry.get("player") or {}
+    status = player.get("injuryStatus")
+    return status if isinstance(status, str) and status else None
+
+
 def build_roster_rows(raw_teams: list, espn_to_player_id: dict) -> list:
     """
     Pure function: maps each ESPN roster entry -> (team_id, player_id, slot_position,
-    is_starter), via the espn_id -> player_id crosswalk populated by sync_id_crosswalk.
-    Unmatched entries (no espn_id crosswalk hit) are skipped, not errors.
+    is_starter, espn_injury_status), via the espn_id -> player_id crosswalk populated by
+    sync_id_crosswalk. Unmatched entries (no espn_id crosswalk hit) are skipped, not errors.
+    espn_injury_status is ESPN's own label, which decides IR eligibility (src/ir_eligibility).
     """
     rows = []
     skipped = 0
@@ -134,7 +141,7 @@ def build_roster_rows(raw_teams: list, espn_to_player_id: dict) -> list:
             slot_id = entry.get("lineupSlotId")
             slot_position = POSITION_MAP.get(slot_id, str(slot_id))
             is_starter = slot_id not in BENCH_AND_IR_SLOT_IDS
-            rows.append((team_id, player_id, slot_position, is_starter))
+            rows.append((team_id, player_id, slot_position, is_starter, _extract_espn_injury_status(entry)))
     if skipped:
         logger.warning(f"Skipped {skipped} roster entr(y/ies) with no espn_id -> player_id match.")
     return rows
@@ -152,6 +159,34 @@ def _extract_team_name(team: dict) -> str:
 def build_team_name_rows(raw_teams: list) -> list:
     """Pure function: maps each raw ESPN team -> (team_id, team_name)."""
     return [(str(team.get("id")), _extract_team_name(team)) for team in raw_teams]
+
+
+IR_SLOT_ID = 21
+
+
+def build_ir_occupancy_rows(raw_teams: list) -> list:
+    """Pure function: (team_id, IR slots in use) per team, counted from ESPN's entries
+    directly. league_rosters can't answer this: build_roster_rows skips players with no
+    espn_id crosswalk match, and one of them may well be the player sitting in IR."""
+    return [
+        (str(team.get("id")), sum(
+            1 for entry in team.get("roster", {}).get("entries", []) if entry.get("lineupSlotId") == IR_SLOT_ID
+        ))
+        for team in raw_teams
+    ]
+
+
+def persist_ir_occupancy(conn, league_id: str, rows: list) -> None:
+    """Runs after persist_team_names, which creates the league_teams rows."""
+    with conn.cursor() as cursor:
+        if rows:
+            cursor.executemany(
+                """
+                UPDATE league_teams SET ir_slots_used = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE league_id = %s AND team_id = %s;
+                """,
+                [(count, league_id, team_id) for team_id, count in rows],
+            )
 
 
 def persist_team_names(conn, league_id: str, rows: list) -> int:
@@ -180,8 +215,8 @@ def persist_rosters(conn, rows: list) -> int:
         if rows:
             cursor.executemany(
                 """
-                INSERT INTO league_rosters (team_id, player_id, slot_position, is_starter)
-                VALUES (%s, %s, %s, %s);
+                INSERT INTO league_rosters (team_id, player_id, slot_position, is_starter, espn_injury_status)
+                VALUES (%s, %s, %s, %s, %s);
                 """,
                 rows,
             )
@@ -206,7 +241,11 @@ def sync_rosters(season: int, request_timeout_seconds: int = 10) -> int:
         with conn.cursor() as cursor:
             cursor.execute("SELECT espn_id, player_id FROM players WHERE espn_id IS NOT NULL;")
             espn_to_player_id = {row[0]: row[1] for row in cursor.fetchall()}
-        return persist_rosters(conn, build_roster_rows(teams, espn_to_player_id))
+        written = persist_rosters(conn, build_roster_rows(teams, espn_to_player_id))
+        league_id = _require_env("ESPN_LEAGUE_ID")
+        persist_team_names(conn, league_id, build_team_name_rows(teams))
+        persist_ir_occupancy(conn, league_id, build_ir_occupancy_rows(teams))
+        return written
 
 
 def refresh_rosters_if_stale(season: int, max_age_seconds: int = ROSTER_REFRESH_SECONDS) -> bool:
@@ -254,6 +293,7 @@ def sync_league(season: int) -> int:
 
         team_name_rows = build_team_name_rows(raw.get("teams", []))
         persist_team_names(conn, league_id, team_name_rows)
+        persist_ir_occupancy(conn, league_id, build_ir_occupancy_rows(raw.get("teams", [])))
 
     if written == 0:
         logger.info("Persisted 0 roster rows - all rosters are empty (expected pre-draft).")

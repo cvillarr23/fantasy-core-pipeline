@@ -85,3 +85,37 @@ def test_get_waiver_recommendations_returns_503_when_inputs_unavailable(client):
 
     assert response.status_code == 503
     assert "no usable weekly_stats.vorp_score" in response.json()["detail"]
+
+
+
+def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
+    from src.services import waiver_service
+
+    monkeypatch.setattr(
+        waiver_service.waiver_strategy, "load_bench_by_position",
+        lambda cur, team_id, season, week: {"RB": [{"player_id": "rb_hurt", "vorp_score": -1.0, "espn_injury_status": "INJURY_RESERVE"}]},
+    )
+    monkeypatch.setattr(
+        waiver_service.waiver_strategy, "load_best_free_agent_by_position",
+        lambda cur, season, week: {"RB": {"player_id": "rb_fa", "vorp_score": 8.0}},
+    )
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("rb_fa", "101", "FA RB", "SEA", None),
+        ("rb_hurt", "102", "Hurt RB", "NYJ", "IR"),
+    ]
+
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.waiver_service.load_open_ir_slots", return_value=1):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3")
+
+    assert response.status_code == 200
+    body = response.json()
+    [rec] = body["recommendations"]
+    assert rec["kind"] == "ir_and_add"
+    assert rec["bench_player"] is None
+    assert rec["ir_player"]["name"] == "Hurt RB"
+    assert body["open_ir_slots"] == 1
+    assert body["ir_moves"] == [{"action": "move_to_ir", "position": "RB", "player": {
+        "espn_id": "102", "name": "Hurt RB", "pro_team": "NYJ", "injury_status": "IR", "net_vorp": -1.0,
+    }}]

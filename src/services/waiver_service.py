@@ -9,6 +9,10 @@ that threshold gates live auto-publish, not what's worth showing a manager to de
 Before the target week's projections land (draft-prep-refresher, Tuesday 05:00 CT) the
 exact-week pools are empty, so the page falls back to prior same-season weeks, the same
 source rules as lineup_solver.load_pregame_roster_pool (#185).
+
+While an IR slot is open, a recommendation that would drop an IR-eligible player (ESPN's
+status, src/ir_eligibility) becomes kind "ir_and_add": stash that player on IR and add the
+free agent with no drop. Display-only; nothing here publishes.
 """
 import logging
 import os
@@ -17,6 +21,7 @@ from src.backtesting import waiver_strategy
 from src.database import get_db_cursor
 from src.ingestion.metrics_extractor import normalize_team
 from src.ingestion.sync_league import refresh_rosters_if_stale
+from src.ir_eligibility import load_open_ir_slots
 from src.optimization.lineup_solver import METRIC_SOURCE, PREGAME_WINDOW_WEEKS, load_teams_playing
 
 logger = logging.getLogger("WaiverService")
@@ -43,12 +48,13 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
     cursor.execute(
         """
         SELECT p.player_id, p.position, p.team, s.week, s.vorp_score,
-               (r.player_id IS NOT NULL) AS on_our_bench
+               (r.player_id IS NOT NULL) AS on_our_bench, r.espn_injury_status
         FROM weekly_stats s
         JOIN players p ON p.player_id = s.player_id
         LEFT JOIN league_rosters r ON r.player_id = p.player_id
         WHERE s.season = %s AND s.week BETWEEN %s AND %s AND s.vorp_score IS NOT NULL
-          AND (r.player_id IS NULL OR (r.team_id = %s AND (r.is_starter IS NULL OR r.is_starter = FALSE)));
+          AND (r.player_id IS NULL OR (r.team_id = %s AND (r.is_starter IS NULL OR r.is_starter = FALSE)
+                                       AND r.slot_position <> 'IR'));
         """,
         (season, first_week, week - 1, team_id),
     )
@@ -72,8 +78,11 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
         ) from exc
 
     players: dict = {}
-    for player_id, position, team, _, vorp_score, on_our_bench in rows:
-        entry = players.setdefault(player_id, {"position": position, "team": team, "bench": on_our_bench, "vorp": []})
+    for player_id, position, team, _, vorp_score, on_our_bench, espn_injury_status in rows:
+        entry = players.setdefault(player_id, {
+            "position": position, "team": team, "bench": on_our_bench,
+            "espn_injury_status": espn_injury_status, "vorp": [],
+        })
         entry["vorp"].append(vorp_score)
 
     bench_by_position: dict = {}
@@ -83,7 +92,9 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
             continue
         candidate = {"player_id": player_id, "vorp_score": sum(entry["vorp"]) / len(entry["vorp"])}
         if entry["bench"]:
-            bench_by_position.setdefault(entry["position"], []).append(candidate)
+            bench_by_position.setdefault(entry["position"], []).append(
+                {**candidate, "espn_injury_status": entry["espn_injury_status"]}
+            )
         else:
             best = free_agents_by_position.get(entry["position"])
             if best is None or candidate["vorp_score"] > best["vorp_score"]:
@@ -118,12 +129,22 @@ def _load_player_display(cursor, player_ids: set) -> dict:
 
 def _shape_recommendation(move: dict, display_by_player_id: dict) -> dict:
     add_display = display_by_player_id[move["add_player_id"]]
-    drop_display = display_by_player_id[move["drop_player_id"]]
+    if move.get("kind") == "ir_and_add":
+        # Nobody leaves the roster, so the gain is the add's whole value.
+        vorp_delta = move["add_vorp_score"]
+        bench_player = None
+        ir_player = {**display_by_player_id[move["ir_player_id"]], "net_vorp": move["ir_vorp_score"]}
+    else:
+        vorp_delta = move["add_vorp_score"] - move["drop_vorp_score"]
+        bench_player = {**display_by_player_id[move["drop_player_id"]], "net_vorp": move["drop_vorp_score"]}
+        ir_player = None
     return {
+        "kind": move.get("kind", "swap"),
         "position": move["position"],
-        "vorp_delta": move["add_vorp_score"] - move["drop_vorp_score"],
+        "vorp_delta": vorp_delta,
         "free_agent": {**add_display, "net_vorp": move["add_vorp_score"]},
-        "bench_player": {**drop_display, "net_vorp": move["drop_vorp_score"]},
+        "bench_player": bench_player,
+        "ir_player": ir_player,
         # Placeholders until a future ticket wires the rumor-signal feed into this
         # endpoint, mirroring how it was added to GET /v1/matchup/roster.
         "rumor_sentiment": None,
@@ -165,14 +186,36 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
                 f"No Season {season} Week {week} rows yet; waiver recommendations use "
                 f"{METRIC_SOURCE} means from Weeks {source['source_weeks']}."
             )
-        moves = waiver_strategy.propose_waiver_moves(bench_by_position, free_agents_by_position, margin=0.0)
+        open_ir_slots = load_open_ir_slots(cursor, our_team_id, season)
+        swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(
+            bench_by_position, free_agents_by_position, open_ir_slots, margin=0.0,
+        )
+        # Bench only: an IR-eligible starter is the lineup page's move_to_ir hint.
+        stash = waiver_strategy.ir_stash_candidates(bench_by_position, open_ir_slots)
+        moves = swaps + ir_and_adds
 
-        player_ids = {m["add_player_id"] for m in moves} | {m["drop_player_id"] for m in moves}
+        player_ids = (
+            {m["add_player_id"] for m in moves}
+            | {m["drop_player_id"] for m in swaps}
+            | {m["ir_player_id"] for m in ir_and_adds}
+            | {p["player_id"] for p in stash}
+        )
         display_by_player_id = _load_player_display(cursor, player_ids)
 
     recommendations = [_shape_recommendation(m, display_by_player_id) for m in moves]
     recommendations.sort(key=lambda r: r["vorp_delta"], reverse=True)
-    return {"season": season, "week": week, "recommendations": recommendations, **source}
+    ir_moves = [
+        {
+            "action": "move_to_ir",
+            "position": p["position"],
+            "player": {**display_by_player_id[p["player_id"]], "net_vorp": p["vorp_score"]},
+        }
+        for p in stash
+    ]
+    return {
+        "season": season, "week": week, "recommendations": recommendations,
+        "open_ir_slots": open_ir_slots, "ir_moves": ir_moves, **source,
+    }
 
 
 def waiver_claim_already_recorded(

@@ -6,27 +6,34 @@ modeling.
 """
 import logging
 
+from src.ir_eligibility import is_ir_eligible
+
 logger = logging.getLogger("BacktestWaiverStrategy")
 
 MARGIN_THRESHOLD = 3.0
 
 
 def load_bench_by_position(cursor, team_id: str, season: int, week: int) -> dict:
-    """Bench players (is_starter is not TRUE) for a team/season/week, grouped by position."""
+    """Bench players (is_starter is not TRUE) for a team/season/week, grouped by position.
+    IR is also a non-starter slot, but a stashed player is never a drop candidate, so IR
+    rows are left out. espn_injury_status rides along for split_ir_moves."""
     cursor.execute(
         """
-        SELECT p.player_id, p.position, COALESCE(s.vorp_score, 0.0) AS vorp_score
+        SELECT p.player_id, p.position, COALESCE(s.vorp_score, 0.0) AS vorp_score, r.espn_injury_status
         FROM players p
         JOIN league_rosters r ON p.player_id = r.player_id
         JOIN weekly_stats s ON p.player_id = s.player_id
         WHERE r.team_id = %s AND s.season = %s AND s.week = %s
-          AND (r.is_starter IS NULL OR r.is_starter = FALSE);
+          AND (r.is_starter IS NULL OR r.is_starter = FALSE)
+          AND r.slot_position <> 'IR';
         """,
         (team_id, season, week),
     )
     by_position: dict = {}
-    for player_id, position, vorp_score in cursor.fetchall():
-        by_position.setdefault(position, []).append({"player_id": player_id, "vorp_score": vorp_score})
+    for player_id, position, vorp_score, espn_injury_status in cursor.fetchall():
+        by_position.setdefault(position, []).append(
+            {"player_id": player_id, "vorp_score": vorp_score, "espn_injury_status": espn_injury_status}
+        )
     return by_position
 
 
@@ -72,6 +79,71 @@ def propose_waiver_moves(bench_by_position: dict, free_agents_by_position: dict,
                 "drop_vorp_score": worst_bench["vorp_score"],
             })
     return moves
+
+
+def ir_eligible_bench(bench_by_position: dict) -> dict:
+    """player_id -> bench entry (plus its position) for every IR-eligible bench player."""
+    return {
+        player["player_id"]: {"position": position, **player}
+        for position, players in bench_by_position.items()
+        for player in players
+        if is_ir_eligible(player.get("espn_injury_status"))
+    }
+
+
+def ir_stash_candidates(bench_by_position: dict, open_ir_slots: int) -> list:
+    """Pure: the IR-eligible bench players to stash, most valuable first, at most one per
+    open IR slot."""
+    if open_ir_slots <= 0:
+        return []
+    eligible = sorted(ir_eligible_bench(bench_by_position).values(), key=lambda p: p["vorp_score"], reverse=True)
+    return eligible[:open_ir_slots]
+
+
+def plan_waiver_moves(bench_by_position: dict, free_agents_by_position: dict, open_ir_slots: int,
+                      margin: float = MARGIN_THRESHOLD) -> tuple:
+    """Pure: (swaps, ir_and_adds), IR-aware propose_waiver_moves.
+
+    While an IR slot is open no IR-eligible player is dropped, wherever they rank on the
+    bench. Each stash frees a roster spot, so the best free agents (any position, worth more
+    than `margin` on their own since nobody leaves) become "ir_and_add" moves first. Only the
+    remaining positions' free agents are weighed against healthy bench players as swaps.
+    Eligible players beyond the open slots are neither stashed nor dropped: dropping them is
+    only right once the stashes have filled IR."""
+    eligible = ir_eligible_bench(bench_by_position) if open_ir_slots > 0 else {}
+    if not eligible:
+        return propose_waiver_moves(bench_by_position, free_agents_by_position, margin=margin), []
+
+    ranked_agents = sorted(
+        ((position, agent) for position, agent in free_agents_by_position.items() if agent["vorp_score"] > margin),
+        key=lambda item: item[1]["vorp_score"], reverse=True,
+    )
+    ir_and_adds = [
+        {
+            "kind": "ir_and_add",
+            "position": position,
+            "ir_player_id": stashed["player_id"],
+            "ir_position": stashed["position"],
+            "drop_player_id": None,
+            "add_player_id": agent["player_id"],
+            "add_vorp_score": agent["vorp_score"],
+            "ir_vorp_score": stashed["vorp_score"],
+        }
+        for stashed, (position, agent) in zip(ir_stash_candidates(bench_by_position, open_ir_slots), ranked_agents)
+    ]
+    claimed_positions = {move["position"] for move in ir_and_adds}
+    healthy_bench = {
+        position: [p for p in players if p["player_id"] not in eligible]
+        for position, players in bench_by_position.items()
+    }
+    remaining_agents = {
+        position: agent for position, agent in free_agents_by_position.items() if position not in claimed_positions
+    }
+    swaps = [
+        move for move in propose_waiver_moves(healthy_bench, remaining_agents, margin=margin)
+        if move["drop_player_id"] not in eligible
+    ]
+    return swaps, ir_and_adds
 
 
 def apply_waiver_moves(conn, team_id: str, moves: list) -> int:

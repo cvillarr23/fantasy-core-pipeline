@@ -174,7 +174,9 @@ def test_run_weekly_waivers_live_wires_decision_logic_to_publish():
 
         result = we.run_weekly_waivers_live("7", 2023, 5)
 
-    mock_propose.assert_called_once_with(mock_bench.return_value, mock_fa.return_value)
+    mock_propose.assert_called_once_with(
+        mock_bench.return_value, mock_fa.return_value, margin=we.waiver_strategy.MARGIN_THRESHOLD,
+    )
     # CORE-17 (#35): resolve_live_waiver_moves needs season/week to fold into
     # decision_inputs - the reasoning bot_decisions records for the eventual claim.
     expected_cursor = mock_conn.cursor.return_value.__enter__.return_value
@@ -273,6 +275,50 @@ def test_run_weekly_waivers_live_warns_when_every_proposed_move_is_dropped(caplo
     [record] = [r for r in caplog.records if "espn_id" in r.getMessage()]
     assert record.levelname == "WARNING"
     assert "3" in record.getMessage()
+
+
+def test_run_weekly_waivers_live_withholds_ir_and_add_moves_while_ir_is_open(caplog):
+    """Auto-publish of IR moves stays off: the free agent that should come in through an IR
+    stash is logged, not published, and never claimed by dropping the healthy player."""
+    pools = (
+        {"RB": [{"player_id": "hurt", "vorp_score": 6.0, "espn_injury_status": "OUT"},
+                {"player_id": "healthy", "vorp_score": 2.0, "espn_injury_status": "ACTIVE"}]},
+        {"RB": {"player_id": "4046", "vorp_score": 9.0}},
+    )
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=pools), \
+         patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[]) as mock_resolve, \
+         patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish, \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        assert we.run_weekly_waivers_live("7", 2026, 5) == []
+
+    mock_publish.assert_not_called()
+    assert mock_resolve.call_args.args[1] == []
+    [record] = [r for r in caplog.records if "suggest IR hurt + add 4046" in r.getMessage()]
+    assert record.levelname == "WARNING"
+    assert "not published" in record.getMessage()
+
+
+def test_run_weekly_waivers_live_refreshes_rosters_before_reading_them():
+    order = []
+    with patch("src.optimization.waiver_evaluator.sync_league.refresh_rosters_if_stale",
+               side_effect=lambda season: order.append(("refresh", season))), \
+         patch("src.optimization.waiver_evaluator.get_db_connection",
+               side_effect=lambda: order.append(("db",)) or MagicMock()), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=({}, {})), \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=[]):
+        we.run_weekly_waivers_live("7", 2026, 5)
+    assert order[:2] == [("refresh", 2026), ("db",)]
+
+
+def test_plan_live_waiver_moves_skips_the_ir_slot_lookup_when_nobody_is_eligible():
+    moves = [{"position": "RB", "drop_player_id": "b", "add_player_id": "f", "add_vorp_score": 5.0, "drop_vorp_score": 1.0}]
+    bench = {"RB": [{"player_id": "b", "vorp_score": 1.0, "espn_injury_status": "QUESTIONABLE"}]}
+    with patch("src.optimization.waiver_evaluator.load_open_ir_slots") as mock_slots, \
+         patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=moves):
+        assert we.plan_live_waiver_moves(MagicMock(), "7", 2026, bench, {"RB": {"player_id": "f", "vorp_score": 5.0}}) == moves
+    mock_slots.assert_not_called()
 
 
 def test_main_exits_zero_when_no_moves_are_worth_making():
