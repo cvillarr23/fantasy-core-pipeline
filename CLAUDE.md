@@ -185,6 +185,15 @@
   log `ir_and_add` at WARNING. The lineup roster adds per-line `ir_suggestion` (`move_to_ir` /
   `activate_from_ir`) and `ir_blocking_transactions` (an active player in IR, which makes ESPN
   reject new moves).
+- `/v1/trigger/lineup` accepts IR entries alongside swaps (#223): `{kind: "ir", player_id,
+  slot: "IR"}` and `{kind: "activate_ir", player_id, slot: <non-IR, normally BENCH>}`, with ESPN
+  ids. The union uses a callable discriminator because pydantic v2 won't apply a defaulted `kind`.
+  An entry without `kind` is a swap, and its published body is unchanged (`kind` is excluded from
+  the swap dump). The gateway checks slot-vs-kind and the id namespace, and writes `bot_decisions`
+  rows as `lineup_ir_move` / `lineup_ir_activate` with no drop. It does **not** pre-check
+  eligibility: the worker reads ESPN live and rejects ineligible players, a full IR slot or "not
+  in IR" permanently. `activity_runner.reconcile_action` verifies an IR entry by that one player's
+  slot.
 - `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week

@@ -42,6 +42,34 @@ def test_numbered_and_flex_slots_verify(requested,actual):
         assert event.call_args.kwargs['outcome']=='verified_complete'
 
 
+def _reconcile_lineup(swaps, roster):
+    action={'league_id':'123','execution':'submitted','outcome':'unknown','kind':'lineup_updates','payload':{'season':2026,'team_id':'8','optimized_swaps':swaps}}
+    league=SimpleNamespace(teams=[SimpleNamespace(team_id=8,roster=[SimpleNamespace(playerId=pid,lineupSlot=slot) for pid,slot in roster])])
+    with patch.object(runner,'action_detail',return_value=action),patch.object(runner,'record_event') as event,patch.object(runner,'get_db_cursor'),patch.object(read_cache,'invalidate_league'):
+        runner.reconcile_action('id',{2026:league})
+    return event.call_args
+
+
+def test_ir_entries_verify_against_the_espn_roster():
+    swaps=[
+        {'add_player_id':'1','drop_player_id':'2','slot':'RB1'},
+        {'kind':'ir','player_id':'3','slot':'IR'},
+        {'kind':'activate_ir','player_id':'4','slot':'BENCH'},
+    ]
+    call=_reconcile_lineup(swaps,[(1,'RB'),(2,'BE'),(3,'IR'),(4,'BE')])
+    assert call.kwargs['outcome']=='verified_complete'
+    assert call.args[2]['items'][1:]==[
+        {'player':'3','kind':'ir','confirmed':True},
+        {'player':'4','kind':'activate_ir','confirmed':True},
+    ]
+
+
+def test_ir_entry_not_yet_applied_is_only_status_checked():
+    call=_reconcile_lineup([{'kind':'ir','player_id':'3','slot':'IR'}],[(3,'BE')])
+    assert call.args[1]=='status_checked'
+    assert call.args[2]['items']==[{'player':'3','kind':'ir','confirmed':False}]
+
+
 def test_tick_continues_past_poison_row_and_leases_reconciliation():
     c=MagicMock();c.fetchall.return_value=[]
     with patch.object(runner,'publish_one',side_effect=[RuntimeError('missing queue'),True,False]) as publish,patch.object(runner,'get_db_cursor') as db:
