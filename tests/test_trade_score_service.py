@@ -361,6 +361,19 @@ def test_washington_matches_the_nfl_schedule_code(context):
     ]
 
 
+def test_week_without_any_metrics_says_so_even_when_traded_players_are_on_bye(context):
+    # Both traded players are on NFL byes, so they pass the traded-player checks, but the
+    # week was never refreshed: that is missing data, not a roster that can't be filled.
+    for team_data in context["teams"].values():
+        for p in team_data["roster"]:
+            p["metrics"]["6"]["vorp_score"] = None
+    playing = {5: set(ALL_TEAMS), 6: ALL_TEAMS - {"KC", "BUF"}}
+    result = score(context, playing=playing)
+    assert result["horizon"]["unscored_weeks"] == [
+        {"week": 6, "reasons": ["no_week_metrics"]}
+    ]
+
+
 def test_nfl_schedule_unavailable_cannot_confirm_a_bye(context):
     context["teams"]["2"]["roster"][2]["metrics"]["5"]["vorp_score"] = None
     result = score(context, playing={5: None, 6: None})
