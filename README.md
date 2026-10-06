@@ -284,3 +284,39 @@ claim; an unknown outcome must stay blocked. No recovery endpoint is provided.
 Offline regression tests: `python -m pytest tests/test_trade_offers.py`. Hash
 fixtures were generated from fantasy-browser-worker's `computeOfferKey` on main;
 they cover exact whitespace, Unicode, null messages, sorted IDs, and D/ST IDs.
+
+
+## League trade context
+
+`GET /v1/trade/context?league_id=<configured ESPN league>&season=2026&week=3&horizon=4`
+returns league-wide current roster ownership and upcoming fantasy head-to-head schedule
+context. The MCP tool `get_league_trade_context_model` uses the same service. The service
+supports the configured ESPN league; `horizon` defaults to four scoring weeks, accepts
+1–18, and stops at the league's regular-season end from ESPN matchup-period settings.
+Multiweek matchup periods are expanded into their actual scoring weeks. After the regular
+season the returned schedule is empty.
+
+Each roster player has separate `espn_id` and internal `player_id` fields, lineup and
+eligible slots, and exact-week database VORP/projections for the horizon. An unavailable or
+ambiguous identity mapping remains null; it never falls back to a numerically matching ID.
+Missing metrics remain null and are counted in `coverage.missing_metric_count` (one count
+per player/week with either metric missing). Unmatched ESPN roster players remain visible.
+Ownership comes from ESPN's current roster snapshot, not the database's last roster sync.
+`roster_snapshot` identifies its fetch time and observed week; selecting a historical week
+does not reconstruct historical ownership. Successful responses are cached for 60 seconds
+and invalidated by the existing verified-move league cache version.
+
+The `completed_fantasy_points_per_week_z` strength metric uses each team's completed
+regular-season fantasy matchup totals before both the selected and observed ESPN week,
+divided by the number of scoring weeks represented. Scores from in-progress or later
+matchups do not enter the metric. The league mean and population standard deviation
+standardize teams with observations; positive z means stronger. Fewer than two observed
+teams produces unknown z scores; equal observed strengths produce zero. Sample counts and
+`unavailable_history_periods` expose incomplete history. This describes past fantasy
+scoring and does not predict win probabilities or measure NFL defense difficulty.
+
+Each schedule week distinguishes `scheduled`, explicit `bye`, and `unavailable` pairings.
+A team's `schedule_strength_z` is the mean opponent z across non-bye scoring weeks, and
+is null unless every such week has a known pairing and strength. Missing/ambiguous
+pairings and unknown scores are reported in `schedule_coverage` rather than treated as
+byes or zero-strength opponents. A bye-only or empty horizon has no schedule score.

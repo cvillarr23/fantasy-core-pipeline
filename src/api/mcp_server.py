@@ -26,6 +26,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.trade_service import evaluate_trade
+from src.services.trade_context_service import get_league_trade_context
 
 logger = logging.getLogger("MCPEngine")
 
@@ -172,6 +173,20 @@ def evaluate_proposed_trade(
     silently produce a valid-looking but impossible score.
     """
     return evaluate_trade(incoming_player_ids, outgoing_player_ids, season, week)
+
+
+@mcp.tool()
+def get_league_trade_context_model(
+    league_id: str, season: int, week: int, horizon: int = 4
+) -> dict:
+    """Current rosters, exact-week VORP/projections, and fantasy-opponent schedule strength.
+
+    Player identities include ESPN and internal IDs separately. Strength uses completed
+    fantasy matchup totals before the selected week; positive z means tougher opponents.
+    Unknown pairings, identity mappings and metrics remain explicit. This is current
+    ownership, not a historical roster reconstruction. NFL matchup difficulty is separate.
+    """
+    return get_league_trade_context(league_id, season, week, horizon)
 
 
 mcp_asgi_app = mcp.streamable_http_app()
