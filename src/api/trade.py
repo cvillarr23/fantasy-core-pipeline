@@ -8,10 +8,22 @@ src/api/players.py's pattern for splitting a REST surface out of the MCP-only la
 import logging
 from typing import List
 
+import requests
+from espn_api.requests.espn_requests import (
+    ESPNAccessDenied,
+    ESPNInvalidLeague,
+    ESPNUnknownError,
+)
+
 from fastapi import APIRouter, HTTPException, Path, Query, Response
 from pydantic import BaseModel
 
 from src.services.trade_service import evaluate_trade
+from src.schemas.trade_context import LeagueTradeContext
+from src.services.trade_context_service import (
+    TradeContextUnavailable,
+    get_league_trade_context,
+)
 
 from src.schemas.trade import (
     OfferStatus,
@@ -93,3 +105,22 @@ def approve_trade_offer(
     if result["duplicate"]:
         response.status_code = 200
     return result
+
+
+@trade_router.get("/context", response_model=LeagueTradeContext)
+def league_trade_context(
+    league_id: str = Query(pattern=r"^[1-9]\d*$"),
+    season: int = Query(ge=2000, le=2100),
+    week: int = Query(ge=1, le=18),
+    horizon: int = Query(4, ge=1, le=18),
+):
+    try:
+        return get_league_trade_context(league_id, season, week, horizon)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except TradeContextUnavailable as error:
+        raise HTTPException(503, str(error)) from error
+    except requests.Timeout as error:
+        raise HTTPException(504, "ESPN request timed out") from error
+    except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as error:
+        raise HTTPException(502, "Could not reach ESPN") from error

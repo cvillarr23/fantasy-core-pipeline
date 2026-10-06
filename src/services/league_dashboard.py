@@ -6,11 +6,10 @@ import time
 from datetime import datetime, timezone
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 from src.ingestion.sync_league import build_league, fetch_raw_league_data
+from src.espn_positions import DEFAULT_POSITIONS
 from src.services.read_cache import cached, league_key
 
 
-# ESPN player position identifiers are distinct from lineup slot identifiers.
-DEFAULT_POSITIONS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "D/ST"}
 LEADER_FETCH_BUDGET_SECONDS = 12
 
 def stamp():

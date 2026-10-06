@@ -297,3 +297,15 @@ def test_sync_rosters_refreshes_team_rows_and_ir_occupancy(monkeypatch):
 
     mock_names.assert_called_once_with(conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
     mock_ir.assert_called_once_with(conn, "1248158344", [("1", 0), ("2", 0)])
+
+
+def test_raw_league_read_includes_matchups_only_when_requested():
+    league = MagicMock()
+    sl.fetch_raw_league_data(league)
+    league.espn_request.league_get.assert_called_with(
+        params={"view": ["mSettings", "mRoster", "mTeam"]}
+    )
+    sl.fetch_raw_league_data(league, include_schedule=True)
+    league.espn_request.league_get.assert_called_with(
+        params={"view": ["mSettings", "mRoster", "mTeam", "mMatchup"]}
+    )

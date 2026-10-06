@@ -53,13 +53,16 @@ def build_league(season: int, request_timeout_seconds: int | None = None) -> Lea
     return league
 
 
-def fetch_raw_league_data(league: League) -> dict:
+def fetch_raw_league_data(league: League, include_schedule: bool = False) -> dict:
     """
     espn_api's typed Settings/Player classes don't expose roster lineup slot counts or
     per-player lineup slot IDs (gaps in espn-api==0.33.0), so those are read directly off
     the raw mSettings/mRoster/mTeam payload instead.
     """
-    return league.espn_request.league_get(params={"view": ["mSettings", "mRoster", "mTeam"]})
+    views = ["mSettings", "mRoster", "mTeam"]
+    if include_schedule:
+        views.append("mMatchup")
+    return league.espn_request.league_get(params={"view": views})
 
 
 def _lineup_slot_counts_by_label(raw_counts: dict) -> dict:
