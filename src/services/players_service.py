@@ -14,7 +14,7 @@ class PlayerNotFoundError(Exception):
 
 def _player_row(cursor, player_id: str):
     cursor.execute("""
-        SELECT player_id, name, position, team, status, injury_status
+        SELECT player_id, name, position, team, status, injury_status, espn_id
         FROM players
         WHERE player_id = %s;
     """, (player_id,))
@@ -75,6 +75,10 @@ def search_players(query: str) -> list:
 
 
 def get_player_summary(player_id: str) -> dict:
+    """Includes espn_id so a caller translating an internal id to ESPN's (the browser worker's
+    trade staging) needs one lookup, not a summary-then-search round trip bounded by
+    SEARCH_RESULT_LIMIT. Null when no espn_id is resolved yet; see search_players for why the
+    two id spaces must never be substituted for each other."""
     with get_db_cursor() as cursor:
         row = _player_row(cursor, player_id)
         if row is None:
@@ -88,5 +92,6 @@ def get_player_summary(player_id: str) -> dict:
         "team": row[3],
         "status": row[4],
         "injury_status": row[5],
+        "espn_id": row[6],
         "recent_news": recent_news,
     }
