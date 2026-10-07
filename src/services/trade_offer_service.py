@@ -2,12 +2,18 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 import uuid
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
+
 from src.database import get_db_cursor
+from src.schemas.trade import ProposalEvaluation
+
+logger = logging.getLogger("TradeOfferService")
 
 ROW_COLUMNS = (
     "id",
@@ -251,6 +257,45 @@ def approve_offer(key, approved_by):
     return _response(key, approval)
 
 
+EVALUATION_VERSION = "proposal-evaluation-v1"
+# Enough of a validation failure to name the bad fields without logging stored values.
+LOGGED_ERROR_LOCATIONS = 5
+
+
+def _stored_evaluation(row, offer):
+    """The worker's score evidence for a generated proposal, or None.
+
+    Display-only: a stored evaluation that can't be read must cost the reviewer that one
+    panel, not the whole offer list, so failures become None with a warning.
+    """
+    raw = offer.get("evaluation")
+    if raw is None:
+        return None
+    label = f"row {row['id']} (offer {offer.get('offer_key')})"
+    version = raw.get("version") if isinstance(raw, dict) else None
+    if version != EVALUATION_VERSION:
+        logger.warning(
+            "Ignoring stored evaluation on %s: unrecognized version %.80r",
+            label,
+            version,
+        )
+        return None
+    try:
+        return ProposalEvaluation.model_validate(raw)
+    except ValidationError as error:
+        locations = [
+            "/".join(map(str, detail["loc"]))
+            for detail in error.errors(include_input=False, include_url=False)
+        ]
+        logger.warning(
+            "Ignoring invalid stored evaluation on %s: %d error(s) at %s",
+            label,
+            error.error_count(),
+            ", ".join(locations[:LOGGED_ERROR_LOCATIONS]),
+        )
+        return None
+
+
 def list_offers(
     status="awaiting_approval", league_id=None, season=None, limit=50, offset=0
 ):
@@ -313,5 +358,6 @@ def list_offers(
         item["approval"] = (
             {k: v for k, v in audit.items() if k != "payload"} if audit else None
         )
+        item["evaluation"] = _stored_evaluation(row, offer)
         result.append(item)
     return dict(offers=result, limit=limit, offset=offset)

@@ -9,18 +9,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.schemas.trade_score import TradeScore
 from src.services import trade_offer_service as service
+from tests.test_trade_score_service import context  # noqa: F401
+from tests.test_trade_score_service import score as shape_score
 
 FIXTURES = json.loads(
     (Path(__file__).parent / "fixtures/trade_offer_keys.json").read_text()
 )
 
 
-def staged(message=None):
+def staged(message=None, evaluation=None, row_id=1):
     fixture = next(f for f in FIXTURES if f["offer"]["message"] == message)
     o = fixture["offer"]
-    return dict(
-        id=1,
+    row = dict(
+        id=row_id,
         status="awaiting_approval",
         league_id=o["leagueId"],
         season=2026,
@@ -35,6 +38,50 @@ def staged(message=None):
             outgoing_player_ids=o["outgoingPlayerIds"],
             message=message,
             screenshot_path="/pod/local.png",
+        ),
+    )
+    if evaluation is not None:
+        row["counter_offer"].update(source="proposal", evaluation=evaluation)
+    return row
+
+
+def proposal_evaluation(trade_context, message):
+    """The worker stores the /v1/trade/score response verbatim, so build it the same way."""
+    return dict(
+        version="proposal-evaluation-v1",
+        evaluated_at="2026-10-07T18:00:00Z",
+        request=dict(
+            league_id="123",
+            season=2026,
+            week=5,
+            horizon=2,
+            our_team_id="1",
+            counterparty_team_id="2",
+            send_espn_ids=["103"],
+            receive_espn_ids=["203"],
+        ),
+        score=TradeScore.model_validate(shape_score(trade_context)).model_dump(
+            mode="json"
+        ),
+        target=dict(team_id="2", position="RB", deficit=1, severity=6.2),
+        ranking=dict(
+            basis="final_score",
+            value_per_scored_week=3.1,
+            rank=1,
+            packages_proposed=5,
+            packages_scored=4,
+            packages_eligible=2,
+        ),
+        pitch=dict(
+            message=message,
+            evidence=[
+                dict(
+                    id="e1",
+                    path="/roster_impact/counterparty/weeks/0/delta",
+                    text="Your week 5 starting lineup changes by +1.0",
+                )
+            ],
+            cited_evidence_ids=["e1"],
         ),
     )
 
@@ -263,6 +310,7 @@ def test_list_filters_and_espn_names(client):
     assert offer["incoming_players"][0] == {"espn_id": "4259545", "name": "Player Name"}
     assert offer["incoming_players"][1] == {"espn_id": "-16021", "name": None}
     assert "screenshot_path" not in offer
+    assert "evaluation" in offer and offer["evaluation"] is None
 
 
 def test_sql_claim_reads_every_matching_row_under_lock():
@@ -396,3 +444,144 @@ def test_duplicate_does_not_replace_original_approver(client, boundary):
     assert second.json()["tracking_id"] == first.json()["tracking_id"]
     channel.basic_publish.assert_called_once()
     audit.assert_called_once()
+
+
+PITCH = "Fair deal?"
+
+
+def list_offers_response(client, rows):
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [tuple(row[k] for k in service.ROW_COLUMNS) for row in rows],
+        [],
+    ]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/trade/offers")
+    assert response.status_code == 200, response.text
+    return {offer["id"]: offer for offer in response.json()["offers"]}
+
+
+def test_list_passes_stored_evaluation_through(client, context):  # noqa: F811
+    stored = proposal_evaluation(context, "  Fair deal?  ")
+    offers = list_offers_response(client, [staged("  Fair deal?  ", stored)])
+    assert offers[1]["evaluation"] == stored
+    assert offers[1]["source"] == "proposal"
+    assert offers[1]["message"] == "  Fair deal?  "
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_list_rows_without_evaluation_return_null(client, caplog, explicit_null):
+    row = staged()
+    if explicit_null:
+        row["counter_offer"]["evaluation"] = None
+    with caplog.at_level("WARNING"):
+        offers = list_offers_response(client, [row])
+    assert "evaluation" in offers[1] and offers[1]["evaluation"] is None
+    assert not caplog.records
+
+
+def _set(path, value):
+    def mutate(evaluation):
+        target = evaluation
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return evaluation
+
+    return mutate
+
+
+def _drop(path):
+    def mutate(evaluation):
+        target = evaluation
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        return evaluation
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        _set(["version"], "proposal-evaluation-v2"),
+        _drop(["version"]),
+        lambda _: "x",
+        lambda _: [],
+        lambda _: 5,
+        _set(["score", "scoring_version"], "trade-score-v2"),
+        _drop(["score", "roster_impact"]),
+        _set(["request", "extra"], True),
+        _set(["ranking", "basis"], "other"),
+        _set(["evaluated_at"], "yesterday"),
+    ],
+)
+def test_invalid_evaluation_is_null_and_logged_without_breaking_list(
+    client, context, caplog, corrupt  # noqa: F811
+):
+    good = proposal_evaluation(context, "  Fair deal?  ")
+    bad = corrupt(proposal_evaluation(context, PITCH))
+    rows = [staged("  Fair deal?  ", good), staged(None, bad, row_id=2)]
+    with caplog.at_level("WARNING"):
+        offers = list_offers_response(client, rows)
+    assert offers[1]["evaluation"] == good
+    assert "evaluation" in offers[2] and offers[2]["evaluation"] is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "row 2" in warnings[0].getMessage()
+    assert PITCH not in caplog.text
+
+
+@pytest.mark.parametrize("evaluation", ["absent", "valid", "garbage"])
+def test_approval_ignores_evaluation(client, boundary, context, evaluation):  # noqa: F811
+    rows, channel, audit = boundary
+    stored = {
+        "absent": None,
+        "valid": proposal_evaluation(context, "  Fair deal?  "),
+        "garbage": {"version": 7},
+    }[evaluation]
+    rows[0] = staged("  Fair deal?  ", stored)
+    if evaluation == "absent":
+        rows[0]["counter_offer"]["source"] = "proposal"
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve", json={"approved_by": "conor"}
+    )
+    assert response.status_code == 202, response.text
+    channel.basic_publish.assert_called_once()
+    sent = json.loads(channel.basic_publish.call_args.kwargs["body"])
+    assert sent.pop("tracking_id")
+    sent.pop("traceparent")
+    fixture = next(f for f in FIXTURES if f["offer"]["message"] == "  Fair deal?  ")
+    assert sent == dict(
+        season=2026,
+        to_team_id="3",
+        incoming_player_ids=fixture["offer"]["incomingPlayerIds"],
+        outgoing_player_ids=fixture["offer"]["outgoingPlayerIds"],
+        source="proposal",
+        approval={"offer_key": key, "approved_by": "conor"},
+        message="  Fair deal?  ",
+    )
+    assert service.compute_offer_key(fixture["offer"]) == key
+    approval = rows[0]["outcome_details"]["approval"]
+    assert "evaluation" not in approval["payload"]
+    assert "evaluation" not in json.dumps(audit.call_args.kwargs["decision_inputs"])
+
+
+def test_staged_copies_with_different_evaluations_approve_once(
+    client, boundary, context  # noqa: F811
+):
+    rows, channel, _ = boundary
+    rows[0] = staged("  Fair deal?  ", proposal_evaluation(context, "  Fair deal?  "))
+    older = staged("  Fair deal?  ", row_id=2)
+    older["counter_offer"]["source"] = "proposal"
+    rows.append(older)
+    key = rows[0]["counter_offer"]["offer_key"]
+    for expected in [202, 200]:
+        response = client.post(
+            f"/v1/trade/offers/{key}/approve", json={"approved_by": "conor"}
+        )
+        assert response.status_code == expected, response.text
+    channel.basic_publish.assert_called_once()
