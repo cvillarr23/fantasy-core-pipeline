@@ -433,7 +433,8 @@ trades set `exceeds_roster_limit`; drops are not simulated.
 Nothing is filled in:
 
 - A week is **unscored**, with reasons, if a traded player lacks a mapping or that week's
-  metrics, or a lineup can't be filled. A traded player whose NFL team is on a bye simply
+  metrics, or a lineup can't be filled. `no_week_metrics` means no rostered player on
+  either team has a row for that week. A traded player whose NFL team is on a bye simply
   sits that week.
 - An unfillable K or D/ST slot is held on both sides.
 - Untraded players without metrics are left out and reported in

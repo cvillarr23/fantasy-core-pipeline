@@ -189,6 +189,10 @@ def _team_week(before_roster, after_roster, traded_ids, week, context, playing):
             reasons.add("unknown_traded_player_position")
         elif reason == "no_metrics":
             reasons.add("schedule_unavailable" if playing is None else "missing_traded_player_metrics")
+    if not before_pool and not after_pool:
+        # Nobody has a row for this week (typically not refreshed yet); say so rather than
+        # blaming roster construction, even when the traded players happen to be on bye.
+        reasons.add("no_week_metrics")
     slot_counts = context["lineup_slot_counts"]
     if any(
         slot not in BENCH_AND_IR_SLOT_NAMES and int(count) > 0 and slot not in SUPPORTED_STARTER_SLOTS
