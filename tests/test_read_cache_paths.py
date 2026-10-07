@@ -77,7 +77,7 @@ def test_matchup_not_found_is_not_cached(read_cache_redis):
 
 
 def test_lineup_roster_default_week_shares_the_explicit_week_entry(read_cache_redis):
-    with patch.object(matchup_service, "resolve_default_week", return_value=5), \
+    with patch.object(matchup_service, "require_upcoming_week", return_value=5), \
          patch.object(matchup_service, "_load_current_team_roster", return_value={"starters": [], "bench": []}) as load:
         matchup_service.get_current_team_roster(2026)
         matchup_service.get_current_team_roster(2026, 5)

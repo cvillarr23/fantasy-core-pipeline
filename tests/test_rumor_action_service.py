@@ -227,3 +227,32 @@ def test_qualifying_signal_with_no_matching_proposed_move_still_advances_waterma
     mock_publish.assert_not_called()
     assert result["waiver_claims_published"] == []
     assert result["watermark"] == 40
+
+
+# ---------------------------------------------------------------------------
+# main (CronJob entrypoint week resolution)
+# ---------------------------------------------------------------------------
+
+def test_main_fails_without_evaluating_when_week_unresolvable(caplog):
+    error = ras.WeekResolutionError("schedule download failed after 6 attempt(s)")
+    with patch("src.services.rumor_action_service.resolve_upcoming_week", side_effect=error), \
+         patch("src.services.rumor_action_service.evaluate_and_publish_rumor_actions") as mock_eval:
+        assert ras.main(["--team-id", "7", "--season", "2026"]) == 1
+    mock_eval.assert_not_called()
+    assert "Could not resolve the upcoming week" in caplog.text
+
+
+def test_main_evaluates_the_resolved_week():
+    with patch("src.services.rumor_action_service.resolve_upcoming_week", return_value=5) as mock_resolve, \
+         patch("src.services.rumor_action_service.evaluate_and_publish_rumor_actions") as mock_eval:
+        assert ras.main(["--team-id", "7", "--season", "2026"]) == 0
+    mock_resolve.assert_called_once_with(2026)
+    mock_eval.assert_called_once_with("7", 2026, 5, source="cli")
+
+
+def test_main_exits_zero_without_evaluating_after_the_regular_season(caplog):
+    with patch("src.services.rumor_action_service.resolve_upcoming_week", return_value=None), \
+         patch("src.services.rumor_action_service.evaluate_and_publish_rumor_actions") as mock_eval:
+        assert ras.main(["--team-id", "7", "--season", "2026"]) == 0
+    mock_eval.assert_not_called()
+    assert "regular season is over" in caplog.text

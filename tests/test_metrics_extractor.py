@@ -691,34 +691,45 @@ def test_resolve_default_year_week_uses_last_completed_week_from_schedule():
     unplayed one (#178) - so the default must come from final scores, not current week."""
     df = _schedule([(3, "REG", 20, 17), (4, "REG", 24, 10), (5, "REG", None, None)])
     with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
-         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=5), \
          patch("src.ingestion.metrics_extractor.nfl.load_schedules", return_value=df):
         year, week = me.resolve_default_year_week()
     assert (year, week) == (2026, 4)
 
 
-def test_resolve_default_year_week_falls_back_to_current_week_minus_one_without_schedule():
+def test_resolve_default_year_week_retries_a_failed_schedule_download():
+    df = _schedule([(3, "REG", 20, 17), (4, "REG", 24, 10), (5, "REG", None, None)])
     with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
-         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=5), \
-         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=RuntimeError("boom")):
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=[ConnectionError("404"), df]), \
+         patch("src.nfl_schedule.time.sleep") as mock_sleep:
         year, week = me.resolve_default_year_week()
     assert (year, week) == (2026, 4)
+    mock_sleep.assert_called_once()
 
 
 def test_resolve_default_year_week_is_none_in_preseason():
+    df = _schedule([(1, "REG", None, None), (2, "REG", None, None)])
     with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
-         patch("src.ingestion.metrics_extractor.nfl.get_current_week", return_value=1), \
-         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=RuntimeError("boom")):
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", return_value=df):
         year, week = me.resolve_default_year_week()
     assert (year, week) == (2026, None)
 
 
-def test_resolve_default_year_week_raises_when_week_cannot_be_resolved():
-    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", side_effect=RuntimeError("boom")), \
-         patch("src.ingestion.metrics_extractor.nfl.get_current_week", side_effect=RuntimeError("boom")), \
-         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=RuntimeError("boom")):
+def test_resolve_default_year_week_raises_when_schedule_never_loads():
+    """No guessing from nflreadpy's current week, which downloads the same file anyway."""
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=ConnectionError("404")), \
+         patch("src.nfl_schedule.time.sleep"):
         with pytest.raises(RuntimeError):
             me.resolve_default_year_week()
+
+
+def test_main_exits_nonzero_when_schedule_never_loads():
+    with patch("src.ingestion.metrics_extractor.nfl.get_current_season", return_value=2026), \
+         patch("src.ingestion.metrics_extractor.nfl.load_schedules", side_effect=ConnectionError("404")), \
+         patch("src.nfl_schedule.time.sleep"), \
+         patch("src.ingestion.metrics_extractor.extract_weekly_metrics") as mock_extract:
+        assert me.main([]) == 1
+    mock_extract.assert_not_called()
 
 
 def test_main_exits_nonzero_when_a_completed_week_writes_nothing(caplog):

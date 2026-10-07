@@ -368,7 +368,7 @@ def test_get_current_team_roster_shapes_and_badges(monkeypatch):
     mock_league.teams = [other_team, our_team]
 
     with patch("src.services.matchup_service.build_league", return_value=mock_league), \
-         patch("src.services.matchup_service.resolve_default_week", return_value=2), \
+         patch("src.services.matchup_service.require_upcoming_week", return_value=2), \
          patch("src.services.matchup_service.compute_roster_deficits",
                return_value={"teams": {"8": {"RB": {"deficit": 1}}}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
@@ -392,9 +392,23 @@ def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):
     mock_league = MagicMock()
     mock_league.teams = [_make_team(team_id=9)]
 
-    with patch("src.services.matchup_service.build_league", return_value=mock_league):
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
+         patch("src.services.matchup_service.require_upcoming_week", return_value=2):
         with pytest.raises(ValueError):
             matchup_service.get_current_team_roster(season=2026)
+
+
+def test_get_current_team_roster_resolves_the_default_week_without_retry_sleeps(monkeypatch):
+    """A web request must not wait out the CronJob backoff, and an unresolvable week must
+    propagate for the route to map rather than quietly showing another week."""
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    error = matchup_service.WeekResolutionError("download failed")
+    with patch("src.services.matchup_service.require_upcoming_week", side_effect=error) as mock_resolve, \
+         patch("src.services.matchup_service.build_league") as mock_build:
+        with pytest.raises(matchup_service.WeekResolutionError):
+            matchup_service.get_current_team_roster(season=2026)
+    mock_resolve.assert_called_once_with(2026, attempts=1)
+    mock_build.assert_not_called()
 
 
 
@@ -405,7 +419,7 @@ def _roster_with(players, ir_slot_count, monkeypatch):
     mock_league = MagicMock()
     mock_league.teams = [our_team]
     with patch("src.services.matchup_service.build_league", return_value=mock_league), \
-         patch("src.services.matchup_service.resolve_default_week", return_value=2), \
+         patch("src.services.matchup_service.require_upcoming_week", return_value=2), \
          patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
          patch("src.services.matchup_service._load_weekly_metrics_by_espn_id", return_value={}), \

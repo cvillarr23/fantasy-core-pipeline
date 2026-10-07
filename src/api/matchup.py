@@ -11,6 +11,7 @@ from espn_api.requests.espn_requests import ESPNAccessDenied, ESPNInvalidLeague,
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.services.matchup_service import (
     ESPNTimeoutError,
     NoMatchupFoundError,
@@ -145,6 +146,11 @@ def get_lineup_roster(season: int, week: int | None = None):
     except (ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError) as e:
         logger.error(f"ESPN unreachable while building roster for season={season}: {e}")
         raise HTTPException(status_code=502, detail="Could not reach ESPN")
+    except WeekResolutionError as e:
+        logger.warning(f"Upcoming week unavailable for roster season={season}: {e}")
+        raise HTTPException(status_code=503, detail="Current week is unavailable. Retry or select a week manually.")
+    except RegularSeasonOverError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to compute roster for season={season}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to compute roster: {str(e)}")
