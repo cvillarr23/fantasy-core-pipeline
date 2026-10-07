@@ -252,6 +252,14 @@ filter/page the results. Player names resolve through `players.espn_id`; unknown
 players retain their ESPN IDs and a null name. The exact manager message is shown.
 Pod-local screenshots are not served.
 
+Each offer also carries `evaluation`: the score evidence the worker stored with a
+generated proposal (`proposal-evaluation-v1`, whose `score` is the verbatim
+`POST /v1/trade/score` response the pitch was written from). It is `null` for
+counters, manual offers and offers staged before the worker stored it. It is also
+`null`, with a logged warning, when the stored version is unknown or the payload fails
+validation, so one bad row never breaks the list. The evaluation is advisory: it is
+not part of `offer_key`, is not checked on approval and is never sent to the worker.
+
 `POST /v1/trade/offers/{offer_key}/approve` accepts only
 `{"approved_by":"your-name"}`. As with the existing trade evaluation route, there
 is no application-layer authentication: the approver is self-reported, and access

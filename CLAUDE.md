@@ -57,6 +57,11 @@
   week is scored only from its own `weekly_stats` rows, never carried forward. The formula
   constants live in the service docstring and the README "Trade scoring" section; change
   `SCORING_VERSION` if they change.
+- `GET /v1/trade/offers` returns `evaluation` (`ProposalEvaluation` in `src/schemas/trade.py`,
+  reusing `TradeScore`), the worker's stored score evidence for generated proposals. It is
+  display-only: keep it out of `compute_offer_key`, `_validated_offer` and the approval
+  payload, since approval binds what the other manager receives, not our reasoning. An
+  unknown version or invalid payload becomes `null` with a warning instead of failing the list.
 - Pydantic request/response models live in `src/schemas/<domain>.py`, not inline in the
   router. **Do not confuse this with `src/models.py`**, which holds only raw DB DDL string
   constants consumed by `run_migrations()` and has nothing to do with the API layer — a

@@ -2,7 +2,9 @@
 
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+
+from src.schemas.trade_score import TradeScore, TradeScoreRequest
 
 OfferStatus = Literal[
     "awaiting_approval",
@@ -47,6 +49,47 @@ class OfferPlayer(BaseModel):
     name: str | None
 
 
+class ProposalTarget(BaseModel):
+    team_id: str
+    position: str
+    deficit: int
+    severity: float
+
+
+class ProposalRanking(BaseModel):
+    basis: Literal["final_score", "our_lineup_gain"]
+    value_per_scored_week: float
+    rank: int
+    packages_proposed: int
+    packages_scored: int
+    packages_eligible: int
+
+
+class PitchEvidence(BaseModel):
+    id: str
+    path: str
+    text: str
+
+
+class ProposalPitch(BaseModel):
+    message: str
+    evidence: list[PitchEvidence]
+    cited_evidence_ids: list[str]
+
+
+class ProposalEvaluation(BaseModel):
+    """Score evidence the worker stored with a generated proposal. `score` is the verbatim
+    POST /v1/trade/score response, and each pitch evidence `path` is a JSON Pointer into it."""
+
+    version: Literal["proposal-evaluation-v1"]
+    evaluated_at: AwareDatetime
+    request: TradeScoreRequest
+    score: TradeScore
+    target: ProposalTarget
+    ranking: ProposalRanking
+    pitch: ProposalPitch
+
+
 class TradeOffer(BaseModel):
     id: int
     status: str
@@ -63,6 +106,8 @@ class TradeOffer(BaseModel):
     outgoing_players: list[OfferPlayer]
     message: str | None = None
     approval: dict | None = None
+    # Advisory only: it is not part of offer_key and is never sent on approval.
+    evaluation: ProposalEvaluation | None = None
 
 
 class TradeOfferList(BaseModel):
