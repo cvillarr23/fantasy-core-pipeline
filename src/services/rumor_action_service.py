@@ -16,6 +16,7 @@ from uuid import uuid4
 from psycopg2.extras import Json
 import logging
 import os
+import sys
 import time
 
 from src.api.draft import _redis_client
@@ -27,7 +28,7 @@ from src.services.rumor_action_checkpoint import (
     save_checkpoint as _save_checkpoint,
 )
 from src.optimization import lineup_solver
-from src.optimization.lineup_solver import resolve_default_week
+from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
 from src.optimization.waiver_evaluator import (
     load_live_waiver_inputs,
     publish_waiver_claim,
@@ -809,11 +810,21 @@ def main(argv=None):
     parser.add_argument("--season", required=True, type=int)
     parser.add_argument("--week", type=int, default=None)
     args = parser.parse_args(argv)
-    week = args.week if args.week is not None else resolve_default_week()
+    week = args.week
+    if week is None:
+        try:
+            week = resolve_upcoming_week(args.season)
+        except WeekResolutionError as exc:
+            logger.error(f"Could not resolve the upcoming week for Season {args.season}: {exc}")
+            return 1
+        if week is None:
+            logger.info(f"The {args.season} regular season is over; no rumor actions to evaluate.")
+            return 0
 
     evaluate_and_publish_rumor_actions(args.team_id, args.season, week, source="cli")
+    return 0
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    main()
+    sys.exit(main())

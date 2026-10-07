@@ -30,6 +30,7 @@ from opentelemetry import trace
 from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion.metrics_extractor import normalize_team
+from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import post_trigger_idempotent
 
@@ -59,6 +60,9 @@ DEFAULT_LINEUP_SLOT_COUNTS = {
 HOLDABLE_WITHOUT_METRICS = {"K", "D/ST"}
 PREGAME_WINDOW_WEEKS = 3
 METRIC_SOURCE = "weekly_stats.vorp_score"
+# resolve_default_week's "regular season over" answer: one past the last regular-season
+# week, which fantasy-draft-prep-refresher's inline script treats as offseason (exit 0).
+SEASON_OVER_WEEK = 19
 
 
 class InsufficientLineupInputError(Exception):
@@ -575,29 +579,39 @@ def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool =
         return len(swaps)
 
 
-def resolve_default_week() -> int:
-    """Resolves a safe CLI default without letting nflreadpy's "current" helper crash startup."""
-    fallback_week = 1
-    try:
-        return int(nfl.get_current_week())
-    except Exception as exc:
-        logger.warning(
-            f"Failed to resolve current NFL week via nflreadpy ({exc}); defaulting --week to {fallback_week}."
-        )
-        return fallback_week
+def resolve_default_week(season: int | None = None) -> int:
+    """The upcoming week for fantasy-infra's shell/inline CronJob scripts, which print it
+    and pass it on. Raises WeekResolutionError rather than guessing, so those scripts fail
+    the Job. After the regular season it returns SEASON_OVER_WEEK, which the refresher
+    reads as offseason; Python callers use resolve_upcoming_week's explicit None instead."""
+    if season is None:
+        season = int(os.getenv("CURRENT_YEAR") or nfl.get_current_season())
+    week = resolve_upcoming_week(season)
+    return SEASON_OVER_WEEK if week is None else week
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Solve the optimal weekly lineup for a team via ILP.")
     parser.add_argument("--team-id", type=str, default=os.getenv("ESPN_TEAM_ID"))
     parser.add_argument("--season", type=int, default=int(os.getenv("CURRENT_YEAR", datetime.now().year)))
-    parser.add_argument("--week", type=int, default=None, help="target week; defaults to nflreadpy's current week")
+    parser.add_argument("--week", type=int, default=None, help="target week; defaults to the upcoming week in the nflverse schedule")
     parser.add_argument("--dry-run", action="store_true", help="compute and log swaps without publishing them")
     args = parser.parse_args(argv)
 
     if not args.team_id:
         parser.error("--team-id is required (or set the ESPN_TEAM_ID env var)")
-    week = args.week if args.week is not None else resolve_default_week()
+    week = args.week
+    if week is None:
+        # Resolved before anything reads the roster or publishes: a wrong week here would
+        # set a live ESPN lineup for that week.
+        try:
+            week = resolve_upcoming_week(args.season)
+        except WeekResolutionError as exc:
+            logger.error(f"Could not resolve the upcoming week for Season {args.season}: {exc}")
+            return 1
+        if week is None:
+            logger.info(f"The {args.season} regular season is over; no lineup to optimize.")
+            return 0
 
     try:
         optimize_weekly_lineup(team_id=args.team_id, season=args.season, week=week, dry_run=args.dry_run)

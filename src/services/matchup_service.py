@@ -10,10 +10,10 @@ import requests
 from src.database import get_db_cursor
 from src.ingestion.sync_league import build_league
 from src.ir_eligibility import lineup_ir_hints, load_ir_slot_count
+from src.nfl_schedule import WeekResolutionError, require_upcoming_week
 from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
     evaluate_lineup,
-    resolve_default_week,
 )
 from src.services.read_cache import cached, league_key
 from src.services.roster_service import compute_roster_deficits
@@ -348,7 +348,9 @@ def get_current_team_roster(season: int, selected_week: int | None = None) -> di
     our_team_id = os.getenv("ESPN_TEAM_ID")
     # Resolve the default week before keying, so "current week" and an explicit week share
     # one entry and a week rollover never serves the previous week's badges.
-    week = selected_week if selected_week is not None else resolve_default_week()
+    # One attempt: a request shouldn't wait out the CronJob backoff, and the route turns a
+    # failure into a 503 instead of showing another week's roster.
+    week = selected_week if selected_week is not None else require_upcoming_week(season, attempts=1)
     return cached(
         ["lineup-roster", *league_key(season), our_team_id, week],
         ROSTER_CACHE_TTL_SECONDS,

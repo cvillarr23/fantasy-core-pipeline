@@ -789,6 +789,74 @@ def test_main_requires_team_id(monkeypatch):
     assert exc.value.code != 0
 
 
+def test_main_without_week_fails_and_never_optimizes_when_week_unresolvable(caplog):
+    error = ls.WeekResolutionError("schedule download failed after 6 attempt(s)")
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week", side_effect=error), \
+         patch("src.optimization.lineup_solver.optimize_weekly_lineup") as mock_opt, \
+         patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
+        assert ls.main(["--team-id", "8", "--season", "2026"]) == 1
+    mock_opt.assert_not_called()
+    mock_post.assert_not_called()
+    assert "Could not resolve the upcoming week" in caplog.text
+
+
+def test_main_without_week_optimizes_the_resolved_week():
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week", return_value=5) as mock_resolve, \
+         patch("src.optimization.lineup_solver.optimize_weekly_lineup", return_value=0) as mock_opt:
+        assert ls.main(["--team-id", "8", "--season", "2026"]) == 0
+    mock_resolve.assert_called_once_with(2026)
+    mock_opt.assert_called_once_with(team_id="8", season=2026, week=5, dry_run=False)
+
+
+def test_main_without_week_exits_zero_without_optimizing_after_the_regular_season(caplog):
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week", return_value=None), \
+         patch("src.optimization.lineup_solver.optimize_weekly_lineup") as mock_opt:
+        assert ls.main(["--team-id", "8", "--season", "2026"]) == 0
+    mock_opt.assert_not_called()
+    assert "regular season is over" in caplog.text
+
+
+def test_main_with_explicit_week_never_resolves():
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week") as mock_resolve, \
+         patch("src.optimization.lineup_solver.optimize_weekly_lineup", return_value=0):
+        assert ls.main(ARGV) == 0
+    mock_resolve.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# resolve_default_week (imported by fantasy-infra's refresher and waiver CronJobs)
+# ---------------------------------------------------------------------------
+
+def test_resolve_default_week_raises_instead_of_falling_back_to_week_one():
+    """The refresher's inline script treats any exception as exit 1, and the waiver shell
+    short-circuits on it - so raising is what makes a failed download fail the Job."""
+    with patch("src.nfl_schedule.nfl.load_schedules", side_effect=ConnectionError("404")), \
+         patch("src.nfl_schedule.time.sleep"):
+        import pytest
+        with pytest.raises(ls.WeekResolutionError):
+            ls.resolve_default_week(2026)
+
+
+def test_resolve_default_week_returns_the_resolved_week():
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week", return_value=5) as mock_resolve:
+        assert ls.resolve_default_week(2026) == 5
+    mock_resolve.assert_called_once_with(2026)
+
+
+def test_resolve_default_week_defaults_season_to_current_year(monkeypatch):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week", return_value=5) as mock_resolve:
+        assert ls.resolve_default_week() == 5
+    mock_resolve.assert_called_once_with(2026)
+
+
+def test_resolve_default_week_reports_season_over_past_week_18():
+    """The refresher reads any week above 18 as offseason and exits 0."""
+    with patch("src.optimization.lineup_solver.resolve_upcoming_week", return_value=None):
+        assert ls.resolve_default_week(2026) == ls.SEASON_OVER_WEEK
+    assert ls.SEASON_OVER_WEEK > 18
+
+
 # ---------------------------------------------------------------------------
 # evaluate_lineup (shared by the optimizer, the matchup badge, and rumor actions)
 # ---------------------------------------------------------------------------

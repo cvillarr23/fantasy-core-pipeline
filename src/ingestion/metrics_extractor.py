@@ -7,6 +7,7 @@ import nflreadpy as nfl
 import polars as pl
 
 from src.database import get_db_connection
+from src.nfl_schedule import last_completed_week, load_schedule
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NFLVerseIngestor")
@@ -718,29 +719,12 @@ def extract_weekly_metrics(year: int, week: int) -> int:
     return written
 
 
-def last_completed_week(df_schedules: pl.DataFrame) -> int | None:
-    """Latest regular-season week whose games all have final scores, or None before any
-    week has finished. A week with only Thursday's game final doesn't count - ingesting
-    it would write a partial week."""
-    if df_schedules.is_empty():
-        return None
-    weeks = (
-        df_schedules.filter(pl.col("game_type") == "REG")
-        .group_by("week")
-        .agg((pl.col("home_score").is_not_null() & pl.col("away_score").is_not_null()).all().alias("complete"))
-        .filter(pl.col("complete"))
-    )
-    if weeks.is_empty():
-        return None
-    return int(weeks["week"].max())
-
-
 def resolve_default_year_week(year: int | None = None) -> tuple[int, int | None]:
     """Resolves the season and the most recently *completed* week - the only week with
     play-by-play to ingest. nflreadpy's current week is already the upcoming, unplayed
-    week by the Tuesday CronJob (#178), which made every scheduled run ingest nothing.
-    Returns week=None when no week has completed yet (preseason); raises RuntimeError
-    when the week can't be determined at all."""
+    week by the Tuesday CronJob, so this reads final scores from the schedule instead.
+    Returns week=None when no week has completed yet (preseason); raises
+    WeekResolutionError (a RuntimeError) when the schedule can't be loaded after retries."""
     if year is None:
         try:
             year = int(nfl.get_current_season())
@@ -748,16 +732,7 @@ def resolve_default_year_week(year: int | None = None) -> tuple[int, int | None]
             year = datetime.now().year
             logger.warning(f"Failed to resolve current NFL season via nflreadpy ({exc}); defaulting --year to {year}.")
 
-    try:
-        return year, last_completed_week(nfl.load_schedules(year))
-    except Exception as exc:
-        logger.warning(f"Failed to load the {year} schedule ({exc}); falling back to nflreadpy's current week - 1.")
-
-    try:
-        week = int(nfl.get_current_week()) - 1
-    except Exception as exc:
-        raise RuntimeError(f"Could not resolve the last completed NFL week for {year}: {exc}") from exc
-    return year, week if week >= 1 else None
+    return year, last_completed_week(load_schedule(year))
 
 
 def main(argv=None) -> int:

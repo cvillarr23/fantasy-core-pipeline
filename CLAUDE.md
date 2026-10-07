@@ -152,6 +152,14 @@
   When that data is missing, a `HOLDABLE_WITHOUT_METRICS` slot no pool player can fill is
   **held**: removed from the ILP, and its current starter is
   left out of the diff so it's never dropped. An unfillable skill slot is an error.
+- A defaulted week comes from `src/nfl_schedule.py`: the earliest regular-season week of
+  the requested season with a game not yet final (week 1 before kickoff; `None` once the
+  regular season is over). The nflverse schedule read retries with backoff (6 attempts,
+  5s doubling to 30s) and then raises `WeekResolutionError`; nothing ever substitutes
+  another week. The lineup optimizer and rumor-action CLIs exit 1 on that error and 0
+  (no-op) when the season is over. `lineup_solver.resolve_default_week()` is kept for
+  fantasy-infra's refresher/waiver scripts: it raises the same way and returns
+  `SEASON_OVER_WEEK` (19) for "season over", which the refresher reads as offseason.
 - Exit codes: `main()` returns 0 for a real decision (swaps published *or* lineup already
   optimal) and 1 for `InsufficientLineupInputError` (no roster, no usable/stale metrics,
   schedule unavailable in mode (2), infeasible solve), so the CronJob's Job fails and

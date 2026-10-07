@@ -5,6 +5,7 @@ import requests
 from espn_api.requests.espn_requests import ESPNAccessDenied
 
 from src.services import matchup_service
+from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.services.matchup_service import NoMatchupFoundError
 
 FAKE_MATCHUP = {
@@ -106,6 +107,21 @@ def test_get_lineup_roster_espn_error_returns_502(client):
     assert response.status_code == 502
 
 
+def test_get_lineup_roster_unresolvable_week_returns_503(client):
+    with patch("src.api.matchup.get_current_team_roster", side_effect=WeekResolutionError("download failed")):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 503
+    assert "week" in response.json()["detail"]
+
+
+def test_get_lineup_roster_after_the_regular_season_returns_409(client):
+    with patch("src.api.matchup.get_current_team_roster", side_effect=RegularSeasonOverError("over")):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 409
+
+
 def test_get_lineup_roster_unexpected_error_returns_500(client):
     with patch("src.api.matchup.get_current_team_roster", side_effect=Exception("boom")):
         response = client.get("/v1/matchup/roster?season=2026")
@@ -159,7 +175,7 @@ def test_roster_current_week_projections_with_real_service(client, monkeypatch):
         [],  # rumor signals
     ]
     with patch("src.services.matchup_service.build_league", return_value=league), \
-         patch("src.services.matchup_service.resolve_default_week", return_value=2), \
+         patch("src.services.matchup_service.require_upcoming_week", return_value=2), \
          patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
          patch("src.services.matchup_service.get_db_cursor") as db:
