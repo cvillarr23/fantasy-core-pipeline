@@ -4,7 +4,7 @@ from src.services.activity_runner import publish_one
 
 @pytest.mark.parametrize('queue',['lineup_updates','waiver_actions','draft_targets'])
 def test_outbox_confirms_delivery_without_redeclaring_queue(queue):
-    cursor=MagicMock();cursor.fetchone.return_value=('id',queue,{'tracking_id':'id'})
+    cursor=MagicMock();cursor.fetchone.return_value=('id',queue,{'tracking_id':'id'},None)
     connection=MagicMock();channel=connection.channel.return_value
     with patch('src.services.activity_runner.get_db_cursor') as db,patch('src.services.activity_runner.pika.BlockingConnection',return_value=connection),patch('src.api.routes._pick_slot_already_filled',return_value=False):
         db.return_value.__enter__.return_value=cursor
@@ -16,7 +16,7 @@ def test_outbox_confirms_delivery_without_redeclaring_queue(queue):
 
 
 def test_outbox_rechecks_draft_deadline_after_broker_connect():
-    cursor=MagicMock();cursor.fetchone.return_value=('id','draft_targets',{'expires_at':1})
+    cursor=MagicMock();cursor.fetchone.return_value=('id','draft_targets',{'expires_at':1},None)
     connection=MagicMock()
     with patch('src.services.activity_runner.get_db_cursor') as db,patch('src.services.activity_runner.pika.BlockingConnection',return_value=connection):
         db.return_value.__enter__.return_value=cursor
@@ -27,7 +27,7 @@ def test_outbox_rechecks_draft_deadline_after_broker_connect():
 
 
 def test_outbox_closes_connection_on_publish_failure_and_does_not_mark_delivered():
-    cursor=MagicMock();cursor.fetchone.return_value=('id','waiver_actions',{})
+    cursor=MagicMock();cursor.fetchone.return_value=('id','waiver_actions',{},None)
     connection=MagicMock();connection.channel.return_value.basic_publish.side_effect=RuntimeError('lost ack')
     with patch('src.services.activity_runner.get_db_cursor') as db,patch('src.services.activity_runner.pika.BlockingConnection',return_value=connection):
         db.return_value.__enter__.return_value=cursor

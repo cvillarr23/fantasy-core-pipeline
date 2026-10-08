@@ -724,7 +724,7 @@ def isolate_durable_storage_for_identity_tests(request):
 ])
 def test_acceptance_persists_before_delivery_and_returns_original_identity(queue,payload):
     order=[]
-    def create(q,body,identity):
+    def create(q,body,identity,depends_on=None):
         order.append('persist');return 'original-action'
     def publish(identity):
         assert identity=='original-action';order.append('publish')
@@ -751,7 +751,7 @@ def test_broker_failure_keeps_durable_action_accepted():
 
 def test_new_actions_keep_decision_audit_and_duplicates_do_not_repeat_it():
     payload=routes.WaiverTriggerPayload(team_id='8',player_id='4046',name='Player',team='KC',decision_inputs={'week':5})
-    with patch('src.services.activity_service.create_action',side_effect=lambda q,b,i:i),patch('src.services.activity_runner.publish_one'),patch('src.api.routes._record_bot_decision') as audit:
+    with patch('src.services.activity_service.create_action',side_effect=lambda q,b,i,depends_on=None:i),patch('src.services.activity_runner.publish_one'),patch('src.api.routes._record_bot_decision') as audit:
         routes._accept_durable('waiver_actions',payload)
         assert audit.call_args.kwargs['decision_inputs']=={'week':5}
     with patch('src.services.activity_service.create_action',return_value='previous'),patch('src.services.activity_runner.publish_one'),patch('src.api.routes._record_bot_decision') as audit:
@@ -777,7 +777,7 @@ def _post_lineup_capturing(client, payload, cursor=None):
     outbox and every bot_decisions write instead of touching a database or broker."""
     captured = {}
 
-    def create(queue, body, identity):
+    def create(queue, body, identity, depends_on=None):
         captured["queue"], captured["body"] = queue, body
         return identity
 
@@ -955,9 +955,116 @@ def test_trigger_lineup_ir_entry_requires_the_api_key(client):
 def test_acceptance_persists_an_ir_payload_before_delivery():
     order = []
     payload = routes.LineupTriggerPayload(team_id="8", optimized_swaps=[IR_ENTRY, ACTIVATE_ENTRY])
-    with patch("src.services.activity_service.create_action", side_effect=lambda q, b, i: order.append("persist") or "original"), \
+    with patch("src.services.activity_service.create_action", side_effect=lambda q, b, i, depends_on=None: order.append("persist") or "original"), \
          patch("src.services.activity_runner.publish_one", side_effect=lambda i: order.append("publish")):
         result = routes._accept_durable("lineup_updates", payload)
 
     assert order == ["persist", "publish"]
     assert result["tracking_id"] == "original"
+
+
+# ---------------------------------------------------------------------------
+# /trigger/waiver after_tracking_id: an add-only claim held until its IR move is verified
+# ---------------------------------------------------------------------------
+
+IR_PARENT = {
+    "id": "ir-move-1", "kind": "lineup_updates", "team_id": "8", "execution": "delivered",
+    "outcome": "unknown", "evidence": {}, "manual_verification_required": False,
+    "payload": {"team_id": "8", "optimized_swaps": [{"kind": "ir", "player_id": "7777", "slot": "IR"}]},
+}
+CHAINED_CLAIM = {
+    "team_id": "8", "player_id": "4046", "name": "Somebody", "team": "KC",
+    "after_tracking_id": "ir-move-1", "decision_inputs": {"season": 2026, "week": 5},
+}
+
+
+def _post_waiver_capturing(client, payload, parent=IR_PARENT):
+    captured = {}
+
+    def create(queue, body, identity, **kwargs):
+        captured.update(queue=queue, body=body, kwargs=kwargs)
+        return identity
+
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_namespace_ok_cursor())), \
+         patch("src.api.routes._reject_player_rostered_elsewhere"), \
+         patch("src.services.activity_service._load_dependency_parent", return_value=parent), \
+         patch("src.services.activity_service.create_action", side_effect=create), \
+         patch("src.services.activity_runner.publish_one") as publish, \
+         patch("src.api.routes._record_bot_decision"):
+        response = client.post("/v1/trigger/waiver", json=payload)
+    captured["publish"] = publish
+    return response, captured
+
+
+def test_waiver_body_without_after_tracking_id_is_unchanged(client):
+    payload = {k: v for k, v in CHAINED_CLAIM.items() if k != "after_tracking_id"}
+    response, captured = _post_waiver_capturing(client, payload)
+
+    assert response.status_code == 202
+    assert captured["kwargs"] == {"depends_on": None}
+    captured["publish"].assert_called_once()
+    assert set(captured["body"]) == {
+        "idempotency_key", "team_id", "player_id", "name", "team", "drop_player_id", "dry_run",
+        "decision_inputs", "traceparent",
+    }
+
+
+def test_chained_claim_is_held_on_its_ir_move_and_not_published(client):
+    response, captured = _post_waiver_capturing(client, CHAINED_CLAIM)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    assert response.json()["after_tracking_id"] == "ir-move-1"
+    assert captured["kwargs"] == {"depends_on": "ir-move-1"}
+    assert "after_tracking_id" not in captured["body"]
+    captured["publish"].assert_not_called()
+
+
+def test_chained_claim_must_be_add_only(client):
+    response, captured = _post_waiver_capturing(client, {**CHAINED_CLAIM, "drop_player_id": "9999"})
+
+    assert response.status_code == 422
+    assert "body" not in captured
+
+
+@pytest.mark.parametrize("parent,status", [
+    (None, 404),
+    ({**IR_PARENT, "team_id": "3"}, 409),
+    ({**IR_PARENT, "kind": "waiver_actions"}, 409),
+    ({**IR_PARENT, "payload": {"optimized_swaps": [{"kind": "activate_ir", "player_id": "7777", "slot": "BENCH"}]}}, 409),
+    ({**IR_PARENT, "execution": "skipped"}, 409),
+    ({**IR_PARENT, "execution": "failed", "evidence": {"permanent": True}}, 409),
+    ({**IR_PARENT, "outcome": "rejected"}, 409),
+])
+def test_chained_claim_needs_a_live_ir_move_for_the_same_team(client, parent, status):
+    response, captured = _post_waiver_capturing(client, CHAINED_CLAIM, parent=parent)
+
+    assert response.status_code == status
+    assert "body" not in captured
+
+
+def test_chained_claim_fails_closed_when_the_ir_move_cannot_be_read(client):
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_namespace_ok_cursor())), \
+         patch("src.api.routes._reject_player_rostered_elsewhere"), \
+         patch("src.services.activity_service._load_dependency_parent", side_effect=RuntimeError("db down")), \
+         patch("src.services.activity_service.create_action") as create:
+        response = client.post("/v1/trigger/waiver", json=CHAINED_CLAIM)
+
+    assert response.status_code == 503
+    create.assert_not_called()
+
+
+def test_a_duplicate_chained_claim_does_not_name_a_parent_it_may_not_be_held_on(client):
+    """The stored claim may be held on an earlier IR move than the one this replay sent."""
+    with patch("src.api.routes.get_db_cursor", lambda: _fake_db_cursor(_namespace_ok_cursor())), \
+         patch("src.api.routes._reject_player_rostered_elsewhere"), \
+         patch("src.services.activity_service._load_dependency_parent", return_value=IR_PARENT), \
+         patch("src.services.activity_service.create_action", return_value="earlier-claim"), \
+         patch("src.services.activity_runner.publish_one") as publish:
+        response = client.post("/v1/trigger/waiver", json=CHAINED_CLAIM)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "duplicate"
+    assert response.json()["tracking_id"] == "earlier-claim"
+    assert "after_tracking_id" not in response.json()
+    publish.assert_not_called()

@@ -148,7 +148,9 @@
   `optimize_weekly_lineup`, `matchup_service.suggest_lineup_swaps` (display-only: on
   `InsufficientLineupInputError` it logs and shows no badges), and `rumor_action_service`'s
   bench_watch path (lets the error raise, like the optimizer). It uses
-  `load_pregame_roster_pool`, not `load_roster_pool`. Source order, always within the
+  `load_pregame_roster_pool`, not `load_roster_pool`. It leaves IR-slot players out of both
+  its roster and metrics queries (#219): they can't start without an activation, but mode (2)
+  would otherwise keep their prior-week VORP. Source order, always within the
   target season: (1) the target week's own `vorp_score` if any rostered **non-K/D-ST**
   player has one (pregame projections written by `fantasy-draft-prep-refresher`, 05:00 CT
   daily; K/D-ST rows alone don't count, since ESPN's can land before Sleeper's, #183);
@@ -188,20 +190,22 @@
   gate and schedule bye exclusion as the lineup fallback (#185). Our bench plus unrostered
   players only. The response's `source_mode`/`source_weeks` say which source was used,
   and `WaiverInputsUnavailableError` maps to 503 rather than an empty list.
-- IR suggestions (#215) are **display-only**. IR eligibility is ESPN's call, so it reads ESPN's
+- IR suggestions (#215) are display-only unless `AUTO_PUBLISH_IR_MOVES` is on (#219, below).
+  IR eligibility is ESPN's call, so it reads ESPN's
   `injuryStatus` (`src/ir_eligibility.py`), never `players.injury_status` (Sleeper's labels,
   refreshed daily): `league_rosters.espn_injury_status` (written by `sync_league`) for waivers,
   live `Team.roster` for `/v1/matchup/roster`. `IR_ELIGIBLE_ESPN_STATUSES` (`OUT`,
-  `INJURY_RESERVE`) is ESPN's default, not read from the league, and unconfirmed until the
-  worker captures a real slot-21 move. Open IR slots = `lineup_slot_counts['IR']` minus
+  `INJURY_RESERVE`) is not read from the league; it was confirmed by live slot-21 moves on
+  2026-10-06 (an ACTIVE player got 409 `TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED`; see the
+  worker's `docs/espn-reverse-engineering.md`, "IR moves"). Open IR slots = `lineup_slot_counts['IR']` minus
   `league_teams.ir_slots_used` (counted off ESPN's raw roster, since `league_rosters` drops
   players with no espn_id match). A player in an IR slot is never a waiver drop. While a slot is
   open, `waiver_strategy.plan_waiver_moves` never drops an IR-eligible player, wherever they
   rank: each stash frees a spot, filled first by the best free agents (`kind: "ir_and_add"`, no
   drop), and only the remaining positions are swapped against healthy bench players. Both live
   publishers (the waiver CronJob, rumor boost_waiver) use the same planner via
-  `waiver_evaluator.plan_live_waiver_moves`, refresh rosters first, publish only the swaps and
-  log `ir_and_add` at WARNING. The lineup roster adds per-line `ir_suggestion` (`move_to_ir` /
+  `waiver_evaluator.plan_live_waiver_moves` and refresh rosters first. With the flag off they
+  publish only the swaps and log `ir_and_add` at WARNING. The lineup roster adds per-line `ir_suggestion` (`move_to_ir` /
   `activate_from_ir`) and `ir_blocking_transactions` (an active player in IR, which makes ESPN
   reject new moves).
 - `/v1/trigger/lineup` accepts IR entries alongside swaps (#223): `{kind: "ir", player_id,
@@ -213,6 +217,34 @@
   eligibility: the worker reads ESPN live and rejects ineligible players, a full IR slot or "not
   in IR" permanently. `activity_runner.reconcile_action` verifies an IR entry by that one player's
   slot.
+- `ir_and_add` auto-publish (#219) is gated by `AUTO_PUBLISH_IR_MOVES` (read per call, off unless
+  `1`/`true`/`yes`). Flag off is an exact no-op. With it on, `plan_live_waiver_moves` returns the
+  IR + add moves after the swaps (so a failed one can't hold the week's swaps back), unless one of
+  our IR slots holds a player ESPN no longer lists as injured, or an occupant `ir_slots_used`
+  counts but `league_rosters` couldn't match: then it logs ERROR and withholds them (activating
+  is a manager's call, so `activate_from_ir` and `move_to_ir` stay suggestions with no
+  auto-publisher).
+  `publish_waiver_claim` hands a target with `ir_player_id` to `publish_ir_and_add`, which posts
+  the IR move to `/v1/trigger/lineup` (week-scoped `lineup_idempotency_key`, no Job name), then the
+  add-only claim to `/v1/trigger/waiver` with `after_tracking_id` = the IR move's tracking id (its
+  own key, with `ir` in the material). It raises, sending no add, if the flag is off, season/week
+  are missing, or the IR response has no tracking id. The gateway checks the parent (exists, same
+  team, has a `kind: "ir"` entry, not already failed, via `activity_service.require_ir_move`; 503
+  if it can't read it)
+  and stores the claim as a **held** outbox row (`activity_outbox.depends_on`, `hold_until` =
+  `ACTIVITY_DEPENDENCY_HOLD_SECONDS`, default 3600) without delivering it. `publish_one`'s own
+  SELECT only releases a held row while its parent is `verified_complete` and `hold_until` hasn't
+  passed, so no caller can bypass it. `activity_runner.settle_held_actions` (start of every tick)
+  cancels a held row for good (`skipped`/`cancelled`, `dependency_failed` event, idempotency key
+  released so a claim held on a fresh IR move can be queued) when the parent is skipped,
+  rejected, cancelled, expired, permanently failed or needs manual verification, or when
+  `hold_until` passes; a transient parent failure keeps it held. Held claims skip
+  `create_action`'s legacy `bot_decisions` dedupe, which matches on add/drop alone. A replay
+  whose IR move has since failed gets 409 (loud), not "duplicate". The worker treats an IR move
+  for a player already in IR as satisfied, so a replay after the 30-minute lineup key lapses
+  verifies at once. `after_tracking_id` is excluded
+  from the queue body. `tests/test_activity_hold_postgres.py` checks the SQL against a local
+  Postgres when `ACTIVITY_TEST_DSN` is set.
 - `metrics_extractor`'s CLI defaults to the last **completed** regular-season week (every
   game final, from the nflverse schedule), not nflreadpy's current week, which is already
   the upcoming, unplayed week by the Tuesday CronJob. Writing 0 rows for a resolved week

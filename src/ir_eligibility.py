@@ -8,9 +8,12 @@ that column is Sleeper's, uses different labels, and refreshes at most daily, wh
 is the one that accepts or rejects the IR move.
 
 IR_ELIGIBLE_ESPN_STATUSES is not read from the league: rosterSettings carries no IR
-eligibility field that espn-api exposes. OUT and INJURY_RESERVE are ESPN's default; it
-has not been confirmed against an accepted/rejected slot-21 move for this league yet, so
-suggestions built on it stay display-only until fantasy-browser-worker captures one.
+eligibility field that espn-api exposes. It was confirmed against live slot-21 moves on
+2026-10-06 (fantasy-browser-worker's docs/espn-reverse-engineering.md, "IR moves"): ESPN
+accepted INJURY_RESERVE and OUT players and rejected an ACTIVE one with HTTP 409
+TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED. ESPN's own "Manage IR" list treats only OUT and
+INJURY_RESERVE as injured, so QUESTIONABLE, DOUBTFUL and SUSPENSION stay excluded, though
+the server rejecting them has not been observed.
 """
 import json
 
@@ -71,6 +74,36 @@ def load_open_ir_slots(cursor, team_id: str, season: int) -> int:
         )
         row = cursor.fetchone()
     return max(0, slot_count - (int(row[0]) if row else 0))
+
+
+def load_ineligible_ir_occupants(cursor, team_id: str) -> list:
+    """(player_id, name, espn_injury_status) for each of this team's IR-slot players whose
+    ESPN status no longer qualifies for IR - the occupants lineup_ir_hints flags
+    "activate_from_ir". league_rosters drops players with no espn_id match, so IR
+    occupants counted in league_teams.ir_slots_used beyond the matched rows come back as
+    (None, None, None): their status can't be checked, which is treated as ineligible."""
+    cursor.execute(
+        """
+        SELECT r.player_id, p.name, r.espn_injury_status
+        FROM league_rosters r
+        JOIN players p ON p.player_id = r.player_id
+        WHERE r.team_id = %s AND r.slot_position = 'IR';
+        """,
+        (str(team_id),),
+    )
+    rows = cursor.fetchall()
+    cursor.execute(
+        """
+        SELECT ir_slots_used FROM league_teams
+        WHERE team_id = %s AND ir_slots_used IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1;
+        """,
+        (str(team_id),),
+    )
+    used = cursor.fetchone()
+    unmatched = max(0, int(used[0]) - len(rows)) if used else 0
+    return [row for row in rows if not is_ir_eligible(row[2])] + [(None, None, None)] * unmatched
 
 
 def lineup_ir_hints(lines: list, ir_slot_count: int) -> tuple:

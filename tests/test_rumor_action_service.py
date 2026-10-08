@@ -98,6 +98,39 @@ def test_boost_waiver_never_drops_an_ir_eligible_player_while_ir_is_open():
     assert result["waiver_claims_published"] == []
 
 
+def test_boost_waiver_publishes_an_ir_and_add_with_the_flag_on(monkeypatch):
+    """The rumor path shares plan_live_waiver_moves and publish_waiver_claim, so with
+    AUTO_PUBLISH_IR_MOVES on its IR + add target reaches the chained publisher."""
+    monkeypatch.setenv("AUTO_PUBLISH_IR_MOVES", "true")
+    redis_client = _fake_redis()
+    signals_cursor = MagicMock()
+    signals_cursor.fetchall.return_value = [(10, "4046", "positive", 0.9, ras.BOOST_WAIVER_ACTION)]
+    target = {
+        "player_id": "e-4046", "drop_player_id": None, "name": "Some Back", "team": "KC",
+        "ir_player_id": "e-7777", "ir_player_name": "Hurt Back",
+        "decision_inputs": {"season": 2026, "week": 3},
+    }
+
+    with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
+         patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
+         patch("src.services.rumor_action_service.load_live_waiver_inputs", return_value=(
+             {"RB": [{"player_id": "hurt", "vorp_score": -1.0, "espn_injury_status": "INJURY_RESERVE"}]},
+             {"RB": {"player_id": "4046", "vorp_score": 5.0}},
+         )), \
+         patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants", return_value=[]), \
+         patch("src.services.rumor_action_service.resolve_live_waiver_moves", return_value=[target]) as mock_resolve, \
+         patch("src.services.rumor_action_service.publish_waiver_claim") as mock_publish:
+        result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
+
+    [move] = mock_resolve.call_args.args[1]
+    assert move["kind"] == "ir_and_add" and move["ir_player_id"] == "hurt"
+    published = mock_publish.call_args.args[1]
+    assert published["ir_player_id"] == "e-7777"
+    assert published["decision_inputs"]["rumor_signal_id"] == 10
+    assert result["waiver_claims_published"] == [published]
+
+
 def test_waiver_claims_publish_outside_the_db_block_and_skip_already_queued():
     """publish_waiver_claim retries with backoff (up to ~2 min), so it must not run while a
     pooled connection is checked out; and a claim the gateway reports as already queued
