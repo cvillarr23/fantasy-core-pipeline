@@ -43,6 +43,7 @@ from src.schemas.trade_inbox import (
     IncomingTrade,
     IncomingTradeList,
     PublicationReceipt,
+    RetryRequest,
     TriageRequest,
     Visibility,
 )
@@ -108,6 +109,31 @@ def decide_incoming_trade(
     try:
         result = trade_inbox_service.decide(
             espn_transaction_id, payload.action, payload.approved_by, payload.comment
+        )
+    except Exception as error:
+        _incoming_error(error)
+    if result["duplicate"]:
+        response.status_code = 200
+    return result
+
+
+@trade_router.post(
+    "/incoming/{espn_transaction_id}/decision/retry",
+    response_model=PublicationReceipt,
+    status_code=202,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def retry_incoming_trade_decision(
+    payload: RetryRequest,
+    response: Response,
+    espn_transaction_id: str = Path(min_length=1, max_length=200),
+):
+    try:
+        result = trade_inbox_service.retry_decision(
+            espn_transaction_id,
+            payload.approved_by,
+            payload.of_claim_id,
+            payload.verified_not_answered,
         )
     except Exception as error:
         _incoming_error(error)

@@ -93,6 +93,16 @@ class DecisionRequest(HumanRequest):
     comment: str | None = Field(None, max_length=2000)
 
 
+class RetryRequest(HumanRequest):
+    of_claim_id: int = Field(
+        ge=1, description="The worker trade_response row to retry, from `response.id`."
+    )
+    verified_not_answered: bool = Field(
+        False,
+        description="Required for an unknown outcome: a human checked ESPN and the offer wasn't answered.",
+    )
+
+
 class CounterRequest(HumanRequest):
     week: int = Field(ge=1, le=18)
 
@@ -155,6 +165,7 @@ class PublicationReceipt(BaseModel):
     duplicate: bool = False
     decision_key: str | None = None
     action: Literal["accept", "decline"] | None = None
+    retry_of: int | None = None
 
 
 class InboxPublication(BaseModel):
@@ -167,6 +178,17 @@ class InboxPublication(BaseModel):
     decision_key: str | None = None
     action: Literal["accept", "decline"] | None = None
     publish_error: str | None = None
+    retry_of: int | None = None
+    verified_not_answered: bool | None = None
+
+
+class InboxResponse(BaseModel):
+    """The newest worker response row that blocks the offer: what a retry names."""
+
+    id: int
+    status: Literal["responding", "responded", "response_unknown", "rejected"]
+    action: str | None = None
+    decision_key: str | None = None
 
 
 class IncomingTrade(BaseModel):
@@ -202,6 +224,7 @@ class IncomingTrade(BaseModel):
     missed_reads: int = 0
     exit_reason: str | None = None
     publications: list[InboxPublication] = Field(default_factory=list)
+    response: InboxResponse | None = None
 
 
 class IncomingTradeList(BaseModel):

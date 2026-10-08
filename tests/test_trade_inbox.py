@@ -547,6 +547,7 @@ def test_list_rank_filter_and_paging(client, boundary):
     cursor.fetchall.side_effect = [
         [tuple(r[c] for c in service.ROW_COLUMNS) for r in entries],
         [("999", "Database name")],
+        [],
     ]
     with patch.object(service, "get_db_cursor") as db:
         db.return_value.__enter__.return_value = cursor
@@ -568,7 +569,11 @@ def test_invalid_advisory_does_not_break_list(client, boundary, caplog, bad_scor
     rows, _, _, _ = boundary
     rows[0]["counter_offer"]["score"].update(bad_score)
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [[tuple(rows[0][c] for c in service.ROW_COLUMNS)], []]
+    cursor.fetchall.side_effect = [
+        [tuple(rows[0][c] for c in service.ROW_COLUMNS)],
+        [],
+        [],
+    ]
     with patch.object(service, "get_db_cursor") as db:
         db.return_value.__enter__.return_value = cursor
         response = client.get("/v1/trade/incoming")
@@ -712,7 +717,7 @@ def test_counter_rejects_overlapping_internal_mappings(client, boundary):
 
 def test_triage_names_use_espn_lookup(client, boundary):
     _, _, _, cursor = boundary
-    cursor.fetchall.return_value = [("999", "Database name")]
+    cursor.fetchall.side_effect = [[("999", "Database name")], []]
     response = client.post(BASE + "/triage", json={"state": "seen", "by": "human"})
     assert response.status_code == 200
     assert response.json()["send_players"][0]["name"] == "Database name"
@@ -745,6 +750,7 @@ def test_visibility_and_history_filters(client, boundary, status, visibility, ex
     cursor = MagicMock()
     cursor.fetchall.side_effect = [
         [tuple(r[c] for c in service.ROW_COLUMNS) for r in rows],
+        [],
         [],
     ]
     with patch.object(service, "get_db_cursor") as db:
@@ -784,7 +790,11 @@ def test_listing_worker_outcome_and_claim_omits_publish_payload(client, boundary
         "verification": {"status": "unknown"},
     }
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [[tuple(rows[0][c] for c in service.ROW_COLUMNS)], []]
+    cursor.fetchall.side_effect = [
+        [tuple(rows[0][c] for c in service.ROW_COLUMNS)],
+        [],
+        [],
+    ]
     with patch.object(service, "get_db_cursor") as db:
         db.return_value.__enter__.return_value = cursor
         response = client.get("/v1/trade/incoming")
@@ -813,3 +823,269 @@ def test_sql_worker_claim_lookup():
     sql, params = cursor.execute.call_args.args
     assert params == ("456", "123")
     assert "trade_response" in sql and "response_unknown" in sql and "rejected" in sql
+
+
+def decline_key(comment=None, fingerprint="a" * 64):
+    return service.compute_decision_key(
+        "456", 2026, "8", "123", "decline", fingerprint, comment
+    )
+
+
+@pytest.fixture
+def worker_responses(boundary):
+    responses = [
+        dict(
+            id=41,
+            status="rejected",
+            decision_key=decline_key(),
+            action="decline",
+            comment=None,
+        )
+    ]
+    with patch.object(
+        service, "_worker_responses", side_effect=lambda *_: copy.deepcopy(responses)
+    ):
+        yield responses
+
+
+def published(connection):
+    channel = connection.return_value.channel.return_value
+    return [json.loads(c.kwargs["body"]) for c in channel.basic_publish.call_args_list]
+
+
+def test_retry_republishes_a_rejected_response_once(client, boundary, worker_responses):
+    rows, connection, audit, _ = boundary
+    original = service.decide("123", "decline", "human")
+    for code in (202, 200):
+        result = client.post(
+            BASE + "/decision/retry",
+            json={"approved_by": " retrier ", "of_claim_id": 41},
+        )
+        assert result.status_code == code, result.text
+        receipt = result.json()
+        assert receipt["duplicate"] == (code == 200)
+    assert receipt["retry_of"] == 41
+    assert receipt["decision_key"] == decline_key()
+    assert receipt["tracking_id"] != original["tracking_id"]
+    sent = published(connection)
+    assert len(sent) == 2
+    assert sent[1] == dict(
+        tracking_id=receipt["tracking_id"],
+        espn_transaction_id="123",
+        action="decline",
+        approval=dict(decision_key=decline_key(), approved_by="retrier"),
+        retry=dict(of_claim_id=41, approved_by="retrier", verified_not_answered=False),
+        traceparent=sent[1]["traceparent"],
+    )
+    claims = rows[0]["outcome_details"]["incoming_publications"]
+    assert claims[decline_key()]["tracking_id"] == original["tracking_id"]
+    assert claims[f"{decline_key()}:retry:41"]["status"] == "queued"
+    assert audit.call_args.kwargs["action"] == "trade_inbox_retry_decline"
+
+
+def test_retry_keeps_the_approved_response_comment(client, boundary, worker_responses):
+    _, connection, _, _ = boundary
+    worker_responses[0].update(
+        decision_key=decline_key("No thanks"), comment="No thanks"
+    )
+    result = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+    )
+    assert result.status_code == 202, result.text
+    assert published(connection)[0]["comment"] == "No thanks"
+    assert published(connection)[0]["approval"]["decision_key"] == decline_key(
+        "No thanks"
+    )
+
+
+def test_unknown_retry_needs_the_espn_check(client, boundary, worker_responses):
+    rows, connection, _, _ = boundary
+    worker_responses[0]["status"] = "response_unknown"
+    rows[0]["status"] = "responding"
+    rows[0]["counter_offer"]["decision"] = {
+        "decision_key": decline_key(),
+        "outcome": "unknown",
+    }
+    refused = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+    )
+    assert refused.status_code == 409
+    assert "checked ESPN" in refused.json()["detail"]
+    assert published(connection) == []
+
+    result = client.post(
+        BASE + "/decision/retry",
+        json={"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+    )
+    assert result.status_code == 202, result.text
+    assert published(connection)[0]["retry"]["verified_not_answered"] is True
+
+
+def test_unknown_retry_requires_its_own_responding_entry(
+    client, boundary, worker_responses
+):
+    rows, connection, _, _ = boundary
+    worker_responses[0]["status"] = "response_unknown"
+    rows[0]["status"] = "responding"
+    rows[0]["counter_offer"]["decision"] = {"decision_key": "b" * 64}
+    result = client.post(
+        BASE + "/decision/retry",
+        json={"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+    )
+    assert result.status_code == 409
+    assert published(connection) == []
+
+
+@pytest.mark.parametrize("status", ["responding", "responded"])
+def test_live_or_settled_responses_cannot_be_retried(
+    client, boundary, worker_responses, status
+):
+    _, connection, _, _ = boundary
+    worker_responses[0]["status"] = status
+    result = client.post(
+        BASE + "/decision/retry",
+        json={"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+    )
+    assert result.status_code == 409
+    assert published(connection) == []
+
+
+def test_retry_refuses_unknown_or_stale_claim_ids(client, boundary, worker_responses):
+    _, connection, _, _ = boundary
+    missing = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 9}
+    )
+    assert missing.status_code == 404
+    worker_responses.append(
+        dict(
+            id=52,
+            status="responding",
+            decision_key=decline_key(),
+            action="decline",
+            comment=None,
+        )
+    )
+    stale = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+    )
+    assert stale.status_code == 409
+    assert published(connection) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda r: r["counter_offer"].update(fingerprint="c" * 64),
+        lambda r: r["counter_offer"].update(
+            expiration_date=int((NOW + timedelta(minutes=4)).timestamp() * 1000)
+        ),
+        lambda r: r.update(status="declined"),
+    ],
+)
+def test_retry_fails_closed_when_the_offer_changed(
+    client, boundary, worker_responses, change
+):
+    rows, connection, _, _ = boundary
+    change(rows[0])
+    result = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+    )
+    assert result.status_code == 409
+    assert published(connection) == []
+
+
+def test_retry_is_blocked_by_an_uncertain_publication(
+    client, boundary, worker_responses
+):
+    rows, connection, _, _ = boundary
+    rows[0]["outcome_details"]["incoming_publications"] = {
+        "other": dict(
+            kind="counter",
+            status="pending",
+            tracking_id="t",
+            approved_by="h",
+            approved_at=NOW.isoformat(),
+            fingerprint="a" * 64,
+        )
+    }
+    result = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+    )
+    assert result.status_code == 409
+    assert published(connection) == []
+
+
+def test_accept_retry_rechecks_the_score(client, boundary, worker_responses):
+    rows, connection, _, _ = boundary
+    worker_responses[0].update(
+        action="accept",
+        decision_key=service.compute_decision_key(
+            "456", 2026, "8", "123", "accept", "a" * 64
+        ),
+    )
+    rows[0]["counter_offer"]["score"]["exceeds_roster_limit"] = True
+    result = client.post(
+        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+    )
+    assert result.status_code == 409
+    assert published(connection) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"approved_by": "human"},
+        {"approved_by": " ", "of_claim_id": 41},
+        {"approved_by": "human", "of_claim_id": 0},
+        {"approved_by": "human", "of_claim_id": 41, "extra": 1},
+    ],
+)
+def test_bad_retry_requests(client, boundary, worker_responses, payload):
+    assert client.post(BASE + "/decision/retry", json=payload).status_code == 422
+
+
+def test_retry_requires_the_api_key(client, boundary, worker_responses):
+    result = client.post(
+        BASE + "/decision/retry",
+        json={"approved_by": "human", "of_claim_id": 41},
+        headers={"X-API-Key": "wrong"},
+    )
+    assert result.status_code == 401
+
+
+def test_listing_exposes_the_latest_worker_response(client, boundary):
+    rows, _, _, _ = boundary
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [tuple(rows[0][c] for c in service.ROW_COLUMNS)],
+        [],
+        [(41, "456", "123", "rejected", "decline", decline_key())],
+    ]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/trade/incoming")
+    assert response.status_code == 200, response.text
+    assert response.json()["offers"][0]["response"] == dict(
+        id=41, status="rejected", action="decline", decision_key=decline_key()
+    )
+
+
+def test_sql_worker_response_lookups():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(41, "rejected", "k", "decline", None)]
+    assert service._worker_responses(cursor, "456", "123") == [
+        dict(id=41, status="rejected", decision_key="k", action="decline", comment=None)
+    ]
+    sql, params = cursor.execute.call_args.args
+    assert params == ("456", "123")
+    assert "trade_response" in sql and "rejected" in sql and "superseded" not in sql
+    cursor.fetchall.return_value = [(41, "456", "123", "rejected", "decline", "k")]
+    assert service._latest_responses(
+        cursor, [dict(league_id="456", counter_offer={"espn_transaction_id": "123"})]
+    ) == {
+        ("456", "123"): dict(
+            id=41, status="rejected", action="decline", decision_key="k"
+        )
+    }
+    sql, params = cursor.execute.call_args.args
+    assert "DISTINCT ON" in sql and params == (["123"],)

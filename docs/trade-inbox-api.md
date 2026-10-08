@@ -48,6 +48,7 @@ Each offer exposes the following fields (the Pydantic models also define OpenAPI
 | `score`, `shadow_policy` | nullable, validated advisory evidence |
 | `missed_reads`, `exit_reason` | refresh retirement evidence |
 | `publications` | core claims with payload omitted; distinct from worker outcomes |
+| `response` | `{id, status, action, decision_key}` of the newest worker `trade_response` row that blocks the offer (`responding`, `responded`, `response_unknown`, `rejected`), or null; `id` is what a retry names |
 
 Names resolve through `players.espn_id`, falling back to worker-captured names.
 Unresolved names stay null. Internal `player_id` is never inferred from numeric
@@ -72,7 +73,7 @@ Use `last_seen_at` for per-offer refresh time; it is not a global job heartbeat.
 
 ## Writes
 
-All three writes require `X-API-Key` matching `TRIGGER_API_KEY`. The existing guard
+All four writes require `X-API-Key` matching `TRIGGER_API_KEY`. The existing guard
 returns 422 for a missing header, 401 for an incorrect key and 500 when the server
 key is not configured. `approved_by`/`by` are nonblank, trimmed human audit labels
 (maximum 200 characters); they are not authenticated identities. Extra body fields
@@ -118,7 +119,30 @@ This starts negotiation and staging for later outgoing approval. It does not
 submit a counter or mark the original offer `countered`. The existing payload
 does not carry the original ESPN transaction/thread ID.
 
-Both publication routes return 202 for a new broker-confirmed publication and 200
+`POST /v1/trade/incoming/{espn_transaction_id}/decision/retry` accepts
+`{approved_by, of_claim_id, verified_not_answered?}`. It republishes an approved
+response that the worker could not complete. `of_claim_id` is the listed
+`response.id`. Under the offer lock it requires:
+- the named row is the offer's only blocking worker response;
+- its status is `rejected`, or `response_unknown` with `verified_not_answered: true`,
+  meaning a human checked ESPN and the offer wasn't answered. `responding` (maybe in
+  flight) and `responded` are never retried;
+- the row's decision key still matches the stored offer, recomputed from its action
+  and comment;
+- the offer is `open` after a rejection, or `responding` with this decision after an
+  unknown outcome, and otherwise actionable (parsed, more than five minutes from
+  expiry; an accept still needs matching score evidence within the roster limit);
+- every other publication is `failed_before_publish` or an earlier `queued` send of
+  this same decision.
+
+It publishes the original action, comment and decision key with a fresh
+`tracking_id`, plus `retry: {of_claim_id, approved_by, verified_not_answered}`. The
+worker re-checks all of this against a fresh ESPN read and supersedes the named row
+in the same transaction as its new claim. The claim is stored under
+`<decision_key>:retry:<of_claim_id>`, so the original receipt is kept, and a repeat
+returns the retry's receipt. Receipts carry `retry_of`.
+
+All three publication routes return 202 for a new broker-confirmed publication and 200
 for a duplicate, with:
 
 ```json
@@ -169,22 +193,21 @@ Any outstanding/queued action blocks competing actions, even if a refresh change
 the offer fingerprint. Existing worker `responding`, `responded`, `response_unknown`
 or `rejected` response rows also block new work when the inbox still looks open.
 A repeat of the same confirmed request returns its receipt without another send.
-Blocked or rejected worker execution does not cause core to republish automatically.
-There is no reconciliation or reapproval endpoint in this change.
+Blocked or rejected worker execution does not cause core to republish automatically:
+only an explicit human retry (above) does, and never for a response still in flight.
 
 Reconcile using the stored payload, tracking ID, broker/worker logs, response rows,
 Activity, and ESPN evidence. Reset a claim only after establishing that no action
 was queued/sent and that no consumer can still execute it. An unknown result must
 remain blocked. Any production write needs explicit operator authorization.
 
-Worker follow-ups: [full score evidence](https://github.com/cvillarr23/fantasy-browser-worker/issues/152),
-[response concurrency and recovery](https://github.com/cvillarr23/fantasy-browser-worker/issues/153),
+Worker follow-ups: [full score evidence](https://github.com/cvillarr23/fantasy-browser-worker/issues/152)
 and [counter thread linkage](https://github.com/cvillarr23/fantasy-browser-worker/issues/154).
 
-Before enabling responses, the worker needs concurrency/recovery improvements:
-its execution checks happen before its later inbox lock, and its initial
-`responding` refusal precedes the redelivery reconciliation path. Core's lock alone
-does not repair those worker behaviors. The response flag remains off.
+The worker claims an offer atomically under the same `trade-inbox` lock (then the
+decision-key lock), re-checking the stored entry. It reconciles an existing claim
+by reading ESPN back before any fresh-offer check, and treats the same four
+response statuses as blocking. The response flag remains off.
 
 Tests mock both storage and AMQP; never probe decision/counter endpoints on the
 deployed stack. Hash fixtures were generated from worker `origin/main` at
