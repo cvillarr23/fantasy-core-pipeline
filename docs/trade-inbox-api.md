@@ -42,6 +42,7 @@ Each offer exposes the following fields (the Pydantic models also define OpenAPI
 | `send_espn_ids`, `receive_espn_ids` | string ESPN player IDs, from our perspective |
 | `send_players`, `receive_players` | `{espn_id, name: string|null}[]`, preserving side order |
 | `other_items`, `player_names`, `comment`, `fingerprint`, `parse_issues` | stored offer details; comment is the proposer's note |
+| `review_token` | opaque 64-hex version of the offer the human is reviewing; send it back on every publication (see [Review token](#review-token)) |
 | `proposed_date`, `expiration_date`, `first_seen_at`, `last_seen_at` | UTC ISO timestamps or null; ESPN milliseconds are converted |
 | `triage` | `{state, by?, at?, snooze_until?}` or null |
 | `decision` | worker-owned JSON or null; includes its outcome and verification details |
@@ -84,8 +85,39 @@ are rejected. Writes target the configured worker league/team.
 future timestamp; other states reject `snooze_until`. Returns the updated item
 with 200. It is permitted in every inbox state and changes neither ESPN nor status.
 
+### Review token
+
+Decision, counter and retry each require `review_token`, copied from the listed row
+the human reviewed. Missing or malformed tokens get 422. Under the offer lock, and
+before any other check, claim, audit or broker access, core recomputes the token from
+the row it just read `FOR UPDATE`. Any difference returns 409 "The offer changed since
+it was reviewed" and nothing is queued. The 409 doesn't include the current token:
+getting a new one takes a fresh read, so the human sees the offer again. Worker
+refreshes take the same lock, so a refresh can't land between the check and the claim.
+
+The token is SHA-256 of compact UTF-8 JSON:
+
+```text
+["trade-inbox-review-v1", league, season, our_team, transaction_id, proposer,
+ fingerprint, sorted(send_ids), sorted(receive_ids), sorted(other_items), comment]
+```
+
+League and season are strings. Each list member is canonical JSON (sorted keys), so
+item order doesn't matter. `comment` is the proposer's exact, untrimmed note, which the
+worker fingerprint leaves out. Triage, refresh timestamps, `missed_reads`, player
+names, `score`, `shadow_policy` and other score evidence are excluded. They change
+without the trade changing, and accept and counter re-check score under the lock.
+Change the version string whenever the covered fields change. Clients must treat the
+token as opaque.
+
+Because the token check comes first, replaying a request on an unchanged offer still
+returns its duplicate receipt, and an unresolved publication still blocks with its
+own 409. Once the offer has changed, any request gets the mismatch 409. The token is
+stored on each claim (`publications[].review_token`, null on older claims) and in the
+`bot_decisions` audit. It is not published to the broker.
+
 `POST /v1/trade/incoming/{espn_transaction_id}/decision` accepts
-`{action: accept|decline, approved_by, comment?}`. The comment is at most 2000
+`{action: accept|decline, approved_by, review_token, comment?}`. The comment is at most 2000
 characters, trimmed exactly like JavaScript `String.trim`; empty becomes null.
 It is the response comment, separate from the original proposer's note.
 
@@ -109,7 +141,7 @@ approval: {decision_key, approved_by}}` plus tracing. Null comments are omitted.
 Scores and shadow policy are never published as approval metadata.
 
 `POST /v1/trade/incoming/{espn_transaction_id}/counter` accepts
-`{approved_by, week: 1..18}`. Only open, parsed, unexpired entries are eligible.
+`{approved_by, review_token, week: 1..18}`. Only open, parsed, unexpired entries are eligible.
 It requires a score matching the offer fingerprint and requested week, and a
 nonempty internal mapping for every player on both sides. The `trade_negotiations`
 body exactly follows worker `buildNegotiationPayload`: `{tracking_id, season,
@@ -120,7 +152,7 @@ submit a counter or mark the original offer `countered`. The existing payload
 does not carry the original ESPN transaction/thread ID.
 
 `POST /v1/trade/incoming/{espn_transaction_id}/decision/retry` accepts
-`{approved_by, of_claim_id, verified_not_answered?}`. It republishes an approved
+`{approved_by, review_token, of_claim_id, verified_not_answered?}`. It republishes an approved
 response that the worker could not complete. `of_claim_id` is the listed
 `response.id`. Under the offer lock it requires:
 - the named row is the offer's only blocking worker response;
@@ -164,7 +196,7 @@ Counter receipts have `kind=counter`, `decision_key=null`, `action=null`.
 blocks or rejects the request. Duplicate receipts retain the original approver,
 timestamp and tracking ID, including after the worker settles the offer.
 
-Other responses: 404 missing entry; 409 unsafe/non-open state, unmapped players,
+Other responses: 404 missing entry; 409 offer changed since review, unsafe/non-open state, unmapped players,
 duplicate rows, competing action or reconciliation needed; 422 invalid input;
 503 broker publication failure. None certifies an ESPN response.
 
@@ -179,7 +211,7 @@ commit atomically with `bot_decisions` before broker access. Decision keys use t
 worker digest. Counter keys hash `["trade-inbox-counter-v1", league, season,
 our_team, transaction_id, fingerprint, week]` (season is a string).
 Claims contain `kind`, `status`, `tracking_id`, `approved_by`, `approved_at`,
-`fingerprint`, exact `payload`, and decision action/key where applicable.
+`fingerprint`, `review_token`, exact `payload`, and decision action/key where applicable.
 Only the payload is omitted from list responses.
 
 `pending` includes both in-flight and outcome-unknown publication. Confirmed sends

@@ -108,7 +108,11 @@ def decide_incoming_trade(
 ):
     try:
         result = trade_inbox_service.decide(
-            espn_transaction_id, payload.action, payload.approved_by, payload.comment
+            espn_transaction_id,
+            payload.action,
+            payload.approved_by,
+            payload.comment,
+            review_token=payload.review_token,
         )
     except Exception as error:
         _incoming_error(error)
@@ -134,6 +138,7 @@ def retry_incoming_trade_decision(
             payload.approved_by,
             payload.of_claim_id,
             payload.verified_not_answered,
+            review_token=payload.review_token,
         )
     except Exception as error:
         _incoming_error(error)
@@ -155,7 +160,10 @@ def counter_incoming_trade(
 ):
     try:
         result = trade_inbox_service.counter(
-            espn_transaction_id, payload.approved_by, payload.week
+            espn_transaction_id,
+            payload.approved_by,
+            payload.week,
+            review_token=payload.review_token,
         )
     except Exception as error:
         _incoming_error(error)

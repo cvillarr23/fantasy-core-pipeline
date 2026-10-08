@@ -5,6 +5,7 @@ in outcome_details so refreshes and response results cannot erase an uncertain s
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -37,6 +38,9 @@ BLOCKING_RESPONSE_STATUSES = ("responding", "responded", "response_unknown", "re
 # confirm it. A responding row may still be in flight; a responded one is final.
 RETRYABLE_RESPONSE_STATUSES = ("rejected", "response_unknown")
 RESPONSE_MARGIN = timedelta(minutes=5)
+# Hashed into every review token: bump it when the covered fields change, so outstanding
+# tokens fail closed and the UI re-reads the offer.
+REVIEW_TOKEN_VERSION = "trade-inbox-review-v1"
 # Python strip also removes control characters that JavaScript trim preserves, and
 # omits the BOM that JavaScript trims. Approval hashes must use the worker's exact set.
 JS_WHITESPACE = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
@@ -171,6 +175,7 @@ def _shape(row, names=None, responses=None):
             dict(espn_id=pid, name=names.get(pid) or roster_names.get(pid))
             for pid in entry.get(f"{side}_espn_ids", [])
         ]
+    item["review_token"] = compute_review_token(row)
     item["score"] = _advisory(row, "score", InboxScore)
     item["shadow_policy"] = _advisory(row, "shadow_policy", ShadowPolicy)
     item["publications"] = [
@@ -335,6 +340,56 @@ def _digest(parts):
     ).hexdigest()
 
 
+def _bag(value):
+    """A list's members as sorted canonical JSON, so ESPN item order and jsonb key order
+    don't change the token. Anything else is hashed as stored."""
+    if not isinstance(value, list):
+        return value
+    return sorted(
+        json.dumps(v, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        for v in value
+    )
+
+
+def compute_review_token(row):
+    """Identifies the offer version a human reviewed, so a publication can't apply their
+    approval to a version they never saw.
+
+    It covers the worker fingerprint (items and dates), both sides and the other items
+    explicitly (core can't recompute the fingerprint to check them), and the proposer's
+    exact note, which the fingerprint leaves out. Refresh bookkeeping, triage and score
+    evidence are left out: they change without the trade changing, and accept and counter
+    re-check score under the lock anyway.
+    """
+    entry = row["counter_offer"] or {}
+    return _digest(
+        [
+            REVIEW_TOKEN_VERSION,
+            str(row["league_id"]),
+            str(row["season"]),
+            entry.get("our_team_id"),
+            entry.get("espn_transaction_id"),
+            entry.get("proposing_team_id"),
+            entry.get("fingerprint"),
+            _bag(entry.get("send_espn_ids")),
+            _bag(entry.get("receive_espn_ids")),
+            _bag(entry.get("other_items")),
+            entry.get("comment"),
+        ]
+    )
+
+
+def _require_reviewed(row, review_token):
+    # Runs on the locked FOR UPDATE row, before anything is claimed, audited or sent. The
+    # current token is deliberately not returned: a new one needs a new read and review.
+    if not isinstance(review_token, str) or not hmac.compare_digest(
+        review_token, compute_review_token(row)
+    ):
+        raise InboxConflict(
+            "The offer changed since it was reviewed; reload it and review again."
+        )
+
+
 def _comment(value):
     return (value or "").strip(JS_WHITESPACE) or None
 
@@ -484,18 +539,23 @@ def _approver(approved_by):
     return approved_by.strip()
 
 
-def decide(tx, action, approved_by, comment=None):
+def decide(tx, action, approved_by, comment=None, *, review_token):
     return _request_publication(
-        tx, "decision", approved_by, action=action, comment=_comment(comment)
+        tx,
+        "decision",
+        approved_by,
+        review_token,
+        action=action,
+        comment=_comment(comment),
     )
 
 
-def counter(tx, approved_by, week):
-    return _request_publication(tx, "counter", approved_by, week=week)
+def counter(tx, approved_by, week, *, review_token):
+    return _request_publication(tx, "counter", approved_by, review_token, week=week)
 
 
 def _request_publication(
-    tx, kind, approved_by, *, action=None, comment=None, week=None
+    tx, kind, approved_by, review_token, *, action=None, comment=None, week=None
 ):
     from src.api import routes
 
@@ -508,6 +568,7 @@ def _request_publication(
     with get_db_cursor() as cursor:
         row = _one(cursor, league, tx)
         entry = _identity(row, league, team, tx)
+        _require_reviewed(row, review_token)
         key = (
             compute_decision_key(
                 league, row["season"], team, tx, action, entry["fingerprint"], comment
@@ -615,6 +676,7 @@ def _request_publication(
             approved_by=approved_by,
             approved_at=_now().isoformat(),
             fingerprint=entry["fingerprint"],
+            review_token=review_token,
             payload=payload,
         )
         if kind == "decision":
@@ -673,10 +735,13 @@ def _publish(league, tx, key, claim, queue, payload):
     return _receipt(tx, claim)
 
 
-def retry_decision(tx, approved_by, of_claim_id, verified_not_answered=False):
+def retry_decision(
+    tx, approved_by, of_claim_id, verified_not_answered=False, *, review_token
+):
     """Publishes the same approved response again for a worker row ESPN rejected or whose
     outcome is unknown. The worker supersedes that row in the same transaction as its new
     claim, and re-checks everything against a fresh ESPN read. Here, under the offer lock:
+    - the stored offer must still be the version the human reviewed;
     - the named row must be the offer's only blocking response, and be retryable;
     - an unknown outcome also needs a human's confirmation that ESPN shows no answer;
     - the response's decision key must still match the stored offer;
@@ -691,6 +756,7 @@ def retry_decision(tx, approved_by, of_claim_id, verified_not_answered=False):
     with get_db_cursor() as cursor:
         row = _one(cursor, league, tx)
         entry = _identity(row, league, team, tx)
+        _require_reviewed(row, review_token)
         responses = _worker_responses(cursor, league, tx)
         target = next((r for r in responses if r["id"] == of_claim_id), None)
         if target is None:
@@ -764,6 +830,7 @@ def retry_decision(tx, approved_by, of_claim_id, verified_not_answered=False):
             approved_by=approved_by,
             approved_at=_now().isoformat(),
             fingerprint=entry["fingerprint"],
+            review_token=review_token,
             payload=payload,
             decision_key=key,
             action=action,
