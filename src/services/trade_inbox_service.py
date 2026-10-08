@@ -30,6 +30,12 @@ ROW_COLUMNS = (
 )
 SELECT_COLUMNS = ", ".join(ROW_COLUMNS)
 LIVE_STATUSES = {"open", "unparsed", "responding"}
+# Worker response rows in these states own their offer. A retried row becomes
+# `superseded`, which is deliberately absent.
+BLOCKING_RESPONSE_STATUSES = ("responding", "responded", "response_unknown", "rejected")
+# The only worker outcomes a human may retry: ESPN refused the send, or no read could
+# confirm it. A responding row may still be in flight; a responded one is final.
+RETRYABLE_RESPONSE_STATUSES = ("rejected", "response_unknown")
 RESPONSE_MARGIN = timedelta(minutes=5)
 # Python strip also removes control characters that JavaScript trim preserves, and
 # omits the BOM that JavaScript trims. Approval hashes must use the worker's exact set.
@@ -124,7 +130,7 @@ def _advisory(row, field, model):
         return None
 
 
-def _shape(row, names=None):
+def _shape(row, names=None, responses=None):
     names = names or {}
     entry = row["counter_offer"] or {}
     item = {
@@ -171,6 +177,9 @@ def _shape(row, names=None):
         {k: v for k, v in claim.items() if k != "payload"}
         for claim in _publications(row).values()
     ]
+    item["response"] = (responses or {}).get(
+        (row["league_id"], entry.get("espn_transaction_id"))
+    )
     return item
 
 
@@ -209,7 +218,10 @@ def list_incoming(
         ]
         rows = sorted(rows, key=_rank)[offset : offset + limit]
         names = _player_names(cursor, rows)
-    return dict(offers=[_shape(r, names) for r in rows], limit=limit, offset=offset)
+        responses = _latest_responses(cursor, rows)
+    return dict(
+        offers=[_shape(r, names, responses) for r in rows], limit=limit, offset=offset
+    )
 
 
 def _player_names(cursor, rows):
@@ -225,6 +237,28 @@ def _player_names(cursor, rows):
         "SELECT espn_id, name FROM players WHERE espn_id = ANY(%s)", (list(ids),)
     )
     return dict(cursor.fetchall())
+
+
+def _latest_responses(cursor, rows):
+    """The newest blocking worker response per offer: what a retry would name."""
+    ids = sorted(
+        {(r["counter_offer"] or {}).get("espn_transaction_id") for r in rows} - {None}
+    )
+    if not ids:
+        return {}
+    cursor.execute(
+        "SELECT DISTINCT ON (league_id, counter_offer->>'espn_transaction_id') id, league_id, "
+        "counter_offer->>'espn_transaction_id', status, counter_offer->>'action', "
+        "counter_offer->>'decision_key' FROM execution_log WHERE transaction_type = 'trade_response' "
+        "AND counter_offer->>'espn_transaction_id' = ANY(%s) "
+        "AND status IN ('responding', 'responded', 'response_unknown', 'rejected') "
+        "ORDER BY league_id, counter_offer->>'espn_transaction_id', id DESC",
+        (ids,),
+    )
+    return {
+        (league, tx): dict(id=rid, status=status, action=action, decision_key=key)
+        for rid, league, tx, status, action, key in cursor.fetchall()
+    }
 
 
 def _scope():
@@ -289,7 +323,8 @@ def triage(tx, state, by, snooze_until=None):
         _save_triage(cursor, row["id"], value)
         row["counter_offer"]["triage"] = value
         names = _player_names(cursor, [row])
-    return _shape(row, names)
+        responses = _latest_responses(cursor, [row])
+    return _shape(row, names, responses)
 
 
 def _digest(parts):
@@ -350,6 +385,20 @@ def _worker_response_exists(cursor, league, tx):
     return cursor.fetchone() is not None
 
 
+def _worker_responses(cursor, league, tx):
+    cursor.execute(
+        "SELECT id, status, counter_offer->>'decision_key', counter_offer->>'action', "
+        "counter_offer->>'comment' FROM execution_log WHERE transaction_type = 'trade_response' "
+        "AND league_id = %s AND counter_offer->>'espn_transaction_id' = %s "
+        "AND status IN ('responding', 'responded', 'response_unknown', 'rejected') ORDER BY id DESC",
+        (league, tx),
+    )
+    return [
+        dict(id=rid, status=status, decision_key=key, action=action, comment=comment)
+        for rid, status, key, action, comment in cursor.fetchall()
+    ]
+
+
 def _identity(row, league, team, tx):
     entry = row["counter_offer"]
     if (
@@ -375,8 +424,8 @@ def _identity(row, league, team, tx):
     return entry
 
 
-def _actionable(row, entry):
-    if row["status"] != "open":
+def _actionable(row, entry, statuses=("open",)):
+    if row["status"] not in statuses:
         raise InboxConflict("Offer is not open.")
     if (
         entry.get("parse_issues") != []
@@ -415,7 +464,24 @@ def _receipt(tx, claim, duplicate=False):
         duplicate=duplicate,
         decision_key=claim.get("decision_key"),
         action=claim.get("action"),
+        retry_of=claim.get("retry_of"),
     )
+
+
+def _require_accept_score(row, entry):
+    score = _advisory(row, "score", InboxScore)
+    if score is None or score.scored_fingerprint != entry["fingerprint"]:
+        raise InboxConflict(
+            "Accept requires score evidence for this offer fingerprint."
+        )
+    if score.exceeds_roster_limit:
+        raise InboxConflict("Accept would exceed the roster limit.")
+
+
+def _approver(approved_by):
+    if not isinstance(approved_by, str) or not approved_by.strip():
+        raise ValueError("A human approved_by is required.")
+    return approved_by.strip()
 
 
 def decide(tx, action, approved_by, comment=None):
@@ -434,9 +500,7 @@ def _request_publication(
     from src.api import routes
 
     league, team = _scope()
-    if not isinstance(approved_by, str) or not approved_by.strip():
-        raise ValueError("A human approved_by is required.")
-    approved_by = approved_by.strip()
+    approved_by = _approver(approved_by)
     if kind == "decision" and action not in ("accept", "decline"):
         raise ValueError("action must be accept or decline.")
     if kind == "counter" and (type(week) is not int or not 1 <= week <= 18):
@@ -488,13 +552,7 @@ def _request_publication(
         tracking_id = str(uuid.uuid4())
         if kind == "decision":
             if action == "accept":
-                score = _advisory(row, "score", InboxScore)
-                if score is None or score.scored_fingerprint != entry["fingerprint"]:
-                    raise InboxConflict(
-                        "Accept requires score evidence for this offer fingerprint."
-                    )
-                if score.exceeds_roster_limit:
-                    raise InboxConflict("Accept would exceed the roster limit.")
+                _require_accept_score(row, entry)
             payload = dict(
                 tracking_id=tracking_id,
                 espn_transaction_id=tx,
@@ -573,7 +631,13 @@ def _request_publication(
             ),
             cursor=cursor,
         )
-    # Persist the claim before broker access: rollback after a successful send would
+    return _publish(league, tx, key, claim, queue, payload)
+
+
+def _publish(league, tx, key, claim, queue, payload):
+    from src.api import routes
+
+    # The claim was committed before this point: rollback after a successful send would
     # allow a second publication of an irreversible response.
     connection, attempted = None, False
     try:
@@ -607,6 +671,118 @@ def _request_publication(
         routes._close_broker_connection(connection)
     _finish_publication(league, tx, key, claim, "queued")
     return _receipt(tx, claim)
+
+
+def retry_decision(tx, approved_by, of_claim_id, verified_not_answered=False):
+    """Publishes the same approved response again for a worker row ESPN rejected or whose
+    outcome is unknown. The worker supersedes that row in the same transaction as its new
+    claim, and re-checks everything against a fresh ESPN read. Here, under the offer lock:
+    - the named row must be the offer's only blocking response, and be retryable;
+    - an unknown outcome also needs a human's confirmation that ESPN shows no answer;
+    - the response's decision key must still match the stored offer;
+    - no other publication may be uncertain, except earlier queued sends of this decision.
+    """
+    from src.api import routes
+
+    league, team = _scope()
+    approved_by = _approver(approved_by)
+    if type(of_claim_id) is not int or of_claim_id < 1:
+        raise ValueError("of_claim_id must be a positive worker response id.")
+    with get_db_cursor() as cursor:
+        row = _one(cursor, league, tx)
+        entry = _identity(row, league, team, tx)
+        responses = _worker_responses(cursor, league, tx)
+        target = next((r for r in responses if r["id"] == of_claim_id), None)
+        if target is None:
+            raise InboxNotFound(
+                "That worker response is not a blocking response for this offer."
+            )
+        if len(responses) != 1:
+            raise InboxConflict(
+                "Another worker response blocks this offer; reconcile it first."
+            )
+        if target["status"] not in RETRYABLE_RESPONSE_STATUSES:
+            raise InboxConflict(f"A {target['status']} response can't be retried.")
+        unknown = target["status"] == "response_unknown"
+        if unknown and verified_not_answered is not True:
+            raise InboxConflict(
+                "Retrying an unknown response needs confirmation that someone checked ESPN "
+                "and the offer wasn't answered."
+            )
+        key, action = target["decision_key"], target["action"]
+        comment = _comment(target["comment"])
+        if action not in ("accept", "decline") or key != compute_decision_key(
+            league, row["season"], team, tx, action, entry["fingerprint"], comment
+        ):
+            raise InboxConflict(
+                "The offer changed since this response was approved; it can't be retried."
+            )
+        publication_key = f"{key}:retry:{of_claim_id}"
+        claims = _publications(row)
+        existing = claims.get(publication_key)
+        if existing and existing.get("status") == "queued":
+            return _receipt(tx, existing, duplicate=True)
+        if any(
+            c.get("status") != "failed_before_publish"
+            and not (
+                c.get("status") == "queued"
+                and c.get("kind") == "decision"
+                and c.get("decision_key") == key
+            )
+            for c in claims.values()
+        ):
+            raise InboxConflict(
+                "An action is already queued, pending, or outcome-unknown; reconcile before retrying."
+            )
+        # After a rejection the worker reopened the offer. After an unknown outcome the
+        # offer still shows this decision's claim as responding.
+        if unknown and (entry.get("decision") or {}).get("decision_key") != key:
+            raise InboxConflict(
+                "The offer's responding state belongs to another decision."
+            )
+        _actionable(row, entry, ("responding",) if unknown else ("open",))
+        if action == "accept":
+            _require_accept_score(row, entry)
+        tracking_id = str(uuid.uuid4())
+        payload = dict(
+            tracking_id=tracking_id,
+            espn_transaction_id=tx,
+            action=action,
+            approval=dict(decision_key=key, approved_by=approved_by),
+            retry=dict(
+                of_claim_id=of_claim_id,
+                approved_by=approved_by,
+                verified_not_answered=verified_not_answered is True,
+            ),
+        )
+        if comment is not None:
+            payload["comment"] = comment
+        claim = dict(
+            kind="decision",
+            status="pending",
+            tracking_id=tracking_id,
+            approved_by=approved_by,
+            approved_at=_now().isoformat(),
+            fingerprint=entry["fingerprint"],
+            payload=payload,
+            decision_key=key,
+            action=action,
+            retry_of=of_claim_id,
+            verified_not_answered=verified_not_answered is True,
+        )
+        _save_publication(cursor, row["id"], publication_key, claim)
+        routes._record_bot_decision(
+            tracking_id=tracking_id,
+            bot_name="trade_inbox",
+            action=f"trade_inbox_retry_{action}",
+            team_id=team,
+            league_id=league,
+            decision_inputs=dict(
+                season=row["season"], week=None, execution_log_id=row["id"], **claim
+            ),
+            cursor=cursor,
+        )
+    return _publish(league, tx, publication_key, claim, "trade_responses", payload)
 
 
 def _finish_publication(league, tx, key, claim, status):

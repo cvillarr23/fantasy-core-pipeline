@@ -63,7 +63,7 @@
   payload, since approval binds what the other manager receives, not our reasoning. An
   unknown version or invalid payload becomes `null` with a warning instead of failing the list.
 - The incoming inbox uses `trade_inbox_service` and `schemas/trade_inbox.py`;
-  all three inbox writes require the existing `X-API-Key` guard. Core publication
+  all four inbox writes require the existing `X-API-Key` guard. Core publication
   claims live in `outcome_details.incoming_publications`, separate from worker-owned
   inbox status and decision. Never set `responding` when queuing: the executor rejects
   that state. `queued` means broker-confirmed, not ESPN-processed. See

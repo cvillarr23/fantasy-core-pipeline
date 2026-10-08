@@ -297,8 +297,8 @@ they cover exact whitespace, Unicode, null messages, sorted IDs, and D/ST IDs.
 ### Incoming trade inbox
 
 `GET /v1/trade/incoming` lists the worker's incoming offers in `rankInbox` order.
-The triage, decision and counter routes require `X-API-Key`; decisions also require
-an explicit human approver. A `queued` receipt confirms broker publication only.
+The triage, decision, decision retry and counter routes require `X-API-Key`;
+decisions and retries also require an explicit human approver. A `queued` receipt confirms broker publication only.
 The worker owns ESPN response execution and confirmed outcomes, and
 `TRADE_RESPONSE_ENABLED` stays off in production.
 
