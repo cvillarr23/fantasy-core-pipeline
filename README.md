@@ -294,6 +294,18 @@ fixtures were generated from fantasy-browser-worker's `computeOfferKey` on main;
 they cover exact whitespace, Unicode, null messages, sorted IDs, and D/ST IDs.
 
 
+### Incoming trade inbox
+
+`GET /v1/trade/incoming` lists the worker's incoming offers in `rankInbox` order.
+The triage, decision and counter routes require `X-API-Key`; decisions also require
+an explicit human approver. A `queued` receipt confirms broker publication only.
+The worker owns ESPN response execution and confirmed outcomes, and
+`TRADE_RESPONSE_ENABLED` stays off in production.
+
+See [the incoming inbox API contract](docs/trade-inbox-api.md) for query filters,
+schemas, queue payloads, status transitions, idempotency and reconciliation.
+Countering hands off to negotiation and stages an offer for later approval.
+
 ## League trade context
 
 ### ESPN score and schedule ingestion
