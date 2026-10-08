@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import re
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,15 @@ def boundary(monkeypatch):
         yield rows, connection, audit, cursor
 
 
+def token(boundary):
+    """The review token of the offer as currently stored: what a fresh GET would show."""
+    return service.compute_review_token(boundary[0][0])
+
+
+def reviewed(boundary, payload):
+    return {**payload, "review_token": token(boundary)}
+
+
 @pytest.mark.parametrize(
     "comment,normalized", [(None, None), ("  ", None), ("  Yes ☃  ", "Yes ☃")]
 )
@@ -177,7 +187,10 @@ def test_decision_receipt_payload_and_duplicate(client, boundary):
     for code, approver in [(202, " human "), (200, "another")]:
         result = client.post(
             BASE + "/decision",
-            json={"action": "accept", "approved_by": approver, "comment": " Yes "},
+            json=reviewed(
+                boundary,
+                {"action": "accept", "approved_by": approver, "comment": " Yes "},
+            ),
         )
         assert result.status_code == code, result.text
         receipt = result.json()
@@ -234,7 +247,10 @@ def test_decision_receipt_payload_and_duplicate(client, boundary):
 def test_only_open_actionable(client, boundary, status, kind, payload):
     rows, connection, _, _ = boundary
     rows[0]["status"] = status
-    assert client.post(BASE + "/" + kind, json=payload).status_code == 409
+    assert (
+        client.post(BASE + "/" + kind, json=reviewed(boundary, payload)).status_code
+        == 409
+    )
     connection.assert_not_called()
 
 
@@ -276,7 +292,8 @@ def test_unsafe_accept_refused(client, boundary, change):
         entry["score"]["exceeds_roster_limit"] = True
     assert (
         client.post(
-            BASE + "/decision", json={"action": "accept", "approved_by": "human"}
+            BASE + "/decision",
+            json=reviewed(boundary, {"action": "accept", "approved_by": "human"}),
         ).status_code
         == 409
     )
@@ -289,7 +306,9 @@ def test_decline_does_not_need_score_or_send_comment(client, boundary):
     assert (
         client.post(
             BASE + "/decision",
-            json={"action": "decline", "approved_by": "human", "comment": " "},
+            json=reviewed(
+                boundary, {"action": "decline", "approved_by": "human", "comment": " "}
+            ),
         ).status_code
         == 202
     )
@@ -304,7 +323,8 @@ def test_counter_uses_score_mapping_and_blocks_competitor(client, boundary):
     rows, connection, _, _ = boundary
     for code in (202, 200):
         response = client.post(
-            BASE + "/counter", json={"approved_by": "human", "week": 5}
+            BASE + "/counter",
+            json=reviewed(boundary, {"approved_by": "human", "week": 5}),
         )
         assert response.status_code == code, response.text
     channel = connection.return_value.channel.return_value
@@ -322,7 +342,8 @@ def test_counter_uses_score_mapping_and_blocks_competitor(client, boundary):
     assert rows[0]["status"] == "open"
     assert (
         client.post(
-            BASE + "/decision", json={"action": "decline", "approved_by": "human"}
+            BASE + "/decision",
+            json=reviewed(boundary, {"action": "decline", "approved_by": "human"}),
         ).status_code
         == 409
     )
@@ -335,7 +356,8 @@ def test_unmapped_counter_cannot_guess_internal_id(client, boundary, mapping):
     rows[0]["counter_offer"]["score"]["players"]["999"]["player_id"] = mapping
     assert (
         client.post(
-            BASE + "/counter", json={"approved_by": "human", "week": 5}
+            BASE + "/counter",
+            json=reviewed(boundary, {"approved_by": "human", "week": 5}),
         ).status_code
         == 409
     )
@@ -345,12 +367,18 @@ def test_unmapped_counter_cannot_guess_internal_id(client, boundary, mapping):
 def test_confirmed_duplicate_after_worker_settles(client, boundary):
     rows, connection, _, _ = boundary
     payload = {"action": "decline", "approved_by": "human"}
-    assert client.post(BASE + "/decision", json=payload).status_code == 202
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 202
+    )
     rows[0]["status"] = "declined"
-    assert client.post(BASE + "/decision", json=payload).status_code == 200
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 200
+    )
     assert (
         client.post(
-            BASE + "/decision", json={**payload, "action": "accept"}
+            BASE + "/decision", json=reviewed(boundary, {**payload, "action": "accept"})
         ).status_code
         == 409
     )
@@ -367,8 +395,14 @@ def test_unknown_publication_blocks_replay(client, boundary, kind):
         "approved_by": "human",
         **({"action": "decline"} if kind == "decision" else {"week": 5}),
     }
-    assert client.post(BASE + "/" + kind, json=payload).status_code == 503
-    assert client.post(BASE + "/" + kind, json=payload).status_code == 409
+    assert (
+        client.post(BASE + "/" + kind, json=reviewed(boundary, payload)).status_code
+        == 503
+    )
+    assert (
+        client.post(BASE + "/" + kind, json=reviewed(boundary, payload)).status_code
+        == 409
+    )
     connection.return_value.channel.return_value.basic_publish.assert_called_once()
 
 
@@ -376,16 +410,22 @@ def test_pre_publish_failure_can_retry(client, boundary):
     _, connection, _, _ = boundary
     connection.side_effect = ConnectionError("before sending")
     payload = {"action": "decline", "approved_by": "human"}
-    assert client.post(BASE + "/decision", json=payload).status_code == 503
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 503
+    )
     connection.side_effect = None
-    assert client.post(BASE + "/decision", json=payload).status_code == 202
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 202
+    )
 
 
 def test_audit_failure_rolls_back_claim(boundary):
     rows, connection, audit, _ = boundary
     audit.side_effect = RuntimeError("audit unavailable")
     with pytest.raises(RuntimeError):
-        service.decide("123", "decline", "human")
+        service.decide("123", "decline", "human", review_token=token(boundary))
     assert rows[0]["outcome_details"] == {}
     connection.assert_not_called()
 
@@ -403,7 +443,7 @@ def test_concurrent_publish_blocks_other_request(boundary):
 
     def run():
         try:
-            service.decide("123", "decline", "human")
+            service.decide("123", "decline", "human", review_token=token(boundary))
         except Exception as error:
             errors.append(error)
 
@@ -412,7 +452,7 @@ def test_concurrent_publish_blocks_other_request(boundary):
     try:
         assert entered.wait(5)
         with pytest.raises(service.InboxConflict):
-            service.decide("123", "accept", "other")
+            service.decide("123", "accept", "other", review_token=token(boundary))
     finally:
         release.set()
         thread.join(5)
@@ -431,7 +471,8 @@ def test_confirmation_preserves_worker_update(client, boundary):
     connection.return_value.channel.return_value.basic_publish.side_effect = publish
     assert (
         client.post(
-            BASE + "/decision", json={"action": "decline", "approved_by": "human"}
+            BASE + "/decision",
+            json=reviewed(boundary, {"action": "decline", "approved_by": "human"}),
         ).status_code
         == 202
     )
@@ -451,11 +492,12 @@ def test_confirmation_save_failure_blocks_republish(client, boundary):
 
     service._save_publication.side_effect = fail_confirmation
     with pytest.raises(RuntimeError):
-        service.decide("123", "decline", "human")
+        service.decide("123", "decline", "human", review_token=token(boundary))
     service._save_publication.side_effect = save
     assert (
         client.post(
-            BASE + "/decision", json={"action": "decline", "approved_by": "human"}
+            BASE + "/decision",
+            json=reviewed(boundary, {"action": "decline", "approved_by": "human"}),
         ).status_code
         == 409
     )
@@ -503,6 +545,8 @@ def test_bad_triage(client, boundary, payload):
 )
 def test_write_auth_and_not_found(client, boundary, kind, payload):
     rows, connection, _, _ = boundary
+    if kind != "triage":
+        payload = reviewed(boundary, payload)
     assert (
         client.post(
             BASE + "/" + kind, json=payload, headers={"X-API-Key": "wrong"}
@@ -605,7 +649,10 @@ def test_duplicate_inbox_rows_fail_closed(client, boundary, kind):
         "approved_by": "human",
         **({"action": "decline"} if kind == "decision" else {"week": 5}),
     }
-    assert client.post(BASE + "/" + kind, json=payload).status_code == 409
+    assert (
+        client.post(BASE + "/" + kind, json=reviewed(boundary, payload)).status_code
+        == 409
+    )
     connection.assert_not_called()
 
 
@@ -614,7 +661,8 @@ def test_existing_worker_response_blocks_new_action(client, boundary):
     service._worker_response_exists.return_value = True
     assert (
         client.post(
-            BASE + "/decision", json={"action": "decline", "approved_by": "human"}
+            BASE + "/decision",
+            json=reviewed(boundary, {"action": "decline", "approved_by": "human"}),
         ).status_code
         == 409
     )
@@ -624,15 +672,22 @@ def test_existing_worker_response_blocks_new_action(client, boundary):
 def test_same_queued_key_never_republishes_blocked_response(client, boundary):
     rows, connection, _, _ = boundary
     payload = {"action": "decline", "approved_by": "human"}
-    assert client.post(BASE + "/decision", json=payload).status_code == 202
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 202
+    )
     rows[0]["counter_offer"]["decision"] = {
         "outcome": "blocked",
         "closed_locks": ["not_armed"],
     }
-    assert client.post(BASE + "/decision", json=payload).status_code == 200
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 200
+    )
     assert (
         client.post(
-            BASE + "/decision", json={**payload, "comment": "changed"}
+            BASE + "/decision",
+            json=reviewed(boundary, {**payload, "comment": "changed"}),
         ).status_code
         == 409
     )
@@ -645,9 +700,15 @@ def test_fingerprint_change_cannot_release_pending_send(client, boundary):
         TimeoutError("unknown")
     )
     payload = {"action": "decline", "approved_by": "human"}
-    assert client.post(BASE + "/decision", json=payload).status_code == 503
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 503
+    )
     rows[0]["counter_offer"]["fingerprint"] = "b" * 64
-    assert client.post(BASE + "/decision", json=payload).status_code == 409
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 409
+    )
     connection.return_value.channel.return_value.basic_publish.assert_called_once()
 
 
@@ -660,7 +721,7 @@ def test_finalization_rejects_replaced_claim(boundary):
 
     connection.return_value.channel.return_value.basic_publish.side_effect = publish
     with pytest.raises(service.InboxConflict, match="claim changed"):
-        service.decide("123", "decline", "human")
+        service.decide("123", "decline", "human", review_token=token(boundary))
     assert (
         next(iter(rows[0]["outcome_details"]["incoming_publications"].values()))[
             "status"
@@ -685,7 +746,10 @@ def test_finalization_rejects_replaced_claim(boundary):
 )
 def test_bad_action_requests(client, boundary, kind, payload):
     _, connection, _, _ = boundary
-    assert client.post(BASE + "/" + kind, json=payload).status_code == 422
+    assert (
+        client.post(BASE + "/" + kind, json=reviewed(boundary, payload)).status_code
+        == 422
+    )
     connection.assert_not_called()
 
 
@@ -695,11 +759,19 @@ def test_missing_header_and_unconfigured_key(client, boundary, monkeypatch):
     payload = {"action": "decline", "approved_by": "human"}
     key = client.headers.pop("X-API-Key")
     try:
-        assert client.post(BASE + "/decision", json=payload).status_code == 422
+        assert (
+            client.post(
+                BASE + "/decision", json=reviewed(boundary, payload)
+            ).status_code
+            == 422
+        )
     finally:
         client.headers["X-API-Key"] = key
     monkeypatch.setattr(routes, "TRIGGER_API_KEY", None)
-    assert client.post(BASE + "/decision", json=payload).status_code == 500
+    assert (
+        client.post(BASE + "/decision", json=reviewed(boundary, payload)).status_code
+        == 500
+    )
     boundary[1].assert_not_called()
 
 
@@ -708,7 +780,8 @@ def test_counter_rejects_overlapping_internal_mappings(client, boundary):
     rows[0]["counter_offer"]["score"]["players"]["888"]["player_id"] = "111"
     assert (
         client.post(
-            BASE + "/counter", json={"approved_by": "human", "week": 5}
+            BASE + "/counter",
+            json=reviewed(boundary, {"approved_by": "human", "week": 5}),
         ).status_code
         == 409
     )
@@ -784,7 +857,7 @@ def test_rank_incomplete_stale_scores_and_invalid_dates():
 
 def test_listing_worker_outcome_and_claim_omits_publish_payload(client, boundary):
     rows, _, _, _ = boundary
-    service.decide("123", "decline", "human")
+    service.decide("123", "decline", "human", review_token=token(boundary))
     rows[0]["counter_offer"]["decision"] = {
         "outcome": "unknown",
         "verification": {"status": "unknown"},
@@ -855,11 +928,11 @@ def published(connection):
 
 def test_retry_republishes_a_rejected_response_once(client, boundary, worker_responses):
     rows, connection, audit, _ = boundary
-    original = service.decide("123", "decline", "human")
+    original = service.decide("123", "decline", "human", review_token=token(boundary))
     for code in (202, 200):
         result = client.post(
             BASE + "/decision/retry",
-            json={"approved_by": " retrier ", "of_claim_id": 41},
+            json=reviewed(boundary, {"approved_by": " retrier ", "of_claim_id": 41}),
         )
         assert result.status_code == code, result.text
         receipt = result.json()
@@ -889,7 +962,8 @@ def test_retry_keeps_the_approved_response_comment(client, boundary, worker_resp
         decision_key=decline_key("No thanks"), comment="No thanks"
     )
     result = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
     )
     assert result.status_code == 202, result.text
     assert published(connection)[0]["comment"] == "No thanks"
@@ -907,7 +981,8 @@ def test_unknown_retry_needs_the_espn_check(client, boundary, worker_responses):
         "outcome": "unknown",
     }
     refused = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
     )
     assert refused.status_code == 409
     assert "checked ESPN" in refused.json()["detail"]
@@ -915,7 +990,10 @@ def test_unknown_retry_needs_the_espn_check(client, boundary, worker_responses):
 
     result = client.post(
         BASE + "/decision/retry",
-        json={"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+        json=reviewed(
+            boundary,
+            {"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+        ),
     )
     assert result.status_code == 202, result.text
     assert published(connection)[0]["retry"]["verified_not_answered"] is True
@@ -930,7 +1008,10 @@ def test_unknown_retry_requires_its_own_responding_entry(
     rows[0]["counter_offer"]["decision"] = {"decision_key": "b" * 64}
     result = client.post(
         BASE + "/decision/retry",
-        json={"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+        json=reviewed(
+            boundary,
+            {"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+        ),
     )
     assert result.status_code == 409
     assert published(connection) == []
@@ -944,7 +1025,10 @@ def test_live_or_settled_responses_cannot_be_retried(
     worker_responses[0]["status"] = status
     result = client.post(
         BASE + "/decision/retry",
-        json={"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+        json=reviewed(
+            boundary,
+            {"approved_by": "human", "of_claim_id": 41, "verified_not_answered": True},
+        ),
     )
     assert result.status_code == 409
     assert published(connection) == []
@@ -953,7 +1037,8 @@ def test_live_or_settled_responses_cannot_be_retried(
 def test_retry_refuses_unknown_or_stale_claim_ids(client, boundary, worker_responses):
     _, connection, _, _ = boundary
     missing = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 9}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 9}),
     )
     assert missing.status_code == 404
     worker_responses.append(
@@ -966,7 +1051,8 @@ def test_retry_refuses_unknown_or_stale_claim_ids(client, boundary, worker_respo
         )
     )
     stale = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
     )
     assert stale.status_code == 409
     assert published(connection) == []
@@ -988,7 +1074,8 @@ def test_retry_fails_closed_when_the_offer_changed(
     rows, connection, _, _ = boundary
     change(rows[0])
     result = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
     )
     assert result.status_code == 409
     assert published(connection) == []
@@ -1009,7 +1096,8 @@ def test_retry_is_blocked_by_an_uncertain_publication(
         )
     }
     result = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
     )
     assert result.status_code == 409
     assert published(connection) == []
@@ -1025,7 +1113,8 @@ def test_accept_retry_rechecks_the_score(client, boundary, worker_responses):
     )
     rows[0]["counter_offer"]["score"]["exceeds_roster_limit"] = True
     result = client.post(
-        BASE + "/decision/retry", json={"approved_by": "human", "of_claim_id": 41}
+        BASE + "/decision/retry",
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
     )
     assert result.status_code == 409
     assert published(connection) == []
@@ -1041,13 +1130,18 @@ def test_accept_retry_rechecks_the_score(client, boundary, worker_responses):
     ],
 )
 def test_bad_retry_requests(client, boundary, worker_responses, payload):
-    assert client.post(BASE + "/decision/retry", json=payload).status_code == 422
+    assert (
+        client.post(
+            BASE + "/decision/retry", json=reviewed(boundary, payload)
+        ).status_code
+        == 422
+    )
 
 
 def test_retry_requires_the_api_key(client, boundary, worker_responses):
     result = client.post(
         BASE + "/decision/retry",
-        json={"approved_by": "human", "of_claim_id": 41},
+        json=reviewed(boundary, {"approved_by": "human", "of_claim_id": 41}),
         headers={"X-API-Key": "wrong"},
     )
     assert result.status_code == 401
@@ -1089,3 +1183,258 @@ def test_sql_worker_response_lookups():
     }
     sql, params = cursor.execute.call_args.args
     assert "DISTINCT ON" in sql and params == (["123"],)
+
+
+PUBLICATIONS = {
+    "decision": ("/decision", {"action": "decline", "approved_by": "human"}),
+    "counter": ("/counter", {"approved_by": "human", "week": 5}),
+    "retry": ("/decision/retry", {"approved_by": "human", "of_claim_id": 41}),
+}
+
+
+def listed(client, rows):
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [tuple(r[c] for c in service.ROW_COLUMNS) for r in rows],
+        [],
+        [],
+    ]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/trade/incoming")
+    assert response.status_code == 200, response.text
+    return response.json()["offers"]
+
+
+def assert_nothing_claimed(boundary):
+    rows, connection, audit, _ = boundary
+    connection.assert_not_called()
+    audit.assert_not_called()
+    assert not rows[0]["outcome_details"].get("incoming_publications")
+
+
+def test_get_exposes_review_token(client, boundary):
+    rows, _, _, _ = boundary
+    shown = listed(client, rows)[0]["review_token"]
+    assert re.fullmatch(r"[0-9a-f]{64}", shown)
+    assert shown == token(boundary)
+    entry = rows[0]["counter_offer"]
+    # Refresh bookkeeping, triage and rescoring aren't the offer the human reviewed.
+    entry.update(last_seen_at=(NOW + timedelta(hours=1)).isoformat(), missed_reads=2)
+    entry["score"].update(final_score=-9.0, as_of_week=6)
+    entry["shadow_policy"] = None
+    entry["player_names"] = {"999": "Renamed", "888": None}
+    triaged = client.post(BASE + "/triage", json={"state": "seen", "by": "human"})
+    assert triaged.status_code == 200, triaged.text
+    assert triaged.json()["review_token"] == shown
+    assert listed(client, rows)[0]["review_token"] == shown
+
+
+@pytest.mark.parametrize("kind", PUBLICATIONS)
+def test_fingerprint_change_between_get_and_post(
+    client, boundary, worker_responses, kind
+):
+    rows, _, _, _ = boundary
+    path, payload = PUBLICATIONS[kind]
+    shown = listed(client, rows)[0]["review_token"]
+    # A worker refresh replaces the offer after the human's read.
+    rows[0]["counter_offer"].update(fingerprint="b" * 64, receive_espn_ids=["777"])
+    rows[0]["counter_offer"]["score"]["scored_fingerprint"] = "b" * 64
+    rows[0]["counter_offer"]["score"]["players"]["777"] = {
+        "player_id": "333",
+        "name": "Other",
+    }
+    worker_responses[0]["decision_key"] = decline_key(fingerprint="b" * 64)
+    result = client.post(BASE + path, json={**payload, "review_token": shown})
+    assert result.status_code == 409
+    assert "changed since it was reviewed" in result.json()["detail"]
+    assert shown not in result.text
+    assert_nothing_claimed(boundary)
+
+
+@pytest.mark.parametrize("kind", PUBLICATIONS)
+def test_refresh_landing_while_waiting_for_lock(
+    client, boundary, worker_responses, kind
+):
+    rows, _, _, _ = boundary
+    path, payload = PUBLICATIONS[kind]
+    shown = token(boundary)
+
+    def worker_commits_first(*_):
+        rows[0]["counter_offer"]["send_espn_ids"] = ["999", "555"]
+
+    with patch.object(service, "_lock", side_effect=worker_commits_first):
+        result = client.post(BASE + path, json={**payload, "review_token": shown})
+    assert result.status_code == 409
+    assert_nothing_claimed(boundary)
+
+
+@pytest.mark.parametrize("kind", PUBLICATIONS)
+@pytest.mark.parametrize(
+    "before,after", [("Their note", "Different note"), ("x", "x "), (None, "")]
+)
+def test_note_only_change_is_rejected(
+    client, boundary, worker_responses, kind, before, after
+):
+    rows, _, _, _ = boundary
+    path, payload = PUBLICATIONS[kind]
+    rows[0]["counter_offer"]["comment"] = before
+    shown = token(boundary)
+    rows[0]["counter_offer"]["comment"] = after
+    # The note is outside the fingerprint, so the approval key alone can't see this.
+    assert rows[0]["counter_offer"]["fingerprint"] == "a" * 64
+    result = client.post(BASE + path, json={**payload, "review_token": shown})
+    assert result.status_code == 409
+    assert_nothing_claimed(boundary)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda r: r["counter_offer"].update(send_espn_ids=["999", "555"]),
+        lambda r: r["counter_offer"].update(receive_espn_ids=["777"]),
+        lambda r: r["counter_offer"].update(
+            other_items=[{"type": "DRAFT_PICK", "overallPickNumber": 3}]
+        ),
+        lambda r: r["counter_offer"].update(proposing_team_id="4"),
+        lambda r: r["counter_offer"].update(fingerprint="b" * 64),
+        lambda r: r["counter_offer"].update(comment=None),
+        lambda r: r["counter_offer"].update(our_team_id="9"),
+        lambda r: r["counter_offer"].update(espn_transaction_id="124"),
+        lambda r: r.update(season=2027),
+        lambda r: r.update(league_id="457"),
+    ],
+)
+def test_each_reviewed_field_changes_the_token(change):
+    original = row()
+    changed = copy.deepcopy(original)
+    change(changed)
+    assert service.compute_review_token(changed) != service.compute_review_token(
+        original
+    )
+
+
+def test_token_ignores_item_order_and_key_order():
+    first, second = row(), row()
+    first["counter_offer"].update(
+        send_espn_ids=["1", "2"],
+        other_items=[
+            {"type": "DRAFT_PICK", "overallPickNumber": 3},
+            {"type": "FAAB", "acquisitionBudget": 5},
+        ],
+    )
+    second["counter_offer"].update(
+        send_espn_ids=["2", "1"],
+        other_items=[
+            {"acquisitionBudget": 5, "type": "FAAB"},
+            {"overallPickNumber": 3, "type": "DRAFT_PICK"},
+        ],
+    )
+    assert service.compute_review_token(first) == service.compute_review_token(second)
+
+
+def test_malformed_row_still_gets_a_token():
+    broken = row()
+    broken["counter_offer"].update(send_espn_ids="999", other_items=None)
+    assert re.fullmatch(r"[0-9a-f]{64}", service.compute_review_token(broken))
+
+
+@pytest.mark.parametrize("kind", PUBLICATIONS)
+def test_stale_or_foreign_token(client, boundary, worker_responses, kind):
+    path, payload = PUBLICATIONS[kind]
+    for stale in (service.compute_review_token(row("124")), "f" * 64):
+        result = client.post(BASE + path, json={**payload, "review_token": stale})
+        assert result.status_code == 409
+    for malformed in ("A" * 64, "a" * 63, "a" * 65, "", None):
+        result = client.post(BASE + path, json={**payload, "review_token": malformed})
+        assert result.status_code == 422
+    assert client.post(BASE + path, json=payload).status_code == 422
+    assert_nothing_claimed(boundary)
+
+
+@pytest.mark.parametrize("kind", ["decision", "counter"])
+def test_duplicate_receipt_preserved_with_token(client, boundary, kind):
+    rows, connection, _, _ = boundary
+    path, payload = PUBLICATIONS[kind]
+    body = reviewed(boundary, payload)
+    first = client.post(BASE + path, json=body)
+    assert first.status_code == 202, first.text
+    rows[0]["status"] = "declined" if kind == "decision" else "countered"
+    rows[0]["counter_offer"]["last_seen_at"] = (NOW + timedelta(hours=1)).isoformat()
+    again = client.post(BASE + path, json=body)
+    assert again.status_code == 200, again.text
+    assert again.json()["duplicate"] is True
+    assert again.json()["tracking_id"] == first.json()["tracking_id"]
+    connection.return_value.channel.return_value.basic_publish.assert_called_once()
+
+
+def test_retry_duplicate_receipt_preserved_with_token(
+    client, boundary, worker_responses
+):
+    _, connection, _, _ = boundary
+    service.decide("123", "decline", "human", review_token=token(boundary))
+    body = reviewed(boundary, PUBLICATIONS["retry"][1])
+    assert client.post(BASE + "/decision/retry", json=body).status_code == 202
+    again = client.post(BASE + "/decision/retry", json=body)
+    assert again.status_code == 200 and again.json()["duplicate"] is True
+    assert len(published(connection)) == 2
+
+
+@pytest.mark.parametrize("kind", ["decision", "counter"])
+def test_unresolved_block_preserved_with_token(client, boundary, kind):
+    _, connection, _, _ = boundary
+    channel = connection.return_value.channel.return_value
+    channel.basic_publish.side_effect = TimeoutError("unknown")
+    path, payload = PUBLICATIONS[kind]
+    body = reviewed(boundary, payload)
+    assert client.post(BASE + path, json=body).status_code == 503
+    for attempt in (body, reviewed(boundary, {"action": "accept", "approved_by": "h"})):
+        blocked = client.post(
+            BASE + "/decision" if "action" in attempt else BASE + path, json=attempt
+        )
+        assert blocked.status_code == 409
+        assert "outcome-unknown" in blocked.json()["detail"]
+    channel.basic_publish.assert_called_once()
+
+
+def test_mismatch_precedes_everything(client, boundary):
+    rows, connection, audit, _ = boundary
+    body = reviewed(boundary, PUBLICATIONS["decision"][1])
+    assert client.post(BASE + "/decision", json=body).status_code == 202
+    claims = copy.deepcopy(rows[0]["outcome_details"])
+    rows[0]["counter_offer"]["comment"] = "Changed after the first send"
+    service._save_publication.reset_mock()
+    service._worker_response_exists.reset_mock()
+    audit.reset_mock()
+    replay = client.post(BASE + "/decision", json=body)
+    # Not the duplicate receipt: the stored offer is no longer the one reviewed.
+    assert replay.status_code == 409
+    assert "changed since it was reviewed" in replay.json()["detail"]
+    service._save_publication.assert_not_called()
+    service._worker_response_exists.assert_not_called()
+    audit.assert_not_called()
+    assert rows[0]["outcome_details"] == claims
+    connection.return_value.channel.return_value.basic_publish.assert_called_once()
+
+
+@pytest.mark.parametrize("kind", ["decision", "counter"])
+def test_claim_and_audit_record_review_token(client, boundary, kind):
+    rows, connection, audit, _ = boundary
+    path, payload = PUBLICATIONS[kind]
+    shown = token(boundary)
+    assert client.post(BASE + path, json=reviewed(boundary, payload)).status_code == 202
+    claim = next(iter(rows[0]["outcome_details"]["incoming_publications"].values()))
+    assert claim["review_token"] == shown
+    assert audit.call_args.kwargs["decision_inputs"]["review_token"] == shown
+    assert "review_token" not in json.dumps(published(connection))
+    assert listed(client, rows)[0]["publications"][0]["review_token"] == shown
+
+
+def test_retry_claim_records_review_token(client, boundary, worker_responses):
+    rows, _, audit, _ = boundary
+    shown = token(boundary)
+    body = reviewed(boundary, PUBLICATIONS["retry"][1])
+    assert client.post(BASE + "/decision/retry", json=body).status_code == 202
+    claims = rows[0]["outcome_details"]["incoming_publications"]
+    assert claims[f"{decline_key()}:retry:41"]["review_token"] == shown
+    assert audit.call_args.kwargs["decision_inputs"]["review_token"] == shown

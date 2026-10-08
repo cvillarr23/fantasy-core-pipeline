@@ -88,12 +88,21 @@ class HumanRequest(BaseModel):
         return value
 
 
-class DecisionRequest(HumanRequest):
+class ReviewedRequest(HumanRequest):
+    # Required: without it, a refresh between the human's read and the locked publish
+    # could apply their approval to an offer they never saw.
+    review_token: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="`review_token` from the GET /v1/trade/incoming row the human reviewed.",
+    )
+
+
+class DecisionRequest(ReviewedRequest):
     action: Literal["accept", "decline"]
     comment: str | None = Field(None, max_length=2000)
 
 
-class RetryRequest(HumanRequest):
+class RetryRequest(ReviewedRequest):
     of_claim_id: int = Field(
         ge=1, description="The worker trade_response row to retry, from `response.id`."
     )
@@ -103,7 +112,7 @@ class RetryRequest(HumanRequest):
     )
 
 
-class CounterRequest(HumanRequest):
+class CounterRequest(ReviewedRequest):
     week: int = Field(ge=1, le=18)
 
 
@@ -175,6 +184,7 @@ class InboxPublication(BaseModel):
     approved_by: str
     approved_at: datetime
     fingerprint: str
+    review_token: str | None = None
     decision_key: str | None = None
     action: Literal["accept", "decline"] | None = None
     publish_error: str | None = None
@@ -214,6 +224,9 @@ class IncomingTrade(BaseModel):
     expiration_date: datetime | None = None
     comment: str | None = None
     fingerprint: str | None = None
+    review_token: str = Field(
+        description="Send this back on decision, counter and retry; it changes when the offer does."
+    )
     parse_issues: list[str] = Field(default_factory=list)
     triage: InboxTriage | None = None
     decision: dict | None = None

@@ -66,7 +66,10 @@
   all four inbox writes require the existing `X-API-Key` guard. Core publication
   claims live in `outcome_details.incoming_publications`, separate from worker-owned
   inbox status and decision. Never set `responding` when queuing: the executor rejects
-  that state. `queued` means broker-confirmed, not ESPN-processed. See
+  that state. `queued` means broker-confirmed, not ESPN-processed. Decision, counter
+  and retry all require the listed row's `review_token` (fingerprint, both sides, other
+  items, the proposer's exact note), checked against the locked `FOR UPDATE` row before
+  any other check, claim or broker call; score evidence stays out of it. See
   `docs/trade-inbox-api.md` for recovery and the worker contract.
 - Pydantic request/response models live in `src/schemas/<domain>.py`, not inline in the
   router. **Do not confuse this with `src/models.py`**, which holds only raw DB DDL string
