@@ -15,7 +15,7 @@ from espn_api.requests.espn_requests import (
     ESPNUnknownError,
 )
 
-from fastapi import APIRouter, HTTPException, Path, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel
 
 from src.services.trade_service import evaluate_trade
@@ -34,9 +34,108 @@ from src.schemas.trade import (
     TradeOfferList,
 )
 from src.services import trade_offer_service
+from src.services import trade_inbox_service
+from src.api.routes import require_trigger_api_key
+from src.schemas.trade_inbox import (
+    CounterRequest,
+    DecisionRequest,
+    InboxFilter,
+    IncomingTrade,
+    IncomingTradeList,
+    PublicationReceipt,
+    TriageRequest,
+    Visibility,
+)
 
 logger = logging.getLogger("TradeRoutes")
 trade_router = APIRouter()
+
+
+@trade_router.get("/incoming", response_model=IncomingTradeList)
+def list_incoming_trades(
+    status: InboxFilter = "live",
+    visibility: Visibility = "visible",
+    league_id: str | None = Query(None, pattern=r"^[1-9]\d*$"),
+    season: int | None = Query(None, ge=2000, le=2100),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    return trade_inbox_service.list_incoming(
+        status, visibility, league_id, season, limit, offset
+    )
+
+
+def _incoming_error(error):
+    if isinstance(error, trade_inbox_service.InboxNotFound):
+        raise HTTPException(404, str(error)) from error
+    if isinstance(error, trade_inbox_service.InboxConflict):
+        raise HTTPException(409, str(error)) from error
+    if isinstance(error, trade_inbox_service.PublishUnavailable):
+        raise HTTPException(503, str(error)) from error
+    if isinstance(error, ValueError):
+        raise HTTPException(422, str(error)) from error
+    raise error
+
+
+@trade_router.post(
+    "/incoming/{espn_transaction_id}/triage",
+    response_model=IncomingTrade,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def triage_incoming_trade(
+    payload: TriageRequest,
+    espn_transaction_id: str = Path(min_length=1, max_length=200),
+):
+    try:
+        return trade_inbox_service.triage(
+            espn_transaction_id, payload.state, payload.by, payload.snooze_until
+        )
+    except Exception as error:
+        _incoming_error(error)
+
+
+@trade_router.post(
+    "/incoming/{espn_transaction_id}/decision",
+    response_model=PublicationReceipt,
+    status_code=202,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def decide_incoming_trade(
+    payload: DecisionRequest,
+    response: Response,
+    espn_transaction_id: str = Path(min_length=1, max_length=200),
+):
+    try:
+        result = trade_inbox_service.decide(
+            espn_transaction_id, payload.action, payload.approved_by, payload.comment
+        )
+    except Exception as error:
+        _incoming_error(error)
+    if result["duplicate"]:
+        response.status_code = 200
+    return result
+
+
+@trade_router.post(
+    "/incoming/{espn_transaction_id}/counter",
+    response_model=PublicationReceipt,
+    status_code=202,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def counter_incoming_trade(
+    payload: CounterRequest,
+    response: Response,
+    espn_transaction_id: str = Path(min_length=1, max_length=200),
+):
+    try:
+        result = trade_inbox_service.counter(
+            espn_transaction_id, payload.approved_by, payload.week
+        )
+    except Exception as error:
+        _incoming_error(error)
+    if result["duplicate"]:
+        response.status_code = 200
+    return result
 
 
 class TradeEvaluationRequest(BaseModel):

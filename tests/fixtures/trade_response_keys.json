@@ -1,0 +1,110 @@
+[
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": null
+    },
+    "key": "2483df2843bca62e4f8ea3c428cd66c079d1ecc6f9fd62ee99b0a6ae19a1d31c"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": ""
+    },
+    "key": "2483df2843bca62e4f8ea3c428cd66c079d1ecc6f9fd62ee99b0a6ae19a1d31c"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": "  "
+    },
+    "key": "2483df2843bca62e4f8ea3c428cd66c079d1ecc6f9fd62ee99b0a6ae19a1d31c"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": " Yes ☃ "
+    },
+    "key": "05d5f1dddc837469c0fc931d4319d156d55122b189afa3e7ff29be6ee77dc338"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": "﻿Yes﻿"
+    },
+    "key": "cfcc90d94c07c87dc0028df5ec2a0106d01102e3cbf6292f7b2bf3a5241b6074"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": "Yes"
+    },
+    "key": "99f416b4691d5622dfb585a776423e92f86b70d98b934e829fdcc04d26aa64c1"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": "\u001cYes\u001c"
+    },
+    "key": "825ebcc1642c1ac77deacc9ef364aed81e0294bd4b1ea8b66f99429ca9feef9f"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": "line\nnext"
+    },
+    "key": "1f89d5b898c0d38288aa9414988713cc075df16d17af87d49cdf207a769f1369"
+  },
+  {
+    "input": {
+      "leagueId": "456",
+      "seasonId": 2026,
+      "ourTeamId": "8",
+      "transactionId": "123",
+      "action": "accept",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "comment": " emoji 🏈 \t"
+    },
+    "key": "ad29bc8065372df2779afdf2486f1e00b37cde7f7a8b9a4acd6986f0d42243ba"
+  }
+]
