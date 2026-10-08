@@ -102,3 +102,33 @@ def test_lineup_ir_hints_prefers_starters_then_higher_value_when_slots_are_short
     hints, _ = ir.lineup_ir_hints(lines, ir_slot_count=2)
 
     assert set(hints) == {"starter", "bench_high"}
+
+
+def test_load_ineligible_ir_occupants_returns_only_players_who_no_longer_qualify():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (4,)
+    cursor.fetchall.return_value = [
+        ("hurt", "Still Hurt", "INJURY_RESERVE"),
+        ("out", "Out Guy", "OUT"),
+        ("healed", "Healed Guy", "ACTIVE"),
+        ("unknown", "No Status", None),
+    ]
+
+    assert ir.load_ineligible_ir_occupants(cursor, 7) == [
+        ("healed", "Healed Guy", "ACTIVE"),
+        ("unknown", "No Status", None),
+    ]
+    sql, params = cursor.execute.call_args_list[0].args
+    assert "slot_position = 'IR'" in sql
+    assert params == ("7",)
+
+
+@pytest.mark.parametrize("used,unmatched", [(3, 2), (1, 0), (None, 0)])
+def test_ir_occupants_without_a_player_match_count_as_unknown(used, unmatched):
+    """league_rosters drops players with no espn_id match, but ir_slots_used counts them;
+    their ESPN status can't be checked, so they're reported rather than assumed eligible."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("hurt", "Still Hurt", "OUT")]
+    cursor.fetchone.return_value = None if used is None else (used,)
+
+    assert ir.load_ineligible_ir_occupants(cursor, "7") == [(None, None, None)] * unmatched

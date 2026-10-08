@@ -964,6 +964,28 @@ def test_lineup_idempotency_key_differs_across_jobs_swaps_and_weeks():
     assert ls.lineup_idempotency_key("7", swaps, job_name="job-a") != key
 
 
+def test_lineup_idempotency_key_for_swaps_is_unchanged_by_ir_support():
+    """Pinned from main before IR entries were keyed: an in-flight retry across the deploy
+    must still dedupe."""
+    assert ls.lineup_idempotency_key("8", [_swap("16737", "4360761", "WR")], job_name="job-a") == \
+        "lineup-8-3456f57b86079f70a422857a078f4aca"
+
+
+def _ir(player_id, kind="ir", slot="IR", week=5):
+    return {"kind": kind, "player_id": player_id, "slot": slot, "decision_inputs": {"season": 2026, "week": week}}
+
+
+def test_lineup_idempotency_key_keys_ir_entries_by_kind_player_and_slot():
+    key = ls.lineup_idempotency_key("8", [_ir("4046")])
+
+    assert key == ls.lineup_idempotency_key("8", [_ir("4046")])
+    assert key != ls.lineup_idempotency_key("8", [_ir("4047")])
+    assert key != ls.lineup_idempotency_key("8", [_ir("4046", kind="activate_ir", slot="BENCH")])
+    assert key != ls.lineup_idempotency_key("8", [_ir("4046", week=6)])
+    mixed = [_swap("16737", "4360761", "WR"), _ir("4046")]
+    assert ls.lineup_idempotency_key("8", mixed) == ls.lineup_idempotency_key("8", list(reversed(mixed)))
+
+
 def test_publish_lineup_swaps_sends_the_job_scoped_key(monkeypatch):
     monkeypatch.setenv("JOB_NAME", "fantasy-lineup-optimizer-29850000")
     swaps = [_swap("16737", "4360761", "WR")]
@@ -996,3 +1018,15 @@ def test_main_survives_a_refused_connection_and_publishes_exactly_once(caplog):
     keys = {c.kwargs["json"]["idempotency_key"] for c in mock_post.call_args_list}
     assert len(keys) == 1, "every attempt must carry the same idempotency key"
     mock_sleep.assert_called_once()
+
+
+def test_pregame_pool_leaves_out_ir_slot_players():
+    """An IR-slot player can't start without being activated first, but in
+    rolling-prior-weeks mode they keep prior-week VORP and could be proposed as a starter.
+    Their metrics are left out too, so their target-week row can't pick target_week mode."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [ROSTER, _metric_rows(TARGET_WEEK, BASE_VORP)]
+    ls.load_pregame_roster_pool(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+    roster_sql, metrics_sql = (c.args[0] for c in mock_cursor.execute.call_args_list[:2])
+    assert "r.slot_position IS DISTINCT FROM 'IR'" in roster_sql
+    assert "r.slot_position IS DISTINCT FROM 'IR'" in metrics_sql

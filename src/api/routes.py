@@ -238,6 +238,18 @@ class WaiverTriggerPayload(BaseModel):
             "Recorded to bot_decisions; never forwarded to the click bot."
         ),
     )
+    # Excluded from the dump so the click bot's message is unchanged; the hold lives in
+    # the outbox, not the message.
+    after_tracking_id: Optional[str] = Field(
+        None,
+        exclude=True,
+        description=(
+            "Tracking id of an IR move (a /trigger/lineup action with a kind 'ir' entry) "
+            "that makes room for this add-only claim. The claim is held, not delivered, "
+            "until that move is verified on ESPN's roster, and cancelled if it fails or "
+            "isn't verified in time. Requires drop_player_id to be omitted."
+        ),
+    )
 
 
 class DraftPickTriggerPayload(BaseModel):
@@ -383,11 +395,36 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     clock), but the same idempotency claim protocol, week-scoped: see
     WAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS.
     """
+    depends_on = _ir_move_to_wait_for(payload) if payload.after_tracking_id else None
     _reject_internal_player_id(payload.player_id, payload.name)
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
     _reject_player_rostered_elsewhere(payload)
-    return _accept_durable("waiver_actions", payload)
+    return _accept_durable("waiver_actions", payload, depends_on=depends_on)
+
+
+def _ir_move_to_wait_for(payload) -> str:
+    """Checks the IR move an add-only claim is chained to, and returns its id. Unlike the
+    other guards this fails CLOSED: a claim whose IR move can't be confirmed would land
+    on a full roster, so it is refused rather than queued unheld."""
+    from src.services.activity_service import (
+        DependencyNotFoundError, DependencyRejectedError, require_ir_move,
+    )
+
+    if payload.drop_player_id:
+        raise HTTPException(
+            status_code=422,
+            detail="A claim chained to an IR move is add-only; omit drop_player_id.",
+        )
+    try:
+        return require_ir_move(payload.after_tracking_id, payload.team_id)
+    except DependencyNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DependencyRejectedError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Could not load IR move %s", payload.after_tracking_id)
+        raise HTTPException(503, "Could not check the IR move this claim depends on.") from exc
 
 
 def _reject_player_rostered_elsewhere(payload):
@@ -751,7 +788,9 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
     return _accept_durable("draft_targets", payload)
 
 
-def _accept_durable(queue, payload):
+def _accept_durable(queue, payload, depends_on=None):
+    """Persists the action, then delivers it. With depends_on it is only persisted: the
+    activity runner delivers it once that action is verified_complete, or cancels it."""
     from src.services.activity_service import create_action
     from src.services.activity_runner import publish_one
 
@@ -761,7 +800,7 @@ def _accept_durable(queue, payload):
     body["traceparent"] = carrier.get("traceparent")
     try:
         proposed_id = str(uuid.uuid4())
-        identity = create_action(queue, body, proposed_id)
+        identity = create_action(queue, body, proposed_id, depends_on=depends_on)
     except Exception as exc:
         logger.exception("Could not persist submission")
         raise HTTPException(
@@ -795,15 +834,21 @@ def _accept_durable(queue, payload):
                 drop_player_id=getattr(payload, "drop_player_id", None),
                 decision_inputs=payload.decision_inputs,
             )
+    result = {
+        "status": "accepted" if identity == proposed_id else "duplicate",
+        "queue": queue,
+        "team_id": payload.team_id,
+        "tracking_id": identity,
+    }
+    if depends_on:
+        # A duplicate may be held on an earlier IR move, so only a new claim names its parent.
+        if identity == proposed_id:
+            result["after_tracking_id"] = depends_on
+        return result
     try:
         publish_one(identity)
     except Exception as exc:
         logger.exception("Submission persisted; background outbox will retry delivery")
         if queue == "draft_targets":
             raise HTTPException(503, "Draft target saved but not delivered. Retry immediately with the same idempotency key.") from exc
-    return {
-        "status": "accepted" if identity == proposed_id else "duplicate",
-        "queue": queue,
-        "team_id": payload.team_id,
-        "tracking_id": identity,
-    }
+    return result

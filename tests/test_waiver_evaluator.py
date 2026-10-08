@@ -447,3 +447,275 @@ def test_main_exits_nonzero_on_insufficient_input_without_posting(caplog):
          patch("src.trigger_client.requests.post", side_effect=gateway.post):
         assert we.main(WAIVER_ARGV) == 1
     assert gateway.posts == []
+
+
+# ---------------------------------------------------------------------------
+# Auto-published IR + add moves, behind AUTO_PUBLISH_IR_MOVES (off by default). The IR move
+# goes to /trigger/lineup first; the add-only claim is chained to its tracking id so the
+# gateway holds it until that IR move is verified on ESPN.
+# ---------------------------------------------------------------------------
+
+IR_POOLS = (
+    {"RB": [{"player_id": "hurt", "vorp_score": 6.0, "espn_injury_status": "OUT"},
+            {"player_id": "healthy", "vorp_score": 2.0, "espn_injury_status": "ACTIVE"}]},
+    {"RB": {"player_id": "4046", "vorp_score": 9.0}},
+)
+IR_AND_ADD_TARGET = {
+    "player_id": "e-4046", "drop_player_id": None, "name": "Some Back", "team": "KC",
+    "ir_player_id": "e-7777", "ir_player_name": "Hurt Back",
+    "decision_inputs": {
+        "add_player_vorp_score": 9.0, "drop_player_vorp_score": None, "season": 2026, "week": 5,
+        "ir_player_vorp_score": 6.0, "ir_player_internal_id": "hurt",
+    },
+}
+
+
+@pytest.fixture
+def ir_flag_on(monkeypatch):
+    monkeypatch.setenv("AUTO_PUBLISH_IR_MOVES", "true")
+
+
+@pytest.mark.parametrize("value,enabled", [
+    (None, False), ("", False), ("0", False), ("false", False), ("no", False), ("off", False),
+    ("1", True), ("true", True), ("TRUE", True), ("yes", True),
+])
+def test_ir_auto_publish_is_off_unless_explicitly_enabled(monkeypatch, value, enabled):
+    if value is None:
+        monkeypatch.delenv("AUTO_PUBLISH_IR_MOVES", raising=False)
+    else:
+        monkeypatch.setenv("AUTO_PUBLISH_IR_MOVES", value)
+    assert we.ir_auto_publish_enabled() is enabled
+
+
+@pytest.mark.parametrize("value", [None, "0", "false"])
+def test_flag_off_is_an_exact_no_op(monkeypatch, caplog, value):
+    """Same plan, same WARNING, no blocking-check query and nothing posted anywhere."""
+    if value is None:
+        monkeypatch.delenv("AUTO_PUBLISH_IR_MOVES", raising=False)
+    else:
+        monkeypatch.setenv("AUTO_PUBLISH_IR_MOVES", value)
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=IR_POOLS), \
+         patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants") as mock_blocking, \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[]) as mock_resolve, \
+         patch("src.trigger_client.requests.post") as mock_post, \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        assert we.run_weekly_waivers_live("7", 2026, 5) == []
+
+    mock_post.assert_not_called()
+    mock_blocking.assert_not_called()
+    assert mock_resolve.call_args.args[1] == []
+    [record] = [r for r in caplog.records if "suggest IR hurt + add 4046" in r.getMessage()]
+    assert record.levelname == "WARNING"
+
+
+def test_flag_on_plans_ir_and_add_moves_after_the_swaps(ir_flag_on, caplog):
+    bench, agents = IR_POOLS
+    agents = {**agents, "WR": {"player_id": "wr-fa", "vorp_score": 8.0}}
+    bench = {**bench, "WR": [{"player_id": "wr-bench", "vorp_score": 1.0, "espn_injury_status": "ACTIVE"}]}
+    with patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants", return_value=[]), \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        moves = we.plan_live_waiver_moves(MagicMock(), "7", 2026, bench, agents)
+
+    assert [m.get("kind") for m in moves] == [None, "ir_and_add"]
+    assert moves[0]["drop_player_id"] == "wr-bench"
+    assert moves[1]["ir_player_id"] == "hurt" and moves[1]["add_player_id"] == "4046"
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_flag_on_withholds_ir_and_adds_while_an_ineligible_player_sits_in_our_ir(ir_flag_on, caplog):
+    """An active player left in IR may block ESPN transactions, and activating them is a
+    manager's call, so the stash is withheld and the run says why at ERROR."""
+    with patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants",
+               return_value=[("old-hurt", "Healed Guy", "ACTIVE")]), \
+         caplog.at_level("INFO", logger="WaiverEvaluator"):
+        moves = we.plan_live_waiver_moves(MagicMock(), "7", 2026, *IR_POOLS)
+
+    assert all(m.get("kind") != "ir_and_add" for m in moves)
+    [record] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert "Healed Guy" in record.getMessage() and "activate" in record.getMessage()
+
+
+def test_resolve_live_waiver_moves_carries_the_ir_players_espn_identity():
+    cursor = MagicMock()
+    # add player lookup, then the IR player's (no drop on an ir_and_add).
+    cursor.fetchone.side_effect = [("e-4046", "Some Back", "KC"), ("e-7777", "Hurt Back", "KC")]
+    moves = [{
+        "kind": "ir_and_add", "position": "RB", "ir_player_id": "hurt", "ir_position": "RB",
+        "drop_player_id": None, "add_player_id": "4046", "add_vorp_score": 9.0, "ir_vorp_score": 6.0,
+    }]
+
+    assert we.resolve_live_waiver_moves(cursor, moves, season=2026, week=5) == [IR_AND_ADD_TARGET]
+
+
+def test_resolve_live_waiver_moves_skips_an_ir_and_add_whose_ir_player_has_no_espn_id():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("e-4046", "Some Back", "KC"), (None, "Hurt Back", "KC")]
+    moves = [{"kind": "ir_and_add", "ir_player_id": "hurt", "drop_player_id": None, "add_player_id": "4046"}]
+
+    assert we.resolve_live_waiver_moves(cursor, moves, season=2026, week=5) == []
+
+
+def test_chained_add_key_is_stable_and_distinct_from_a_plain_add_only_claim():
+    plain = {k: v for k, v in IR_AND_ADD_TARGET.items() if not k.startswith("ir_")}
+    key = we.waiver_idempotency_key("7", IR_AND_ADD_TARGET)
+
+    assert key == we.waiver_idempotency_key("7", dict(IR_AND_ADD_TARGET))
+    assert key != we.waiver_idempotency_key("7", plain)
+    assert key != we.waiver_idempotency_key("7", {**IR_AND_ADD_TARGET, "ir_player_id": "e-1"})
+
+
+class _FakeGateway:
+    """/trigger/lineup and /trigger/waiver that dedupe on idempotency_key and answer with a
+    stable tracking id per key, the way _accept_durable does. `failures` maps a path to the
+    status codes to serve first; `lineup_body` overrides the lineup response."""
+
+    def __init__(self, failures=None, lineup_body=None):
+        self.failures = {k: list(v) for k, v in (failures or {}).items()}
+        self.lineup_body = lineup_body
+        self.tracking = {}
+        self.posts = []
+
+    def post(self, url, json, headers, timeout):
+        path = url.rsplit("/", 1)[-1]
+        self.posts.append((path, json))
+        pending = self.failures.get(path)
+        if pending:
+            return _response(pending.pop(0), {"detail": "failed"})
+        if path == "lineup" and self.lineup_body is not None:
+            return _response(202, self.lineup_body)
+        key = json["idempotency_key"]
+        status = "duplicate" if key in self.tracking else "accepted"
+        self.tracking.setdefault(key, f"{path}-track-{len(self.tracking) + 1}")
+        return _response(202, {"status": status, "tracking_id": self.tracking[key]})
+
+
+def _publish_chained(gateway, target=IR_AND_ADD_TARGET):
+    with patch("src.trigger_client.time.sleep"), \
+         patch("src.trigger_client.requests.post", side_effect=gateway.post):
+        return we.publish_waiver_claim("7", dict(target))
+
+
+def test_ir_and_add_posts_the_ir_move_then_an_add_chained_to_it(ir_flag_on):
+    gateway = _FakeGateway()
+
+    assert _publish_chained(gateway) is True
+
+    (ir_path, ir_body), (add_path, add_body) = gateway.posts
+    assert ir_path == "lineup"
+    assert ir_body["team_id"] == "7"
+    [entry] = ir_body["optimized_swaps"]
+    assert {k: entry[k] for k in ("kind", "player_id", "player_name", "slot")} == {
+        "kind": "ir", "player_id": "e-7777", "player_name": "Hurt Back", "slot": "IR",
+    }
+    assert entry["decision_inputs"]["season"] == 2026 and entry["decision_inputs"]["week"] == 5
+    assert add_path == "waiver"
+    assert add_body["after_tracking_id"] == "lineup-track-1"
+    assert add_body["drop_player_id"] is None
+    assert add_body["player_id"] == "e-4046"
+    assert not any(k.startswith("ir_") for k in add_body)
+    assert add_body["idempotency_key"] == we.waiver_idempotency_key("7", IR_AND_ADD_TARGET)
+    assert ir_body["idempotency_key"] != add_body["idempotency_key"]
+
+
+def test_ir_and_add_replay_dedupes_both_steps(ir_flag_on):
+    """A pod retry or rumor replay gets the original IR tracking id back and re-chains to
+    it; the held add comes back duplicate rather than being queued again."""
+    gateway = _FakeGateway()
+    assert _publish_chained(gateway) is True
+    assert _publish_chained(gateway) is False
+
+    adds = [body for path, body in gateway.posts if path == "waiver"]
+    assert [a["after_tracking_id"] for a in adds] == ["lineup-track-1", "lineup-track-1"]
+    assert len(gateway.tracking) == 2
+
+
+def test_a_rejected_ir_move_never_sends_the_add(ir_flag_on):
+    gateway = _FakeGateway(failures={"lineup": [422]})
+
+    with pytest.raises(requests.HTTPError):
+        _publish_chained(gateway)
+
+    assert [path for path, _ in gateway.posts] == ["lineup"]
+
+
+def test_an_ir_move_that_exhausts_retries_never_sends_the_add(ir_flag_on):
+    gateway = _FakeGateway(failures={"lineup": [503] * 6})
+
+    with pytest.raises(requests.HTTPError):
+        _publish_chained(gateway)
+
+    assert {path for path, _ in gateway.posts} == {"lineup"}
+
+
+def test_an_ir_response_without_a_tracking_id_never_sends_the_add(ir_flag_on):
+    gateway = _FakeGateway(lineup_body={"status": "accepted"})
+
+    with pytest.raises(we.IrMoveNotChainableError):
+        _publish_chained(gateway)
+
+    assert [path for path, _ in gateway.posts] == ["lineup"]
+
+
+def test_ir_and_add_refuses_with_the_flag_off(monkeypatch):
+    """A rumor checkpoint prepared while the flag was on must not publish after it's off."""
+    monkeypatch.delenv("AUTO_PUBLISH_IR_MOVES", raising=False)
+    gateway = _FakeGateway()
+
+    with pytest.raises(we.IrAutoPublishDisabledError):
+        _publish_chained(gateway)
+
+    assert gateway.posts == []
+
+
+def test_ir_and_add_refuses_without_season_and_week(ir_flag_on):
+    gateway = _FakeGateway()
+    target = {**IR_AND_ADD_TARGET, "decision_inputs": {"add_player_vorp_score": 9.0}}
+
+    with pytest.raises(we.IrMoveNotChainableError):
+        _publish_chained(gateway, target)
+
+    assert gateway.posts == []
+
+
+def test_main_with_the_flag_on_publishes_the_ir_move_before_its_add(ir_flag_on):
+    """End to end through the real planner, identity resolution and trigger client."""
+    identities = {"4046": ("e-4046", "Some Back", "KC"), "hurt": ("e-7777", "Hurt Back", "KC")}
+
+    def identity(cursor, player_id):
+        espn_id, name, team = identities[player_id]
+        return {"espn_id": espn_id, "name": name, "team": team}
+
+    gateway = _FakeGateway()
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.sync_league.refresh_rosters_if_stale"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=IR_POOLS), \
+         patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
+         patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants", return_value=[]), \
+         patch("src.optimization.waiver_evaluator.resolve_espn_identity", side_effect=identity), \
+         patch("src.trigger_client.requests.post", side_effect=gateway.post):
+        assert we.main(WAIVER_ARGV) == 0
+
+    assert [path for path, _ in gateway.posts] == ["lineup", "waiver"]
+    assert gateway.posts[1][1]["after_tracking_id"] == "lineup-track-1"
+
+
+def test_a_failed_ir_and_add_does_not_hold_back_the_weeks_swaps(ir_flag_on):
+    """Swaps publish first, so an IR move the gateway refuses fails the Job (and alerts)
+    only after the ordinary claims are queued; a pod retry dedupes them."""
+    gateway = _FakeGateway(failures={"lineup": [422]})
+    with patch("src.optimization.waiver_evaluator.get_db_connection"), \
+         patch("src.optimization.waiver_evaluator.sync_league.refresh_rosters_if_stale"), \
+         patch("src.optimization.waiver_evaluator.load_live_waiver_inputs", return_value=IR_POOLS), \
+         patch("src.optimization.waiver_evaluator.plan_live_waiver_moves", return_value=[{}, {}]), \
+         patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves",
+               return_value=[dict(CLAIM_1), dict(IR_AND_ADD_TARGET)]), \
+         patch("src.trigger_client.time.sleep"), \
+         patch("src.trigger_client.requests.post", side_effect=gateway.post), \
+         pytest.raises(requests.HTTPError):
+        we.main(WAIVER_ARGV)
+
+    assert [path for path, _ in gateway.posts] == ["waiver", "lineup"]

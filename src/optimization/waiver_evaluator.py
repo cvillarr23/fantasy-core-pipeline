@@ -14,11 +14,15 @@ and there is no ESPN identity to safely act on.
 
 Neither publisher here (the weekly CronJob, rumor_action_service's boost_waiver path)
 drops an IR-eligible player while an IR slot is open. plan_live_waiver_moves uses the
-same waiver_strategy.plan_waiver_moves as the waiver page: free agents that should come
-in through an IR stash are logged as suggestions, not published, until
-fantasy-browser-worker has a confirmed slot-21 move, and they are never claimed with a
-healthy player's drop instead. Rosters are refreshed first, since a week-old snapshot
-would misstate who sits in IR.
+same waiver_strategy.plan_waiver_moves as the waiver page, and a free agent that should
+come in through an IR stash is never claimed with a healthy player's drop instead.
+Rosters are refreshed first, since a week-old snapshot would misstate who sits in IR.
+
+Those IR + add moves are only published with AUTO_PUBLISH_IR_MOVES on; otherwise they are
+logged as suggestions. Publishing one is two writes in a fixed order: the IR move through
+/v1/trigger/lineup, then an add-only claim chained to that move's tracking id. The gateway
+holds the claim until the IR move is verified on ESPN's roster and cancels it if the move
+fails, so the add can never overfill the roster.
 
 No FAAB/budget modeling: neither players nor weekly_stats carries such a column, and
 waiver_strategy's margin-threshold rule has none either - out of scope for #117,
@@ -28,6 +32,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -37,13 +42,30 @@ from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion import sync_league
-from src.ir_eligibility import load_open_ir_slots
+from src.ir_eligibility import load_ineligible_ir_occupants, load_open_ir_slots
+from src.optimization import lineup_solver
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
 
 configure_trace_logging()
 logger = logging.getLogger("WaiverEvaluator")
 tracer = trace.get_tracer("waiver_evaluator")
+
+
+def ir_auto_publish_enabled() -> bool:
+    """AUTO_PUBLISH_IR_MOVES gates every unattended IR write, off unless explicitly on.
+    Read per call rather than at import so a long-lived API process honours a change."""
+    return os.getenv("AUTO_PUBLISH_IR_MOVES", "").strip().lower() in {"1", "true", "yes"}
+
+
+class IrAutoPublishDisabledError(Exception):
+    """An IR + add move reached a publisher while AUTO_PUBLISH_IR_MOVES is off - e.g. a
+    rumor checkpoint prepared before the flag was turned off."""
+
+
+class IrMoveNotChainableError(Exception):
+    """The add-only claim can't be tied to its IR move (no season/week to key it, or no
+    tracking id back from the IR move), so it is not sent at all."""
 
 
 def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None, week: Optional[int] = None) -> list:
@@ -63,6 +85,13 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
             logger.warning(f"Skipping waiver move adding {move['add_player_id']}: no espn_id resolved yet.")
             continue
 
+        ir_identity = None
+        if move.get("ir_player_id"):
+            ir_identity = resolve_espn_identity(cursor, move["ir_player_id"])
+            if ir_identity is None:
+                logger.warning(f"Skipping IR + add move stashing {move['ir_player_id']}: no espn_id resolved yet.")
+                continue
+
         drop_espn_id = None
         drop_player_id = move.get("drop_player_id")
         if drop_player_id:
@@ -72,7 +101,7 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
                 continue
             drop_espn_id = drop_identity["espn_id"]
 
-        resolved.append({
+        target = {
             "player_id": add_identity["espn_id"],
             "drop_player_id": drop_espn_id,
             "name": add_identity["name"],
@@ -83,7 +112,15 @@ def resolve_live_waiver_moves(cursor, moves: list, season: Optional[int] = None,
                 "season": season,
                 "week": week,
             },
-        })
+        }
+        if ir_identity is not None:
+            target["ir_player_id"] = ir_identity["espn_id"]
+            target["ir_player_name"] = ir_identity["name"]
+            target["decision_inputs"].update(
+                ir_player_vorp_score=move.get("ir_vorp_score"),
+                ir_player_internal_id=move["ir_player_id"],
+            )
+        resolved.append(target)
     return resolved
 
 
@@ -97,13 +134,18 @@ def waiver_idempotency_key(team_id: str, target: dict) -> Optional[str]:
     inputs = target.get("decision_inputs") or {}
     if inputs.get("season") is None or inputs.get("week") is None:
         return None
-    material = json.dumps({
+    material = {
         "team_id": str(team_id),
         "season": inputs.get("season"),
         "week": inputs.get("week"),
         "add": str(target["player_id"]),
         "drop": str(target.get("drop_player_id")),
-    }, sort_keys=True)
+    }
+    # A claim chained to an IR move is held on that move, so it must not dedupe against
+    # a plain add-only claim of the same player; plain claims keep their existing keys.
+    if target.get("ir_player_id"):
+        material["ir"] = str(target["ir_player_id"])
+    material = json.dumps(material, sort_keys=True)
     return f"waiver-{team_id}-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
 
 
@@ -111,7 +153,10 @@ def publish_waiver_claim(team_id: str, target: dict, core_api_base_url: str = CO
     """POSTs one claim to /v1/trigger/waiver, retrying transient failures (#189's client)
     under its week-scoped idempotency key. True if newly queued, False if the gateway said
     it was already queued. Raises once retries are exhausted or on a 4xx. Without a key
-    (no season/week) it's a single un-retried POST, since a retry could double-queue."""
+    (no season/week) it's a single un-retried POST, since a retry could double-queue.
+    A target with ir_player_id is an IR + add move and goes through publish_ir_and_add."""
+    if target.get("ir_player_id"):
+        return publish_ir_and_add(team_id, target, core_api_base_url, timeout)
     payload = {"team_id": team_id, **target}
     key = waiver_idempotency_key(team_id, target)
     if key is None:
@@ -123,6 +168,81 @@ def publish_waiver_claim(team_id: str, target: dict, core_api_base_url: str = CO
         logger.info(f"Waiver claim for Team {team_id}: {target['name']} already queued under {key}; not re-queued.")
         return False
     logger.info(f"Published waiver claim for Team {team_id}: {target['name']} (idempotency key {key}).")
+    return True
+
+
+def publish_ir_and_add(team_id: str, target: dict, core_api_base_url: str = CORE_API_BASE_URL, timeout: float = 10.0) -> bool:
+    """Publishes an IR stash and the add-only claim it makes room for. The IR move is
+    POSTed first; the claim is then POSTed with after_tracking_id, which makes the gateway
+    hold it until that IR move is verified_complete and cancel it if the move fails. Each
+    step has its own key: a pod retry soon after gets "duplicate" for both, and a later
+    replay, once the IR key has lapsed, queues an IR move the worker finds already applied
+    and verifies at once. True if the claim was newly queued.
+
+    Raises, sending nothing further, when the flag is off, when there's no season/week to
+    key the steps, or when the IR move can't be confirmed as accepted with a tracking id:
+    an add sent without its IR move would overfill the roster."""
+    if not ir_auto_publish_enabled():
+        raise IrAutoPublishDisabledError(
+            f"Not publishing IR {target['ir_player_id']} + add {target['name']} for Team {team_id}: "
+            "AUTO_PUBLISH_IR_MOVES is off."
+        )
+    add_key = waiver_idempotency_key(team_id, target)
+    if add_key is None:
+        raise IrMoveNotChainableError(
+            f"IR + add {target['name']} for Team {team_id} has no season/week to key it; nothing published."
+        )
+    inputs = target["decision_inputs"]
+    ir_entry = {
+        "kind": "ir",
+        "player_id": str(target["ir_player_id"]),
+        "player_name": target.get("ir_player_name"),
+        "slot": "IR",
+        "decision_inputs": {
+            "season": inputs["season"],
+            "week": inputs["week"],
+            "ir_player_vorp_score": inputs.get("ir_player_vorp_score"),
+            "ir_player_internal_id": inputs.get("ir_player_internal_id"),
+            "makes_room_for_player_id": str(target["player_id"]),
+        },
+    }
+    # No Job name: the IR move belongs to this waiver week, like the claim it precedes.
+    ir_key = lineup_solver.lineup_idempotency_key(team_id, [ir_entry])
+    ir_response = post_trigger_idempotent(
+        "lineup", {"team_id": team_id, "optimized_swaps": [ir_entry]}, ir_key,
+        core_api_base_url=core_api_base_url, timeout=timeout,
+    )
+    try:
+        ir_tracking_id = ir_response.json().get("tracking_id")
+    except Exception:
+        ir_tracking_id = None
+    if not ir_tracking_id:
+        raise IrMoveNotChainableError(
+            f"IR move for {target['ir_player_id']} (key {ir_key}) returned no tracking id; "
+            f"not sending the add of {target['name']}."
+        )
+    logger.info(
+        f"Team {team_id}: IR move for {target.get('ir_player_name') or target['ir_player_id']} "
+        f"queued as {ir_tracking_id} ({response_status(ir_response)})."
+    )
+
+    claim = {
+        "team_id": team_id,
+        "player_id": target["player_id"],
+        "drop_player_id": None,
+        "name": target["name"],
+        "team": target["team"],
+        "decision_inputs": inputs,
+        "after_tracking_id": ir_tracking_id,
+    }
+    response = post_trigger_idempotent("waiver", claim, add_key, core_api_base_url=core_api_base_url, timeout=timeout)
+    if response_status(response) == "duplicate":
+        logger.info(f"Add of {target['name']} for Team {team_id} already queued under {add_key}; not re-queued.")
+        return False
+    logger.info(
+        f"Queued add of {target['name']} for Team {team_id}, held until IR move {ir_tracking_id} "
+        f"is verified (idempotency key {add_key})."
+    )
     return True
 
 
@@ -151,20 +271,44 @@ def load_live_waiver_inputs(cursor, team_id: str, season: int, week: int) -> tup
 
 def plan_live_waiver_moves(cursor, team_id: str, season: int, bench_by_position: dict,
                            free_agents_by_position: dict) -> list:
-    """The swaps safe to publish. IR + add moves are logged at WARNING and not published,
-    since nothing can make the slot-21 move yet; a manager has to. IR slots are only
-    queried when a bench player is IR-eligible."""
+    """The moves to publish. IR slots are only queried when a bench player is
+    IR-eligible. With AUTO_PUBLISH_IR_MOVES off, IR + add moves are logged at WARNING and
+    only the swaps are returned. With it on, the IR + add moves follow the swaps, so one
+    that fails to publish can't hold back the week's ordinary claims. They are withheld
+    when one of our IR slots holds a player ESPN no longer lists as injured (or one whose
+    status we can't see): ESPN may then refuse new transactions, and activating that
+    player is a manager's call."""
     open_slots = (
         load_open_ir_slots(cursor, team_id, season)
         if waiver_strategy.ir_eligible_bench(bench_by_position) else 0
     )
     swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(bench_by_position, free_agents_by_position, open_slots)
-    for move in ir_and_adds:
-        logger.warning(
-            f"Team {team_id}: not published, suggest IR {move['ir_player_id']} + add {move['add_player_id']} "
-            f"({move['add_vorp_score']:.2f} VORP); IR moves are suggestions only."
+    if not ir_and_adds:
+        return swaps
+    if not ir_auto_publish_enabled():
+        for move in ir_and_adds:
+            logger.warning(
+                f"Team {team_id}: not published, suggest IR {move['ir_player_id']} + add {move['add_player_id']} "
+                f"({move['add_vorp_score']:.2f} VORP); IR moves are suggestions only."
+            )
+        return swaps
+    blocking = load_ineligible_ir_occupants(cursor, team_id)
+    if blocking:
+        names = ", ".join(
+            f"{name or pid or 'an unmatched player'} ({status or 'no injury status'})"
+            for pid, name, status in blocking
         )
-    return swaps
+        logger.error(
+            f"Team {team_id}: {names} sit in IR without an IR-eligible ESPN status; activate them from IR. "
+            f"Not publishing {len(ir_and_adds)} IR + add move(s) until then, since ESPN may reject them."
+        )
+        return swaps
+    for move in ir_and_adds:
+        logger.info(
+            f"Team {team_id}: publishing IR {move['ir_player_id']} + add {move['add_player_id']} "
+            f"({move['add_vorp_score']:.2f} VORP)."
+        )
+    return swaps + ir_and_adds
 
 
 def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_url: str = CORE_API_BASE_URL) -> list:

@@ -119,13 +119,17 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
          nothing about the target week. The newest usable week must be target_week - 1,
          or the data is stale.
 
+    IR-slot players are left out of both queries. They can't start without being
+    activated first, yet in mode 2 they keep their prior-week VORP, and a Sleeper status
+    other than Out would let them through the injury filter as a proposed starter.
+
     Raises InsufficientLineupInputError when neither source is usable."""
     cursor.execute(
         """
         SELECT p.player_id, p.name, p.position, p.team, p.injury_status
         FROM league_rosters r
         JOIN players p ON p.player_id = r.player_id
-        WHERE r.team_id = %s;
+        WHERE r.team_id = %s AND r.slot_position IS DISTINCT FROM 'IR';
         """,
         (team_id,),
     )
@@ -140,7 +144,7 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
         FROM weekly_stats s
         JOIN league_rosters r ON r.player_id = s.player_id
         WHERE r.team_id = %s AND s.season = %s AND s.week BETWEEN %s AND %s
-          AND s.vorp_score IS NOT NULL;
+          AND s.vorp_score IS NOT NULL AND r.slot_position IS DISTINCT FROM 'IR';
         """,
         (team_id, season, first_week, target_week),
     )
@@ -474,7 +478,10 @@ def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = Non
     swaps twice. A re-run recomputes identical swaps (league_rosters isn't resynced from
     ESPN in between), so the same inputs give the same key. The Job name, when set
     (JOB_NAME, from the CronJob's downward API), scopes it to one Job: a new scheduled or
-    manual Job is a new decision and always publishes."""
+    manual Job is a new decision and always publishes.
+
+    IR entries ({kind, player_id, slot}) are keyed by all three; a swap keeps its original
+    [drop, add, slot] material, so keys computed before IR entries existed still match."""
     weeks = sorted({
         (s.get("decision_inputs") or {}).get("season", 0) * 100 + (s.get("decision_inputs") or {}).get("week", 0)
         for s in swaps
@@ -483,7 +490,11 @@ def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = Non
         "job": job_name,
         "team_id": str(team_id),
         "weeks": weeks,
-        "swaps": sorted([str(s["drop_player_id"]), str(s["add_player_id"]), str(s["slot"])] for s in swaps),
+        "swaps": sorted(
+            [str(s["kind"]), str(s["player_id"]), str(s["slot"])] if s.get("kind") in ("ir", "activate_ir")
+            else [str(s["drop_player_id"]), str(s["add_player_id"]), str(s["slot"])]
+            for s in swaps
+        ),
     }, sort_keys=True)
     return f"lineup-{team_id}-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
 

@@ -8,7 +8,7 @@ import time
 import re
 import pika
 from src.database import get_db_cursor
-from src.services.activity_service import action_detail, record_event
+from src.services.activity_service import action_detail, dependency_failure_reason, record_event
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +19,17 @@ def publish_one(identity=None):
     try:
         with get_db_cursor() as c:
             c.execute(
-                """SELECT o.action_id,o.queue,o.body FROM activity_outbox o
+                """SELECT o.action_id,o.queue,o.body,o.depends_on FROM activity_outbox o
               WHERE o.published_at IS NULL AND (%s IS NOT NULL OR o.next_attempt_at<=now()) AND (%s IS NULL OR o.action_id=%s)
+              AND (o.depends_on IS NULL OR (o.hold_until>=now() AND EXISTS (SELECT 1 FROM activity_actions p
+                   WHERE p.id=o.depends_on AND p.outcome='verified_complete')))
               ORDER BY o.next_attempt_at,o.action_id LIMIT 1 FOR UPDATE SKIP LOCKED""",
                 (identity, identity, identity),
             )
             row = c.fetchone()
             if not row:
                 return False
-            action_id, queue, body = row
+            action_id, queue, body, depends_on = row
             if isinstance(body, str):
                 body = json.loads(body)
             from src.api.routes import AMQP_URL, _pick_slot_already_filled
@@ -73,6 +75,11 @@ def publish_one(identity=None):
                     "INSERT INTO activity_events(action_id,stage) VALUES (%s,'delivered_to_worker_queue')",
                     (action_id,),
                 )
+                if depends_on:
+                    c.execute(
+                        "INSERT INTO activity_events(action_id,stage,detail) VALUES (%s,'dependency_verified',%s)",
+                        (action_id, json.dumps({"depends_on": depends_on})),
+                    )
             c.execute(
                 "UPDATE activity_outbox SET published_at=now(),attempts=attempts+1 WHERE action_id=%s",
                 (action_id,),
@@ -92,6 +99,56 @@ def publish_one(identity=None):
                 connection.close()
             except Exception:
                 logger.warning("Could not close outbox connection")
+
+
+def settle_held_actions():
+    """Cancels held actions that must never be sent: their parent failed for good or was
+    skipped, or hold_until passed before they were released. Release is publish_one's job;
+    this only ever closes a held row. Returns the cancelled action ids."""
+    cancelled = []
+    with get_db_cursor() as c:
+        c.execute(
+            """SELECT o.action_id,o.depends_on,o.hold_until<now(),p.execution,p.outcome,p.evidence,
+              EXISTS (SELECT 1 FROM activity_events e WHERE e.action_id=o.depends_on
+                      AND e.stage='manual_verification_required')
+            FROM activity_outbox o LEFT JOIN activity_actions p ON p.id=o.depends_on
+            WHERE o.published_at IS NULL AND o.depends_on IS NOT NULL
+            FOR UPDATE OF o SKIP LOCKED"""
+        )
+        for action_id, parent_id, overdue, execution, outcome, evidence, manual in c.fetchall():
+            parent = None if execution is None else {
+                "execution": execution,
+                "outcome": outcome,
+                "evidence": evidence,
+                "manual_verification_required": manual,
+            }
+            reason = dependency_failure_reason(parent, overdue=bool(overdue))
+            if not reason:
+                continue
+            detail = json.dumps({
+                "reason": reason,
+                "depends_on": parent_id,
+                "parent_execution": execution,
+                "parent_outcome": outcome,
+            })
+            # The key is released so a later claim held on a fresh IR move isn't answered
+            # with this dead one; that claim still needs its own verified parent.
+            c.execute(
+                """UPDATE activity_actions SET execution='skipped',outcome='cancelled',idempotency_key=NULL,
+                evidence=evidence || %s::jsonb,updated_at=now() WHERE id=%s""",
+                (detail, action_id),
+            )
+            c.execute(
+                "INSERT INTO activity_events(action_id,stage,detail) VALUES (%s,'dependency_failed',%s)",
+                (action_id, detail),
+            )
+            c.execute(
+                "UPDATE activity_outbox SET published_at=now() WHERE action_id=%s",
+                (action_id,),
+            )
+            logger.warning("Cancelled held action %s: %s (depends on %s)", action_id, reason, parent_id)
+            cancelled.append(action_id)
+    return cancelled
 
 
 def normalize_slot(slot):
@@ -216,6 +273,12 @@ def reconcile_action(identity, leagues=None):
 
 
 def tick():
+    # Settling only ever cancels, and publish_one releases a held row only once its parent
+    # is verified, so a settle failure can delay a cancellation but never send a held row.
+    try:
+        settle_held_actions()
+    except Exception:
+        logger.exception("Settling held actions deferred")
     for _ in range(25):
         try:
             if not publish_one():

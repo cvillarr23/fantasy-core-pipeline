@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS activity_outbox (
 ALTER TABLE activity_outbox ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE activity_outbox ADD COLUMN IF NOT EXISTS last_error TEXT;
 CREATE INDEX IF NOT EXISTS activity_outbox_due ON activity_outbox(next_attempt_at) WHERE published_at IS NULL;
+ALTER TABLE activity_outbox ADD COLUMN IF NOT EXISTS depends_on TEXT REFERENCES activity_actions(id);
+ALTER TABLE activity_outbox ADD COLUMN IF NOT EXISTS hold_until TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS activity_outbox_held ON activity_outbox(depends_on) WHERE published_at IS NULL AND depends_on IS NOT NULL;
 CREATE TABLE IF NOT EXISTS activity_sessions (
  id TEXT PRIMARY KEY, league_id TEXT NOT NULL, action_id TEXT,
  title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', content JSONB NOT NULL DEFAULT '[]',
@@ -72,8 +75,79 @@ def redact(value):
 
 IDEMPOTENCY_TTL_SECONDS = {"lineup_updates": 1800, "draft_targets": 900, "waiver_actions": 604800}
 
+# How long a held action waits for the action it depends on. The IR move ahead of an
+# add-only claim is normally verified within minutes; past this the claim is cancelled
+# rather than sent against a roster that may have moved on.
+DEPENDENCY_HOLD_SECONDS = int(os.getenv("ACTIVITY_DEPENDENCY_HOLD_SECONDS", "3600"))
+DEPENDENCY_FAILED_OUTCOMES = {"rejected", "cancelled", "expired"}
 
-def create_action(queue, payload, tracking_id=None):
+
+class DependencyNotFoundError(Exception):
+    """The action a new action was asked to wait on doesn't exist in this league."""
+
+
+class DependencyRejectedError(Exception):
+    """The action to wait on can't make room for the new one: not an IR move for this
+    team, or already failed for good."""
+
+
+def dependency_failure_reason(parent, overdue=False):
+    """Why a held action must never be sent, or None while it may still be. Only a
+    verified_complete parent releases it, and only before hold_until: a parent verified
+    later says nothing about a roster that may have moved on since. A transient worker
+    failure keeps it held, since the worker's requeue or the roster reconciler can still
+    verify the parent."""
+    if parent is None:
+        return "parent_missing"
+    if overdue:
+        return "hold_expired"
+    if parent["outcome"] == "verified_complete":
+        return None
+    if parent["execution"] == "skipped":
+        return "parent_skipped"
+    if parent["outcome"] in DEPENDENCY_FAILED_OUTCOMES:
+        return f"parent_{parent['outcome']}"
+    evidence = parent.get("evidence") or {}
+    if isinstance(evidence, str):
+        evidence = json.loads(evidence)
+    if parent["execution"] == "failed" and evidence.get("permanent") is True:
+        return "parent_failed_permanently"
+    if parent.get("manual_verification_required"):
+        return "parent_needs_manual_verification"
+    return None
+
+
+def require_ir_move(identity, team_id):
+    """Returns the id of the IR move an add-only claim may wait on. Raises
+    DependencyNotFoundError or DependencyRejectedError when it can't make room."""
+    parent = _load_dependency_parent(identity)
+    if parent is None:
+        raise DependencyNotFoundError(f"IR move {identity} not found.")
+    entries = (parent.get("payload") or {}).get("optimized_swaps") or []
+    if parent["kind"] != "lineup_updates" or not any(e.get("kind") == "ir" for e in entries):
+        raise DependencyRejectedError(f"Action {identity} is not an IR move.")
+    if str(parent["team_id"]) != str(team_id):
+        raise DependencyRejectedError(f"IR move {identity} belongs to another team.")
+    reason = dependency_failure_reason(parent)
+    if reason:
+        raise DependencyRejectedError(f"IR move {identity} can no longer make room ({reason}).")
+    return parent["id"]
+
+
+def _load_dependency_parent(identity):
+    with get_db_cursor() as c:
+        c.execute(
+            """SELECT id,kind,team_id,execution,outcome,payload,evidence,
+            EXISTS (SELECT 1 FROM activity_events e WHERE e.action_id=a.id
+                    AND e.stage='manual_verification_required') AS manual_verification_required
+            FROM activity_actions a WHERE id=%s AND league_id=%s""",
+            (identity, league_id()),
+        )
+        rows = _rows(c)
+    return rows[0] if rows else None
+
+
+def create_action(queue, payload, tracking_id=None, depends_on=None):
     identity = tracking_id or payload.get("tracking_id") or str(uuid.uuid4())
     league = str(payload.get("league_id") or league_id())
     key = payload.get("idempotency_key")
@@ -97,9 +171,13 @@ def create_action(queue, payload, tracking_id=None):
               AND created_at<now()-(%s * interval '1 second')""",
               (league, queue, key, IDEMPOTENCY_TTL_SECONDS.get(queue, 1800)))
         inputs = payload.get("decision_inputs") or {}
+        # The bot_decisions fallback predates keyed claims and matches on add/drop alone,
+        # so it would fold a claim held on a new IR move into an older claim of the same
+        # player - possibly one cancelled with its own IR move. Held claims rely on keys.
         if (
             queue == "waiver_actions"
             and key
+            and not depends_on
             and inputs.get("season") is not None
             and inputs.get("week") is not None
         ):
@@ -156,13 +234,20 @@ def create_action(queue, payload, tracking_id=None):
             )
             return c.fetchone()[0]
         c.execute(
-            "INSERT INTO activity_outbox(action_id,queue,body) VALUES (%s,%s,%s)",
-            (identity, queue, json.dumps(queue_body)),
+            """INSERT INTO activity_outbox(action_id,queue,body,depends_on,hold_until)
+            VALUES (%s,%s,%s,%s,now()+(%s::int * interval '1 second'))""",
+            (identity, queue, json.dumps(queue_body), depends_on,
+             DEPENDENCY_HOLD_SECONDS if depends_on else None),
         )
         c.execute(
             "INSERT INTO activity_events(action_id,stage) VALUES (%s,'queued')",
             (identity,),
         )
+        if depends_on:
+            c.execute(
+                "INSERT INTO activity_events(action_id,stage,detail) VALUES (%s,'held_for_dependency',%s)",
+                (identity, json.dumps({"depends_on": depends_on})),
+            )
     return identity
 
 
