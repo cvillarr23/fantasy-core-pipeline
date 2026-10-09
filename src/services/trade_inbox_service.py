@@ -721,7 +721,11 @@ def _request_publication(
                 tracking_id=tracking_id,
                 espn_transaction_id=tx,
                 action=action,
-                approval=dict(decision_key=key, approved_by=approved_by),
+                approval=dict(
+                    decision_key=key,
+                    approved_by=approved_by,
+                    reviewed_note=entry.get("comment"),
+                ),
             )
             if comment is not None:
                 payload["comment"] = comment
@@ -917,7 +921,11 @@ def retry_decision(
             tracking_id=tracking_id,
             espn_transaction_id=tx,
             action=action,
-            approval=dict(decision_key=key, approved_by=approved_by),
+            approval=dict(
+                decision_key=key,
+                approved_by=approved_by,
+                reviewed_note=entry.get("comment"),
+            ),
             retry=dict(
                 of_claim_id=of_claim_id,
                 approved_by=approved_by,
