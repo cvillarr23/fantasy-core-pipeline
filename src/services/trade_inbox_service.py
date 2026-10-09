@@ -12,12 +12,13 @@ import math
 import os
 import re
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from pydantic import ValidationError
 
 from src.database import get_db_cursor
-from src.schemas.trade_inbox import InboxScore, ShadowPolicy
+from src.schemas.trade_inbox import IncomingEvaluation, InboxScore, ShadowPolicy
 
 logger = logging.getLogger("TradeInboxService")
 ROW_COLUMNS = (
@@ -38,6 +39,9 @@ BLOCKING_RESPONSE_STATUSES = ("responding", "responded", "response_unknown", "re
 # confirm it. A responding row may still be in flight; a responded one is final.
 RETRYABLE_RESPONSE_STATUSES = ("rejected", "response_unknown")
 RESPONSE_MARGIN = timedelta(minutes=5)
+EVALUATION_VERSION = "incoming-trade-evaluation-v1"
+# Enough of a validation failure to name the bad fields without logging stored values.
+LOGGED_ERROR_LOCATIONS = 5
 # Hashed into every review token: bump it when the covered fields change, so outstanding
 # tokens fail closed and the UI re-reads the offer.
 REVIEW_TOKEN_VERSION = "trade-inbox-review-v1"
@@ -121,7 +125,7 @@ def _advisory(row, field, model):
             [
                 "/".join(map(str, e["loc"]))
                 for e in error.errors(include_input=False, include_url=False)
-            ][:5]
+            ][:LOGGED_ERROR_LOCATIONS]
             if isinstance(error, ValidationError)
             else []
         )
@@ -132,6 +136,104 @@ def _advisory(row, field, model):
             ", ".join(locations),
         )
         return None
+
+
+def _evaluation_mismatch(row, entry, summary, evaluation):
+    """The first way the evidence fails to describe this offer and this summary, or None.
+
+    A breakdown from another offer version, refresh or score must never sit beside the
+    summary that ranks the offer.
+    """
+    request, score = evaluation.request, evaluation.score
+    checks = (
+        ("summary", summary is not None),
+        (
+            "fingerprint",
+            summary is not None
+            and evaluation.scored_fingerprint
+            == entry.get("fingerprint")
+            == summary.scored_fingerprint,
+        ),
+        (
+            "evaluated_at",
+            summary is not None and evaluation.evaluated_at == summary.scored_at,
+        ),
+        (
+            "request offer",
+            request.league_id == row["league_id"]
+            and request.season == row["season"]
+            and request.our_team_id == entry.get("our_team_id")
+            and request.counterparty_team_id == entry.get("proposing_team_id")
+            and _same_ids(request.send_espn_ids, entry.get("send_espn_ids"))
+            and _same_ids(request.receive_espn_ids, entry.get("receive_espn_ids")),
+        ),
+        (
+            "response request",
+            score.league_id == request.league_id
+            and score.season == request.season
+            and score.as_of_week == request.week
+            and score.our_team.team_id == request.our_team_id
+            and score.counterparty_team.team_id == request.counterparty_team_id
+            and _same_ids([p.espn_id for p in score.send], request.send_espn_ids)
+            and _same_ids([p.espn_id for p in score.receive], request.receive_espn_ids),
+        ),
+        (
+            "summary score",
+            summary is not None
+            and score.scoring_version == summary.scoring_version
+            and score.as_of_week == summary.as_of_week
+            and score.score.final_score == summary.final_score,
+        ),
+    )
+    return next((name for name, ok in checks if not ok), None)
+
+
+def _same_ids(ids, other):
+    # Order-insensitive, but a repeated id still has to repeat on both sides.
+    return isinstance(other, list) and Counter(ids) == Counter(other)
+
+
+def _evaluation(row, summary):
+    """The worker's full score evidence for this offer, or None.
+
+    Display-only: evidence that can't be read, or that describes a different offer
+    version or summary, costs the reviewer that one panel, not the list.
+    """
+    entry = row["counter_offer"] or {}
+    raw = entry.get("evaluation")
+    if raw is None:
+        return None
+    version = raw.get("version") if isinstance(raw, dict) else None
+    if version != EVALUATION_VERSION:
+        logger.warning(
+            "Ignoring stored evaluation on inbox row %s: unrecognized version %.80r",
+            row["id"],
+            version,
+        )
+        return None
+    try:
+        evaluation = IncomingEvaluation.model_validate(raw)
+    except ValidationError as error:
+        locations = [
+            "/".join(map(str, detail["loc"]))
+            for detail in error.errors(include_input=False, include_url=False)
+        ]
+        logger.warning(
+            "Ignoring invalid stored evaluation on inbox row %s: %d error(s) at %s",
+            row["id"],
+            error.error_count(),
+            ", ".join(locations[:LOGGED_ERROR_LOCATIONS]),
+        )
+        return None
+    mismatch = _evaluation_mismatch(row, entry, summary, evaluation)
+    if mismatch:
+        logger.warning(
+            "Ignoring stored evaluation on inbox row %s: %s does not match",
+            row["id"],
+            mismatch,
+        )
+        return None
+    return evaluation
 
 
 def _shape(row, names=None, responses=None):
@@ -177,6 +279,7 @@ def _shape(row, names=None, responses=None):
         ]
     item["review_token"] = compute_review_token(row)
     item["score"] = _advisory(row, "score", InboxScore)
+    item["evaluation"] = _evaluation(row, item["score"])
     item["shadow_policy"] = _advisory(row, "shadow_policy", ShadowPolicy)
     item["publications"] = [
         {k: v for k, v in claim.items() if k != "payload"}

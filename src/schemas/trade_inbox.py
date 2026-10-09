@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from src.schemas.trade import OfferPlayer
+from src.schemas.trade_score import TradeScore, TradeScoreRequest
 
 InboxStatus = Literal[
     "open",
@@ -144,6 +145,30 @@ class InboxScore(BaseModel):
     error: str | None
 
 
+class InboxScoreRequest(TradeScoreRequest):
+    # The worker stores the request exactly as sent and omits horizon, so null means the
+    # scorer used its default, not that a value was sent.
+    horizon: int | None = Field(None, ge=1, le=18)
+
+
+class IncomingEvaluation(BaseModel):
+    """The worker's full score evidence for an incoming offer: the exact POST
+    /v1/trade/score request and its unmodified response.
+
+    Display-only. It is exposed only while it describes the same offer version, refresh
+    and score as `score`, which alone drives ranking, mappings and publication checks.
+    """
+
+    version: Literal["incoming-trade-evaluation-v1"]
+    evaluated_at: AwareDatetime = Field(description="Equals `score.scored_at`.")
+    scored_fingerprint: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Equals the offer's `fingerprint` and `score.scored_fingerprint`.",
+    )
+    request: InboxScoreRequest
+    score: TradeScore
+
+
 class ShadowThresholds(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False)
     accept_min: StrictFloat | StrictInt | None
@@ -231,6 +256,7 @@ class IncomingTrade(BaseModel):
     triage: InboxTriage | None = None
     decision: dict | None = None
     score: InboxScore | None = None
+    evaluation: IncomingEvaluation | None = None
     shadow_policy: ShadowPolicy | None = None
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None

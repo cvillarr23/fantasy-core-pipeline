@@ -12,7 +12,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.schemas.trade_score import TradeScore
 from src.services import trade_inbox_service as service
+from tests.test_trade_score_service import context  # noqa: F401
+from tests.test_trade_score_service import score as shape_score
 
 NOW = datetime(2026, 10, 7, 18, tzinfo=timezone.utc)
 BASE = "/v1/trade/incoming/123"
@@ -1438,3 +1441,245 @@ def test_retry_claim_records_review_token(client, boundary, worker_responses):
     claims = rows[0]["outcome_details"]["incoming_publications"]
     assert claims[f"{decline_key()}:retry:41"]["review_token"] == shown
     assert audit.call_args.kwargs["decision_inputs"]["review_token"] == shown
+
+
+def evidence(trade_context, entry=None):
+    """The worker's stored envelope for `row()`: the exact score request it sent (no
+    horizon) and the full response, retargeted to this offer's league, teams and players.
+    """
+    entry = entry or row()["counter_offer"]
+    score = TradeScore.model_validate(shape_score(trade_context)).model_dump(
+        mode="json"
+    )
+    score["league_id"] = "456"
+    score["our_team"]["team_id"] = entry["our_team_id"]
+    score["counterparty_team"]["team_id"] = entry["proposing_team_id"]
+    score["send"][0]["espn_id"] = entry["send_espn_ids"][0]
+    score["receive"][0]["espn_id"] = entry["receive_espn_ids"][0]
+    score["score"]["final_score"] = entry["score"]["final_score"]
+    return dict(
+        version="incoming-trade-evaluation-v1",
+        evaluated_at=entry["score"]["scored_at"],
+        scored_fingerprint=entry["fingerprint"],
+        request=dict(
+            league_id="456",
+            season=2026,
+            week=5,
+            our_team_id=entry["our_team_id"],
+            counterparty_team_id=entry["proposing_team_id"],
+            send_espn_ids=list(entry["send_espn_ids"]),
+            receive_espn_ids=list(entry["receive_espn_ids"]),
+        ),
+        score=score,
+    )
+
+
+def list_response(client, rows):
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [tuple(r[c] for c in service.ROW_COLUMNS) for r in rows],
+        [],
+        [],
+    ]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/trade/incoming?status=all&visibility=all")
+    assert response.status_code == 200, response.text
+    return response.json()["offers"]
+
+
+def test_list_exposes_valid_evidence_verbatim(client, context, caplog):  # noqa: F811
+    entry = row()
+    stored = evidence(context)
+    entry["counter_offer"]["evaluation"] = copy.deepcopy(stored)
+    with caplog.at_level("WARNING"):
+        [offer] = list_response(client, [entry])
+    exposed = offer["evaluation"]
+    assert exposed["request"].pop("horizon") is None
+    assert exposed["evaluated_at"] == "2026-10-07T18:00:00Z"
+    exposed["evaluated_at"] = stored["evaluated_at"]
+    assert exposed == stored
+    terms = exposed["score"]["score"]
+    for key in (
+        "our_weighted_gain",
+        "counterparty_weighted_benefit",
+        "our_schedule_adjustment",
+    ):
+        assert key in terms
+    assert exposed["score"]["horizon"]["unscored_weeks"] is not None
+    assert exposed["score"]["schedule"]["weeks"]
+    assert offer["score"]["final_score"] == 4.0
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_absent_evidence_is_null_without_warning(client, caplog, explicit_null):
+    entry = row()
+    if explicit_null:
+        entry["counter_offer"]["evaluation"] = None
+    with caplog.at_level("WARNING"):
+        [offer] = list_response(client, [entry])
+    assert "evaluation" in offer and offer["evaluation"] is None
+    assert offer["score"] is not None
+    assert not caplog.records
+
+
+def _evidence_set(path, value):
+    def mutate(stored, entry):
+        target = stored
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return stored
+
+    return mutate
+
+
+def _entry_set(path, value):
+    def mutate(stored, entry):
+        target = entry
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return stored
+
+    return mutate
+
+
+def _drop(path):
+    def mutate(stored, entry):
+        target = stored
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        return stored
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "corrupt,reason",
+    [
+        (_evidence_set(["version"], "incoming-trade-evaluation-v2"), "version"),
+        (_drop(["version"]), "version"),
+        (lambda stored, entry: "x", "version"),
+        (lambda stored, entry: [], "version"),
+        (_evidence_set(["score", "scoring_version"], "trade-score-v2"), "invalid"),
+        (_drop(["score", "roster_impact"]), "invalid"),
+        (
+            _evidence_set(["score", "horizon", "unscored_weeks"], [{"week": 7}]),
+            "invalid",
+        ),
+        (_evidence_set(["request", "extra"], True), "invalid"),
+        (_evidence_set(["request", "send_espn_ids"], ["abc"]), "invalid"),
+        (_evidence_set(["evaluated_at"], "2026-10-07T18:00:00"), "invalid"),
+        (_evidence_set(["scored_fingerprint"], "A" * 64), "invalid"),
+        # The offer changed after scoring: a new fingerprint on the entry and summary.
+        (_entry_set(["fingerprint"], "b" * 64), "fingerprint"),
+        (_entry_set(["score", "scored_fingerprint"], "b" * 64), "fingerprint"),
+        (_evidence_set(["scored_fingerprint"], "b" * 64), "fingerprint"),
+        # A newer summary from a later refresh than the breakdown.
+        (
+            _entry_set(
+                ["score", "scored_at"], (NOW + timedelta(minutes=1)).isoformat()
+            ),
+            "evaluated_at",
+        ),
+        (_evidence_set(["request", "league_id"], "457"), "request offer"),
+        (_evidence_set(["request", "season"], 2025), "request offer"),
+        (_evidence_set(["request", "our_team_id"], "9"), "request offer"),
+        (_evidence_set(["request", "counterparty_team_id"], "4"), "request offer"),
+        (_evidence_set(["request", "send_espn_ids"], ["999", "999"]), "request offer"),
+        (_evidence_set(["request", "receive_espn_ids"], ["777"]), "request offer"),
+        (_evidence_set(["score", "league_id"], "457"), "response request"),
+        (_evidence_set(["score", "as_of_week"], 6), "response request"),
+        (
+            _evidence_set(["score", "counterparty_team", "team_id"], "4"),
+            "response request",
+        ),
+        (_evidence_set(["score", "receive", 0, "espn_id"], "777"), "response request"),
+        (_entry_set(["score", "final_score"], 5.0), "summary score"),
+        (_entry_set(["score", "as_of_week"], 6), "summary score"),
+        (_entry_set(["score", "scoring_version"], None), "summary score"),
+        (_entry_set(["score", "final_score"], "99"), "summary"),
+        (_entry_set(["score"], None), "summary"),
+    ],
+)
+def test_bad_or_mismatched_evidence_is_null_without_breaking_list(
+    client, context, caplog, corrupt, reason  # noqa: F811
+):
+    good, bad = row("1"), row("2")
+    good["counter_offer"]["evaluation"] = evidence(context)
+    bad["id"] = 8
+    bad["counter_offer"]["evaluation"] = corrupt(
+        evidence(context), bad["counter_offer"]
+    )
+    with caplog.at_level("WARNING"):
+        offers = {
+            o["espn_transaction_id"]: o for o in list_response(client, [good, bad])
+        }
+    assert offers["1"]["evaluation"] is not None
+    assert "evaluation" in offers["2"] and offers["2"]["evaluation"] is None
+    warnings = [
+        r.getMessage() for r in caplog.records if "evaluation" in r.getMessage()
+    ]
+    assert len(warnings) == 1 and "row 8" in warnings[0]
+    if reason not in ("version", "invalid"):
+        assert f"{reason} does not match" in warnings[0]
+    # The stored player ids and scores stay out of the log.
+    assert "777" not in caplog.text and "99" not in warnings[0]
+
+
+def test_evidence_never_changes_rank(client, context):  # noqa: F811
+    low, high = row("1", final=1.0), row("2", final=9.0)
+    low["counter_offer"]["evaluation"] = evidence(context, low["counter_offer"])
+    # Evidence claiming a far better score than the summary is refused, not ranked.
+    stored = evidence(context, high["counter_offer"])
+    high["counter_offer"]["evaluation"] = stored
+    low["counter_offer"]["evaluation"]["score"]["score"]["final_score"] = 100.0
+    offers = list_response(client, [low, high])
+    assert [o["espn_transaction_id"] for o in offers] == ["2", "1"]
+    assert offers[0]["evaluation"] is not None and offers[1]["evaluation"] is None
+
+
+def test_triage_response_carries_bound_evidence(
+    client, boundary, context
+):  # noqa: F811
+    rows = boundary[0]
+    rows[0]["counter_offer"]["evaluation"] = evidence(context)
+    body = {"state": "seen", "by": "human"}
+    response = client.post(BASE + "/triage", json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["evaluation"]["scored_fingerprint"] == "a" * 64
+    rows[0]["counter_offer"]["fingerprint"] = "b" * 64
+    response = client.post(BASE + "/triage", json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["evaluation"] is None
+    assert response.json()["score"] is not None
+
+
+@pytest.mark.parametrize("kind", ["accept", "counter"])
+def test_evidence_leaves_token_and_publications_unchanged(
+    client, boundary, context, kind  # noqa: F811
+):
+    rows, connection, _, _ = boundary
+    channel = connection.return_value.channel.return_value
+    request = (
+        ("/decision", {"action": "accept", "approved_by": "human"})
+        if kind == "accept"
+        else ("/counter", {"approved_by": "human", "week": 5})
+    )
+    bodies, tokens = [], []
+    for stored in (None, evidence(context), {"version": 7}):
+        rows[0]["outcome_details"] = {}
+        rows[0]["counter_offer"]["evaluation"] = stored
+        tokens.append(token(boundary))
+        response = client.post(BASE + request[0], json=reviewed(boundary, request[1]))
+        assert response.status_code == 202, response.text
+        sent = json.loads(channel.basic_publish.call_args.kwargs["body"])
+        sent.pop("tracking_id")
+        sent.pop("traceparent")
+        bodies.append(sent)
+    assert len(set(tokens)) == 1
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert "evaluation" not in json.dumps(bodies[0])
