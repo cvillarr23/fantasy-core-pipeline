@@ -208,7 +208,11 @@ def test_decision_receipt_payload_and_duplicate(client, boundary):
         espn_transaction_id="123",
         action="accept",
         comment="Yes",
-        approval=dict(decision_key=receipt["decision_key"], approved_by="human"),
+        approval=dict(
+            decision_key=receipt["decision_key"],
+            approved_by="human",
+            reviewed_note="Their note",
+        ),
         traceparent=sent["traceparent"],
     )
     assert channel.basic_publish.call_args.kwargs["routing_key"] == "trade_responses"
@@ -929,6 +933,63 @@ def published(connection):
     return [json.loads(c.kwargs["body"]) for c in channel.basic_publish.call_args_list]
 
 
+@pytest.mark.parametrize("action", ["accept", "decline"])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "note,absent",
+    [
+        (None, False),
+        ("", False),
+        ("  \tTheir ☃ note\n ", False),
+        (" \t\n ", False),
+        (None, True),
+    ],
+)
+def test_response_approval_includes_exact_reviewed_note(
+    client, boundary, worker_responses, action, retry, note, absent
+):
+    rows, connection, audit, _ = boundary
+    entry = rows[0]["counter_offer"]
+    response_comment = "Our reply"
+    key = service.compute_decision_key(
+        "456", 2026, "8", "123", action, entry["fingerprint"], response_comment
+    )
+    if retry:
+        # A retry must use the freshly reviewed row, even if an earlier approval
+        # contained a different proposer note with the same decision key.
+        service.decide(
+            "123", action, "human", response_comment, review_token=token(boundary)
+        )
+        worker_responses[0].update(
+            decision_key=key, action=action, comment=response_comment
+        )
+    if absent:
+        entry.pop("comment")
+    else:
+        entry["comment"] = note
+    path = "/decision/retry" if retry else "/decision"
+    body = (
+        {"approved_by": "human", "of_claim_id": 41}
+        if retry
+        else {"approved_by": "human", "action": action, "comment": " Our reply "}
+    )
+    result = client.post(BASE + path, json=reviewed(boundary, body))
+    assert result.status_code == 202, result.text
+    sent = published(connection)[-1]
+    assert sent["action"] == action
+    assert sent["comment"] == response_comment
+    assert sent["approval"] == dict(
+        decision_key=key, approved_by="human", reviewed_note=None if absent else note
+    )
+    publication_key = f"{key}:retry:41" if retry else key
+    claim = rows[0]["outcome_details"]["incoming_publications"][publication_key]
+    assert claim["payload"]["approval"] == sent["approval"]
+    assert (
+        audit.call_args.kwargs["decision_inputs"]["payload"]["approval"]
+        == sent["approval"]
+    )
+
+
 def test_retry_republishes_a_rejected_response_once(client, boundary, worker_responses):
     rows, connection, audit, _ = boundary
     original = service.decide("123", "decline", "human", review_token=token(boundary))
@@ -949,7 +1010,11 @@ def test_retry_republishes_a_rejected_response_once(client, boundary, worker_res
         tracking_id=receipt["tracking_id"],
         espn_transaction_id="123",
         action="decline",
-        approval=dict(decision_key=decline_key(), approved_by="retrier"),
+        approval=dict(
+            decision_key=decline_key(),
+            approved_by="retrier",
+            reviewed_note="Their note",
+        ),
         retry=dict(of_claim_id=41, approved_by="retrier", verified_not_answered=False),
         traceparent=sent[1]["traceparent"],
     )

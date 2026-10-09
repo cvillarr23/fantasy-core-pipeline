@@ -168,7 +168,11 @@ Core computes `decision_key` as SHA-256 of compact UTF-8 JSON:
 
 All four identifiers, including season, are strings. The published `trade_responses`
 body contains `{tracking_id, espn_transaction_id, action, comment?,
-approval: {decision_key, approved_by}}` plus tracing. Null comments are omitted.
+approval: {decision_key, approved_by, reviewed_note}}` plus tracing. Null response
+comments are omitted. `reviewed_note` is always included, including on decision retries:
+it is the exact proposer note from the locked inbox row whose review token was verified.
+Whitespace is preserved, an empty string stays empty, and an absent note is null.
+The worker compares this note against a fresh ESPN read before executing the response.
 Scores and shadow policy are never published as approval metadata.
 
 `POST /v1/trade/incoming/{espn_transaction_id}/counter` accepts
