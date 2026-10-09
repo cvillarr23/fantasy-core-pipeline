@@ -4,26 +4,43 @@ on:
   pull_request:
     types: [opened, edited, synchronize]
 
+permissions:
+  issues: write
+  pull-requests: read
+
 jobs:
   check-linked-issue:
     runs-on: ubuntu-latest
     steps:
       - name: Check for a closing issue reference
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const result = await github.graphql(`
-              query($owner:String!, $repo:String!, $number:Int!) {
-                repository(owner:$owner, name:$repo) {
-                  pullRequest(number:$number) {
-                    closingIssuesReferences(first: 10) { totalCount }
+            let result;
+            try {
+              result = await github.graphql(`
+                query($owner:String!, $repo:String!, $number:Int!) {
+                  repository(owner:$owner, name:$repo) {
+                    pullRequest(number:$number) {
+                      closingIssuesReferences(first: 10) { totalCount }
+                    }
                   }
                 }
-              }
-            `, { owner: context.repo.owner, repo: context.repo.repo, number: context.issue.number });
+              `, { owner: context.repo.owner, repo: context.repo.repo, number: context.issue.number });
+            } catch (error) {
+              core.setFailed("Unable to read closing issue references with this PR token. A maintainer must verify the closing issue link; fork and Dependabot PRs use read-only tokens. " + error.message);
+              return;
+            }
 
             const linked = result.repository.pullRequest.closingIssuesReferences.totalCount > 0;
+            const readOnly = context.payload.pull_request.head.repo.full_name !== context.payload.pull_request.base.repo.full_name || context.actor === "dependabot[bot]";
+            if (readOnly) {
+              if (!linked) {
+                core.setFailed("PR has no linked closing issue. Add Fixes #N or Closes owner/repo#N to the PR description. Labels and comments are skipped because fork and Dependabot PRs use read-only tokens.");
+              }
+              return;
+            }
             const labelName = "needs-issue-link";
 
             const { data: existingLabels } = await github.rest.issues.listLabelsOnIssue({
