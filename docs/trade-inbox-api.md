@@ -47,6 +47,7 @@ Each offer exposes the following fields (the Pydantic models also define OpenAPI
 | `triage` | `{state, by?, at?, snooze_until?}` or null |
 | `decision` | worker-owned JSON or null; includes its outcome and verification details |
 | `score`, `shadow_policy` | nullable, validated advisory evidence |
+| `evaluation` | nullable full score evidence bound to `score` (see below); display-only |
 | `missed_reads`, `exit_reason` | refresh retirement evidence |
 | `publications` | core claims with payload omitted; distinct from worker outcomes |
 | `response` | `{id, status, action, decision_key}` of the newest worker `trade_response` row that blocks the offer (`responding`, `responded`, `response_unknown`, `rejected`), or null; `id` is what a retry names |
@@ -62,9 +63,39 @@ equality with an ESPN ID.
 `stale`, `error`. States are `scored`, `incomplete`, `unavailable`, `unscorable`,
 `stale_ownership`; `unparsed` is an inbox state, not a score state.
 Absent, invalid or unknown-version score/shadow metadata returns null with a
-bounded warning that omits stored values. The worker does not yet persist the full
-score breakdown or detailed per-week horizon evidence. Do not invent those values.
+bounded warning that omits stored values.
 Ranking follows the raw worker score even if an invalid advisory panel becomes null.
+
+`evaluation` is the worker's full breakdown behind `score`:
+`{version: "incoming-trade-evaluation-v1", evaluated_at, scored_fingerprint, request, score}`.
+`request` is the exact `POST /v1/trade/score` body the worker sent, validated as
+`TradeScoreRequest`. The worker omits `horizon`, so `request.horizon` is null, which
+means the scorer's default of four weeks applied, not that a value was sent. `score` is
+the complete, unmodified `TradeScore` response: `score.our_weighted_gain` (G*),
+`score.counterparty_weighted_benefit` (C*), `score.our_schedule_adjustment`, `schedule`,
+both `roster_impact` sides, `horizon` (start/end week, `scored_weeks`, and
+`unscored_weeks[].reasons`), `coverage`, `roster_snapshot` and `strength_metric`.
+
+Core exposes it only while it describes the same offer version, refresh and score as
+the summary, so a breakdown and summary can't silently disagree:
+
+- `scored_fingerprint` equals both the offer `fingerprint` and `score.scored_fingerprint`;
+  `evaluated_at` is the same instant as `score.scored_at`.
+- The request's league and season match the row, its teams match `our_team_id` and
+  `proposing_team_id`, and its two player sides match `send_espn_ids` and
+  `receive_espn_ids` (order ignored, repeats counted).
+- The response's league, season, `as_of_week`, both team IDs and `send`/`receive` ESPN
+  IDs match the request.
+- The response's `scoring_version`, `as_of_week` and `score.final_score` equal the
+  summary's.
+
+Absent or null evidence returns null silently (legacy rows, unscorable trades, permanent
+score failures, or evidence over the worker's 64 KiB limit). Unknown-version, malformed or
+mismatched evidence, or evidence beside a missing or invalid summary, returns null with a
+warning naming the row and the failed check, never stored values. A stale summary
+(`stale: true`) keeps its original evidence and timestamp, so both still match.
+`evaluation` is not part of the review token, ranking, accept/counter checks or any
+publication payload. Clients should show the breakdown as unavailable when it is null.
 
 Worker outcomes are separate from inbox status: `decision.outcome=blocked` with
 `closed_locks` displays response blocking, `pending` with inbox `responding`
@@ -233,8 +264,7 @@ Activity, and ESPN evidence. Reset a claim only after establishing that no actio
 was queued/sent and that no consumer can still execute it. An unknown result must
 remain blocked. Any production write needs explicit operator authorization.
 
-Worker follow-ups: [full score evidence](https://github.com/cvillarr23/fantasy-browser-worker/issues/152)
-and [counter thread linkage](https://github.com/cvillarr23/fantasy-browser-worker/issues/154).
+Worker follow-up: [counter thread linkage](https://github.com/cvillarr23/fantasy-browser-worker/issues/154).
 
 The worker claims an offer atomically under the same `trade-inbox` lock (then the
 decision-key lock), re-checking the stored entry. It reconciles an existing claim
