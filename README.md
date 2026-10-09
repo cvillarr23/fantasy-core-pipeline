@@ -2,6 +2,8 @@
 
 The core intelligence layer of your automated fantasy football infrastructure. It performs data transformations, tracks utilization metrics, solves linear roster models, and exposes an internal control API.
 
+This project is unofficial and not affiliated with ESPN or Disney. It is for personal use on your own leagues. Read the [disclaimer and scope](https://github.com/cvillarr23/fantasy-project/blob/main/DISCLAIMER.md) before using it.
+
 ## Repository Layout
 *   `src/api/`: FastAPI Control Plane router, middleware definitions, and Model Context Protocol (MCP) data tools.
 *   `src/ingestion/`: Scrapers managing deterministic JSON transformations from Sleeper and `nflverse`.
