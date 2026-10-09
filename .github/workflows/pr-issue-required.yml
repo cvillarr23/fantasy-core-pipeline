@@ -6,7 +6,7 @@ on:
 
 permissions:
   issues: write
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   check-linked-issue:
@@ -33,7 +33,11 @@ jobs:
               return;
             }
 
-            const linked = result.repository.pullRequest.closingIssuesReferences.totalCount > 0;
+            // The repo-scoped token cannot see closing links to private sibling repos.
+            // Accept a qualified reference to the shared tracker; maintainers verify its target.
+            const body = context.payload.pull_request.body || "";
+            const trackerReference = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:https:\/\/github\.com\/cvillarr23\/fantasy-project\/issues\/|cvillarr23\/fantasy-project#)[1-9]\d*\b/i.test(body);
+            const linked = result.repository.pullRequest.closingIssuesReferences.totalCount > 0 || trackerReference;
             const readOnly = context.payload.pull_request.head.repo.full_name !== context.payload.pull_request.base.repo.full_name || context.actor === "dependabot[bot]";
             if (readOnly) {
               if (!linked) {
