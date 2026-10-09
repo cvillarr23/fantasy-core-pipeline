@@ -45,6 +45,18 @@ def staged(message=None, evaluation=None, row_id=1):
     return row
 
 
+def staged_counter(row_id=1, thread_root_id="tx-1"):
+    """A staged counter whose key binds the incoming offer it answers."""
+    fixture = next(f for f in FIXTURES if f["offer"].get("relatedTransactionId"))
+    row = staged(row_id=row_id)
+    row["counter_offer"].update(
+        offer_key=fixture["key"],
+        related_transaction_id=fixture["offer"]["relatedTransactionId"],
+        thread_root_id=thread_root_id,
+    )
+    return row
+
+
 def proposal_evaluation(trade_context, message):
     """The worker stores the /v1/trade/score response verbatim, so build it the same way."""
     return dict(
@@ -187,6 +199,8 @@ def test_double_approve_and_duplicate_staged_rows_publish_once(client, boundary)
         ("incoming_player_ids", ["99"]),
         ("outgoing_player_ids", ["99"]),
         ("source", "invalid"),
+        ("related_transaction_id", "tx-9"),
+        ("thread_root_id", "tx-1"),
     ],
 )
 def test_edited_offer_rejected(client, boundary, field, value):
@@ -449,6 +463,57 @@ def test_duplicate_does_not_replace_original_approver(client, boundary):
 PITCH = "Fair deal?"
 
 
+def test_approved_counter_keeps_its_link(client, boundary):
+    rows, channel, _ = boundary
+    rows[0] = staged_counter()
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve", json={"approved_by": "conor"}
+    )
+    assert response.status_code == 202, response.text
+    sent = json.loads(channel.basic_publish.call_args.kwargs["body"])
+    assert sent["related_transaction_id"] == "tx-3"
+    assert sent["thread_root_id"] == "tx-1"
+    reconstructed = dict(
+        leagueId="1248158344",
+        seasonId=str(sent["season"]),
+        fromTeamId="8",
+        toTeamId=sent["to_team_id"],
+        incomingPlayerIds=sent["incoming_player_ids"],
+        outgoingPlayerIds=sent["outgoing_player_ids"],
+        message=sent.get("message"),
+        relatedTransactionId=sent["related_transaction_id"],
+    )
+    assert service.compute_offer_key(reconstructed) == key
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("related_transaction_id", " tx-3"), ("thread_root_id", "")],
+)
+def test_malformed_counter_linkage_rejected(client, boundary, field, value):
+    rows, channel, _ = boundary
+    rows[0] = staged_counter()
+    rows[0]["counter_offer"][field] = value
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve", json={"approved_by": "conor"}
+    )
+    assert response.status_code == 409
+    channel.basic_publish.assert_not_called()
+
+
+def test_staged_copies_disagreeing_on_thread_root_are_rejected(client, boundary):
+    rows, channel, _ = boundary
+    rows[:] = [staged_counter(), staged_counter(row_id=2, thread_root_id="tx-0")]
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve", json={"approved_by": "conor"}
+    )
+    assert response.status_code == 409
+    channel.basic_publish.assert_not_called()
+
+
 def list_offers_response(client, rows):
     cursor = MagicMock()
     cursor.fetchall.side_effect = [
@@ -585,3 +650,11 @@ def test_staged_copies_with_different_evaluations_approve_once(
         )
         assert response.status_code == expected, response.text
     channel.basic_publish.assert_called_once()
+
+
+def test_list_shows_counter_linkage(client):
+    offers = list_offers_response(client, [staged_counter(), staged(row_id=2)])
+    assert offers[1]["related_transaction_id"] == "tx-3"
+    assert offers[1]["thread_root_id"] == "tx-1"
+    assert offers[2]["related_transaction_id"] is None
+    assert offers[2]["thread_root_id"] is None

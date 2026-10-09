@@ -40,7 +40,11 @@ class PublishUnavailable(RuntimeError):
 
 
 def compute_offer_key(offer):
-    """Mirror trade_builder.js computeOfferKey (ids have already been normalized)."""
+    """Mirror trade_builder.js computeOfferKey (ids have already been normalized).
+
+    A counter's related transaction is appended, so an approval names the incoming offer it
+    counters. Unlinked offers keep the original eight-field key.
+    """
     canonical = [
         "trade-offer-v1",
         str(offer["leagueId"]),
@@ -51,6 +55,8 @@ def compute_offer_key(offer):
         sorted(map(str, offer["outgoingPlayerIds"])),
         offer.get("message"),
     ]
+    if offer.get("relatedTransactionId"):
+        canonical.append(str(offer["relatedTransactionId"]))
     encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -92,6 +98,15 @@ def _validated_offer(row, key):
             not isinstance(message, str) or not message.strip()
         ):
             raise ValueError("invalid staged message")
+        # Counter linkage. Both fields are optional; the thread root is tracing only.
+        related = offer.get("related_transaction_id")
+        thread_root = offer.get("thread_root_id")
+        if related is not None:
+            identifier(related)
+        if thread_root is not None:
+            if related is None:
+                raise ValueError("thread root without a related transaction")
+            identifier(thread_root)
         normalized = dict(
             leagueId=league,
             seasonId=str(row["season"]),
@@ -100,6 +115,7 @@ def _validated_offer(row, key):
             incomingPlayerIds=sides[0],
             outgoingPlayerIds=sides[1],
             message=message,
+            relatedTransactionId=related,
         )
         if offer["offer_key"] != key or compute_offer_key(normalized) != key:
             raise ValueError("offer key mismatch")
@@ -183,6 +199,10 @@ def approve_offer(key, approved_by):
                 _validated_offer(other, key)
                 if other["counter_offer"]["source"] != offer["source"]:
                     raise OfferConflict("Staged copies disagree on offer source.")
+                if other["counter_offer"].get("thread_root_id") != offer.get(
+                    "thread_root_id"
+                ):
+                    raise OfferConflict("Staged copies disagree on counter thread.")
         tracking_id = str(uuid.uuid4())
         approval = dict(
             offer_key=key,
@@ -201,6 +221,10 @@ def approve_offer(key, approved_by):
         )
         if offer.get("message") is not None:
             payload["message"] = offer["message"]
+        # The worker recomputes the key from these, so a counter must keep its link.
+        for field in ("related_transaction_id", "thread_root_id"):
+            if offer.get(field) is not None:
+                payload[field] = offer[field]
         approval["payload"] = payload
         _save_approval(cursor, row["id"], "approval_pending", approval)
         routes._record_bot_decision(
@@ -346,6 +370,8 @@ def list_offers(
                     "incoming_player_ids",
                     "outgoing_player_ids",
                     "message",
+                    "related_transaction_id",
+                    "thread_root_id",
                 )
             }
         )

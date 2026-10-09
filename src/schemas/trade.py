@@ -105,6 +105,10 @@ class TradeOffer(BaseModel):
     incoming_players: list[OfferPlayer]
     outgoing_players: list[OfferPlayer]
     message: str | None = None
+    # Set on a counter: the incoming ESPN offer it answers (part of offer_key) and that offer's
+    # thread root (tracing only).
+    related_transaction_id: str | None = None
+    thread_root_id: str | None = None
     approval: dict | None = None
     # Advisory only: it is not part of offer_key and is never sent on approval.
     evaluation: ProposalEvaluation | None = None

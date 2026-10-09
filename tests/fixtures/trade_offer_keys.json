@@ -74,5 +74,25 @@
       "message": "  "
     },
     "key": "6df6066bab78e491b2585d10779133018151ac031d3daa770e79be87cd85fc80"
+  },
+  {
+    "offer": {
+      "leagueId": "1248158344",
+      "seasonId": "2026",
+      "fromTeamId": "8",
+      "toTeamId": "3",
+      "incomingPlayerIds": [
+        "4259545",
+        "-16021",
+        "10",
+        "2"
+      ],
+      "outgoingPlayerIds": [
+        "3139477"
+      ],
+      "message": null,
+      "relatedTransactionId": "tx-3"
+    },
+    "key": "847591276fc2cc0355b8fff07915d82c90aadcaf8291e48dd6624a3103032103"
   }
 ]
