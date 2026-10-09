@@ -36,7 +36,7 @@ ESPN_TO_PLAYER_ID = {"3117251": "4046", "4360438": "8112"}
 
 
 def _require_env_vars(monkeypatch):
-    monkeypatch.setenv("ESPN_LEAGUE_ID", "1248158344")
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "123456789")
     monkeypatch.setenv("ESPN_S2", "fake_s2")
     monkeypatch.setenv("ESPN_SWID", "{fake-swid}")
 
@@ -177,7 +177,7 @@ def test_persist_team_names_upserts_without_deleting():
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    sl.persist_team_names(mock_conn, "1248158344", [("1", "The Dynasty")])
+    sl.persist_team_names(mock_conn, "123456789", [("1", "The Dynasty")])
 
     execute_calls = [c[0][0] for c in mock_cursor.execute.call_args_list]
     assert not any("DELETE FROM league_teams" in c for c in execute_calls)
@@ -208,7 +208,7 @@ def test_sync_league_persists_team_names_alongside_rosters(monkeypatch):
 
         sl.sync_league(season=2026)
 
-    mock_persist_names.assert_called_once_with(mock_conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
+    mock_persist_names.assert_called_once_with(mock_conn, "123456789", [("1", "The Dynasty"), ("2", "Team Two")])
     persisted_sql = [c.args[0] for c in mock_cursor.executemany.call_args_list]
     assert any("ir_slots_used" in sql for sql in persisted_sql)
 
@@ -273,11 +273,11 @@ def test_persist_ir_occupancy_updates_league_teams():
     mock_conn = MagicMock()
     mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
 
-    sl.persist_ir_occupancy(mock_conn, "1248158344", [("1", 1)])
+    sl.persist_ir_occupancy(mock_conn, "123456789", [("1", 1)])
 
     sql, rows = mock_cursor.executemany.call_args.args
     assert "UPDATE league_teams" in sql and "ir_slots_used" in sql
-    assert rows == [(1, "1248158344", "1")]
+    assert rows == [(1, "123456789", "1")]
 
 
 def test_sync_rosters_refreshes_team_rows_and_ir_occupancy(monkeypatch):
@@ -295,8 +295,8 @@ def test_sync_rosters_refreshes_team_rows_and_ir_occupancy(monkeypatch):
         conn.cursor.return_value.__enter__.return_value.fetchall.return_value = []
         sl.sync_rosters(2026)
 
-    mock_names.assert_called_once_with(conn, "1248158344", [("1", "The Dynasty"), ("2", "Team Two")])
-    mock_ir.assert_called_once_with(conn, "1248158344", [("1", 0), ("2", 0)])
+    mock_names.assert_called_once_with(conn, "123456789", [("1", "The Dynasty"), ("2", "Team Two")])
+    mock_ir.assert_called_once_with(conn, "123456789", [("1", 0), ("2", 0)])
 
 
 def test_raw_league_read_includes_matchups_only_when_requested():
