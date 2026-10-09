@@ -273,12 +273,19 @@ def _rows(c):
 
 
 def list_actions(user, limit=50, offset=0, attention=False):
+    """List submissions with dependency events; detail reads include the full timeline."""
     with get_db_cursor() as c:
         c.execute(
-            """SELECT a.*, (r.read_at IS NULL OR r.read_at<a.updated_at) AS unread
+            """SELECT a.*, (r.read_at IS NULL OR r.read_at<a.updated_at) AS unread,
+          COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM activity_events e
+            WHERE e.action_id=a.id AND e.stage IN
+              ('held_for_dependency','dependency_verified','dependency_failed')), '[]'::jsonb) AS events
         FROM activity_actions a LEFT JOIN activity_reads r ON r.item_id=a.id AND r.user_id=%s
-        WHERE a.league_id=%s AND (%s=false OR a.execution='failed' OR
-          (a.outcome='unknown' AND a.created_at < now()-interval '5 minutes') OR a.outcome='awaiting_approval')
+        LEFT JOIN activity_outbox o ON o.action_id=a.id
+        WHERE a.league_id=%s AND (%s=false OR (
+          NOT (o.depends_on IS NOT NULL AND o.published_at IS NULL) AND
+          (a.execution='failed' OR
+           (a.outcome='unknown' AND a.created_at < now()-interval '5 minutes') OR a.outcome='awaiting_approval')))
         ORDER BY a.created_at DESC LIMIT %s OFFSET %s""",
             (user, league_id(), attention, limit, offset),
         )
