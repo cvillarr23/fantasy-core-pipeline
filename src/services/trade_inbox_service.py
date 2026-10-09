@@ -762,6 +762,10 @@ def _request_publication(
                 offering_team_id=entry["proposing_team_id"],
                 incoming_player_ids=internal("receive"),
                 outgoing_player_ids=internal("send"),
+                # Lets the staged counter be traced to this offer. Queuing it marks nothing
+                # countered: the worker's refresh does that from ESPN's own linkage.
+                related_transaction_id=tx,
+                thread_root_id=entry.get("thread_root_id") or tx,
             )
             incoming, outgoing = (
                 payload["incoming_player_ids"],

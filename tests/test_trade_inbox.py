@@ -343,6 +343,8 @@ def test_counter_uses_score_mapping_and_blocks_competitor(client, boundary):
         offering_team_id="3",
         incoming_player_ids=["222"],
         outgoing_player_ids=["111"],
+        related_transaction_id="123",
+        thread_root_id="123",
         traceparent=sent["traceparent"],
     )
     assert channel.basic_publish.call_args.kwargs["routing_key"] == "trade_negotiations"
