@@ -100,7 +100,7 @@ def proposal_evaluation(trade_context, message):
 
 @pytest.fixture
 def boundary(monkeypatch):
-    monkeypatch.setenv("ESPN_LEAGUE_ID", "1248158344")
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "123456789")
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     rows = [staged()]
     lock = threading.Lock()
@@ -157,7 +157,7 @@ def test_approve_publishes_stored_offer(client, boundary):
     )
     assert sent["season"] == 2026
     reconstructed = dict(
-        leagueId="1248158344",
+        leagueId="123456789",
         seasonId=str(sent["season"]),
         fromTeamId="8",
         toTeamId=sent["to_team_id"],
@@ -312,13 +312,13 @@ def test_list_filters_and_espn_names(client):
     with patch.object(service, "get_db_cursor") as db:
         db.return_value.__enter__.return_value = cursor
         response = client.get(
-            "/v1/trade/offers?status=awaiting_approval&league_id=1248158344&season=2026&limit=10&offset=2"
+            "/v1/trade/offers?status=awaiting_approval&league_id=123456789&season=2026&limit=10&offset=2"
         )
     assert response.status_code == 200, response.text
     sql, params = cursor.execute.call_args_list[0].args
     assert "transaction_type = 'trade_offer_submit'" in sql
     assert "status = %s" in sql and "league_id = %s" in sql and "season = %s" in sql
-    assert params == ["awaiting_approval", "1248158344", 2026, 10, 2]
+    assert params == ["awaiting_approval", "123456789", 2026, 10, 2]
     assert "espn_id" in cursor.execute.call_args_list[1].args[0]
     offer = response.json()["offers"][0]
     assert offer["incoming_players"][0] == {"espn_id": "4259545", "name": "Player Name"}
@@ -475,7 +475,7 @@ def test_approved_counter_keeps_its_link(client, boundary):
     assert sent["related_transaction_id"] == "tx-3"
     assert sent["thread_root_id"] == "tx-1"
     reconstructed = dict(
-        leagueId="1248158344",
+        leagueId="123456789",
         seasonId=str(sent["season"]),
         fromTeamId="8",
         toTeamId=sent["to_team_id"],

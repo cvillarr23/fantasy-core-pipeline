@@ -1,7 +1,7 @@
 """
 Historical ground truth for the backtesting harness (CORE-15).
 
-The real league (1248158344) has no draft/season history to replay, so this pulls real
+The configured league has no draft/season history to replay, so this pulls real
 public historical data instead: actual weekly fantasy points and a FantasyPros ECR-based
 ADP proxy, both via nflreadpy, against a hardcoded standard league config rather than a
 real `league_settings` row.
