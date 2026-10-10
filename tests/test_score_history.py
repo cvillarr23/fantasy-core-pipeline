@@ -36,26 +36,6 @@ def test_stored_matchup_avoids_espn_and_current_roster_badges(monkeypatch):
     badges.assert_not_called()
 
 
-def test_strength_cannot_fall_back_to_live_totals():
-    from tests.test_trade_context_service import IDENTITIES, METRICS, FETCHED_AT
-    from tests.test_trade_context_service import raw as raw_fixture
-
-    raw = raw_fixture.__wrapped__()
-    result = trade_context_service.shape_trade_context(
-        raw,
-        IDENTITIES,
-        METRICS,
-        "123",
-        2026,
-        3,
-        4,
-        FETCHED_AT,
-        stored_events={},
-    )
-    assert result["teams"]["1"]["strength"]["points_per_week"] is None
-    assert result["teams"]["1"]["schedule"][0]["status"] == "unavailable"
-
-
 def test_history_requires_every_week_of_multiweek_period():
     rows = [
         ("1", 1, [1, 2], "2", "scheduled", 1, 100.0),

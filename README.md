@@ -395,9 +395,9 @@ does not reconstruct historical ownership. Successful responses are cached for 6
 and invalidated by the existing verified-move league cache version.
 
 The `completed_fantasy_points_per_week_z` strength metric uses each team's completed
-stored ESPN regular-season scores before both the selected and observed ESPN week,
-divided by the number of scoring weeks represented. Every scoring week of a fantasy
-matchup period must be ingested before that period contributes. Scores from in-progress or later
+ESPN regular-season scores before both the selected and observed ESPN week,
+divided by the number of scoring weeks represented. When using stored scores, every scoring
+week of a fantasy matchup period must be ingested before that period contributes. Scores from in-progress or later
 matchups do not enter the metric. The league mean and population standard deviation
 standardize teams with observations; positive z means stronger. Fewer than two observed
 teams produces unknown z scores; equal observed strengths produce zero. Sample counts and
@@ -405,8 +405,15 @@ teams produces unknown z scores; equal observed strengths produce zero. Sample c
 scoring and does not predict win probabilities or measure NFL defense difficulty.
 
 Each schedule week distinguishes `scheduled`, explicit `bye`, and `unavailable` pairings.
-Pairings and strength come from the ingestion tables; missing stored history does not fall
-back to live ESPN totals. Current ownership and the observed ESPN week remain live.
+Pairings and strength normally come from the ingestion tables. If the store has no usable
+completed history, or ESPN's live schedule has a usable completed team/matchup period
+missing from the store, the entire league falls back to live ESPN matchup totals and
+pairings. This includes incomplete stored multiweek periods; live totals are still divided
+by the period's scoring-week count. The comparison respects both the selected and observed
+ESPN week, so in-progress and future scores cannot trigger a fallback. Complete stored
+history stays authoritative, even if live scores differ. `strength_metric.source` reports
+the selected source. If neither source fills a history gap, it remains unknown and is
+counted in `unavailable_history_periods`. Current ownership and the observed ESPN week remain live.
 A team's `schedule_strength_z` is the mean opponent z across non-bye scoring weeks, and
 is null unless every such week has a known pairing and strength. Missing/ambiguous
 pairings and unknown scores are reported in `schedule_coverage` rather than treated as
