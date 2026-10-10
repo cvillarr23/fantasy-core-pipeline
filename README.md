@@ -304,7 +304,7 @@ decisions and retries also require an explicit human approver. A `queued` receip
 The worker owns ESPN response execution and confirmed outcomes, and
 `TRADE_RESPONSE_ENABLED` stays off in production.
 
-See [the incoming inbox API contract](docs/trade-inbox-api.md) for query filters,
+See [the incoming inbox API contract](docs/decision-pipelines/incoming-trade-api.md) for query filters,
 schemas, queue payloads, status transitions, idempotency and reconciliation.
 Countering hands off to negotiation and stages an offer for later approval.
 
@@ -472,5 +472,10 @@ Nothing is filled in:
 - Unknown opponent strength or pairing leaves G*, C* or `final_score` null, with a reason.
 - An empty or bye-only horizon has no final score.
 
-Projections and VORP are currently refreshed for the upcoming week only, so later horizon
-weeks usually come back unscored and `complete_horizon` is false.
+The daily refresher attempts the upcoming week and three following weeks, capped at week 18.
+Missing metrics or failed refresh stages can still leave horizon weeks unscored; inspect
+`complete_horizon` and the coverage reasons. See [projections and VORP](docs/decision-pipelines/projections-and-vorp.md).
+
+## Decision pipelines
+
+See [the decision pipeline guide](docs/decision-pipelines/index.md) for inputs, formulas, thresholds, missing-data behavior and publication rules across projections, lineups, waivers, trades, rumors, drafts and backtesting.
