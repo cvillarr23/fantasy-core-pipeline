@@ -18,7 +18,12 @@ from datetime import datetime, timedelta, timezone
 from pydantic import ValidationError
 
 from src.database import get_db_cursor
-from src.schemas.trade_inbox import IncomingEvaluation, InboxScore, ShadowPolicy
+from src.schemas.trade_inbox import (
+    IncomingEvaluation,
+    InboxScore,
+    ShadowPolicy,
+    StoredCounter,
+)
 
 logger = logging.getLogger("TradeInboxService")
 ROW_COLUMNS = (
@@ -48,6 +53,21 @@ REVIEW_TOKEN_VERSION = "trade-inbox-review-v1"
 # Python strip also removes control characters that JavaScript trim preserves, and
 # omits the BOM that JavaScript trims. Approval hashes must use the worker's exact set.
 JS_WHITESPACE = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+# The worker's MAX_COUNTERS_PER_THREAD: it refuses a further counter in a thread past this.
+COUNTER_LIMIT_PER_THREAD = 3
+# Thread state after the latest turn, mirroring the worker's buildThread. A countered turn
+# hands the move to the other side even before their reply is stored.
+SETTLED_THREAD_STATES = {
+    "accepted": "agreed",
+    "accepted_pending_processing": "agreed",
+    "declined": "rejected",
+    "vetoed": "rejected",
+    "expired": "expired",
+    "withdrawn": "abandoned",
+    "closed_unknown": "abandoned",
+}
 
 
 class InboxConflict(ValueError):
@@ -271,12 +291,7 @@ def _shape(row, names=None, responses=None):
             "at": _date(triage.get("at")),
             "snooze_until": _date(triage.get("snooze_until")),
         }
-    roster_names = entry.get("player_names") or {}
-    for side in ("send", "receive"):
-        item[f"{side}_players"] = [
-            dict(espn_id=pid, name=names.get(pid) or roster_names.get(pid))
-            for pid in entry.get(f"{side}_espn_ids", [])
-        ]
+    item.update(_players(entry, names))
     item["review_token"] = compute_review_token(row)
     item["score"] = _advisory(row, "score", InboxScore)
     item["evaluation"] = _evaluation(row, item["score"])
@@ -288,7 +303,36 @@ def _shape(row, names=None, responses=None):
     item["response"] = (responses or {}).get(
         (row["league_id"], entry.get("espn_transaction_id"))
     )
+    item["our_counter"] = _our_counter(row, names)
     return item
+
+
+def _players(offer, names):
+    roster_names = offer.get("player_names") or {}
+    return {
+        f"{side}_players": [
+            dict(espn_id=pid, name=names.get(pid) or roster_names.get(pid))
+            for pid in offer.get(f"{side}_espn_ids") or []
+        ]
+        for side in ("send", "receive")
+    }
+
+
+def _our_counter(row, names):
+    """The worker's record of our counter to this offer, or None when absent or invalid."""
+    counter = _advisory(row, "our_counter", StoredCounter)
+    if counter is None:
+        return None
+    return dict(
+        espn_transaction_id=counter.espn_transaction_id,
+        status=counter.status,
+        **_players(counter.model_dump(), names),
+        proposed_date=_date(counter.proposed_date),
+        expiration_date=_date(counter.expiration_date),
+        missed_reads=counter.missed_reads,
+        exit_reason=counter.exit_reason,
+        seen_at=_date(counter.seen_at),
+    )
 
 
 def list_incoming(
@@ -333,11 +377,16 @@ def list_incoming(
 
 
 def _player_names(cursor, rows):
+    offers = [row["counter_offer"] or {} for row in rows]
+    offers += [
+        o["our_counter"] for o in offers if isinstance(o.get("our_counter"), dict)
+    ]
     ids = {
         pid
-        for row in rows
+        for offer in offers
         for side in ("send", "receive")
-        for pid in (row["counter_offer"] or {}).get(f"{side}_espn_ids", [])
+        for pid in offer.get(f"{side}_espn_ids") or []
+        if isinstance(pid, str)
     }
     if not ids:
         return {}
@@ -367,6 +416,99 @@ def _latest_responses(cursor, rows):
         (league, tx): dict(id=rid, status=status, action=action, decision_key=key)
         for rid, league, tx, status, action, key in cursor.fetchall()
     }
+
+
+def _thread_root(entry):
+    return entry.get("thread_root_id") or entry.get("espn_transaction_id")
+
+
+def _thread_state(turn):
+    if turn["status"] in SETTLED_THREAD_STATES:
+        return SETTLED_THREAD_STATES[turn["status"]]
+    theirs = turn["side"] == "theirs"
+    if turn["status"] == "countered":
+        return "awaiting_them" if theirs else "awaiting_us"
+    if turn["status"] == "open":
+        return "awaiting_us" if theirs else "awaiting_them"
+    return "awaiting_us"
+
+
+def get_thread(tx, league_id=None):
+    """
+    The negotiation `tx` belongs to: their offers and our counters, oldest first, and its
+    state. `tx` may name any offer in the thread or one of our counters. Mirrors the
+    worker's buildThread, which reads the same rows.
+    """
+    league = league_id or os.getenv("ESPN_LEAGUE_ID")
+    if not league:
+        raise InboxConflict("Worker league is not configured.")
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            f"SELECT {SELECT_COLUMNS} FROM execution_log WHERE transaction_type = 'trade_inbox' "
+            "AND league_id = %s AND (counter_offer->>'espn_transaction_id' = %s "
+            "OR counter_offer->'our_counter'->>'espn_transaction_id' = %s)",
+            (league, tx, tx),
+        )
+        found = [dict(zip(ROW_COLUMNS, r)) for r in cursor.fetchall()]
+        if not found:
+            raise InboxNotFound("Incoming offer not found.")
+        roots = {_thread_root(r["counter_offer"] or {}) for r in found}
+        if len(roots) != 1:
+            raise InboxConflict("Offer belongs to more than one thread.")
+        root = roots.pop()
+        cursor.execute(
+            f"SELECT {SELECT_COLUMNS} FROM execution_log WHERE transaction_type = 'trade_inbox' "
+            "AND league_id = %s AND COALESCE(counter_offer->>'thread_root_id', "
+            "counter_offer->>'espn_transaction_id') = %s",
+            (league, root),
+        )
+        members = [dict(zip(ROW_COLUMNS, r)) for r in cursor.fetchall()]
+        names = _player_names(cursor, members)
+
+    turns = []
+    for row in members:
+        entry = row["counter_offer"] or {}
+        turns.append(
+            dict(
+                side="theirs",
+                espn_transaction_id=entry.get("espn_transaction_id"),
+                status=row["status"],
+                proposing_team_id=entry.get("proposing_team_id"),
+                comment=entry.get("comment"),
+                **_players(entry, names),
+                proposed_date=_date(entry.get("proposed_date")),
+                expiration_date=_date(entry.get("expiration_date")),
+                exit_reason=entry.get("exit_reason"),
+            )
+        )
+        counter = _our_counter(row, names)
+        if counter:
+            turns.append(
+                dict(
+                    side="ours",
+                    counters=entry.get("espn_transaction_id"),
+                    **{
+                        k: counter[k]
+                        for k in (
+                            "espn_transaction_id",
+                            "status",
+                            "send_players",
+                            "receive_players",
+                            "proposed_date",
+                            "expiration_date",
+                            "exit_reason",
+                        )
+                    },
+                )
+            )
+    turns.sort(key=lambda t: (_time(t["proposed_date"]), t["espn_transaction_id"]))
+    return dict(
+        thread_root_id=root,
+        state=_thread_state(turns[-1]) if turns else None,
+        our_counters=sum(t["side"] == "ours" for t in turns),
+        counter_limit=COUNTER_LIMIT_PER_THREAD,
+        turns=turns,
+    )
 
 
 def _scope():

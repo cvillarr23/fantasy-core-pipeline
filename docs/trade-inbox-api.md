@@ -51,6 +51,7 @@ Each offer exposes the following fields (the Pydantic models also define OpenAPI
 | `missed_reads`, `exit_reason` | refresh retirement evidence |
 | `publications` | core claims with payload omitted; distinct from worker outcomes |
 | `response` | `{id, status, action, decision_key}` of the newest worker `trade_response` row that blocks the offer (`responding`, `responded`, `response_unknown`, `rejected`), or null; `id` is what a retry names |
+| `our_counter` | our counter to this offer as ESPN showed it, or null (see [Negotiation threads](#negotiation-threads)) |
 
 Names resolve through `players.espn_id`, falling back to worker-captured names.
 Unresolved names stay null. Internal `player_id` is never inferred from numeric
@@ -102,6 +103,39 @@ Worker outcomes are separate from inbox status: `decision.outcome=blocked` with
 displays execution, `unknown` with `verification` requires manual verification,
 and confirmed outcomes include `accepted_pending_processing`, `accepted`, `declined`.
 Use `last_seen_at` for per-offer refresh time; it is not a global job heartbeat.
+
+## Negotiation threads
+
+The worker records our counter to an incoming offer on that offer's row, as
+`our_counter`. Core exposes it as `{espn_transaction_id, status, send_players,
+receive_players, proposed_date, expiration_date, missed_reads, exit_reason, seen_at}`.
+`status` uses the inbox states: `open` while the counter is pending, then how it
+ended. The answered offer itself stays `countered`. An absent `our_counter` returns
+null. An invalid one returns null with a warning that names the row and the
+failing fields, never the stored values. `our_counter` is not part of the review
+token.
+
+`GET /v1/trade/incoming/{espn_transaction_id}/thread` returns the negotiation that
+an offer, or one of our counters, belongs to. It has an optional `league_id`
+parameter, which defaults to the configured `ESPN_LEAGUE_ID`; with neither set it
+returns 409. It returns 404 when no row matches. The response is `{thread_root_id,
+state, our_counters, counter_limit, turns}`:
+
+- `turns`: their offers (`side: "theirs"`) and our counters (`side: "ours"`, with
+  `counters` naming the offer they answered), ordered by proposal time, then ID.
+- `state`: read from the latest turn. It is one of:
+  - `awaiting_us`: their offer is open;
+  - `awaiting_them`: our counter is pending;
+  - `agreed`;
+  - `rejected`;
+  - `expired`;
+  - `abandoned`: withdrawn or closed unexplained.
+- `our_counters`: the counters ESPN has shown. Counters that were only staged
+  don't count.
+- `counter_limit`: the worker's per-thread cap. At the cap, the worker refuses
+  another counter.
+
+This mirrors the worker's `buildThread`.
 
 ## Writes
 

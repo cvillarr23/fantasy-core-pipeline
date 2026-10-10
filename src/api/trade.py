@@ -42,6 +42,7 @@ from src.schemas.trade_inbox import (
     InboxFilter,
     IncomingTrade,
     IncomingTradeList,
+    NegotiationThread,
     PublicationReceipt,
     RetryRequest,
     TriageRequest,
@@ -76,6 +77,19 @@ def _incoming_error(error):
     if isinstance(error, ValueError):
         raise HTTPException(422, str(error)) from error
     raise error
+
+
+@trade_router.get(
+    "/incoming/{espn_transaction_id}/thread", response_model=NegotiationThread
+)
+def get_incoming_thread(
+    espn_transaction_id: str = Path(min_length=1, max_length=200),
+    league_id: str | None = Query(None, pattern=r"^[1-9]\d*$"),
+):
+    try:
+        return trade_inbox_service.get_thread(espn_transaction_id, league_id)
+    except Exception as error:
+        _incoming_error(error)
 
 
 @trade_router.post(

@@ -1750,3 +1750,153 @@ def test_evidence_leaves_token_and_publications_unchanged(
     assert len(set(tokens)) == 1
     assert bodies[0] == bodies[1] == bodies[2]
     assert "evaluation" not in json.dumps(bodies[0])
+
+
+def counter_record(tx="ours-1", status="open", **overrides):
+    return dict(
+        espn_transaction_id=tx,
+        status=status,
+        send_espn_ids=["777"],
+        receive_espn_ids=["888"],
+        player_names={"777": "Our counter name", "888": "Other player"},
+        proposed_date=1791396000000,
+        expiration_date=int((NOW + timedelta(hours=2)).timestamp() * 1000),
+        missed_reads=0,
+        exit_reason=None,
+        seen_at=NOW.isoformat(),
+        **overrides,
+    )
+
+
+def thread_rows():
+    """Their offer 123, our counter ours-1 (countered), and their open reply 124."""
+    original = row("123", status="countered")
+    original["counter_offer"]["our_counter"] = counter_record(status="countered")
+    reply = row("124")
+    reply["id"] = 8
+    reply["counter_offer"].update(
+        related_transaction_id="ours-1",
+        thread_root_id="123",
+        proposed_date=1791403200000,
+    )
+    return [reply, original]
+
+
+def get_thread(client, found, members, names=()):
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [tuple(r[c] for c in service.ROW_COLUMNS) for r in found],
+        [tuple(r[c] for c in service.ROW_COLUMNS) for r in members],
+        list(names),
+    ]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get(f"{BASE}/thread")
+    return response, cursor
+
+
+def test_thread_orders_turns_and_reports_state(client, monkeypatch):
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "456")
+    members = thread_rows()
+    response, cursor = get_thread(
+        client, [members[1]], members, [("777", "Database name")]
+    )
+    assert response.status_code == 200, response.text
+    thread = response.json()
+    assert [
+        (t["side"], t["espn_transaction_id"], t["status"]) for t in thread["turns"]
+    ] == [
+        ("theirs", "123", "countered"),
+        ("ours", "ours-1", "countered"),
+        ("theirs", "124", "open"),
+    ]
+    assert thread["turns"][1]["counters"] == "123"
+    assert thread["turns"][1]["send_players"] == [
+        {"espn_id": "777", "name": "Database name"}
+    ]
+    assert thread["turns"][0]["proposing_team_id"] == "3"
+    assert thread["turns"][0]["proposed_date"].endswith("Z")
+    assert thread | {"turns": None} == {
+        "thread_root_id": "123",
+        "state": "awaiting_us",
+        "our_counters": 1,
+        "counter_limit": service.COUNTER_LIMIT_PER_THREAD,
+        "turns": None,
+    }
+    lookup, members_query = cursor.execute.call_args_list[:2]
+    assert lookup.args[1] == ("456", "123", "123")
+    assert "our_counter" in lookup.args[0]
+    assert members_query.args[1] == ("456", "123")
+
+
+@pytest.mark.parametrize(
+    "status,state",
+    [
+        ("open", "awaiting_them"),
+        ("accepted", "agreed"),
+        ("declined", "rejected"),
+        ("expired", "expired"),
+        ("withdrawn", "abandoned"),
+        ("countered", "awaiting_us"),
+    ],
+)
+def test_thread_state_follows_our_latest_counter(client, monkeypatch, status, state):
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "456")
+    original = row("123", status="countered")
+    original["counter_offer"]["our_counter"] = counter_record(status=status)
+    response, _ = get_thread(client, [original], [original])
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == state
+
+
+def test_thread_for_a_lone_offer_awaits_us(client, monkeypatch):
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "456")
+    response, _ = get_thread(client, [row()], [row()])
+    assert response.json() | {"turns": None} == {
+        "thread_root_id": "123",
+        "state": "awaiting_us",
+        "our_counters": 0,
+        "counter_limit": service.COUNTER_LIMIT_PER_THREAD,
+        "turns": None,
+    }
+
+
+def test_thread_not_found_and_unconfigured(client, monkeypatch):
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "456")
+    assert get_thread(client, [], [])[0].status_code == 404
+    monkeypatch.delenv("ESPN_LEAGUE_ID")
+    assert client.get(f"{BASE}/thread").status_code == 409
+    assert client.get(f"{BASE}/thread?league_id=abc").status_code == 422
+
+
+def test_listing_exposes_our_counter(client, boundary):
+    rows, _, _, _ = boundary
+    rows[0]["status"] = "countered"
+    rows[0]["counter_offer"]["our_counter"] = counter_record()
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [tuple(rows[0][c] for c in service.ROW_COLUMNS)],
+        [("777", "Database name")],
+        [],
+    ]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/trade/incoming?status=all")
+    counter = response.json()["offers"][0]["our_counter"]
+    assert counter["espn_transaction_id"] == "ours-1"
+    assert counter["status"] == "open"
+    assert counter["send_players"] == [{"espn_id": "777", "name": "Database name"}]
+    assert counter["receive_players"] == [{"espn_id": "888", "name": "Other player"}]
+    assert counter["proposed_date"].endswith("Z") and counter["seen_at"].endswith("Z")
+    assert set(cursor.execute.call_args_list[1].args[1][0]) == {"777", "888", "999"}
+
+
+@pytest.mark.parametrize(
+    "bad", [{"status": "bogus"}, {"espn_transaction_id": ""}, {"missed_reads": "1"}]
+)
+def test_invalid_our_counter_does_not_break_list(client, boundary, caplog, bad):
+    rows, _, _, _ = boundary
+    rows[0]["counter_offer"]["our_counter"] = counter_record() | bad
+    response_rows = listed(client, rows)
+    assert response_rows[0]["our_counter"] is None
+    assert "our_counter" in caplog.text
