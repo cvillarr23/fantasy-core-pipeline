@@ -5798,6 +5798,11 @@
             "title": "Open Ir Slots",
             "type": "integer"
           },
+          "open_roster_slots": {
+            "default": 0,
+            "title": "Open Roster Slots",
+            "type": "integer"
+          },
           "recommendations": {
             "items": {
               "$ref": "#/components/schemas/WaiverRecommendation"

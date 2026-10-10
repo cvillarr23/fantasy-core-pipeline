@@ -4,6 +4,7 @@ repo - sync_players.py only publishes injury-transition alerts - so this is new 
 built specifically to be scorable against a static (no-moves) baseline. No FAAB/budget
 modeling.
 """
+import json
 import logging
 
 from src.ir_eligibility import is_ir_eligible
@@ -57,6 +58,71 @@ def load_best_free_agent_by_position(cursor, season: int, week: int) -> dict:
         if current is None or vorp_score > current["vorp_score"]:
             best_by_position[position] = {"player_id": player_id, "vorp_score": vorp_score}
     return best_by_position
+
+
+def load_open_roster_slots(cursor, team_id: str, season: int) -> int:
+    """Non-IR capacity minus current occupancy; unknown capacity never permits adds."""
+    cursor.execute(
+        """
+        SELECT lineup_slot_counts FROM league_settings
+        WHERE season = %s ORDER BY updated_at DESC LIMIT 1;
+        """,
+        (season,),
+    )
+    row = cursor.fetchone()
+    counts = row[0] if row else None
+    if isinstance(counts, str):
+        counts = json.loads(counts)
+    if not isinstance(counts, dict):
+        return 0
+    capacity = sum(int(count or 0) for slot, count in counts.items() if slot != "IR")
+    if capacity <= 0:
+        return 0
+    cursor.execute(
+        """SELECT COUNT(*) FROM league_rosters
+        WHERE team_id = %s AND slot_position IS DISTINCT FROM 'IR';""",
+        (str(team_id),),
+    )
+    return max(0, capacity - int(cursor.fetchone()[0]))
+
+
+def load_add_candidates(cursor, season: int, week: int) -> list:
+    """All projected free agents, so multiple open slots can use the same position."""
+    cursor.execute(
+        """
+        SELECT p.player_id, p.position, COALESCE(s.vorp_score, 0.0)
+        FROM players p JOIN weekly_stats s ON p.player_id = s.player_id
+        WHERE s.season = %s AND s.week = %s
+          AND NOT EXISTS (SELECT 1 FROM league_rosters r WHERE r.player_id = p.player_id);
+        """,
+        (season, week),
+    )
+    return [
+        {"player_id": pid, "position": position, "vorp_score": score}
+        for pid, position, score in cursor.fetchall()
+    ]
+
+
+def plan_add_only_moves(candidates: list, open_roster_slots: int,
+                        margin: float = MARGIN_THRESHOLD) -> tuple:
+    """Reserve the best worthwhile adds, then return best remaining agents for swaps/IR."""
+    ranked = sorted(candidates, key=lambda p: (-p["vorp_score"], str(p["player_id"])))
+    unique = {}
+    for player in ranked:
+        unique.setdefault(player["player_id"], player)
+    ranked = list(unique.values())
+    selected = [p for p in ranked if p["vorp_score"] > margin][:max(0, open_roster_slots)]
+    adds = [
+        {"kind": "add", "position": p["position"], "drop_player_id": None,
+         "add_player_id": p["player_id"], "add_vorp_score": p["vorp_score"]}
+        for p in selected
+    ]
+    claimed = {p["player_id"] for p in selected}
+    remaining = {}
+    for p in ranked:
+        if p["player_id"] not in claimed:
+            remaining.setdefault(p["position"], {"player_id": p["player_id"], "vorp_score": p["vorp_score"]})
+    return adds, remaining
 
 
 def propose_waiver_moves(bench_by_position: dict, free_agents_by_position: dict, margin: float = MARGIN_THRESHOLD) -> list:

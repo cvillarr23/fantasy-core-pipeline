@@ -253,14 +253,17 @@ class InsufficientWaiverInputError(Exception):
 
 def load_live_waiver_inputs(cursor, team_id: str, season: int, week: int) -> tuple:
     """(bench_by_position, free_agents_by_position) for the target week. Both come from
-    exact-week weekly_stats joins (shared with backtesting), so an empty side means that
-    week's projections haven't landed yet (draft-prep-refresher, 05:00 CT) - raise rather
-    than report "no moves" (#178 follow-up)."""
+    exact-week weekly_stats joins (shared with backtesting). Missing free agents, or
+    missing bench metrics with no roster vacancy, fail instead of reporting no moves."""
     bench_by_position = waiver_strategy.load_bench_by_position(cursor, team_id, season, week)
     free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
+    open_roster_slots = (
+        waiver_strategy.load_open_roster_slots(cursor, team_id, season)
+        if not bench_by_position else 0
+    )
     missing = [
         label for label, pool in (("bench", bench_by_position), ("free-agent", free_agents_by_position))
-        if not pool
+        if not pool and (label != "bench" or open_roster_slots <= 0)
     ]
     if missing:
         raise InsufficientWaiverInputError(
@@ -270,28 +273,34 @@ def load_live_waiver_inputs(cursor, team_id: str, season: int, week: int) -> tup
 
 
 def plan_live_waiver_moves(cursor, team_id: str, season: int, bench_by_position: dict,
-                           free_agents_by_position: dict) -> list:
-    """The moves to publish. IR slots are only queried when a bench player is
+                           free_agents_by_position: dict, week: int) -> list:
+    """Fill existing non-IR vacancies before planning swaps or IR chains.
+    IR slots are only queried when a bench player is
     IR-eligible. With AUTO_PUBLISH_IR_MOVES off, IR + add moves are logged at WARNING and
     only the swaps are returned. With it on, the IR + add moves follow the swaps, so one
     that fails to publish can't hold back the week's ordinary claims. They are withheld
     when one of our IR slots holds a player ESPN no longer lists as injured (or one whose
     status we can't see): ESPN may then refuse new transactions, and activating that
     player is a manager's call."""
+    adds = []
+    open_roster_slots = waiver_strategy.load_open_roster_slots(cursor, team_id, season)
+    if open_roster_slots > 0:
+        candidates = waiver_strategy.load_add_candidates(cursor, season, week)
+        adds, free_agents_by_position = waiver_strategy.plan_add_only_moves(candidates, open_roster_slots)
     open_slots = (
         load_open_ir_slots(cursor, team_id, season)
         if waiver_strategy.ir_eligible_bench(bench_by_position) else 0
     )
     swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(bench_by_position, free_agents_by_position, open_slots)
     if not ir_and_adds:
-        return swaps
+        return adds + swaps
     if not ir_auto_publish_enabled():
         for move in ir_and_adds:
             logger.warning(
                 f"Team {team_id}: not published, suggest IR {move['ir_player_id']} + add {move['add_player_id']} "
                 f"({move['add_vorp_score']:.2f} VORP); IR moves are suggestions only."
             )
-        return swaps
+        return adds + swaps
     blocking = load_ineligible_ir_occupants(cursor, team_id)
     if blocking:
         names = ", ".join(
@@ -302,13 +311,13 @@ def plan_live_waiver_moves(cursor, team_id: str, season: int, bench_by_position:
             f"Team {team_id}: {names} sit in IR without an IR-eligible ESPN status; activate them from IR. "
             f"Not publishing {len(ir_and_adds)} IR + add move(s) until then, since ESPN may reject them."
         )
-        return swaps
+        return adds + swaps
     for move in ir_and_adds:
         logger.info(
             f"Team {team_id}: publishing IR {move['ir_player_id']} + add {move['add_player_id']} "
             f"({move['add_vorp_score']:.2f} VORP)."
         )
-    return swaps + ir_and_adds
+    return adds + swaps + ir_and_adds
 
 
 def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_url: str = CORE_API_BASE_URL) -> list:
@@ -319,7 +328,7 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 bench_by_position, free_agents_by_position = load_live_waiver_inputs(cursor, team_id, season, week)
-                moves = plan_live_waiver_moves(cursor, team_id, season, bench_by_position, free_agents_by_position)
+                moves = plan_live_waiver_moves(cursor, team_id, season, bench_by_position, free_agents_by_position, week=week)
                 resolved = resolve_live_waiver_moves(cursor, moves, season, week)
 
         if not moves:

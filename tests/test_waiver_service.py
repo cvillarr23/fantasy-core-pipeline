@@ -210,7 +210,7 @@ def test_empty_target_week_falls_back_to_prior_week_means(monkeypatch):
 def test_fallback_query_stays_in_season_and_excludes_other_teams_rosters(monkeypatch):
     _, _, cursor = _run_with_empty_target_week(monkeypatch, _fallback_rows())
 
-    query, params = cursor.execute.call_args_list[0][0]
+    query, params = next(c.args for c in cursor.execute.call_args_list if "weekly_stats" in c.args[0])
     assert "s.season = %s" in query
     assert "vorp_score IS NOT NULL" in query
     assert "r.player_id IS NULL OR (r.team_id = %s" in query
@@ -240,7 +240,7 @@ def test_week_one_never_reads_the_prior_season(monkeypatch):
 
     assert isinstance(result, waiver_service.WaiverInputsUnavailableError)
     assert "Week 1" in str(result)
-    cursor.execute.assert_not_called()
+    assert not any("weekly_stats" in c.args[0] for c in cursor.execute.call_args_list)
 
 
 def test_fallback_fails_when_schedule_unavailable(monkeypatch):
@@ -337,3 +337,54 @@ def test_injured_star_is_stashed_rather_than_a_healthy_player_dropped(monkeypatc
     assert rec["kind"] == "ir_and_add"
     assert rec["ir_player"]["name"] == "Hurt Back"
     assert rec["bench_player"] is None
+
+
+@pytest.fixture(autouse=True)
+def full_roster_by_default(monkeypatch):
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 0)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_open_slot_recommends_add_without_a_bench(monkeypatch, fallback):
+    cursor = MagicMock()
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 2)
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position", lambda *args: {})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position",
+                        lambda *args: {} if fallback else {"WR": {"player_id": "fa1", "vorp_score": 8.0}})
+    candidates = [{"player_id": "fa1", "position": "WR", "vorp_score": 8.0},
+                  {"player_id": "fa2", "position": "WR", "vorp_score": 7.0}]
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_add_candidates", lambda *args: candidates)
+    display = [("fa1", "1", "First", "SEA", None), ("fa2", "2", "Second", "SEA", None)]
+    if fallback:
+        cursor.fetchall.side_effect = [[("fa1", "WR", "SEA", 3, 8.0, False, None),
+                                        ("fa2", "WR", "SEA", 3, 7.0, False, None)], display]
+    else:
+        cursor.fetchall.return_value = display
+    with patch.object(waiver_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch.object(waiver_service, "load_open_ir_slots", return_value=0), \
+         patch.object(waiver_service, "load_teams_playing", return_value={"SEA"}):
+        result = waiver_service.compute_waiver_recommendations(2026, 4)
+    assert result["open_roster_slots"] == 2
+    assert result["source_mode"] == ("rolling_prior_weeks" if fallback else "target_week")
+    assert [r["kind"] for r in result["recommendations"]] == ["add", "add"]
+    assert [r["vorp_delta"] for r in result["recommendations"]] == [8.0, 7.0]
+    assert all(r["bench_player"] is None and r["ir_player"] is None for r in result["recommendations"])
+
+
+def test_add_recommendations_precede_larger_swap_gains(monkeypatch):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("fa1", "1", "First", "SEA", None),
+                                   ("fa2", "2", "Second", "SEA", None),
+                                   ("bench", "3", "Bench", "SEA", None)]
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 1)
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position",
+                        lambda *args: {"WR": [{"player_id": "bench", "vorp_score": -10}]})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position",
+                        lambda *args: {"WR": {"player_id": "fa1", "vorp_score": 8}})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_add_candidates", lambda *args: [
+        {"player_id": "fa1", "position": "WR", "vorp_score": 8},
+        {"player_id": "fa2", "position": "WR", "vorp_score": 7}])
+    with patch.object(waiver_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch.object(waiver_service, "load_open_ir_slots", return_value=0):
+        result = waiver_service.compute_waiver_recommendations(2026, 4)
+    assert [(r["kind"], r["vorp_delta"]) for r in result["recommendations"]] == [("add", 8), ("swap", 17)]

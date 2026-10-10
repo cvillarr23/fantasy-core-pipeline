@@ -72,8 +72,8 @@ class WaiverPlayerSummary(BaseModel):
 
 
 class WaiverRecommendation(BaseModel):
-    # "swap" (add free_agent, drop bench_player) or "ir_and_add" (move ir_player to IR,
-    # add free_agent, no drop).
+    # "add" uses an open roster slot; "swap" drops bench_player; "ir_and_add"
+    # moves ir_player to IR before adding free_agent.
     kind: str = "swap"
     position: str
     vorp_delta: float
@@ -95,6 +95,7 @@ class WaiverRecommendationsResponse(BaseModel):
     season: int
     week: int
     recommendations: List[WaiverRecommendation]
+    open_roster_slots: int = 0
     # IR-eligible bench players worth stashing while an IR slot is open.
     open_ir_slots: int = 0
     ir_moves: List[WaiverIrMove] = []

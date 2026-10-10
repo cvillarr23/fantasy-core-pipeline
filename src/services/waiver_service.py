@@ -33,10 +33,13 @@ class WaiverInputsUnavailableError(Exception):
 
 
 def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
-                                 window: int = PREGAME_WINDOW_WEEKS) -> tuple:
+                                 window: int = PREGAME_WINDOW_WEEKS,
+                                 add_candidates: list | None = None, allow_empty_bench: bool = False) -> tuple:
     """(bench_by_position, free_agents_by_position, source) from each player's mean
     vorp_score over the up-to-`window` prior weeks of the same season, in
-    waiver_strategy's shapes. Our bench and unrostered players only; players whose team
+    waiver_strategy's shapes. An optional add_candidates list receives every usable free
+    agent, including multiple players at one position. An open roster slot permits an
+    empty bench. Our bench and unrostered players only; players whose team
     is on bye in `week` are dropped. Week 1 never reads the prior season. Raises
     WaiverInputsUnavailableError when there's no usable or only stale data."""
     if week <= 1:
@@ -96,11 +99,16 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
                 {**candidate, "espn_injury_status": entry["espn_injury_status"]}
             )
         else:
+            if add_candidates is not None:
+                add_candidates.append({"position": entry["position"], **candidate})
             best = free_agents_by_position.get(entry["position"])
             if best is None or candidate["vorp_score"] > best["vorp_score"]:
                 free_agents_by_position[entry["position"]] = candidate
 
-    missing = [label for label, pool in (("bench", bench_by_position), ("free-agent", free_agents_by_position)) if not pool]
+    missing = [
+        label for label, pool in (("bench", bench_by_position), ("free-agent", free_agents_by_position))
+        if not pool and (label != "bench" or not allow_empty_bench)
+    ]
     if missing:
         raise WaiverInputsUnavailableError(
             f"no {' or '.join(missing)} players with usable {METRIC_SOURCE} in Season {season} "
@@ -129,7 +137,11 @@ def _load_player_display(cursor, player_ids: set) -> dict:
 
 def _shape_recommendation(move: dict, display_by_player_id: dict) -> dict:
     add_display = display_by_player_id[move["add_player_id"]]
-    if move.get("kind") == "ir_and_add":
+    if move.get("kind") == "add":
+        vorp_delta = move["add_vorp_score"]
+        bench_player = None
+        ir_player = None
+    elif move.get("kind") == "ir_and_add":
         # Nobody leaves the roster, so the gain is the add's whole value.
         vorp_delta = move["add_vorp_score"]
         bench_player = None
@@ -174,17 +186,27 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
     # players other managers have since picked up.
     refresh_rosters_if_stale(season)
     with get_db_cursor() as cursor:
+        open_roster_slots = waiver_strategy.load_open_roster_slots(cursor, our_team_id, season)
+        add_candidates = []
         bench_by_position = waiver_strategy.load_bench_by_position(cursor, our_team_id, season, week)
         free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
-        if bench_by_position and free_agents_by_position:
+        if free_agents_by_position and (bench_by_position or open_roster_slots > 0):
+            if open_roster_slots > 0:
+                add_candidates = waiver_strategy.load_add_candidates(cursor, season, week)
             source = {"source_mode": "target_week", "source_weeks": [week]}
         else:
             bench_by_position, free_agents_by_position, source = load_prior_week_waiver_pools(
                 cursor, our_team_id, season, week,
+                add_candidates=add_candidates, allow_empty_bench=open_roster_slots > 0,
             )
             logger.info(
                 f"No Season {season} Week {week} rows yet; waiver recommendations use "
                 f"{METRIC_SOURCE} means from Weeks {source['source_weeks']}."
+            )
+        adds = []
+        if open_roster_slots > 0:
+            adds, free_agents_by_position = waiver_strategy.plan_add_only_moves(
+                add_candidates, open_roster_slots, margin=0.0,
             )
         open_ir_slots = load_open_ir_slots(cursor, our_team_id, season)
         swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(
@@ -192,7 +214,7 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
         )
         # Bench only: an IR-eligible starter is the lineup page's move_to_ir hint.
         stash = waiver_strategy.ir_stash_candidates(bench_by_position, open_ir_slots)
-        moves = swaps + ir_and_adds
+        moves = adds + swaps + ir_and_adds
 
         player_ids = (
             {m["add_player_id"] for m in moves}
@@ -203,7 +225,7 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
         display_by_player_id = _load_player_display(cursor, player_ids)
 
     recommendations = [_shape_recommendation(m, display_by_player_id) for m in moves]
-    recommendations.sort(key=lambda r: r["vorp_delta"], reverse=True)
+    recommendations.sort(key=lambda r: (r["kind"] != "add", -r["vorp_delta"]))
     ir_moves = [
         {
             "action": "move_to_ir",
@@ -214,7 +236,7 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
     ]
     return {
         "season": season, "week": week, "recommendations": recommendations,
-        "open_ir_slots": open_ir_slots, "ir_moves": ir_moves, **source,
+        "open_roster_slots": open_roster_slots, "open_ir_slots": open_ir_slots, "ir_moves": ir_moves, **source,
     }
 
 

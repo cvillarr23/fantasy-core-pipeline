@@ -224,7 +224,7 @@ def _prepare_waiver_claims(
                 cursor, team_id, season, week
             )
             moves = plan_live_waiver_moves(
-                cursor, team_id, season, bench_by_position, free_agents_by_position
+                cursor, team_id, season, bench_by_position, free_agents_by_position, week=week
             )
             matched_moves = [
                 move for move in moves if move["add_player_id"] in waiver_targets

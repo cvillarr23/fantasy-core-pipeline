@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.backtesting import waiver_strategy
 
 
@@ -187,3 +189,50 @@ def test_ir_stash_candidates_lists_eligible_bench_players_by_value_up_to_the_ope
     ]
     assert [p["player_id"] for p in waiver_strategy.ir_stash_candidates(bench, open_ir_slots=1)] == ["c"]
     assert waiver_strategy.ir_stash_candidates(bench, open_ir_slots=0) == []
+
+
+@pytest.mark.parametrize("counts,occupied,expected", [
+    ({"QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "K": 1, "D/ST": 1, "BE": 7, "IR": 2}, 15, 1),
+    ({"QB": 1, "BE": 2, "IR": 3}, 3, 0),
+    ({"QB": 1, "BE": 2}, 4, 0),
+    ({"QB": 1, "BE": 2}, 0, 3),
+    ('{"QB": 1, "BE": 2, "IR": 1}', 1, 2),
+    (None, 0, 0),
+])
+def test_open_roster_slots_excludes_ir_and_clamps_capacity(counts, occupied, expected):
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [(counts,), (occupied,)]
+    assert waiver_strategy.load_open_roster_slots(cursor, "8", 2026) == expected
+    if counts is not None:
+        query, params = cursor.execute.call_args.args
+        assert "slot_position IS DISTINCT FROM 'IR'" in query
+        assert params == ("8",)
+
+
+def test_adds_take_best_agents_including_multiple_at_same_position_before_other_moves():
+    candidates = [
+        {"player_id": "wr1", "position": "WR", "vorp_score": 10.0},
+        {"player_id": "wr2", "position": "WR", "vorp_score": 9.0},
+        {"player_id": "wr3", "position": "WR", "vorp_score": 8.0},
+        {"player_id": "rb", "position": "RB", "vorp_score": 7.0},
+    ]
+    adds, remaining = waiver_strategy.plan_add_only_moves(candidates, 2, margin=0)
+    assert [m["add_player_id"] for m in adds] == ["wr1", "wr2"]
+    assert all(m["kind"] == "add" and m["drop_player_id"] is None for m in adds)
+    swaps, ir_adds = waiver_strategy.plan_waiver_moves(
+        _bench(RB=[("hurt", 1.0, "OUT")], WR=[("bad", -1.0, None)]), remaining, 1, margin=0,
+    )
+    assert [m["add_player_id"] for m in ir_adds] == ["wr3"]
+    assert not swaps
+    assert len({m["add_player_id"] for m in adds + swaps + ir_adds}) == 3
+
+
+@pytest.mark.parametrize("slots,margin,expected", [(0, 0, []), (5, 3, ["good"]), (5, 0, ["good", "small"])])
+def test_adds_respect_capacity_pool_size_and_strict_margin(slots, margin, expected):
+    candidates = [
+        {"player_id": "good", "position": "WR", "vorp_score": 4.0},
+        {"player_id": "small", "position": "WR", "vorp_score": 3.0},
+        {"player_id": "zero", "position": "RB", "vorp_score": 0.0},
+    ]
+    adds, _ = waiver_strategy.plan_add_only_moves(candidates, slots, margin)
+    assert [m["add_player_id"] for m in adds] == expected

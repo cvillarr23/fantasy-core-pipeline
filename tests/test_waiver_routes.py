@@ -119,3 +119,22 @@ def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
     assert body["ir_moves"] == [{"action": "move_to_ir", "position": "RB", "player": {
         "espn_id": "102", "name": "Hurt RB", "pro_team": "NYJ", "injury_status": "IR", "net_vorp": -1.0,
     }}]
+
+
+def test_get_waiver_recommendations_serializes_add_only(client):
+    result = {
+        "season": 2026, "week": 5, "open_roster_slots": 1,
+        "recommendations": [{
+            "kind": "add", "position": "WR", "vorp_delta": 8.0,
+            "free_agent": {"espn_id": "101", "name": "Free Agent", "pro_team": "SEA", "net_vorp": 8.0},
+            "bench_player": None, "ir_player": None,
+        }],
+    }
+    with patch("src.api.waiver.compute_waiver_recommendations", return_value=result):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=5")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["open_roster_slots"] == 1
+    assert body["recommendations"][0]["kind"] == "add"
+    assert body["recommendations"][0]["bench_player"] is None
+    assert body["recommendations"][0]["ir_player"] is None
