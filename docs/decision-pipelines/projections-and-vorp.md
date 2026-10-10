@@ -4,17 +4,59 @@ description: How weekly projections, replacement baselines and scarcity produce 
 sidebar_position: 2
 ---
 
-## Inputs and daily refresh
+VORP measures a player's projected value above a replacement player. Use this page to predict how weekly inputs change lineup, waiver and draft values.
 
-`sync_projections` fetches Sleeper regular-season `pts_ppr` for QB/RB/WR/TE. It upserts only `projected_points` for known players, preserving advanced metrics. A missing/null scoring field becomes 0; an absent player row is not created. `sync_kicker_dst` supplies ESPN K/D-ST projections.
+```mermaid
+flowchart LR
+    S[Sleeper skill projections] -->|pts_ppr| P[Exact-week stats]
+    E[ESPN K and D/ST projections] -->|projected_points| P
+    P -->|points and signals| C[Matchup coefficient]
+    C -->|adjusted points| B[Replacement baseline]
+    L[League slots and roster usage] -->|starter demand| B
+    B -->|signed vorp_base| V[Scarcity adjustment]
+    V -->|vorp_score| W[(weekly_stats)]
+```
 
-The [infra refresher](https://github.com/cvillarr23/fantasy-infra/blob/main/base/core-pipeline/draft-prep-refresher-cronjob.yaml) runs daily at 18:00 America/Chicago. It resolves `CURRENT_YEAR`'s upcoming regular-season week, then refreshes that week through `min(week + 3, 18)`. Each week runs `sync_projections` → `sync_kicker_dst` → `vorp_matrix` in order within a shared 600-second budget. Target-week failure stops the run; a future-week failure skips its dependent stages but allows other weeks to proceed. Any failed week makes the Job fail. Earlier committed work remains, and there is no whole-run automatic retry.
+## When does the refresh run?
 
-`src.nfl_schedule` defines upcoming as the earliest regular-season week with any game lacking a final score. Thursday finishing does not advance the week. Downloads receive six attempts with delays of 5, 10, 20, 30 and 30 seconds. Missing schedules or stale season configuration fail rather than guess. A completed current regular season returns no upcoming week and scheduled jobs exit successfully without acting. APIs can supply a week explicitly; trade horizons default to four weeks and stop at the league's regular-season end.
+| Setting | Behavior |
+| --- | --- |
+| Schedule | Daily at 18:00 America/Chicago |
+| Season | `CURRENT_YEAR` |
+| Horizon | Upcoming week through `min(week + 3, 18)` |
+| Week budget | 600 seconds shared across three stages |
+| Target-week failure | Stop; fail the Job |
+| Future-week failure | Skip that week's remaining stages; try other weeks; fail the Job |
+| Completed work | Keep committed weeks; no automatic whole-run retry |
 
-## Formula
+```mermaid
+flowchart LR
+    R[Resolve upcoming week] -->|current season| S[sync_projections]
+    S -->|skill points committed| K[sync_kicker_dst]
+    K -->|K and D/ST points committed| V[vorp_matrix]
+    V -->|week complete| N[Next horizon week]
+    N -->|through week 18| S
+```
 
-`vorp_matrix.run_vorp_pipeline(season, week)` reads exact-week `weekly_stats`, players, roster membership, starter flags and league slot counts.
+The resolver chooses the earliest regular-season week with an unfinished game. A finished Thursday game does not advance the week.
+
+<details>
+<summary>Week resolution and ingestion edge cases</summary>
+
+| Condition | Result |
+| --- | --- |
+| Schedule download fails | Six attempts; backoff 5, 10, 20, 30, 30 seconds; then fail |
+| Missing schedule or stale season configuration | Fail rather than guess |
+| Current regular season complete | No upcoming week; scheduled jobs exit successfully |
+| Explicit API week | Use the requested week; trade horizons stop at the league's regular-season end |
+| Sleeper scoring field missing/null | Store 0 for a known player |
+| Player absent from response or unknown locally | Do not create a projection row |
+
+`sync_projections` reads regular-season `pts_ppr` for QB/RB/WR/TE and upserts only `projected_points`, preserving advanced metrics. `sync_kicker_dst` supplies ESPN K/D-ST projections.
+
+</details>
+
+## How is VORP calculated?
 
 ```text
 coefficient = clamp(1 + 0.06 × market_z + 0.03 × signal_z, 0.85, 1.15)
@@ -26,20 +68,66 @@ scarcity_multiplier = 1 + 0.35 × (1 − ratio)
 vorp_score = vorp_base × applicable_scarcity_multiplier
 ```
 
-`market_z` standardizes distinct NFL team implied totals within season/week. `signal_z` standardizes by position/season/week: negative pressure rate allowed for QB, separation for WR/TE, depth-chart improvement for RB. Z scores clamp to ±2. Null signals, fewer than two observations or zero standard deviation contribute 0. Usage shares are excluded because projections already include usage.
+| Input | Rule |
+| --- | --- |
+| `market_z` | Standardize distinct NFL team implied totals within season/week |
+| `signal_z`: QB | Standardize negative pressure rate allowed |
+| `signal_z`: WR/TE | Standardize separation |
+| `signal_z`: RB | Standardize depth-chart improvement |
+| Signal groups | Position/season/week; clamp z to ±2 |
+| Missing/degenerate signal | Contribute 0 for null, fewer than two observations or zero standard deviation |
+| Usage shares | Excluded because projections already include usage |
+| Scarcity eligibility | Only unrostered players with positive base VORP; everyone else uses 1.0 |
 
-Starter demand is positional slots × team count plus allocated FLEX slots. FLEX types RB/WR/TE, RB/WR and WR/TE restrict eligibility. At least ten observed eligible FLEX roster rows supply position weights; otherwise use RB 0.5, WR 0.4, TE 0.1, restricted and normalized. Largest-remainder rounding keeps integer allocations equal to total FLEX demand.
+:::tip[Predict the result]
+12 adjusted points minus an 8-point baseline gives 4 VORP, or 5.4 at maximum scarcity. A 6-point player stays at −2, even when the position is thin.
+:::
 
-With populated rosters, replacement is the highest adjusted projection among non-starters/free agents at that position. Otherwise use the first player beyond structural starter demand (rank N+1); a short pool falls back to its minimum. Empty-position baselines are QB 10, RB/WR 8, TE 5, K/D-ST 7. No league settings falls back to ten teams with QB 1, RB 2, WR 2, TE 1 and RB/WR/TE 1.
+## Where is the replacement line?
 
-VORP stays signed. Scarcity applies only to unrostered players with positive `vorp_base`; others use 1.0. For example, 12 adjusted points against an 8-point baseline gives 4 VORP, or 5.4 at maximum scarcity. A 6-point player stays −2 even in a thin pool.
+| Roster state | Baseline |
+| --- | --- |
+| Populated rosters | Highest adjusted projection among non-starters/free agents at the position |
+| Pre-draft | First player beyond structural starter demand: rank N+1 |
+| Pool shorter than demand | Pool minimum |
+| Empty position pool | QB 10; RB/WR 8; TE 5; K/D-ST 7 |
 
-## Outputs and missing data
+<details>
+<summary>Starter demand, FLEX allocation and default league shape</summary>
 
-The pipeline updates coefficient, adjusted points, base VORP, scarcity, final VORP and defense multiplier on existing exact-week rows. An empty week returns zero updates. It does not fill future weeks from prior data.
+Starter demand is positional slots × team count plus allocated FLEX slots.
 
-When `MATCHUP_WEIGHTING_ENABLED=true` and week is 1, the lineup-only defense multiplier is `clamp(1 + 0.05 × opponent_defense_strength_z, 0.9, 1.1)`. Positive strength means a weaker defense; missing strength is neutral. Other weeks/disabled mode persist null, consumed as 1.0. This does not change canonical VORP.
+| Allocation input | Rule |
+| --- | --- |
+| FLEX types | RB/WR/TE, RB/WR, WR/TE; restrict positions to the slot |
+| At least ten observed eligible FLEX rows | Use observed position shares |
+| Fewer than ten rows | RB 0.5, WR 0.4, TE 0.1; restrict and normalize |
+| Integer rounding | Largest remainder; allocations sum to total FLEX demand |
+| Missing league settings | Ten teams; QB 1, RB 2, WR 2, TE 1, RB/WR/TE 1 |
 
-[Lineups](lineup-optimization.md) and the [waiver read service](waivers.md) have their own prior-week fallback. [Trade scoring](trade-scoring.md) requires exact-week metrics, so a four-week refresh attempt does not guarantee complete coverage.
+</details>
 
-Implementation: [vorp_matrix.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/vorp_matrix.py), [sync_projections.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/ingestion/sync_projections.py), [nfl_schedule.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/nfl_schedule.py).
+## What happens with missing data?
+
+The pipeline updates existing exact-week rows with the coefficient, adjusted points, base VORP, scarcity, final VORP and defense multiplier. An empty week returns zero updates.
+
+:::warning[Refresh coverage is not guaranteed]
+A four-week refresh attempt does not guarantee four scored weeks. Trade scoring requires exact-week metrics; lineup and waiver reads have separate fallback rules.
+:::
+
+| Defense adjustment | Behavior |
+| --- | --- |
+| `MATCHUP_WEIGHTING_ENABLED=true`, week 1 | `clamp(1 + 0.05 × opponent_defense_strength_z, 0.9, 1.1)` |
+| Missing strength | Neutral 1.0 |
+| Disabled or another week | Persist null; lineup consumes it as 1.0 |
+| Effect | Lineup objective only; canonical VORP stays unchanged |
+
+Positive defense strength means a weaker defense.
+
+## Related
+
+- [Lineup data rules](lineup-optimization.md)
+- [Waiver data rules](waivers.md)
+- [Trade coverage](trade-scoring.md)
+- Implementation: [vorp_matrix.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/vorp_matrix.py), [sync_projections.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/ingestion/sync_projections.py), [nfl_schedule.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/nfl_schedule.py)
+- Schedule: [infra refresher](https://github.com/cvillarr23/fantasy-infra/blob/main/base/core-pipeline/draft-prep-refresher-cronjob.yaml)

@@ -4,19 +4,38 @@ description: How eligible roster players fill starting slots and become publishe
 sidebar_position: 3
 ---
 
-## Pregame inputs
+The lineup solver fills starting slots with the highest total eligible VORP. Use this page to understand a suggested swap or an unavailable-lineup result.
 
-`lineup_solver.evaluate_lineup` is shared by the weekly optimizer, matchup suggestions and rumor `bench_watch` actions. It excludes IR-slot players and players with Sleeper status `Out`.
+```mermaid
+flowchart LR
+    R[Non-IR roster] -->|player IDs| P[Pregame metric pool]
+    P -->|eligible players| H[Hold missing K and D/ST slots]
+    H -->|remaining slot demand| S[Lineup ILP]
+    S -->|optimal starters| D[Diff current starters]
+    D -->|internal swaps| I[Resolve ESPN identities]
+    I -->|POST /v1/trigger/lineup| G[Gateway]
+    G -->|queued swaps| W[Worker and ESPN verification]
+```
 
-1. Use target-week non-null VORP if any rostered player outside K/D-ST has it. K/D-ST rows alone do not select this mode. Players missing target-week metrics are omitted.
-2. Otherwise average each player's available VORP from the previous three same-season weeks. The newest usable week across the inputs must be target week minus one. Load the target week's NFL schedule to exclude byes; prior defense multipliers are discarded.
-3. If neither source is usable, raise `InsufficientLineupInputError`. Week 1 never borrows the prior season. Missing schedules, stale inputs and an empty eligible pool are failures, distinct from an already-optimal lineup.
+## Which metrics does the solver use?
 
-Outputs describe `metric_source`, `source_mode`, `source_season`, `source_weeks` and `held_slots`. This fallback is a VORP mean, not actual points or a newly generated projection.
+`evaluate_lineup` serves the weekly optimizer, matchup suggestions and rumor `bench_watch` actions. Its pool excludes IR-slot players and Sleeper status `Out`.
 
-## Slot rules and objective
+| Source choice | Rule |
+| --- | --- |
+| Target week | Use non-null target-week VORP if any rostered player outside K/D-ST has it; omit players missing metrics |
+| Prior-week fallback | Otherwise average available VORP over the previous three same-season weeks |
+| Fallback freshness | Newest usable input week must be target week minus one |
+| Fallback byes | Exclude target-week NFL byes using the schedule; discard prior defense multipliers |
+| No usable source | Raise `InsufficientLineupInputError` |
 
-League settings supply starter counts; missing settings use QB 1, RB 2, WR 2, TE 1, RB/WR/TE 1, K 1 and D/ST 1. BE, Bench and IR are excluded. Position slots accept their position; FLEX accepts its named positions. The ILP uses position eligibility, rather than arbitrary ESPN `eligible_slots`.
+:::warning[Missing data is not an optimal lineup]
+K/D-ST rows alone do not select target-week mode. Week 1 never borrows the prior season; stale inputs, missing schedules and an empty eligible pool fail evaluation.
+:::
+
+Source evidence reports `metric_source`, `source_mode`, `source_season`, `source_weeks` and `held_slots`.
+
+## How are slots filled?
 
 ```text
 maximize Σ selected_player.vorp_score × defense_matchup_multiplier
@@ -24,16 +43,53 @@ subject to exactly one eligible player per starting slot
            each player occupies at most one slot
 ```
 
-The CBC solver must return `Optimal`. Signed VORP permits below-replacement starters when slots require them. A K or D/ST slot with insufficient eligible players is held out, preserving the current starter; missing skill-position capacity fails the solve. The [Week 1 defense multiplier](projections-and-vorp.md) defaults to 1.0.
+| Slot or result | Behavior |
+| --- | --- |
+| Position slot | Accept its position |
+| FLEX | Accept the positions named by the slot |
+| BE, Bench, IR | Exclude from starter demand |
+| Missing K/D-ST capacity | Hold the slot; preserve its current starter |
+| Missing skill-position capacity | Fail the solve |
+| Negative VORP | Allow it when needed to fill a slot |
+| Successful solve | CBC status must be `Optimal` |
+| Equal optima | No explicit manager-preference tie-break |
 
-## IR and publication
+The solver uses position eligibility, not arbitrary ESPN `eligible_slots`. Missing settings default to QB 1, RB 2, WR 2, TE 1, RB/WR/TE 1, K 1 and D/ST 1; the [defense multiplier](projections-and-vorp.md) defaults to 1.0.
 
-IR activation is a separate roster action; stashed players cannot enter the solve. ESPN `OUT`/`INJURY_RESERVE` determine [IR hints and waiver stashes](waivers.md), while the pregame pool uses the Sleeper `Out` filter. Managers must address an ineligible IR occupant before ESPN may allow new transactions.
+## How does a swap reach ESPN?
 
-The optimizer diffs selected player IDs against current starters. New starters pair with a removed starter of the same position where possible, otherwise a remaining removed starter (for a FLEX change). The swap's `slot` is the removed player's actual roster slot. Held K/D-ST starters never become drop candidates. Equal optimal solutions do not have an explicit manager preference tie-break.
+| Stage | Rule |
+| --- | --- |
+| Diff | Compare optimal player IDs with current starters |
+| Pair | Match adds with same-position removals first, then any remaining removal for FLEX |
+| Slot | Use the removed starter's actual roster slot |
+| Held starters | Never become removal candidates |
+| Identity | Resolve internal IDs to ESPN IDs before publication |
+| Evidence | Retain add/drop VORP, multiplier, season/week and source |
+| Dry run | `--dry-run` evaluates without publishing |
 
-Internal IDs resolve to ESPN IDs before `POST /v1/trigger/lineup`. Decision inputs retain add/drop VORP, multiplier, season/week and source evidence. `--dry-run` evaluates without publishing. The normal CLI uses an explicit `--week` or the shared upcoming-week resolver.
+:::note[IR is a separate action]
+Stashed players must be activated before they can start. ESPN `OUT`/`INJURY_RESERVE` control IR hints; the pregame pool uses Sleeper `Out`. An ineligible IR occupant can block ESPN transactions.
+:::
 
-A stable idempotency key includes team, decision weeks, sorted swap identities and `JOB_NAME` when available. Retrying the same Job uses the same key; another Job is a new decision. The trigger client retries transient failures under that key. Empty swaps or a duplicate receipt return false; exhausted retries/4xx raise. Publication alone does not establish an ESPN lineup change.
+<details>
+<summary>Publication keys and retry behavior</summary>
 
-Implementation: [lineup_solver.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/lineup_solver.py).
+| Setting or outcome | Behavior |
+| --- | --- |
+| Idempotency material | Team, decision weeks, sorted swap identities and `JOB_NAME` when available |
+| Same Job retry | Same key |
+| Another Job | New decision |
+| Transient gateway failure | Retry under the same key |
+| Empty swaps or duplicate | Return false |
+| Exhausted retries or 4xx | Raise |
+| CLI week | Explicit `--week` or shared upcoming-week resolver |
+
+</details>
+
+## Related
+
+- [Waivers and IR](waivers.md)
+- [Rumor actions](rumor-actions.md)
+- [Activity and execution evidence](../activity-api.md)
+- Implementation: [lineup_solver.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/lineup_solver.py)

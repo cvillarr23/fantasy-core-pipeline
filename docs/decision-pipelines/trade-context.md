@@ -4,27 +4,84 @@ description: How current ESPN ownership and completed fantasy matchups describe 
 sidebar_position: 5
 ---
 
-## Inputs and horizon
+Trade context combines current ESPN ownership with completed fantasy scoring and upcoming matchups. Use it to inspect the roster and strength evidence behind a trade score.
 
-`GET /v1/trade/context` and MCP `get_league_trade_context_model` share `trade_context_service`. Requests name league, season, as-of week and horizon (default 4, range 1–18). The service supports the configured ESPN league. It reads current ESPN rosters/settings and stored score history, maps ESPN players to internal identities, and loads exact-week projection/VORP rows.
+```mermaid
+flowchart LR
+    E[Current ESPN roster and settings] -->|ownership and slots| C[Trade context]
+    H[Stored completed score history] -->|points per scoring week| Z[Fantasy strength z]
+    Z -->|opponent strength| C
+    M[(Exact-week metrics)] -->|projection and VORP| C
+    C -->|snapshot and coverage| T[Trade scorer or reader]
+```
 
-The horizon is inclusive from the requested week to `min(week + horizon − 1, regular_season_end_week)`. Ownership always describes the current snapshot, even for a historical/future as-of request. `roster_snapshot` reports fetch time, observed ESPN week and whether it matches the request. This is not a reconstructed historical roster.
+## Which snapshot and horizon do you get?
 
-## Fantasy opponent strength
+| Request or evidence | Rule |
+| --- | --- |
+| REST | `GET /v1/trade/context` |
+| MCP | `get_league_trade_context_model` |
+| Inputs | Configured league, season, as-of week, horizon |
+| Horizon | Default 4; range 1–18 |
+| Inclusive end | `min(week + horizon − 1, regular_season_end_week)` |
+| Metrics | Exact-week projections/VORP; explicit internal identity mapping |
+| `roster_snapshot` | Fetch time, observed ESPN week, match with requested week |
 
-Only completed regular-season matchup periods ending before both the requested week and ESPN's observed scoring week contribute. Byes, ambiguous/missing matches and incomplete totals do not contribute. Multiweek matchup points divide by their actual scoring-week count.
+:::warning[Ownership is current]
+Historical or future as-of requests still use the current ESPN roster. They do not reconstruct ownership for the requested week.
+:::
+
+## How is fantasy strength calculated?
 
 ```text
 points_per_week = sum(completed_matchup_points) / completed_scoring_weeks
 strength_z = (points_per_week − league_mean) / population_standard_deviation
 ```
 
-Mean and population standard deviation use teams with observations. With at least two observed teams and zero standard deviation, their z scores are 0; fewer than two observations leave z scores null. A team without completed history has null strength. Positive z means stronger fantasy scoring. This measures completed points, not win probability or NFL defense strength.
+| History rule | Behavior |
+| --- | --- |
+| Eligible periods | Completed regular-season periods ending before both requested and observed ESPN week |
+| Multiweek matchups | Divide totals by actual scoring-week count |
+| Byes, ambiguous matches, incomplete totals | Exclude from observations |
+| League mean/stddev | Use teams with observations; population standard deviation |
+| At least two observations, zero stddev | Observed teams get z=0 |
+| Fewer than two observations | Z scores remain null |
+| Team without history | Null strength |
 
-Each horizon scoring week reports pairing, matchup period, status (`scheduled`, `bye`, `unavailable`) and opponent strength. Schedule strength is the mean known opponent z only when every non-bye week has known pairing and strength and at least one strength exists. Missing opponents and fantasy byes are distinct; they are not converted to average-strength opponents.
+Positive z means stronger fantasy scoring. It describes completed points, not win probability or NFL defense strength.
 
-## Outputs and failures
+## What does schedule coverage mean?
 
-Teams include roster positions, slots, ESPN injury status, eligible slots, mapping, per-week `projected_points`/`vorp_score`, completed-history counts, schedule and coverage. Missing mappings and metrics remain explicit nulls with coverage counts. Request validation is 422; unavailable context is 503, ESPN timeout 504 and other ESPN read failure 502. Consumers must inspect snapshot and coverage before interpreting a schedule summary.
+| Weekly status | Meaning |
+| --- | --- |
+| `scheduled` | Pairing known; strength may still be null |
+| `bye` | Fantasy bye |
+| `unavailable` | Pairing unavailable or ambiguous |
 
-[Trade scoring](trade-scoring.md) uses this same snapshot to compare before/after lineups. Implementation: [trade_context_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_context_service.py).
+Schedule strength is the mean opponent z only when every non-bye week has known pairing and strength, with at least one strength observation. Missing opponents are not treated as average strength.
+
+<details>
+<summary>Output fields and read errors</summary>
+
+| Output | Contents |
+| --- | --- |
+| Roster | Position, slot, ESPN injury status, eligible slots and identity mapping |
+| Metrics | Per-week `projected_points` and `vorp_score` |
+| History | Completed matchup/scoring-week counts and unavailable periods |
+| Schedule | Week, matchup period, status and opponent strength |
+| Coverage | Missing mappings/metrics remain null and counted |
+
+| HTTP status | Cause |
+| --- | --- |
+| 422 | Invalid request |
+| 503 | Context unavailable |
+| 504 | ESPN timeout |
+| 502 | Other ESPN read failure |
+
+</details>
+
+## Related
+
+- [Trade scoring](trade-scoring.md)
+- [Incoming score evidence](incoming-trades.md)
+- Implementation: [trade_context_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_context_service.py)

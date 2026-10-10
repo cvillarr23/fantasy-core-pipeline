@@ -4,13 +4,34 @@ description: How remaining roster capacity and scarcity select live draft target
 sidebar_position: 10
 ---
 
-## Inputs and recomputation
+The draft matrix selects an ideal remaining roster, then chooses the next pick from that selection. Use this page to understand positional needs, candidate order and clock-limited publication.
 
-`draft_matrix` consumes browser-worker pick events from Redis Stream `draft_picks:{leagueId}` using a consumer group. It persists picks and resolves ESPN IDs through the player crosswalk. Its undrafted pool joins the requested season/week projections (week 1 by default) and excludes players already in `draft_picks`, rather than consulting post-draft roster ownership.
+```mermaid
+flowchart LR
+    E[Pick Stream event] -->|ESPN pick identity| P[Persist pick]
+    P -->|remaining players| V[Recompute pre-draft VORP]
+    V -->|scarcity-adjusted pool| S[Remaining-roster ILP]
+    C[Our picks and league slots] -->|position caps and pick budget| S
+    S -->|selected players| R[Rank up to five targets]
+    R -->|our turn| H[Hold and check gates]
+    H -->|keyed trigger request| W[Worker pick]
+    W -->|confirmed rejection| R
+    W -->|landed pick event| P
+```
 
-The matrix recomputes matchup coefficient, structural replacement baselines and scarcity over the remaining undrafted pool using the [pre-draft VORP rules](projections-and-vorp.md). As players disappear, both baselines and scarcity can change.
+## Which players and capacity are available?
 
-Roster capacity comes from configured starters plus BE slots, excluding IR. If BE is absent, a total size of 16 is the fallback. Per-team FLEX uses the default RB/WR/TE weights with largest-remainder rounding. Bench capacity uses those same weights across RB/WR/TE.
+| Input | Rule |
+| --- | --- |
+| Pick events | Redis `draft_picks:{leagueId}` consumer group |
+| Identity | Resolve ESPN IDs through the player crosswalk; persist picks |
+| Pool | Requested season/week projections, week 1 by default |
+| Exclusion | Already in `draft_picks`; not post-draft roster ownership |
+| VORP | Recompute coefficient, structural baselines and scarcity over the undrafted pool |
+| Capacity | Configured starters plus BE; exclude IR |
+| Missing BE setting | Total roster-size fallback 16 |
+| FLEX | Default RB/WR/TE shares, largest-remainder rounding |
+| Bench | Same RB/WR/TE shares |
 
 ```text
 starting_need[position] = max(0, positional_slots + FLEX_share − drafted_by_us)
@@ -19,18 +40,69 @@ target_picks = min(remaining_picks, pool_size,
                    Σ min(position_cap[position], available_count[position]))
 ```
 
-## Solve and immediate target
+## How is the immediate target selected?
 
-The binary ILP maximizes sum of scarcity-adjusted VORP with exactly `target_picks` players and per-position upper caps. Equality forces mandatory picks even if all remaining values are zero/negative. Empty pools, zero capacity or a non-optimal solve produce no recommendation.
+| Step | Rule |
+| --- | --- |
+| Remaining-roster ILP | Maximize total scarcity-adjusted VORP with exactly `target_picks` and position upper caps |
+| Required negative-value picks | Equality forces picks even when all values are zero/negative |
+| Empty pool, zero capacity or non-optimal solve | No recommendation |
+| First ranking tier | Selected players at positions still needing starters; descending VORP |
+| Second ranking tier | Remaining selected players; descending VORP |
+| Candidate limit | Five; no additional equal-score preference |
 
-This selects the ideal remaining roster from the current pool. To choose the immediate pick, rank selected players at positions still needing starters by descending VORP, then the remaining selected players by descending VORP. Keep up to five candidates. A lower-valued needed starter can therefore precede a higher-valued bench candidate. There is no additional equal-score preference.
+:::tip[Starter need comes first]
+A lower-valued needed starter can precede a higher-valued bench candidate. The immediate pick comes from the selected remaining-roster solution, not from the whole pool's highest score.
+:::
 
-Opponent picks trigger a recompute when our turn is next under the known snake order; our own confirmed pick records whether it matched the attempted target instead. The Redis board carries recommendation, candidates, VORP lookup and listener/timer evidence. Startup seeds the VORP lookup; the listener recovers its own unacknowledged backlog and acknowledges processed events.
+## When does the listener recompute?
 
-## Clock, publication and recovery
+| Event | Behavior |
+| --- | --- |
+| Startup | Seed VORP lookup; recover this consumer's unacknowledged backlog |
+| Opponent pick | Recompute when our turn is next under the known snake order |
+| Our confirmed pick | Record whether it matched the attempted target |
+| New filled pick | Cancel stale pending publisher |
+| Draft complete | Stop listener |
+| Processed Stream event | Acknowledge after processing |
 
-The default hold delay is eight seconds, with a 90-second pick clock, five-second safety margin and minimum ten-second auto-publish window. Delay is clamped to the available window. Timing starts at the upstream Stream event, so backlog processing does not create a fresh clock. A newer filled pick cancels a pending publisher; draft completion stops the listener.
+The Redis board records recommendation, candidates, VORP lookup and listener/timer evidence.
 
-Publication uses the trigger API and worker draft execution path. Pause/autodraft state and mode gate the publisher. Transient publish failures retry every two seconds within the clock; three consecutive failed publications trip an auto-publish circuit breaker. A new pick cycle can re-enable a circuit-breaker disable; a manual disable remains in force. A confirmed ESPN rejection can advance to the next precomputed candidate after rejection readback; uncertainty is not permission to blindly choose another player. Board recommendation, queued target and landed ESPN pick are distinct evidence.
+## What limits auto-publication?
 
-Run the listener with explicit `--league-id`, `--team-id`, `--season` and optionally `--week`/`--auto-draft-delay-seconds`; the API normally provisions its Job. IDs must name the intended draft. Implementation: [draft_matrix.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/draft_matrix.py).
+| Setting or gate | Default behavior |
+| --- | --- |
+| Hold delay | 8 seconds |
+| Pick clock | 90 seconds, measured from upstream Stream event |
+| Safety margin | 5 seconds |
+| Minimum auto-publish window | 10 seconds; clamp delay to available window |
+| Pause/autodraft/mode | Gate the publisher |
+| Transient failure | Retry every 2 seconds within the clock |
+| Three consecutive failed publications | Trip auto-publish circuit breaker |
+| Next pick cycle | May re-enable circuit-breaker disable; preserve manual disable |
+| Confirmed ESPN rejection | Advance to next precomputed candidate after readback |
+
+:::warning[Do not treat uncertainty as rejection]
+Backlog processing does not restart the clock. A recommendation, queued target and landed ESPN pick are separate evidence; uncertainty does not authorize choosing another player.
+:::
+
+<details>
+<summary>Listener CLI arguments</summary>
+
+The API normally provisions the listener Job. For a direct invocation, IDs must name the intended draft.
+
+| Argument | Requirement |
+| --- | --- |
+| `--league-id` | Required |
+| `--team-id` | Required |
+| `--season` | Required |
+| `--week` | Optional; default 1 |
+| `--auto-draft-delay-seconds` | Optional |
+
+</details>
+
+## Related
+
+- [Pre-draft VORP](projections-and-vorp.md)
+- [Historical draft comparisons](backtesting.md)
+- Implementation: [draft_matrix.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/draft_matrix.py)

@@ -4,9 +4,26 @@ description: How raw evaluation, staged evidence and human approval produce outg
 sidebar_position: 7
 ---
 
-## Evaluation paths
+Outgoing proposals use deterministic scoring before staging an offer for human approval. Use this page to understand package ranking and the difference between an approved receipt and an ESPN submission.
 
-`POST /v1/trade/evaluate` and MCP `evaluate_proposed_trade` use `trade_service.evaluate_trade` with internal incoming/outgoing player IDs and exact season/week. Duplicate IDs and IDs on both sides are rejected.
+```mermaid
+flowchart LR
+    D[Deficit targets] -->|up to three teams| L[LLM packages]
+    L -->|at most six packages| V[Validate IDs and ownership]
+    V -->|four-week requests| S[Core trade scorer]
+    S -->|eligible scores| R[Worker ranking]
+    R -->|winning evidence| P[Grounded pitch]
+    P -->|offer and evaluation| A[Stage for human approval]
+    A -->|approved offer key| Q[trade_submissions queue]
+    Q -->|execution gates| W[Worker and ESPN]
+```
+
+## Which evaluation do you need?
+
+| Evaluation | Inputs | Output |
+| --- | --- | --- |
+| `POST /v1/trade/evaluate`; MCP `evaluate_proposed_trade` | Internal incoming/outgoing IDs, exact season/week | Raw VORP totals and missing IDs |
+| [Trade score](trade-scoring.md) | ESPN IDs, current ownership, horizon and schedules | Optimal starter impact, G*, C* and coverage |
 
 ```text
 incoming_total = sum(available incoming VORP)
@@ -14,32 +31,80 @@ outgoing_total = sum(available outgoing VORP)
 delta_vorp = incoming_total − outgoing_total
 ```
 
-Absent rows contribute nothing to the sums and appear in `missing_player_ids`; therefore a positive partial total does not establish an improvement. This simple endpoint does not simulate roster slots, schedules or drops. Use [trade scoring](trade-scoring.md) for starter impact and weighted value.
+Duplicate IDs and IDs on both sides are rejected. Absent rows contribute nothing and appear in `missing_player_ids`; raw evaluation does not simulate slots, schedules or drops.
 
-The browser worker owns scanning, proposal generation, negotiation and staging. Core supplies deterministic context/evaluation and queues requests; language-model suggestions do not replace database VORP or approve an offer.
+## Which generated packages qualify?
 
-## Generated proposal selection
+The worker targets up to three deficit teams and asks for at most six packages. Our outgoing side must include the target's deficit position.
 
-The [worker proposal generator](https://github.com/cvillarr23/fantasy-browser-worker/blob/main/src/bots/trade_proposal.js) chooses up to three deficit target teams and asks the LLM for at most six candidate packages. Player IDs must be distinct, correctly owned ESPN IDs, with no overlap; our outgoing side must include the target's deficit position. Core scores each package over four weeks before any pitch is written.
+| Gate | Requirement |
+| --- | --- |
+| Identity | Distinct, correctly owned ESPN IDs; no side overlap |
+| Coverage | At least one scored week; no unmapped traded players |
+| Our gain | Raw lineup gain >0 |
+| Their gain | Raw lineup change ≥0 |
+| Capacity | Neither side exceeds its roster limit |
+| Final score/horizon | Positive weighted score and complete horizon are not required |
 
-Eligibility requires at least one scored week, our raw lineup gain strictly above 0, counterparty raw lineup change at least 0, neither side over its roster limit and no unmapped traded player. It does not require a positive final weighted score or a complete horizon.
+No eligible package means no staged offer. Unavailable scoring can fail the run rather than stage an unscored claim.
 
-The [worker ranking](https://github.com/cvillarr23/fantasy-browser-worker/blob/main/src/lib/trade_scoring.js) puts packages with a numeric `final_score` ahead of packages using unweighted `our_lineup_gain`. Within each tier it ranks the chosen value divided by scored-week count, descending. Ties use more scored weeks, complete horizon, larger counterparty lineup change, then canonical package key. Thus weighted and unweighted values are never compared on the same scale. This differs from incoming inbox ranking, which uses total final score.
+## How does the worker rank packages?
 
-The winner's pitch uses deterministic score evidence and cited evidence IDs. Stored evaluation includes the exact request/response, target deficit, ranking basis/value/counts and pitch evidence paths (JSON Pointers into the score). No eligible package means no staged offer; unavailable scoring can fail the run rather than stage unscored claims.
+| Priority | Rule |
+| --- | --- |
+| 1. Score tier | Numeric `final_score` packages precede unweighted `our_lineup_gain` packages |
+| 2. Value | Chosen score divided by scored-week count, descending |
+| 3. Tie-breaks | More scored weeks, complete horizon, larger counterparty gain, then canonical package key |
 
-## Staged offers and evidence
+Incoming inbox ranking uses total final score instead. The outgoing ranking keeps weighted and unweighted values in separate tiers.
 
-`GET /v1/trade/offers` reads staged execution-log offers. Their player IDs are ESPN IDs despite payload field names such as `incoming_player_ids`. `trade_offer_service` validates stored proposal evaluation version `proposal-evaluation-v1` before exposing it; absent or invalid evidence is unavailable, rather than inferred from an LLM message. This evidence is for review, not authorization.
+<details>
+<summary>Pitch, staged evidence and offer identity</summary>
 
-`offer_key` is a canonical digest of the staged offer's identity and terms, shared with the worker. It includes the exact message and related incoming transaction ID for counters; thread root is tracing metadata outside the digest. Edits to keyed terms require a new key. The core checks configured league/team, both player sides and source before approval; conflicting staged copies fail closed.
+| Evidence | Contents |
+| --- | --- |
+| Pitch | Deterministic score facts with cited evidence IDs |
+| `proposal-evaluation-v1` | Exact request/response, target deficit, ranking basis/value/counts and pitch evidence paths |
+| Pitch paths | JSON Pointers into the stored score |
+| Invalid/absent evaluation | Unavailable panel; no inference from LLM text |
+| `GET /v1/trade/offers` IDs | ESPN IDs even in `incoming_player_ids`/`outgoing_player_ids` |
+| `offer_key` | Digest of identity, player sides, exact message and related transaction ID for counters |
+| Thread root | Tracing metadata outside the digest |
 
-## Human approval and publication
+Edits to keyed terms require a new key. Core checks configured league/team, player sides and source; conflicting staged copies fail closed.
 
-`POST /v1/trade/offers/{offer_key}/approve` requires a nonblank `approved_by` label. Unlike incoming decision routes, this route has no application-layer authentication and relies on the deployment trust boundary. The label is self-reported audit metadata. Under a PostgreSQL advisory lock, the core reads all rows for the key and accepts only an `awaiting_approval` offer. An earlier pending/submitting/submitted row blocks a new send.
+</details>
 
-The exact payload, approver, time, tracking ID and `bot_decisions` audit commit before broker access as `approval_pending`. Broker-confirmed publication to `trade_submissions` changes it to `approved` and returns 202. A repeated confirmed approval returns 200 with the original receipt and no new send. This receipt does not certify ESPN submission.
+## What happens when you approve?
 
-A proven pre-publication failure restores `awaiting_approval`; an ambiguous send or crash leaves `approval_pending` indefinitely. Reconcile tracking ID against broker, worker and ESPN evidence before releasing an uncertain claim. The worker independently applies its enable, dry-run, approval and execution gates.
+```mermaid
+stateDiagram-v2
+    awaiting_approval --> approval_pending: Lock and commit claim plus audit
+    approval_pending --> approved: Broker confirms publication
+    approval_pending --> awaiting_approval: Proven pre-publication failure
+    approved --> approved: Duplicate returns original receipt
+    approval_pending --> approval_pending: Ambiguous outcome stays blocked
+```
 
-[Incoming counters](incoming-trades.md) start negotiation and staging; they do not directly submit an outgoing counter. Implementation: [trade_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_service.py), [trade_offer_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_offer_service.py).
+| Rule | Behavior |
+| --- | --- |
+| Route | `POST /v1/trade/offers/{offer_key}/approve` |
+| Approver | Nonblank self-reported `approved_by` audit label |
+| Authentication | No application-layer auth; deployment trust boundary applies |
+| Lock | Read all rows for key under PostgreSQL advisory lock |
+| Eligible state | `awaiting_approval` |
+| Blocking history | Pending, submitting or submitted row prevents new publication |
+| Committed before send | Exact payload, approver, time, tracking ID and `bot_decisions` audit |
+| New confirmed publication | 202, `approved` |
+| Duplicate approval | 200, original receipt, no send |
+
+:::warning[An approved receipt is a broker receipt]
+Worker enable, dry-run, approval and execution gates still apply. For an ambiguous send or crash, reconcile broker, worker and ESPN evidence before releasing the indefinitely pending claim.
+:::
+
+## Related
+
+- [Incoming counters and review](incoming-trades.md)
+- [Trade context](trade-context.md)
+- Core: [trade_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_service.py), [trade_offer_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_offer_service.py)
+- Worker: [proposal generator](https://github.com/cvillarr23/fantasy-browser-worker/blob/main/src/bots/trade_proposal.js), [package ranking](https://github.com/cvillarr23/fantasy-browser-worker/blob/main/src/lib/trade_scoring.js)

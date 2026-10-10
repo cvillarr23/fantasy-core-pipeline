@@ -304,7 +304,7 @@ decisions and retries also require an explicit human approver. A `queued` receip
 The worker owns ESPN response execution and confirmed outcomes, and
 `TRADE_RESPONSE_ENABLED` stays off in production.
 
-See [the incoming inbox API contract](docs/decision-pipelines/incoming-trades.md) for query filters,
+See [the incoming inbox API contract](docs/decision-pipelines/incoming-trade-api.md) for query filters,
 schemas, queue payloads, status transitions, idempotency and reconciliation.
 Countering hands off to negotiation and stages an offer for later approval.
 

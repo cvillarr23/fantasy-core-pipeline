@@ -4,22 +4,22 @@ description: How projections become lineup, waiver, trade, rumor and draft decis
 sidebar_position: 1
 ---
 
-These pages describe the implemented inputs, formulas, thresholds and outputs. Values are fantasy-point-based VORP unless stated otherwise. Internal `player_id` and ESPN IDs are separate namespaces; publication requires an explicit mapping.
+Use these guides to predict a decision from its inputs, formulas and thresholds. Start with the pipeline you want to understand, then follow its links to evidence and execution rules.
 
 ```mermaid
 flowchart LR
-    P[Weekly projections and signals] --> V[VORP matrix]
-    V --> L[Lineup optimizer]
-    V --> W[Waiver planner]
-    V --> T[Trade scorer]
-    R[Rumor signals] --> L
-    R --> W
-    V --> D[Draft matrix]
-    L --> G[Trigger API and durable queues]
-    W --> G
-    T --> H[Human trade review]
-    H --> G
-    G --> E[Browser worker and ESPN verification]
+    P[Weekly projections and signals] -->|projections| V[VORP matrix]
+    V -->|starter value| L[Lineup optimizer]
+    V -->|bench and free-agent value| W[Waiver planner]
+    V -->|exact-week metrics| T[Trade scorer]
+    R[Rumor signals] -->|bench_watch| L
+    R -->|boost_waiver_priority| W
+    V -->|pre-draft value| D[Draft matrix]
+    L -->|lineup trigger| G[Trigger API and durable queues]
+    W -->|waiver trigger| G
+    T -->|score evidence| H[Human trade review]
+    H -->|approved trade| G
+    G -->|queued actions| E[Browser worker and ESPN verification]
 ```
 
 | Decision | Read next |
@@ -33,6 +33,14 @@ flowchart LR
 | Ranking, shadow policy and review evidence | [Incoming trades](incoming-trades.md) |
 | Event-triggered decisions and durable retries | [Rumor actions](rumor-actions.md) |
 | Pick selection and draft clock | [Draft](draft.md) |
-| Historical comparisons and running a replay | [Backtesting](backtesting.md) |
+| Historical comparisons | [Backtesting](backtesting.md) |
+| Replay commands and verification | [Run a backtest](run-backtest.md) |
+| Incoming endpoint/payload lookup | [API reference](incoming-trade-api.md) |
 
-A recommendation is an output of evaluation. A queued/approved receipt confirms publication to the control plane or broker; the browser worker owns execution and ESPN readback. Inspect [Activity](../activity-api.md) and worker evidence to establish the final result.
+:::note[Identity and completion]
+Internal `player_id` and ESPN IDs are separate namespaces; publication requires a mapping. Values are fantasy-point-based VORP unless stated otherwise.
+:::
+
+:::tip[Find the final result]
+A queued/approved receipt confirms publication to the control plane or broker. Inspect [Activity](../activity-api.md) and worker ESPN readback to establish execution.
+:::
