@@ -290,3 +290,8 @@ def test_postgres_empty_bench_does_not_prevent_browsing(postgres):
     result = service.browse_free_agents(2026, 4)
     assert result["total"] == 0
     assert result["free_agents"] == []
+
+
+def test_limit_none_returns_the_whole_sorted_pool():
+    result, _, _ = _browse(ROWS, limit=None)
+    assert [p["player_id"] for p in result["free_agents"]] == ["fa1", "fa3", "fa2", "fa4"]

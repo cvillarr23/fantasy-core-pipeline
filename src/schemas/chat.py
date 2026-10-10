@@ -25,6 +25,10 @@ class ChatGrounding(BaseModel):
     team_roster: dict
     roster_deficits: dict
     trade_evaluation: Optional[dict] = None
+    # Only fetched for waiver/pickup questions; null otherwise. Either may instead hold
+    # {"unavailable": reason} when the pool or recommendations can't be computed.
+    free_agents: Optional[dict] = None
+    waiver_recommendations: Optional[dict] = None
 
 
 class ChatQueryResponse(BaseModel):

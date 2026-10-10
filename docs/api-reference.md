@@ -134,7 +134,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 
 | Method | Path | Purpose | `X-API-Key` | Publishes to |
 |---|---|---|---|---|
-| `POST` | `/v1/chat/query` | Ask the LLM a roster question. | No |  |
+| `POST` | `/v1/chat/query` | Ask the LLM a roster or waiver question. | No |  |
 | `GET` | `/v1/health` | Check Postgres and RabbitMQ reachability. | No |  |
 
 <!-- END GENERATED: endpoints -->

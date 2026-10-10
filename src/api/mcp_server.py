@@ -24,6 +24,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from src.services.free_agent_service import browse_free_agents
 from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.trade_service import evaluate_trade
 from src.services.trade_context_service import get_league_trade_context
@@ -114,8 +115,8 @@ mcp = FastMCP(
     name="fantasy-core-mcp",
     instructions=(
         "Structured tools for reasoning about this fantasy football league's roster construction "
-        "and trade math, including one team's roster player by player (get_team_roster) and a "
-        "deterministic schedule-aware trade score (score_trade_proposal)."
+        "and trade math, including one team's roster player by player (get_team_roster), the "
+        "free-agent pool (get_free_agents) and a deterministic schedule-aware trade score (score_trade_proposal)."
     ),
     token_verifier=GoogleTokenVerifier(),
     auth=AuthSettings(
@@ -155,6 +156,27 @@ def get_team_roster(team_id: str, season: int, week: int) -> dict:
     means no weekly_stats row for that week (bye, not synced yet), not a zero projection.
     """
     return get_team_roster_players(team_id, season, week)
+
+
+@mcp.tool()
+def get_free_agents(
+    season: int,
+    week: int,
+    position: str | None = None,
+    q: str | None = None,
+    limit: int = 25,
+) -> dict:
+    """
+    Unrostered players in the league, sorted by vorp_score descending - name, ESPN id,
+    position, NFL team, injury status, projected_points and vorp_score, plus the bot team's
+    weakest same-position bench player and the VORP delta of swapping them. Same service as
+    GET /v1/waiver/free-agents. Filter by `position` (e.g. "RB") or a name substring `q`.
+
+    Before the week's projections land, metrics are the mean of up to 3 prior weeks
+    (`source_mode` "rolling_prior_weeks"); players on bye then have null metrics, not zero.
+    Raises when neither source has usable data.
+    """
+    return browse_free_agents(season, week, position, q, "vorp", max(1, min(limit, 200)))
 
 
 @mcp.tool()
