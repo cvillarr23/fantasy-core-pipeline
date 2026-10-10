@@ -226,6 +226,66 @@ class InboxResponse(BaseModel):
     decision_key: str | None = None
 
 
+ThreadState = Literal[
+    "awaiting_us", "awaiting_them", "agreed", "rejected", "expired", "abandoned"
+]
+
+
+class StoredCounter(BaseModel):
+    """The worker's `our_counter`: our counter to an incoming offer, as ESPN showed it."""
+
+    espn_transaction_id: str = Field(min_length=1)
+    status: InboxStatus
+    send_espn_ids: list[str] = Field(default_factory=list)
+    receive_espn_ids: list[str] = Field(default_factory=list)
+    player_names: dict[str, str | None] = Field(default_factory=dict)
+    proposed_date: StrictInt | str | None = None
+    expiration_date: StrictInt | str | None = None
+    missed_reads: StrictInt = 0
+    exit_reason: str | None = None
+    seen_at: str | None = None
+
+
+class OurCounter(BaseModel):
+    espn_transaction_id: str
+    status: InboxStatus
+    send_players: list[OfferPlayer]
+    receive_players: list[OfferPlayer]
+    proposed_date: datetime | None = None
+    expiration_date: datetime | None = None
+    missed_reads: int = 0
+    exit_reason: str | None = None
+    seen_at: datetime | None = None
+
+
+class ThreadTurn(BaseModel):
+    side: Literal["theirs", "ours"]
+    espn_transaction_id: str
+    status: str
+    proposing_team_id: str | None = None
+    counters: str | None = Field(
+        None, description="On our turns, the offer this counter answered."
+    )
+    comment: str | None = None
+    send_players: list[OfferPlayer]
+    receive_players: list[OfferPlayer]
+    proposed_date: datetime | None = None
+    expiration_date: datetime | None = None
+    exit_reason: str | None = None
+
+
+class NegotiationThread(BaseModel):
+    thread_root_id: str
+    state: ThreadState | None
+    our_counters: int = Field(
+        description="Counters from us that ESPN has shown; staged-only counters don't count."
+    )
+    counter_limit: int = Field(
+        description="Counters the worker sends per thread before refusing another."
+    )
+    turns: list[ThreadTurn]
+
+
 class IncomingTrade(BaseModel):
     id: int
     status: str
@@ -264,6 +324,7 @@ class IncomingTrade(BaseModel):
     exit_reason: str | None = None
     publications: list[InboxPublication] = Field(default_factory=list)
     response: InboxResponse | None = None
+    our_counter: OurCounter | None = None
 
 
 class IncomingTradeList(BaseModel):
