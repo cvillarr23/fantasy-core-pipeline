@@ -172,4 +172,4 @@ stateDiagram-v2
 - [API reference](./api-reference.md): which endpoints publish and which need an API key.
 - [Activity submissions](./activity-api.md): reading an action's delivery and verification state.
 - [Incoming trade inbox API](./trade-inbox-api.md): the trade message contracts and recovery.
-- [ESPN reverse engineering notes](https://github.com/cvillarr23/fantasy-browser-worker/blob/main/docs/espn-reverse-engineering.md): how the worker acts on these messages.
+- [ESPN reverse engineering notes](/worker/espn-reverse-engineering): how the worker acts on these messages.

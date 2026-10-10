@@ -1,0 +1,29 @@
+name: Notify docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild the docs site
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_SITE_DISPATCH_TOKEN }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set DOCS_SITE_DISPATCH_TOKEN with Contents: write for fantasy-project only."
+            exit 1
+          fi
+          gh api --method POST repos/cvillarr23/fantasy-project/dispatches \
+            -f event_type=docs-updated \
+            -f "client_payload[repository]=$SOURCE_REPOSITORY" \
+            -f "client_payload[sha]=$SOURCE_SHA"
