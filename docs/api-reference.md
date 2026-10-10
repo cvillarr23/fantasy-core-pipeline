@@ -99,6 +99,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 |---|---|---|---|---|
 | `GET` | `/v1/roster/deficits` | Show per-position roster deficits. | No |  |
 | `POST` | `/v1/roster/move-preview` | Preview the effect of a roster move. | No |  |
+| `GET` | `/v1/waiver/free-agents` | Browse all claimable free agents with metrics and same-position swap values. | No |  |
 | `GET` | `/v1/waiver/recommendations` | Recommend waiver adds and drops. | No |  |
 
 ### League and matchup

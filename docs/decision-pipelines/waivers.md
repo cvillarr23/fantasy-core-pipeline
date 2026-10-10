@@ -117,6 +117,7 @@ A duplicate receipt confirms an earlier publication. Worker execution and ESPN v
 
 ## Related
 
+- [Browse the full free-agent pool](../waiver-free-agents-api.md)
 - [Lineup and IR slots](lineup-optimization.md)
 - [Rumor-triggered claims](rumor-actions.md)
 - Implementation: [waiver_evaluator.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/optimization/waiver_evaluator.py), [waiver_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/waiver_service.py), [waiver_strategy.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/waiver_strategy.py)

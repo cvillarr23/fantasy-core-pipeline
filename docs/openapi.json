@@ -1062,6 +1062,217 @@
         "title": "FantasyScheduleWeek",
         "type": "object"
       },
+      "FreeAgentEntry": {
+        "properties": {
+          "bench_player": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FreeAgentPlayer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "injury_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Injury Status"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "string"
+          },
+          "pro_team": {
+            "title": "Pro Team",
+            "type": "string"
+          },
+          "projected_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projected Points"
+          },
+          "vorp_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vorp Delta"
+          },
+          "vorp_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vorp Score"
+          }
+        },
+        "required": [
+          "player_id",
+          "espn_id",
+          "name",
+          "position",
+          "pro_team"
+        ],
+        "title": "FreeAgentEntry",
+        "type": "object"
+      },
+      "FreeAgentPlayer": {
+        "properties": {
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "injury_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Injury Status"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "string"
+          },
+          "pro_team": {
+            "title": "Pro Team",
+            "type": "string"
+          },
+          "projected_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projected Points"
+          },
+          "vorp_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vorp Score"
+          }
+        },
+        "required": [
+          "player_id",
+          "espn_id",
+          "name",
+          "position",
+          "pro_team"
+        ],
+        "title": "FreeAgentPlayer",
+        "type": "object"
+      },
+      "FreeAgentsResponse": {
+        "properties": {
+          "free_agents": {
+            "items": {
+              "$ref": "#/components/schemas/FreeAgentEntry"
+            },
+            "title": "Free Agents",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "season": {
+            "title": "Season",
+            "type": "integer"
+          },
+          "source_mode": {
+            "enum": [
+              "target_week",
+              "rolling_prior_weeks"
+            ],
+            "title": "Source Mode",
+            "type": "string"
+          },
+          "source_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Source Weeks",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "season",
+          "week",
+          "free_agents",
+          "total",
+          "limit",
+          "offset",
+          "source_mode",
+          "source_weeks"
+        ],
+        "title": "FreeAgentsResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -8295,6 +8506,127 @@
           }
         },
         "summary": "Trigger Waiver Claim"
+      }
+    },
+    "/v1/waiver/free-agents": {
+      "get": {
+        "operationId": "get_free_agents_v1_waiver_free_agents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Season",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "week",
+            "required": true,
+            "schema": {
+              "maximum": 18,
+              "minimum": 1,
+              "title": "Week",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "position",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Position"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "vorp",
+              "enum": [
+                "vorp",
+                "projected"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeAgentsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Free Agents"
       }
     },
     "/v1/waiver/recommendations": {
