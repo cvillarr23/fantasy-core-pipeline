@@ -170,11 +170,27 @@ def shape_trade_context(
         str(team["id"]): {"team_id": str(team["id"]), "name": _extract_team_name(team)}
         for team in source_teams
     }
-    events = (
-        _schedule_events(raw, teams, periods)
-        if stored_events is None
-        else defaultdict(list, stored_events)
-    )
+    live_events = _schedule_events(raw, teams, periods)
+
+    def completed_history_keys(events):
+        return {
+            (team_id, period)
+            for team_id in teams
+            for period, period_weeks in periods.items()
+            if max(period_weeks) < min(week, observed_week)
+            and len(matches := events.get((team_id, period), [])) == 1
+            and matches[0]["status"] == "scheduled"
+            and matches[0]["completed"]
+            and _number(matches[0]["points"]) is not None
+        }
+
+    if stored_events is not None:
+        stored_history = completed_history_keys(stored_events)
+        # Use one score source for the entire league so strengths remain comparable.
+        # A scheduled row alone is not history; ESPN may have finished before sync.
+        if not stored_history or completed_history_keys(live_events) - stored_history:
+            stored_events = None
+    events = live_events if stored_events is None else defaultdict(list, stored_events)
     unmapped = set()
     missing_metrics = 0
     for source in source_teams:

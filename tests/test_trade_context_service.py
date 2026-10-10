@@ -124,7 +124,7 @@ METRICS = {
 FETCHED_AT = "2026-10-05T12:00:00+00:00"
 
 
-def shape(raw, week=3, horizon=4, identities=None, metrics=None):
+def shape(raw, week=3, horizon=4, identities=None, metrics=None, stored_events=None):
     return service.shape_trade_context(
         raw,
         IDENTITIES if identities is None else identities,
@@ -134,6 +134,7 @@ def shape(raw, week=3, horizon=4, identities=None, metrics=None):
         week,
         horizon,
         FETCHED_AT,
+        stored_events=stored_events,
     )
 
 
@@ -374,7 +375,9 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
 
     with patch.object(service, "build_league") as build, patch.object(
         service, "fetch_raw_league_data", return_value=raw
-    ) as fetch, patch.object(service, "get_db_cursor", db):
+    ) as fetch, patch.object(service, "get_db_cursor", db), patch.object(
+        service, "load_stored_events", return_value={}
+    ) as history:
         result = service.get_league_trade_context("123", 2026, 3, 4)
     build.assert_called_once_with(2026, request_timeout_seconds=10)
     fetch.assert_called_once_with(build.return_value, include_schedule=True)
@@ -382,6 +385,12 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
     assert set(cursor.execute.call_args_list[0].args[1][0]) == {"100", "500", "-1"}
     assert cursor.execute.call_args_list[1].args[1][:3] == (2026, 3, 6)
     assert result["teams"]["1"]["roster"][0]["player_id"] == "500"
+    history.assert_called_once_with("123", 2026)
+    assert result["strength_metric"]["teams_with_strength"] == 4
+    assert result["strength_metric"]["source"] == (
+        "ESPN completed regular-season matchup totals"
+    )
+    assert result["teams"]["1"]["schedule_strength_z"] is not None
     assert (
         datetime.fromisoformat(result["roster_snapshot"]["fetched_at"]).tzinfo
         is not None
@@ -496,3 +505,136 @@ def test_postseason_observed_period_still_allows_regular_season_context(raw):
     result = shape(raw, week=7)
     assert result["roster_snapshot"]["observed_week"] == 19
     assert result["teams"]["1"]["schedule"] == []
+
+
+def stored_schedule(raw):
+    return dict(
+        service._schedule_events(
+            raw,
+            {str(team["id"]): team for team in raw["teams"]},
+            service._regular_periods(raw),
+        )
+    )
+
+
+@pytest.mark.parametrize("store_kind", ["empty", "future_only", "incomplete"])
+def test_no_completed_stored_history_falls_back_to_live(raw, store_kind):
+    events = stored_schedule(raw)
+    if store_kind == "empty":
+        events = {}
+    elif store_kind == "future_only":
+        events = {key: value for key, value in events.items() if key[1] >= 3}
+    else:
+        for matches in events.values():
+            matches[0].update(completed=False, points=None)
+    result = shape(raw, stored_events=events)
+    assert result == shape(raw)
+    assert result["strength_metric"]["teams_with_strength"] == 4
+    assert result["strength_metric"]["source"] == (
+        "ESPN completed regular-season matchup totals"
+    )
+    assert result["teams"]["1"]["strength"]["points_per_week"] == 105
+    assert result["teams"]["1"]["schedule_strength_z"] is not None
+
+
+@pytest.mark.parametrize("gap", ["lagging_week", "missing_team", "incomplete_score"])
+def test_partial_store_falls_back_for_the_whole_league(raw, gap):
+    events = stored_schedule(raw)
+    if gap == "lagging_week":
+        events = {key: value for key, value in events.items() if key[1] != 2}
+    elif gap == "missing_team":
+        del events[("2", 2)]
+    else:
+        events[("2", 2)][0].update(points=None, completed=False)
+    # Differing stored scores ensure the fallback does not mix the two sources.
+    events[("1", 1)][0]["points"] = 500
+    original = deepcopy(events)
+    assert shape(raw, stored_events=events) == shape(raw)
+    assert events == original
+
+
+def test_complete_store_keeps_stored_scores_and_pairings(raw):
+    events = stored_schedule(raw)
+    events[("1", 1)][0]["points"] = 200
+    del events[("1", 3)]
+    result = shape(raw, stored_events=events)
+    assert result["strength_metric"]["source"] == (
+        "Stored ESPN completed regular-season scoring weeks"
+    )
+    assert result["teams"]["1"]["strength"]["points_per_week"] == 155
+    assert result["teams"]["1"]["schedule"][0]["status"] == "unavailable"
+
+
+def test_completed_zero_scores_are_usable_stored_history(raw):
+    events = stored_schedule(raw)
+    for matches in events.values():
+        matches[0]["points"] = 0
+    result = shape(raw, stored_events=events)
+    assert result["strength_metric"]["source"].startswith("Stored ESPN")
+    assert result["strength_metric"]["teams_with_strength"] == 4
+    assert all(
+        team["strength"]["points_per_week"] == 0 for team in result["teams"].values()
+    )
+
+
+def test_gap_in_both_sources_stays_unknown_without_zero_scores(raw):
+    raw["schedule"][2]["home"]["totalPoints"] = None
+    events = stored_schedule(raw)
+    del events[("1", 2)]
+    result = shape(raw, stored_events=events)
+    assert result["strength_metric"]["source"].startswith("Stored ESPN")
+    strength = result["teams"]["1"]["strength"]
+    assert strength["points_per_week"] == 100
+    assert strength["completed_scoring_weeks"] == 1
+    assert strength["unavailable_history_periods"] == 1
+
+
+def test_empty_store_and_missing_live_scores_remain_unknown(raw):
+    raw.pop("schedule")
+    result = shape(raw, stored_events={})
+    assert result["strength_metric"]["teams_with_strength"] == 0
+    assert result["strength_metric"]["source"].startswith("ESPN completed")
+    for team in result["teams"].values():
+        assert team["strength"]["points_per_week"] is None
+        assert team["strength"]["unavailable_history_periods"] == 2
+        assert team["schedule_strength_z"] is None
+
+
+@pytest.mark.parametrize("week,observed_week", [(2, 3), (6, 2)])
+def test_later_live_completion_cannot_trigger_fallback(raw, week, observed_week):
+    raw["scoringPeriodId"] = observed_week
+    events = stored_schedule(raw)
+    for key, matches in events.items():
+        if key[1] >= 2:
+            matches[0].update(completed=False, points=None)
+    result = shape(raw, week=week, stored_events=events)
+    assert result["strength_metric"]["source"].startswith("Stored ESPN")
+    assert result["teams"]["1"]["strength"]["points_per_week"] == 100
+    assert result["teams"]["1"]["strength"]["completed_scoring_weeks"] == 1
+
+
+def test_partial_multiweek_store_uses_completed_live_totals(raw):
+    from src.services.score_history import shape_stored_events
+
+    raw["settings"]["scheduleSettings"] = {
+        "matchupPeriodCount": 2,
+        "matchupPeriods": {"1": [1, 2], "2": [3, 4]},
+    }
+    raw["schedule"] = [
+        game(1, 1, 2, 200, 160, "HOME"),
+        game(1, 3, 4, 240, 120, "HOME"),
+        game(2, 1, 3),
+        game(2, 2, 4),
+    ]
+    events = shape_stored_events(
+        [
+            ("1", 1, [1, 2], "2", "scheduled", 1, 100.0),
+            ("1", 1, [1, 2], "2", "scheduled", 2, None),
+            ("3", 1, [1, 2], "4", "scheduled", 1, 120.0),
+            ("3", 1, [1, 2], "4", "scheduled", 2, 120.0),
+        ]
+    )
+    result = shape(raw, stored_events=events)
+    assert result == shape(raw)
+    assert result["teams"]["1"]["strength"]["points_per_week"] == 100
+    assert result["teams"]["1"]["strength"]["completed_scoring_weeks"] == 2
