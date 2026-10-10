@@ -1,4 +1,8 @@
-# Activity submissions
+---
+title: Activity submissions
+description: How to list queued actions and read their delivery and verification state.
+sidebar_position: 7
+---
 
 `GET /v1/activity/actions` returns `{ "items": [...] }` for the configured
 league. `limit` defaults to 50 (maximum 100), and `offset` defaults to 0.
