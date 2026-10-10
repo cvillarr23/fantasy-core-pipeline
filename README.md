@@ -73,6 +73,10 @@ sequenceDiagram
     DM->>Redis: XACK
 ```
 
+## Documentation
+
+Reference pages live in `docs/` and are published on the project docs site: [data model](docs/data-model.md), [migrations](docs/migrations.md), [ingestion](docs/ingestion.md), [read-only access](docs/read-only-access.md), [API reference](docs/api-reference.md) and [queue publishing](docs/queue-publishing.md). `docs/openapi.json` and the endpoint tables in the API reference are generated; after changing a route run `DB_PASSWORD=test python scripts/export_openapi.py`, or `tests/test_api_docs.py` fails.
+
 ## Schema Notes
 
 Design rationale for `src/models.py` DDL that's too deep for an inline comment.

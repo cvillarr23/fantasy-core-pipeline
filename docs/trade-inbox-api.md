@@ -1,4 +1,8 @@
-# Incoming trade inbox API
+---
+title: Incoming trade inbox API
+description: Read contract, review token and publishing rules for the incoming trade inbox.
+sidebar_position: 8
+---
 
 These endpoints read the browser worker's `execution_log` inbox and queue human
 requests. No migration is needed. Publishing a request never means ESPN processed

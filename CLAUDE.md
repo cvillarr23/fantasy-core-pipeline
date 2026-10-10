@@ -31,6 +31,10 @@
 
 ## API layer conventions
 
+- Adding or changing a route means regenerating `docs/openapi.json` and the endpoint tables in
+  `docs/api-reference.md` (`DB_PASSWORD=test python scripts/export_openapi.py`) and adding a
+  one-line entry for the route in that script's `DESCRIPTIONS`; `tests/test_api_docs.py` fails
+  otherwise. Schema or queue changes also need `docs/data-model.md` / `docs/queue-publishing.md`.
 - `src/api/*.py` routers must be thin HTTP controllers: parse request params, call into
   `src/services/<domain>_service.py`, map service-raised exceptions to HTTP status codes,
   and shape the response via `src/schemas/<domain>.py` Pydantic models. They must not run
