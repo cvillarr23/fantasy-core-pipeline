@@ -4,20 +4,30 @@ description: How bench value, free agents and IR capacity determine recommendati
 sidebar_position: 4
 ---
 
-Waivers replace a weak bench player or use an IR stash to make room for an add. Use this page to distinguish a displayed recommendation from a live claim.
+Waivers fill open non-IR roster slots, replace a weak bench player, or use an IR stash to make room for an add. Use this page to distinguish a displayed recommendation from a live claim.
 
 ```mermaid
 flowchart LR
     R[Refresh roster] -->|ownership| P[Bench and free-agent pools]
-    P -->|VORP and IR eligibility| I{Open IR capacity?}
+    P -->|open non-IR capacity| F[Reserve best add-only pickups]
+    F -->|remaining agents and IR eligibility| I{Open IR capacity?}
     I -->|yes| A[Protect eligible bench; plan IR plus add]
     I -->|no| S[Same-position swaps]
     A -->|remaining agents and healthy bench| S
     S -->|gain above margin| M[Planned moves]
     A -->|add value above margin| M
+    F -->|add value above margin| M
     M -->|margin 0| D[Read recommendations]
     M -->|margin 3 and publication gates| G[Live publisher]
 ```
+
+## When can we just add a player?
+
+`open_roster_slots` is the configured sum of all non-IR lineup slots (starters and bench) minus this team's non-IR `league_rosters` occupancy, clamped at zero. Missing league settings mean zero capacity.
+
+The planner reserves up to that many free agents by descending VORP before considering swaps or IR chains. It uses all projected free agents, so multiple pickups can share a position. A reserved player cannot also appear in a swap or IR chain. Remaining agents can still improve the bench.
+
+These moves have `kind: "add"`, an internal `drop_player_id: null`, and null `bench_player` and `ir_player` summaries. Their gain is the add's full VORP. The read path requires VORP >0 and supports the same prior-week averages and bye exclusions as swaps; live claims require VORP >3. Add-only claims publish before swaps, without an IR move, dependency tracking ID, or IR publication flag.
 
 ## Which player gets dropped?
 
@@ -61,7 +71,7 @@ Standalone stash hints can overlap an IR + add suggestion. Choose one action pla
 | `waiver_service` | Exact week when both pools exist; otherwise prior three same-season weeks | >0 | Recommendations and `ir_moves`; no publication |
 | `waiver_evaluator` | Exact-week pools required | >3 | Live claims and gated IR + add |
 
-Both refresh stale roster ownership before planning. Recommendations sort by `vorp_delta` and expose the kind, position, add, bench/IR player and source weeks; rumor fields are currently null.
+Both refresh stale roster ownership before planning. Add-only recommendations come first; within each group, recommendations sort by `vorp_delta` and expose the kind, position, add, bench/IR player and source weeks; rumor fields are currently null.
 
 <details>
 <summary>Read fallback and unavailable inputs</summary>
@@ -72,8 +82,8 @@ Both refresh stale roster ownership before planning. Recommendations sort by `vo
 | Newest usable fallback week older than immediately prior week | Raise unavailable-input error |
 | Target-week NFL bye | Exclude player using the schedule |
 | Week 1 lacks data | Do not borrow the previous season |
-| Missing bench/free-agent pool or schedule failure | Raise unavailable-input error |
-| Live pool missing | Fail; no prior-week fallback |
+| Missing free-agent pool, missing bench with no open roster slots, or schedule failure | Raise unavailable-input error |
+| Live free-agent pool missing, or bench missing with no open roster slots | Fail; no prior-week fallback |
 | Successful empty plan | No qualifying improvement |
 
 </details>

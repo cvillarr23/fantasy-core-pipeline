@@ -317,7 +317,7 @@ def test_plan_live_waiver_moves_skips_the_ir_slot_lookup_when_nobody_is_eligible
     bench = {"RB": [{"player_id": "b", "vorp_score": 1.0, "espn_injury_status": "QUESTIONABLE"}]}
     with patch("src.optimization.waiver_evaluator.load_open_ir_slots") as mock_slots, \
          patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves", return_value=moves):
-        assert we.plan_live_waiver_moves(MagicMock(), "7", 2026, bench, {"RB": {"player_id": "f", "vorp_score": 5.0}}) == moves
+        assert we.plan_live_waiver_moves(MagicMock(), "7", 2026, bench, {"RB": {"player_id": "f", "vorp_score": 5.0}}, week=5) == moves
     mock_slots.assert_not_called()
 
 
@@ -517,7 +517,7 @@ def test_flag_on_plans_ir_and_add_moves_after_the_swaps(ir_flag_on, caplog):
     with patch("src.optimization.waiver_evaluator.load_open_ir_slots", return_value=1), \
          patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants", return_value=[]), \
          caplog.at_level("INFO", logger="WaiverEvaluator"):
-        moves = we.plan_live_waiver_moves(MagicMock(), "7", 2026, bench, agents)
+        moves = we.plan_live_waiver_moves(MagicMock(), "7", 2026, bench, agents, week=5)
 
     assert [m.get("kind") for m in moves] == [None, "ir_and_add"]
     assert moves[0]["drop_player_id"] == "wr-bench"
@@ -532,7 +532,7 @@ def test_flag_on_withholds_ir_and_adds_while_an_ineligible_player_sits_in_our_ir
          patch("src.optimization.waiver_evaluator.load_ineligible_ir_occupants",
                return_value=[("old-hurt", "Healed Guy", "ACTIVE")]), \
          caplog.at_level("INFO", logger="WaiverEvaluator"):
-        moves = we.plan_live_waiver_moves(MagicMock(), "7", 2026, *IR_POOLS)
+        moves = we.plan_live_waiver_moves(MagicMock(), "7", 2026, *IR_POOLS, week=5)
 
     assert all(m.get("kind") != "ir_and_add" for m in moves)
     [record] = [r for r in caplog.records if r.levelname == "ERROR"]
@@ -719,3 +719,41 @@ def test_a_failed_ir_and_add_does_not_hold_back_the_weeks_swaps(ir_flag_on):
         we.main(WAIVER_ARGV)
 
     assert [path for path, _ in gateway.posts] == ["waiver", "lineup"]
+
+
+@pytest.fixture(autouse=True)
+def full_roster_by_default(monkeypatch):
+    monkeypatch.setattr(we.waiver_strategy, "load_open_roster_slots", lambda *args: 0)
+
+
+
+def test_weekly_waivers_publishes_add_only_claims_first_without_ir_flag(monkeypatch):
+    monkeypatch.delenv("AUTO_PUBLISH_IR_MOVES", raising=False)
+    monkeypatch.setattr(we.waiver_strategy, "load_open_roster_slots", lambda *args: 2)
+    monkeypatch.setattr(we.waiver_strategy, "load_add_candidates", lambda *args: [
+        {"player_id": "fa1", "position": "WR", "vorp_score": 8.0},
+        {"player_id": "fa2", "position": "WR", "vorp_score": 7.0},
+        {"player_id": "fa3", "position": "WR", "vorp_score": 6.0}])
+    pools = ({"WR": [{"player_id": "bench", "vorp_score": 1.0}]},
+             {"WR": {"player_id": "fa1", "vorp_score": 8.0}})
+    def identity(cursor, pid):
+        return {"espn_id": "espn-" + pid, "name": pid, "team": "SEA"}
+    with patch.object(we, "get_db_connection"), \
+         patch.object(we, "load_live_waiver_inputs", return_value=pools), \
+         patch.object(we, "resolve_espn_identity", side_effect=identity), \
+         patch.object(we, "post_trigger_idempotent") as post:
+        resolved = we.run_weekly_waivers_live("8", 2026, 5)
+    assert [t["player_id"] for t in resolved] == ["espn-fa1", "espn-fa2", "espn-fa3"]
+    assert [t["drop_player_id"] for t in resolved] == [None, None, "espn-bench"]
+    assert post.call_count == 3
+    assert all(c.args[0] == "waiver" for c in post.call_args_list)
+    assert all("after_tracking_id" not in c.args[1] for c in post.call_args_list)
+    assert resolved[0]["decision_inputs"]["drop_player_vorp_score"] is None
+
+
+def test_live_input_allows_empty_bench_when_roster_has_capacity(monkeypatch):
+    monkeypatch.setattr(we.waiver_strategy, "load_open_roster_slots", lambda *args: 1)
+    fa = {"WR": {"player_id": "fa", "vorp_score": 5}}
+    with patch.object(we.waiver_strategy, "load_bench_by_position", return_value={}), \
+         patch.object(we.waiver_strategy, "load_best_free_agent_by_position", return_value=fa):
+        assert we.load_live_waiver_inputs(MagicMock(), "8", 2026, 5) == ({}, fa)
