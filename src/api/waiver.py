@@ -5,15 +5,62 @@ Thin controller over src.services.waiver_service, mirroring src/api/roster.py's 
 of splitting a REST surface out of the MCP-only layer.
 """
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from src.services.waiver_service import WaiverInputsUnavailableError, compute_waiver_recommendations
+from src.services.free_agent_service import browse_free_agents
 
 logger = logging.getLogger("WaiverRoutes")
 waiver_router = APIRouter()
+
+
+class FreeAgentPlayer(BaseModel):
+    player_id: str
+    espn_id: str
+    name: str
+    position: str
+    pro_team: str
+    injury_status: Optional[str] = None
+    projected_points: Optional[float] = None
+    vorp_score: Optional[float] = None
+
+
+class FreeAgentEntry(FreeAgentPlayer):
+    bench_player: Optional[FreeAgentPlayer] = None
+    vorp_delta: Optional[float] = None
+
+
+class FreeAgentsResponse(BaseModel):
+    season: int
+    week: int
+    free_agents: List[FreeAgentEntry]
+    total: int
+    limit: int
+    offset: int
+    source_mode: Literal["target_week", "rolling_prior_weeks"]
+    source_weeks: List[int]
+
+
+@waiver_router.get("/free-agents", response_model=FreeAgentsResponse)
+def get_free_agents(
+    season: int = Query(..., ge=1),
+    week: int = Query(..., ge=1, le=18),
+    position: Optional[str] = Query(None, min_length=1),
+    q: Optional[str] = None,
+    sort: Literal["vorp", "projected"] = "vorp",
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    try:
+        return browse_free_agents(season, week, position, q, sort, limit, offset)
+    except WaiverInputsUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"Free agents unavailable: {exc}")
+    except Exception as exc:
+        logger.exception("Failed to browse free agents for season=%s week=%s", season, week)
+        raise HTTPException(status_code=500, detail=f"Failed to browse free agents: {exc}")
 
 
 class WaiverPlayerSummary(BaseModel):

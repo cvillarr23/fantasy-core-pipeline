@@ -101,6 +101,7 @@ DESCRIPTIONS = {
     "GET /v1/roster/deficits": "Show per-position roster deficits.",
     "POST /v1/roster/move-preview": "Preview the effect of a roster move.",
     "GET /v1/waiver/recommendations": "Recommend waiver adds and drops.",
+    "GET /v1/waiver/free-agents": "Browse all claimable free agents with metrics and same-position swap values.",
     "GET /v1/league/teams": "List league teams.",
     "GET /v1/league/current-week": "Show the current NFL week.",
     "GET /v1/league/standings": "Show league standings.",
