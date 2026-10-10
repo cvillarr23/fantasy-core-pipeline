@@ -1,0 +1,19 @@
+name: Notify docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild the docs site
+        uses: cvillarr23/fantasy-project/.github/actions/dispatch-docs@4f7da926c63b74d3db9917cef547ccea8b074ef2
+        with:
+          token: ${{ secrets.DOCS_SITE_DISPATCH_TOKEN }}
