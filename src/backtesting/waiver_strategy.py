@@ -90,7 +90,7 @@ def load_add_candidates(cursor, season: int, week: int) -> list:
     """All projected free agents, so multiple open slots can use the same position."""
     cursor.execute(
         """
-        SELECT p.player_id, p.position, COALESCE(s.vorp_score, 0.0)
+        SELECT p.player_id, p.position, COALESCE(s.vorp_score, 0.0), p.injury_status
         FROM players p JOIN weekly_stats s ON p.player_id = s.player_id
         WHERE s.season = %s AND s.week = %s
           AND NOT EXISTS (SELECT 1 FROM league_rosters r WHERE r.player_id = p.player_id);
@@ -98,20 +98,44 @@ def load_add_candidates(cursor, season: int, week: int) -> list:
         (season, week),
     )
     return [
-        {"player_id": pid, "position": position, "vorp_score": score}
-        for pid, position, score in cursor.fetchall()
+        {"player_id": pid, "position": position, "vorp_score": score, "injury_status": injury}
+        for pid, position, score, injury in cursor.fetchall()
     ]
 
 
+def load_rostered_positions(cursor, team_id: str) -> set:
+    """All roster positions, including starters without weekly metrics."""
+    cursor.execute(
+        """SELECT DISTINCT p.position FROM league_rosters r
+        JOIN players p ON p.player_id = r.player_id WHERE r.team_id = %s;""",
+        (str(team_id),),
+    )
+    return {row[0] for row in cursor.fetchall()}
+
+
 def plan_add_only_moves(candidates: list, open_roster_slots: int,
-                        margin: float = MARGIN_THRESHOLD) -> tuple:
-    """Reserve the best worthwhile adds, then return best remaining agents for swaps/IR."""
+                        rostered_positions: set) -> tuple:
+    """Fill vacancies with healthy depth, even below replacement-level VORP.
+
+    Missing K/D/ST starters take priority, with at most one add per missing position.
+    Otherwise only QB/RB/WR/TE depth is useful. VORP ranks candidates within this pool;
+    it is relative to replacement level, so zero is not a threshold for an empty slot.
+    Unselected candidates remain available to the existing swap/IR rules.
+    """
     ranked = sorted(candidates, key=lambda p: (-p["vorp_score"], str(p["player_id"])))
     unique = {}
     for player in ranked:
         unique.setdefault(player["player_id"], player)
     ranked = list(unique.values())
-    selected = [p for p in ranked if p["vorp_score"] > margin][:max(0, open_roster_slots)]
+    healthy = [p for p in ranked if str(p.get("injury_status") or "").strip().upper()
+               not in {"OUT", "IR", "INJURY_RESERVE", "INJURED RESERVE"}]
+    missing_starters = {}
+    for player in healthy:
+        position = player["position"]
+        if position in {"K", "D/ST"} and position not in rostered_positions:
+            missing_starters.setdefault(position, player)
+    depth = [p for p in healthy if p["position"] in {"QB", "RB", "WR", "TE"}]
+    selected = (list(missing_starters.values()) + depth)[:max(0, open_roster_slots)]
     adds = [
         {"kind": "add", "position": p["position"], "drop_player_id": None,
          "add_player_id": p["player_id"], "add_vorp_score": p["vorp_score"]}

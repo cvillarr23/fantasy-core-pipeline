@@ -216,7 +216,7 @@ def test_adds_take_best_agents_including_multiple_at_same_position_before_other_
         {"player_id": "wr3", "position": "WR", "vorp_score": 8.0},
         {"player_id": "rb", "position": "RB", "vorp_score": 7.0},
     ]
-    adds, remaining = waiver_strategy.plan_add_only_moves(candidates, 2, margin=0)
+    adds, remaining = waiver_strategy.plan_add_only_moves(candidates, 2, rostered_positions=set())
     assert [m["add_player_id"] for m in adds] == ["wr1", "wr2"]
     assert all(m["kind"] == "add" and m["drop_player_id"] is None for m in adds)
     swaps, ir_adds = waiver_strategy.plan_waiver_moves(
@@ -227,12 +227,76 @@ def test_adds_take_best_agents_including_multiple_at_same_position_before_other_
     assert len({m["add_player_id"] for m in adds + swaps + ir_adds}) == 3
 
 
-@pytest.mark.parametrize("slots,margin,expected", [(0, 0, []), (5, 3, ["good"]), (5, 0, ["good", "small"])])
-def test_adds_respect_capacity_pool_size_and_strict_margin(slots, margin, expected):
+@pytest.mark.parametrize("slots,expected", [(0, []), (1, ["good"]), (5, ["good", "small", "zero"])])
+def test_adds_respect_capacity_and_pool_size(slots, expected):
     candidates = [
         {"player_id": "good", "position": "WR", "vorp_score": 4.0},
         {"player_id": "small", "position": "WR", "vorp_score": 3.0},
         {"player_id": "zero", "position": "RB", "vorp_score": 0.0},
     ]
-    adds, _ = waiver_strategy.plan_add_only_moves(candidates, slots, margin)
+    adds, _ = waiver_strategy.plan_add_only_moves(candidates, slots, rostered_positions=set())
     assert [m["add_player_id"] for m in adds] == expected
+
+
+@pytest.mark.parametrize("position", ["QB", "RB", "WR", "TE"])
+def test_negative_vorp_skill_depth_beats_backup_specialists(position):
+    candidates = [
+        {"player_id": "k", "position": "K", "vorp_score": -0.1},
+        {"player_id": "dst", "position": "D/ST", "vorp_score": -0.2},
+        {"player_id": "depth", "position": position, "vorp_score": -4.78},
+        {"player_id": "worse", "position": position, "vorp_score": -6},
+    ]
+    adds, remaining = waiver_strategy.plan_add_only_moves(candidates, 1, {"K", "D/ST"})
+    assert [(m["kind"], m["add_player_id"]) for m in adds] == [("add", "depth")]
+    assert remaining[position]["player_id"] == "worse"
+    assert remaining["K"]["player_id"] == "k"
+
+
+@pytest.mark.parametrize("status", ["OUT", "Out", "IR", "Injured Reserve", "INJURY_RESERVE"])
+def test_adds_skip_injured_candidates_but_preserve_swap_pool(status):
+    candidates = [
+        {"player_id": "hurt", "position": "WR", "vorp_score": 10, "injury_status": status},
+        {"player_id": "healthy", "position": "WR", "vorp_score": -5, "injury_status": "Questionable"},
+    ]
+    adds, remaining = waiver_strategy.plan_add_only_moves(candidates, 1, {"K", "D/ST"})
+    assert [m["add_player_id"] for m in adds] == ["healthy"]
+    assert remaining["WR"]["player_id"] == "hurt"
+
+
+@pytest.mark.parametrize("missing", ["K", "D/ST"])
+def test_missing_specialist_is_filled_once_before_skill_depth(missing):
+    candidates = [
+        {"player_id": "first", "position": missing, "vorp_score": -2},
+        {"player_id": "backup", "position": missing, "vorp_score": -3},
+        {"player_id": "hurt", "position": missing, "vorp_score": 5, "injury_status": "OUT"},
+        {"player_id": "depth", "position": "RB", "vorp_score": 8},
+    ]
+    adds, _ = waiver_strategy.plan_add_only_moves(candidates, 3, {"K", "D/ST"} - {missing})
+    assert [m["add_player_id"] for m in adds] == ["first", "depth"]
+
+
+def test_specialist_only_pool_does_not_add_backups():
+    candidates = [{"player_id": "k", "position": "K", "vorp_score": 5}]
+    adds, _ = waiver_strategy.plan_add_only_moves(candidates, 1, {"K", "D/ST"})
+    assert adds == []
+
+
+def test_add_candidate_loader_carries_free_agent_injury_status():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("hurt", "WR", -4.78, "Out")]
+    assert waiver_strategy.load_add_candidates(cursor, 2026, 6) == [
+        {"player_id": "hurt", "position": "WR", "vorp_score": -4.78, "injury_status": "Out"}]
+    query, params = cursor.execute.call_args.args
+    assert "p.injury_status" in query
+    assert "NOT EXISTS" in query
+    assert params == (2026, 6)
+
+
+def test_rostered_positions_includes_starters_without_projections():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("K",), ("D/ST",), ("WR",)]
+    assert waiver_strategy.load_rostered_positions(cursor, "8") == {"K", "D/ST", "WR"}
+    query, params = cursor.execute.call_args.args
+    assert "weekly_stats" not in query
+    assert "is_starter" not in query
+    assert params == ("8",)

@@ -51,7 +51,9 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
     cursor.execute(
         """
         SELECT p.player_id, p.position, p.team, s.week, s.vorp_score,
-               (r.player_id IS NOT NULL) AS on_our_bench, r.espn_injury_status
+               (r.player_id IS NOT NULL) AS on_our_bench,
+               CASE WHEN r.player_id IS NULL THEN p.injury_status
+                    ELSE r.espn_injury_status END AS injury_status
         FROM weekly_stats s
         JOIN players p ON p.player_id = s.player_id
         LEFT JOIN league_rosters r ON r.player_id = p.player_id
@@ -81,10 +83,10 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
         ) from exc
 
     players: dict = {}
-    for player_id, position, team, _, vorp_score, on_our_bench, espn_injury_status in rows:
+    for player_id, position, team, _, vorp_score, on_our_bench, injury_status in rows:
         entry = players.setdefault(player_id, {
             "position": position, "team": team, "bench": on_our_bench,
-            "espn_injury_status": espn_injury_status, "vorp": [],
+            "injury_status": injury_status, "vorp": [],
         })
         entry["vorp"].append(vorp_score)
 
@@ -96,11 +98,12 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
         candidate = {"player_id": player_id, "vorp_score": sum(entry["vorp"]) / len(entry["vorp"])}
         if entry["bench"]:
             bench_by_position.setdefault(entry["position"], []).append(
-                {**candidate, "espn_injury_status": entry["espn_injury_status"]}
+                {**candidate, "espn_injury_status": entry["injury_status"]}
             )
         else:
             if add_candidates is not None:
-                add_candidates.append({"position": entry["position"], **candidate})
+                add_candidates.append({"position": entry["position"], **candidate,
+                                       "injury_status": entry["injury_status"]})
             best = free_agents_by_position.get(entry["position"])
             if best is None or candidate["vorp_score"] > best["vorp_score"]:
                 free_agents_by_position[entry["position"]] = candidate
@@ -206,7 +209,8 @@ def compute_waiver_recommendations(season: int, week: int) -> dict:
         adds = []
         if open_roster_slots > 0:
             adds, free_agents_by_position = waiver_strategy.plan_add_only_moves(
-                add_candidates, open_roster_slots, margin=0.0,
+                add_candidates, open_roster_slots,
+                rostered_positions=waiver_strategy.load_rostered_positions(cursor, our_team_id),
             )
         open_ir_slots = load_open_ir_slots(cursor, our_team_id, season)
         swaps, ir_and_adds = waiver_strategy.plan_waiver_moves(

@@ -286,7 +286,10 @@ def plan_live_waiver_moves(cursor, team_id: str, season: int, bench_by_position:
     open_roster_slots = waiver_strategy.load_open_roster_slots(cursor, team_id, season)
     if open_roster_slots > 0:
         candidates = waiver_strategy.load_add_candidates(cursor, season, week)
-        adds, free_agents_by_position = waiver_strategy.plan_add_only_moves(candidates, open_roster_slots)
+        adds, free_agents_by_position = waiver_strategy.plan_add_only_moves(
+            candidates, open_roster_slots,
+            rostered_positions=waiver_strategy.load_rostered_positions(cursor, team_id),
+        )
     open_slots = (
         load_open_ir_slots(cursor, team_id, season)
         if waiver_strategy.ir_eligible_bench(bench_by_position) else 0

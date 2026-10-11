@@ -341,6 +341,7 @@ def test_injured_star_is_stashed_rather_than_a_healthy_player_dropped(monkeypatc
 
 @pytest.fixture(autouse=True)
 def full_roster_by_default(monkeypatch):
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_rostered_positions", lambda *args: {"K", "D/ST"})
     monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 0)
 
 
@@ -388,3 +389,34 @@ def test_add_recommendations_precede_larger_swap_gains(monkeypatch):
          patch.object(waiver_service, "load_open_ir_slots", return_value=0):
         result = waiver_service.compute_waiver_recommendations(2026, 4)
     assert [(r["kind"], r["vorp_delta"]) for r in result["recommendations"]] == [("add", 8), ("swap", 17)]
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_negative_vorp_open_slot_recommends_healthy_skill_add(monkeypatch, fallback):
+    cursor = MagicMock()
+    candidates = [
+        {"player_id": "k", "position": "K", "vorp_score": -0.1},
+        {"player_id": "dst", "position": "D/ST", "vorp_score": -0.2},
+        {"player_id": "hurt", "position": "WR", "vorp_score": -1, "injury_status": "Out"},
+        {"player_id": "worthy", "position": "WR", "vorp_score": -4.78},
+    ]
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 1)
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position", lambda *args: {})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position",
+                        lambda *args: {} if fallback else {"WR": {"player_id": "worthy", "vorp_score": -4.78}})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_add_candidates", lambda *args: candidates)
+    display = [("worthy", "1", "Xavier Worthy", "KC", None)]
+    if fallback:
+        rows = [(p["player_id"], p["position"], "KC", 5, p["vorp_score"], False,
+                 p.get("injury_status")) for p in candidates]
+        cursor.fetchall.side_effect = [rows, display]
+    else:
+        cursor.fetchall.return_value = display
+    with patch.object(waiver_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch.object(waiver_service, "load_open_ir_slots", return_value=0), \
+         patch.object(waiver_service, "load_teams_playing", return_value={"KC"}):
+        result = waiver_service.compute_waiver_recommendations(2026, 6)
+    assert result["open_roster_slots"] == 1
+    assert [(r["kind"], r["position"], r["free_agent"]["name"]) for r in result["recommendations"]] == [
+        ("add", "WR", "Xavier Worthy")]
+    assert result["recommendations"][0]["bench_player"] is None
