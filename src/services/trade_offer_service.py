@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
+from src.queue_contracts import TRADE_SUBMISSIONS
 from src.database import get_db_cursor
 from src.schemas.trade import ProposalEvaluation
 
@@ -250,14 +251,14 @@ def approve_offer(key, approved_by):
         channel = connection.channel()
         channel.confirm_delivery()
         # Worker-owned durable queue: declaring also bootstraps KEDA on a fresh broker.
-        channel.queue_declare(queue="trade_submissions", durable=True)
+        channel.queue_declare(queue=TRADE_SUBMISSIONS, durable=True)
         carrier = {}
         routes.propagate.inject(carrier)
         body = json.dumps({**payload, "traceparent": carrier.get("traceparent")})
         attempted = True
         channel.basic_publish(
             exchange="",
-            routing_key="trade_submissions",
+            routing_key=TRADE_SUBMISSIONS,
             body=body,
             mandatory=True,
             properties=routes.pika.BasicProperties(

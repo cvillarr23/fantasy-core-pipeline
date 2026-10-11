@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import ValidationError
 
+from src.queue_contracts import TRADE_RESPONSES, TRADE_NEGOTIATIONS
 from src.database import get_db_cursor
 from src.schemas.trade_inbox import (
     IncomingEvaluation,
@@ -871,7 +872,7 @@ def _request_publication(
             )
             if comment is not None:
                 payload["comment"] = comment
-            queue = "trade_responses"
+            queue = TRADE_RESPONSES
         else:
             score = _advisory(row, "score", InboxScore)
             if (
@@ -921,7 +922,7 @@ def _request_publication(
                 raise InboxConflict(
                     "Counter player mappings overlap or contain duplicates."
                 )
-            queue = "trade_negotiations"
+            queue = TRADE_NEGOTIATIONS
         claim = dict(
             kind=kind,
             status="pending",
@@ -1106,7 +1107,7 @@ def retry_decision(
             ),
             cursor=cursor,
         )
-    return _publish(league, tx, publication_key, claim, "trade_responses", payload)
+    return _publish(league, tx, publication_key, claim, TRADE_RESPONSES, payload)
 
 
 def _finish_publication(league, tx, key, claim, status):

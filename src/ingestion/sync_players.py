@@ -9,6 +9,7 @@ import polars as pl
 import redis
 import requests
 
+from src.queue_contracts import WAIVER_ACTIONS as WAIVER_ACTIONS_QUEUE
 from src.database import get_db_connection, get_redis_client
 
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +35,6 @@ SYNC_IN_PROGRESS_TTL_SECONDS = 5 * 60
 FETCH_RETRY_ATTEMPTS = 3
 FETCH_CONNECT_TIMEOUT_SECONDS = 5
 FETCH_READ_TIMEOUT_SECONDS = 30
-
-WAIVER_ACTIONS_QUEUE = "waiver_actions"
 
 
 def fetch_sleeper_players() -> dict:
