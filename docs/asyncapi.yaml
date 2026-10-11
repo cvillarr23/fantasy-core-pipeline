@@ -1,0 +1,630 @@
+asyncapi: 3.0.0
+info:
+  title: Core RabbitMQ queue contracts
+  version: 1.0.0
+  description: Messages published by fantasy-core-pipeline and consumed by fantasy-browser-worker. Durable
+    JSON on the AMQP default exchange; queue names are routing keys. See /core/queue-publishing for delivery,
+    idempotency and retry behavior.
+defaultContentType: application/json
+channels:
+  lineup_updates:
+    address: lineup_updates
+    messages:
+      LineupUpdate:
+        $ref: '#/components/messages/LineupUpdate'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: lineup_updates
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
+  waiver_actions:
+    address: waiver_actions
+    messages:
+      WaiverClaim:
+        $ref: '#/components/messages/WaiverClaim'
+      InjuryAlert:
+        $ref: '#/components/messages/InjuryAlert'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: waiver_actions
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
+  draft_targets:
+    address: draft_targets
+    messages:
+      DraftTarget:
+        $ref: '#/components/messages/DraftTarget'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: draft_targets
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
+  trade_submissions:
+    address: trade_submissions
+    messages:
+      TradeSubmission:
+        $ref: '#/components/messages/TradeSubmission'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: trade_submissions
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
+  trade_responses:
+    address: trade_responses
+    messages:
+      TradeResponse:
+        $ref: '#/components/messages/TradeResponse'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: trade_responses
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
+  trade_negotiations:
+    address: trade_negotiations
+    messages:
+      TradeNegotiation:
+        $ref: '#/components/messages/TradeNegotiation'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: trade_negotiations
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
+operations:
+  publish_lineup_updates:
+    action: send
+    channel:
+      $ref: '#/channels/lineup_updates'
+    messages:
+    - $ref: '#/channels/lineup_updates/messages/LineupUpdate'
+  publish_waiver_actions:
+    action: send
+    channel:
+      $ref: '#/channels/waiver_actions'
+    messages:
+    - $ref: '#/channels/waiver_actions/messages/WaiverClaim'
+    - $ref: '#/channels/waiver_actions/messages/InjuryAlert'
+  publish_draft_targets:
+    action: send
+    channel:
+      $ref: '#/channels/draft_targets'
+    messages:
+    - $ref: '#/channels/draft_targets/messages/DraftTarget'
+  publish_trade_submissions:
+    action: send
+    channel:
+      $ref: '#/channels/trade_submissions'
+    messages:
+    - $ref: '#/channels/trade_submissions/messages/TradeSubmission'
+  publish_trade_responses:
+    action: send
+    channel:
+      $ref: '#/channels/trade_responses'
+    messages:
+    - $ref: '#/channels/trade_responses/messages/TradeResponse'
+  publish_trade_negotiations:
+    action: send
+    channel:
+      $ref: '#/channels/trade_negotiations'
+    messages:
+    - $ref: '#/channels/trade_negotiations/messages/TradeNegotiation'
+components:
+  messages:
+    LineupUpdate:
+      name: LineupUpdate
+      title: LineupUpdate
+      summary: Apply swaps and IR moves in one ESPN transaction. Player IDs are ESPN IDs; decision_inputs
+        and swap kind are removed before publication. IR eligibility is checked live by the worker.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/LineupUpdate'
+      examples:
+      - name: placeholder IDs
+        payload:
+          tracking_id: 00000000-0000-4000-8000-000000000001
+          traceparent: null
+          league_id: example-league
+          idempotency_key: example-key
+          team_id: example-team
+          optimized_swaps:
+          - drop_player_id: example-espn-starter
+            add_player_id: example-espn-bench
+            slot: FLEX
+          - kind: ir
+            player_id: example-espn-injured
+            slot: IR
+    WaiverClaim:
+      name: WaiverClaim
+      title: WaiverClaim
+      summary: Claim a free agent using ESPN player IDs. Null drop_player_id means add-only; null dry_run
+        uses the worker default. after_tracking_id is stored in the outbox, never sent.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/WaiverClaim'
+      examples:
+      - name: placeholder IDs
+        payload:
+          tracking_id: 00000000-0000-4000-8000-000000000001
+          traceparent: null
+          league_id: example-league
+          idempotency_key: example-key
+          team_id: example-team
+          player_id: example-espn-free-agent
+          name: Example Player
+          team: XYZ
+          drop_player_id: null
+          dry_run: true
+    DraftTarget:
+      name: DraftTarget
+      title: DraftTarget
+      summary: Select a draft target using ESPN player IDs (negative IDs identify defenses). Null optional
+        fields use worker defaults. expires_at is Unix seconds; stale targets are skipped.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/DraftTarget'
+      examples:
+      - name: placeholder IDs
+        payload:
+          tracking_id: 00000000-0000-4000-8000-000000000001
+          traceparent: null
+          league_id: example-league
+          idempotency_key: example-key
+          team_id: example-team
+          player_id: example-espn-target
+          name: Example Player
+          position: RB
+          pro_team: XYZ
+          pick_number: 42
+          expires_at: 1893456000
+          mode: practice
+    InjuryAlert:
+      name: InjuryAlert
+      title: InjuryAlert
+      summary: Ingestor alert, not a waiver claim. player_id is a Sleeper ID. No tracking_id, league_id
+        or traceparent is added by this publisher.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/InjuryAlert'
+      examples:
+      - name: placeholder IDs
+        payload:
+          event_type: INJURY_STATUS_CHANGE
+          timestamp: '2030-01-01T00:00:00Z'
+          player_id: example-sleeper-player
+          name: Example Player
+          team: XYZ
+          new_injury_status: Out
+    TradeSubmission:
+      name: TradeSubmission
+      title: TradeSubmission
+      summary: Submit a human-approved staged offer using ESPN player IDs. approval binds the stored offer
+        key; a counter preserves related_transaction_id and thread_root_id.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/TradeSubmission'
+      examples:
+      - name: placeholder IDs
+        payload:
+          tracking_id: 00000000-0000-4000-8000-000000000001
+          traceparent: null
+          season: 2030
+          to_team_id: example-team
+          incoming_player_ids:
+          - example-espn-incoming
+          outgoing_player_ids:
+          - example-espn-outgoing
+          source: proposal
+          approval:
+            offer_key: example-offer-key
+            approved_by: example-reviewer
+    TradeResponse:
+      name: TradeResponse
+      title: TradeResponse
+      summary: Accept or decline a reviewed incoming offer. A retry uses a new tracking_id. An unknown outcome requires explicit verification that
+        ESPN has not answered it; a confirmed rejection can be retried without that flag.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/TradeResponse'
+      examples:
+      - name: placeholder IDs
+        payload:
+          tracking_id: 00000000-0000-4000-8000-000000000001
+          traceparent: null
+          espn_transaction_id: example-transaction
+          action: decline
+          approval:
+            decision_key: example-decision-key
+            approved_by: example-reviewer
+            reviewed_note: null
+    TradeNegotiation:
+      name: TradeNegotiation
+      title: TradeNegotiation
+      summary: Stage a counter for an incoming offer. Player IDs are internal Sleeper IDs, mapped by the
+        worker; publication does not submit or mark the offer countered.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/TradeNegotiation'
+      examples:
+      - name: placeholder IDs
+        payload:
+          tracking_id: 00000000-0000-4000-8000-000000000001
+          traceparent: null
+          season: 2030
+          week: 5
+          offering_team_id: example-team
+          incoming_player_ids:
+          - example-sleeper-incoming
+          outgoing_player_ids:
+          - example-sleeper-outgoing
+          related_transaction_id: example-transaction
+          thread_root_id: example-thread
+  schemas:
+    LineupUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        tracking_id:
+          type: string
+        traceparent:
+          type:
+          - string
+          - 'null'
+        league_id:
+          type: string
+        idempotency_key:
+          type:
+          - string
+          - 'null'
+        team_id:
+          type: string
+        optimized_swaps:
+          type: array
+          items:
+            oneOf:
+            - type: object
+              additionalProperties: false
+              properties:
+                drop_player_id:
+                  type: string
+                add_player_id:
+                  type: string
+                slot:
+                  type: string
+                drop_player_name:
+                  type:
+                  - string
+                  - 'null'
+                add_player_name:
+                  type:
+                  - string
+                  - 'null'
+                matchup_multiplier:
+                  type:
+                  - number
+                  - 'null'
+              required:
+              - drop_player_id
+              - add_player_id
+              - slot
+            - type: object
+              additionalProperties: false
+              properties:
+                kind:
+                  type: string
+                  enum:
+                  - ir
+                  - activate_ir
+                player_id:
+                  type: string
+                slot:
+                  type: string
+                player_name:
+                  type:
+                  - string
+                  - 'null'
+              required:
+              - kind
+              - player_id
+              - slot
+      required:
+      - tracking_id
+      - traceparent
+      - league_id
+      - team_id
+      - optimized_swaps
+    WaiverClaim:
+      type: object
+      additionalProperties: false
+      properties:
+        tracking_id:
+          type: string
+        traceparent:
+          type:
+          - string
+          - 'null'
+        league_id:
+          type: string
+        idempotency_key:
+          type:
+          - string
+          - 'null'
+        team_id:
+          type: string
+        player_id:
+          type: string
+        name:
+          type: string
+        team:
+          type: string
+        drop_player_id:
+          type:
+          - string
+          - 'null'
+        dry_run:
+          type:
+          - boolean
+          - 'null'
+      required:
+      - tracking_id
+      - traceparent
+      - league_id
+      - team_id
+      - player_id
+      - name
+      - team
+    DraftTarget:
+      type: object
+      additionalProperties: false
+      properties:
+        tracking_id:
+          type: string
+        traceparent:
+          type:
+          - string
+          - 'null'
+        league_id:
+          type: string
+        idempotency_key:
+          type:
+          - string
+          - 'null'
+        team_id:
+          type: string
+        player_id:
+          type: string
+        name:
+          type: string
+        position:
+          type: string
+        pro_team:
+          type: string
+        pick_number:
+          type:
+          - integer
+          - 'null'
+        expires_at:
+          type:
+          - number
+          - 'null'
+        mode:
+          type:
+          - string
+          - 'null'
+          enum:
+          - live
+          - practice
+          - null
+      required:
+      - tracking_id
+      - traceparent
+      - league_id
+      - team_id
+      - player_id
+      - name
+      - position
+      - pro_team
+    InjuryAlert:
+      type: object
+      additionalProperties: false
+      properties:
+        event_type:
+          type: string
+          const: INJURY_STATUS_CHANGE
+        timestamp:
+          type: string
+          format: date-time
+        player_id:
+          type: string
+        name:
+          type: string
+        team:
+          type:
+          - string
+          - 'null'
+        new_injury_status:
+          type: string
+          enum:
+          - Questionable
+          - Doubtful
+          - Out
+      required:
+      - event_type
+      - timestamp
+      - player_id
+      - name
+      - team
+      - new_injury_status
+    TradeSubmission:
+      type: object
+      additionalProperties: false
+      properties:
+        tracking_id:
+          type: string
+        traceparent:
+          type:
+          - string
+          - 'null'
+        season:
+          type: integer
+        to_team_id:
+          type: string
+        incoming_player_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        outgoing_player_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        source:
+          type: string
+          enum:
+          - counter_offer
+          - proposal
+          - manual
+        approval:
+          type: object
+          additionalProperties: false
+          properties:
+            offer_key:
+              type: string
+            approved_by:
+              type: string
+          required:
+          - offer_key
+          - approved_by
+        message:
+          type: string
+        related_transaction_id:
+          type: string
+        thread_root_id:
+          type: string
+      required:
+      - tracking_id
+      - traceparent
+      - season
+      - to_team_id
+      - incoming_player_ids
+      - outgoing_player_ids
+      - source
+      - approval
+    TradeResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        tracking_id:
+          type: string
+        traceparent:
+          type:
+          - string
+          - 'null'
+        espn_transaction_id:
+          type: string
+        action:
+          type: string
+          enum:
+          - accept
+          - decline
+        approval:
+          type: object
+          additionalProperties: false
+          properties:
+            decision_key:
+              type: string
+            approved_by:
+              type: string
+            reviewed_note:
+              type:
+              - string
+              - 'null'
+          required:
+          - decision_key
+          - approved_by
+          - reviewed_note
+        comment:
+          type: string
+        retry:
+          type: object
+          additionalProperties: false
+          properties:
+            of_claim_id:
+              type: integer
+            approved_by:
+              type: string
+            verified_not_answered:
+              type: boolean
+          required:
+          - of_claim_id
+          - approved_by
+          - verified_not_answered
+      required:
+      - tracking_id
+      - traceparent
+      - espn_transaction_id
+      - action
+      - approval
+    TradeNegotiation:
+      type: object
+      additionalProperties: false
+      properties:
+        tracking_id:
+          type: string
+        traceparent:
+          type:
+          - string
+          - 'null'
+        season:
+          type: integer
+        week:
+          type: integer
+        offering_team_id:
+          type: string
+        incoming_player_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        outgoing_player_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        related_transaction_id:
+          type: string
+        thread_root_id:
+          type: string
+      required:
+      - tracking_id
+      - traceparent
+      - season
+      - week
+      - offering_team_id
+      - incoming_player_ids
+      - outgoing_player_ids
+      - related_transaction_id
+      - thread_root_id

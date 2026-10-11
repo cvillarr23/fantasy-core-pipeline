@@ -11,6 +11,7 @@ from typing import Annotated, List, Literal, Optional, Union
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from opentelemetry import propagate, trace
 from pydantic import BaseModel, Discriminator, Field, Tag, model_validator
+from src.queue_contracts import LINEUP_UPDATES, WAIVER_ACTIONS, DRAFT_TARGETS
 from src.api.draft import _redis_client
 from src.database import get_db_cursor
 from src.services import waiver_service
@@ -379,7 +380,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
             continue
         _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
         _reject_internal_player_id(swap.add_player_id, swap.add_player_name)
-    return _accept_durable("lineup_updates", payload)
+    return _accept_durable(LINEUP_UPDATES, payload)
 
 
 @router.post(
@@ -400,7 +401,7 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
     _reject_player_rostered_elsewhere(payload)
-    return _accept_durable("waiver_actions", payload, depends_on=depends_on)
+    return _accept_durable(WAIVER_ACTIONS, payload, depends_on=depends_on)
 
 
 def _ir_move_to_wait_for(payload) -> str:
@@ -785,7 +786,7 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         raise HTTPException(
             409, "Pick deadline passed before the target could be queued."
         )
-    return _accept_durable("draft_targets", payload)
+    return _accept_durable(DRAFT_TARGETS, payload)
 
 
 def _accept_durable(queue, payload, depends_on=None):
@@ -807,7 +808,7 @@ def _accept_durable(queue, payload, depends_on=None):
             503, "Submission was not accepted. Durable tracking is unavailable."
         ) from exc
     if identity == proposed_id:
-        if queue == "lineup_updates":
+        if queue == LINEUP_UPDATES:
             for swap in payload.optimized_swaps:
                 if isinstance(swap, IrMoveInstruction):
                     action, target, drop = IR_MOVE_ACTIONS[swap.kind], swap.player_id, None
@@ -826,9 +827,9 @@ def _accept_durable(queue, payload, depends_on=None):
             _record_bot_decision(
                 tracking_id=identity,
                 bot_name="waiver_sniper"
-                if queue == "waiver_actions"
+                if queue == WAIVER_ACTIONS
                 else "draft_clicker",
-                action="waiver_claim" if queue == "waiver_actions" else "draft_pick",
+                action="waiver_claim" if queue == WAIVER_ACTIONS else "draft_pick",
                 team_id=payload.team_id,
                 target_player_id=payload.player_id,
                 drop_player_id=getattr(payload, "drop_player_id", None),
@@ -849,6 +850,6 @@ def _accept_durable(queue, payload, depends_on=None):
         publish_one(identity)
     except Exception as exc:
         logger.exception("Submission persisted; background outbox will retry delivery")
-        if queue == "draft_targets":
+        if queue == DRAFT_TARGETS:
             raise HTTPException(503, "Draft target saved but not delivered. Retry immediately with the same idempotency key.") from exc
     return result

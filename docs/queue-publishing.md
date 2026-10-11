@@ -54,76 +54,30 @@ The outbox publishes with a passive queue declaration, so `lineup_updates`, `wai
 
 ## What do the messages contain?
 
-Every message carries a `traceparent` field, and the same value goes in the AMQP headers, so a worker span can join the API's trace. It is separate from `tracking_id`, which is the human-facing UUID. Ids are always **ESPN ids**, never Sleeper `players.player_id`; the API rejects a Sleeper id with a 422.
+Every API message carries a nullable `traceparent` field, and the same value goes in the AMQP headers, so a worker span can join the API's trace. It is separate from `tracking_id`, which is the human-facing UUID. Lineup, waiver claim and draft player IDs are **ESPN IDs**; those trigger routes reject a Sleeper ID with a 422. Counter staging and injury alerts use Sleeper IDs.
 
-### `lineup_updates`
+See the [queue contract explorer](/reference/queues) for schemas, required fields and placeholder examples, or download the [AsyncAPI 3.0 spec](./asyncapi.yaml).
 
-| Field | Type | Meaning |
-|---|---|---|
-| `team_id` | string | Our team. |
-| `optimized_swaps` | array | Entries applied in one ESPN transaction. |
-| `idempotency_key` | string, optional | See [Idempotency](#how-does-idempotency-work). |
-| `tracking_id` | string | Added by core. |
+:::warning[Two payloads on one queue]
+`waiver_actions` carries both API claims (ESPN player IDs) and ingestor injury alerts (Sleeper player IDs). Injury alerts have `event_type: "INJURY_STATUS_CHANGE"` and no `team_id`, `tracking_id` or trace context. A consumer must not treat them as claims.
+:::
 
-Each entry is one of:
+Lineup and waiver triggers use ESPN player IDs. `trade_negotiations` uses internal Sleeper IDs because the worker stages the counter from core's player mapping. Core strips `decision_inputs`, swap `kind`, and request-only `after_tracking_id` before publishing.
 
-| Entry | Fields |
-|---|---|
-| Swap (no `kind`) | `drop_player_id`, `add_player_id`, `slot`, `matchup_multiplier?`, and optional names for the id check. |
-| IR move (`kind: "ir"`) | `player_id`, `slot: "IR"`, `player_name?` |
-| IR activation (`kind: "activate_ir"`) | `player_id`, `slot` (any non-IR slot, normally `BENCH`), `player_name?` |
-
-`decision_inputs` and `kind` on a swap are stripped before publishing. Core does not check IR eligibility; the worker reads ESPN live and rejects ineligible moves.
-
-### `waiver_actions`
-
-| Field | Type | Meaning |
-|---|---|---|
-| `team_id`, `player_id`, `name`, `team` | string | The free agent to claim. |
-| `drop_player_id` | string, optional | Omit for an add-only claim into an open slot. |
-| `dry_run` | boolean, optional | Overrides the worker's `DRY_RUN`. |
-| `idempotency_key`, `tracking_id` | string | As above. |
-
-`after_tracking_id` is request-only. It holds the claim until the named IR move is verified, and it never appears in the queued message. See [Held claims](#how-does-a-claim-wait-for-an-ir-move).
-
-### `draft_targets`
-
-| Field | Type | Meaning |
-|---|---|---|
-| `team_id`, `player_id`, `name`, `position`, `pro_team` | string | The target, matched by name, position and team. |
-| `league_id`, `pick_number` | string, number | The slot the target is for. |
-| `expires_at` | number | Unix time after which the pick is dropped. |
-| `mode` | `live` or `practice` | Lets the worker submit for real in a practice room. |
-| `idempotency_key` | string | Stable per pick. |
-
-The route returns 409 if the pick is already filled or `expires_at` has passed, and the outbox expires a target that goes stale while waiting. On a delivery failure the route returns 503, and the caller retries with the same key.
-
-### `trade_submissions`, `trade_responses`, `trade_negotiations`
-
-| Queue | Fields |
-|---|---|
-| `trade_submissions` | `tracking_id`, `season`, `to_team_id`, `incoming_player_ids`, `outgoing_player_ids`, `source`, `approval {offer_key, approved_by}`, optional `message`, `related_transaction_id`, `thread_root_id`. |
-| `trade_responses` | `tracking_id`, `espn_transaction_id`, `action`, `approval {decision_key, approved_by, reviewed_note}`, optional `comment`. |
-| `trade_negotiations` | `tracking_id`, `season`, `week`, `offering_team_id`, `incoming_player_ids`, `outgoing_player_ids`, `related_transaction_id`, `thread_root_id`. |
-
-`trade_negotiations` carries internal player ids, because the worker stages the counter from core's player mapping. Contract details, including the review token each of these requires, are in [Incoming trade inbox API](./trade-inbox-api.md).
+Draft targets expire while waiting in the outbox. The route returns 409 for a filled or expired pick and 503 on delivery failure; retry with the same key.
 
 ### Direct publisher: injury alerts
 
-`sync_players` publishes straight to `waiver_actions`, bypassing the API, when a rostered player's injury status changes to `Questionable`, `Doubtful` or `Out`. It declares the queue passively, so it fails if the queue is missing.
+Player sync publishes injury alerts directly when a rostered player's status changes to `Questionable`, `Doubtful` or `Out`. It checks that the queue exists before publishing.
 
-```json title="Injury alert (waiver_actions)"
-{
-  "event_type": "INJURY_STATUS_CHANGE",
-  "timestamp": "2026-10-04T15:00:00+00:00",
-  "player_id": "<sleeper player_id>",
-  "name": "Example Player",
-  "team": "XYZ",
-  "new_injury_status": "Questionable"
-}
+## How do I update the contract?
+
+Edit `docs/asyncapi.yaml` alongside publisher changes. The contract tests validate real publisher output, reject undocumented fields, and compare channels with the shared queue constants.
+
+```bash
+DB_PASSWORD=test pytest tests/test_asyncapi_docs.py
+npx @asyncapi/cli validate docs/asyncapi.yaml
 ```
-
-This message has no `team_id` or `tracking_id`, and it uses the Sleeper id. A consumer must not treat it like a claim.
 
 ## How does idempotency work?
 
