@@ -115,7 +115,7 @@ DESCRIPTIONS = {
     "GET /v1/stats/vorp": "List VORP scores.",
     "GET /v1/backtest/results": "List backtest runs.",
     "GET /v1/backtest/results/{season}": "Show the backtest for a season.",
-    "POST /v1/chat/query": "Ask the LLM a roster question.",
+    "POST /v1/chat/query": "Ask the LLM a roster or waiver question.",
 }
 
 

@@ -54,6 +54,11 @@
   aggregates). Other teams' full rosters are deliberately left out to keep the prompt small.
   `llm_client` has no tool calling, so chat calls these in process; the same function backs
   the `get_team_roster` MCP tool for remote callers.
+  A question (or the previous one, for follow-ups) matching `WAIVER_QUESTION_PATTERN` also
+  gets the top 5 free agents per position (`free_agent_service.browse_free_agents`, also the
+  `get_free_agents` MCP tool) and compact `compute_waiver_recommendations` output. The
+  latter plans only for `ESPN_TEAM_ID`, so another `team_id` gets `{"unavailable": ...}`, as
+  does `WaiverInputsUnavailableError`; other questions skip both fetches.
 - `trade_score_service` (`POST /v1/trade/score`, MCP `score_trade_proposal`) is the
   schedule-aware trade scorer, kept separate from `evaluate_trade`, whose raw-VORP
   contract the worker still calls and which the scorer reuses as `raw_vorp`. Request ids

@@ -156,7 +156,8 @@ def browse_free_agents(
     return {
         "season": season,
         "week": week,
-        "free_agents": filtered[offset : offset + limit],
+        # limit=None returns the whole sorted pool (the chat grounding trims it per position).
+        "free_agents": filtered[offset:] if limit is None else filtered[offset : offset + limit],
         "total": len(filtered),
         "limit": limit,
         "offset": offset,

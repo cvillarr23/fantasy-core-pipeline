@@ -64,6 +64,28 @@ def test_get_team_roster_delegates_to_roster_service():
     assert result["team_id"] == "10"
 
 
+def test_get_free_agents_returns_the_free_agent_service_rows():
+    rows = [{"player_id": "fa1", "espn_id": "201", "name": "Alpha Back", "position": "RB", "pro_team": "SEA",
+             "injury_status": None, "projected_points": 7.0, "vorp_score": 4.0,
+             "bench_player": None, "vorp_delta": None}]
+    with patch("src.api.mcp_server.browse_free_agents") as mock_browse:
+        mock_browse.return_value = {"season": 2026, "week": 3, "free_agents": rows, "total": 1, "limit": 10,
+                                    "offset": 0, "source_mode": "target_week", "source_weeks": [3]}
+        result = mcp_server.get_free_agents(season=2026, week=3, position="RB", q="alpha", limit=10)
+
+    mock_browse.assert_called_once_with(2026, 3, "RB", "alpha", "vorp", 10)
+    assert result["free_agents"] == rows
+
+
+def test_get_free_agents_defaults_and_clamps_limit():
+    with patch("src.api.mcp_server.browse_free_agents") as mock_browse:
+        mcp_server.get_free_agents(season=2026, week=3)
+        mcp_server.get_free_agents(season=2026, week=3, limit=5000)
+
+    assert mock_browse.call_args_list[0].args == (2026, 3, None, None, "vorp", 25)
+    assert mock_browse.call_args_list[1].args[-1] == 200
+
+
 def test_evaluate_proposed_trade_delegates_to_trade_service():
     with patch("src.api.mcp_server.evaluate_trade") as mock_evaluate:
         mock_evaluate.return_value = {

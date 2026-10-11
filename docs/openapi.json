@@ -211,6 +211,18 @@
       },
       "ChatGrounding": {
         "properties": {
+          "free_agents": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Free Agents"
+          },
           "roster_deficits": {
             "additionalProperties": true,
             "title": "Roster Deficits",
@@ -232,6 +244,18 @@
               }
             ],
             "title": "Trade Evaluation"
+          },
+          "waiver_recommendations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiver Recommendations"
           }
         },
         "required": [
