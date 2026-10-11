@@ -16,18 +16,18 @@ flowchart LR
     A -->|remaining agents and healthy bench| S
     S -->|gain above margin| M[Planned moves]
     A -->|add value above margin| M
-    F -->|add value above margin| M
-    M -->|margin 0| D[Read recommendations]
-    M -->|margin 3 and publication gates| G[Live publisher]
+    F -->|healthy depth or missing K/DST starter| M
+    M -->|swap/IR margin 0; adds ungated| D[Read recommendations]
+    M -->|swap/IR margin 3 and publication gates| G[Live publisher]
 ```
 
 ## When can we just add a player?
 
 `open_roster_slots` is the configured sum of all non-IR lineup slots (starters and bench) minus this team's non-IR `league_rosters` occupancy, clamped at zero. Missing league settings mean zero capacity.
 
-The planner reserves up to that many free agents by descending VORP before considering swaps or IR chains. It uses all projected free agents, so multiple pickups can share a position. A reserved player cannot also appear in a swap or IR chain. Remaining agents can still improve the bench.
+The planner reserves up to that many healthy free agents before considering swaps or IR chains. It fills missing K or D/ST positions first, at most one each, using the full roster including starters without metrics to check whether the position is present. Remaining slots go to QB/RB/WR/TE depth ranked by descending VORP, so multiple pickups can share a skill position. OUT/IR candidates are excluded from add-only fills. A reserved player cannot also appear in a swap or IR chain. Remaining agents can still improve the bench.
 
-These moves have `kind: "add"`, an internal `drop_player_id: null`, and null `bench_player` and `ir_player` summaries. Their gain is the add's full VORP. The read path requires VORP >0 and supports the same prior-week averages and bye exclusions as swaps; live claims require VORP >3. Add-only claims publish before swaps, without an IR move, dependency tracking ID, or IR publication flag.
+These moves have `kind: "add"`, an internal `drop_player_id: null`, and null `bench_player` and `ir_player` summaries. Their `vorp_delta` carries the add's full VORP and can be negative: VORP measures value relative to replacement level, not an empty roster slot. Neither the read path nor live add-only claims require positive VORP. The read path supports the same prior-week averages and bye exclusions as swaps. Add-only claims publish before swaps, without an IR move, dependency tracking ID, or IR publication flag.
 
 ## Which player gets dropped?
 
@@ -68,8 +68,8 @@ Standalone stash hints can overlap an IR + add suggestion. Choose one action pla
 
 | Path | Metrics | Strict margin | Output |
 | --- | --- | --- | --- |
-| `waiver_service` | Exact week when both pools exist; otherwise prior three same-season weeks | >0 | Recommendations and `ir_moves`; no publication |
-| `waiver_evaluator` | Exact-week pools required | >3 | Live claims and gated IR + add |
+| `waiver_service` | Exact week when both pools exist; otherwise prior three same-season weeks | >0 for swaps/IR; none for adds | Recommendations and `ir_moves`; no publication |
+| `waiver_evaluator` | Exact-week pools required | >3 for swaps/IR; none for adds | Live claims and gated IR + add |
 
 Both refresh stale roster ownership before planning. Add-only recommendations come first; within each group, recommendations sort by `vorp_delta` and expose the kind, position, add, bench/IR player and source weeks; rumor fields are currently null.
 

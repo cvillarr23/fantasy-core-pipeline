@@ -723,6 +723,7 @@ def test_a_failed_ir_and_add_does_not_hold_back_the_weeks_swaps(ir_flag_on):
 
 @pytest.fixture(autouse=True)
 def full_roster_by_default(monkeypatch):
+    monkeypatch.setattr(we.waiver_strategy, "load_rostered_positions", lambda *args: {"K", "D/ST"})
     monkeypatch.setattr(we.waiver_strategy, "load_open_roster_slots", lambda *args: 0)
 
 
@@ -757,3 +758,24 @@ def test_live_input_allows_empty_bench_when_roster_has_capacity(monkeypatch):
     with patch.object(we.waiver_strategy, "load_bench_by_position", return_value={}), \
          patch.object(we.waiver_strategy, "load_best_free_agent_by_position", return_value=fa):
         assert we.load_live_waiver_inputs(MagicMock(), "8", 2026, 5) == ({}, fa)
+
+
+def test_weekly_waivers_publishes_negative_vorp_skill_add(monkeypatch):
+    monkeypatch.setattr(we.waiver_strategy, "load_open_roster_slots", lambda *args: 1)
+    monkeypatch.setattr(we.waiver_strategy, "load_add_candidates", lambda *args: [
+        {"player_id": "k", "position": "K", "vorp_score": -0.1},
+        {"player_id": "dst", "position": "D/ST", "vorp_score": -0.2},
+        {"player_id": "hurt", "position": "WR", "vorp_score": -1, "injury_status": "IR"},
+        {"player_id": "worthy", "position": "WR", "vorp_score": -4.78},
+    ])
+    with patch.object(we, "get_db_connection"), \
+         patch.object(we, "load_live_waiver_inputs", return_value=({}, {"WR": {"player_id": "worthy", "vorp_score": -4.78}})), \
+         patch.object(we, "resolve_espn_identity", return_value={"espn_id": "1", "name": "Xavier Worthy", "team": "KC"}), \
+         patch.object(we, "post_trigger_idempotent") as post:
+        resolved = we.run_weekly_waivers_live("8", 2026, 6)
+    assert len(resolved) == 1
+    assert resolved[0]["drop_player_id"] is None
+    assert resolved[0]["decision_inputs"]["add_player_vorp_score"] == -4.78
+    post.assert_called_once()
+    assert post.call_args.args[1]["player_id"] == "1"
+    assert post.call_args.args[1]["drop_player_id"] is None
