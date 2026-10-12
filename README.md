@@ -483,3 +483,9 @@ Missing metrics or failed refresh stages can still leave horizon weeks unscored;
 ## Decision pipelines
 
 See [the decision pipeline guide](docs/decision-pipelines/index.md) for inputs, formulas, thresholds, missing-data behavior and publication rules across projections, lineups, waivers, trades, rumors, drafts and backtesting.
+
+## License
+
+Code, configuration and documentation are licensed under the [MIT License](LICENSE).
+Third-party dependencies retain their own licenses.
+See [third-party notices](THIRD_PARTY_NOTICES.md) for dependency licenses and image redistribution.
