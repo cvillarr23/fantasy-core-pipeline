@@ -137,6 +137,9 @@ class RosterResponse(BaseModel):
     bench: list[LineupPlayerLine]
     # An active player sitting in IR; ESPN rejects new transactions until they leave it.
     ir_blocking_transactions: bool = False
+    # The league's lineup shape keyed by slot label ("QB", "BE", "IR", ...), so the lineup
+    # page can show bench and IR capacity. None when the league's settings aren't synced.
+    lineup_slot_counts: Optional[dict[str, int]] = None
 
 
 @matchup_router.get("/roster", response_model=RosterResponse)

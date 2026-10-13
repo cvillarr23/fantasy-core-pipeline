@@ -3568,6 +3568,20 @@
             "title": "Ir Blocking Transactions",
             "type": "boolean"
           },
+          "lineup_slot_counts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lineup Slot Counts"
+          },
           "starters": {
             "items": {
               "$ref": "#/components/schemas/LineupPlayerLine"

@@ -9,7 +9,7 @@ import requests
 
 from src.database import get_db_cursor
 from src.ingestion.sync_league import build_league
-from src.ir_eligibility import lineup_ir_hints, load_ir_slot_count
+from src.ir_eligibility import lineup_ir_hints, load_lineup_slot_counts_row, open_ir_slots
 from src.nfl_schedule import WeekResolutionError, require_upcoming_week
 from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
@@ -185,14 +185,18 @@ def _split_roster_starters_bench(players: list) -> tuple[list, list]:
     return starters, bench
 
 
-def _load_ir_slot_count(season: int) -> int:
-    """Display-only, like the swap badges: a DB failure means no IR hints, not a failed page."""
+def _load_lineup_slot_counts(season: int) -> dict | None:
+    """Display-only, like the swap badges: a DB failure or an unsynced league means no slot
+    capacity and no IR hints, not a failed page."""
     try:
         with get_db_cursor() as cursor:
-            return load_ir_slot_count(cursor, season)
+            counts = load_lineup_slot_counts_row(cursor, season)
     except Exception as exc:
-        logger.warning(f"No IR hints for Season {season}: could not read the IR slot count: {exc}")
-        return 0
+        logger.warning(f"No slot capacity or IR hints for Season {season}: could not read lineup slot counts: {exc}")
+        return None
+    if counts is None:
+        return None
+    return {slot: int(count or 0) for slot, count in counts.items()}
 
 
 def _apply_ir_hints(player_lines: list, ir_slot_count: int) -> bool:
@@ -379,6 +383,12 @@ def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     _apply_rumor_signal(starters, rumor_signal_by_espn_id)
     _apply_rumor_signal(bench, rumor_signal_by_espn_id)
 
-    ir_blocking = _apply_ir_hints(starters + bench, _load_ir_slot_count(season))
+    slot_counts = _load_lineup_slot_counts(season)
+    ir_blocking = _apply_ir_hints(starters + bench, open_ir_slots(slot_counts or {}, 0))
 
-    return {"starters": starters, "bench": bench, "ir_blocking_transactions": ir_blocking}
+    return {
+        "starters": starters,
+        "bench": bench,
+        "ir_blocking_transactions": ir_blocking,
+        "lineup_slot_counts": slot_counts,
+    }
