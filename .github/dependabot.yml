@@ -1,22 +1,39 @@
 version: 2
+# Monthly and grouped: every Dependabot PR runs full CI on the self-hosted
+# runners (two jobs at a time across all fantasy repos), so a weekly batch of
+# single-package PRs queued CI for hours. Security updates are separate from
+# this schedule and still open immediately.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
-    # The OpenTelemetry packages pin each other's exact versions, so a bump
-    # of one on its own fails pip install with ResolutionImpossible.
     groups:
+      # The OpenTelemetry packages pin each other's exact versions, so a bump
+      # of one on its own fails pip install with ResolutionImpossible.
       opentelemetry:
         patterns: ["opentelemetry-*"]
+      # Majors stay one PR each since they usually need code changes.
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
+    # Base-image runtime upgrades are deliberate: requirements.txt pins target
+    # python:3.11. Dependabot counts 3.11 -> 3.14 as a minor bump, so ignore
+    # minors as well as majors.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
