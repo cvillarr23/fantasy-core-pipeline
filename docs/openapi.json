@@ -409,6 +409,24 @@
         "title": "CounterRequest",
         "type": "object"
       },
+      "DeadLetterQueue": {
+        "properties": {
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "queue": {
+            "title": "Queue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "queue",
+          "messages"
+        ],
+        "title": "DeadLetterQueue",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2372,6 +2390,20 @@
       },
       "JobHealthList": {
         "properties": {
+          "dead_letters": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DeadLetterQueue"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dead Letters"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/JobHealth"

@@ -89,7 +89,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `GET` | `/v1/activity/actions/{identity}` | Show one action with its event timeline. | No |  |
 | `POST` | `/v1/activity/actions/{identity}/check` | Re-verify an action against ESPN now. | No |  |
 | `GET` | `/v1/activity/bots` | Summarize each bot's recent activity. | No |  |
-| `GET` | `/v1/activity/jobs` | Latest run and recent failure count per job. | No |  |
+| `GET` | `/v1/activity/jobs` | Latest run and recent failure count per job, plus dead-letter queue depths. | No |  |
 | `POST` | `/v1/activity/read/{identity}` | Mark an activity item read. | No |  |
 | `GET` | `/v1/activity/runs` | List job and bot runs (audit log), newest first. | No |  |
 | `GET` | `/v1/activity/runs/{identity}` | Show one run with its trigger, inputs, outputs and child runs. | No |  |

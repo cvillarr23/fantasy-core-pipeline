@@ -159,3 +159,28 @@ def test_llm_session_is_linked_to_the_active_run(recorded):
                 "hi", call_site="rumor_digest"
             )
     assert ("run-1", "llm_session", ["session-1"], "output") in recorded["links"]
+
+
+def test_dead_letter_depths_skip_missing_queues():
+    import pika
+
+    connection = MagicMock(is_open=True)
+    present = MagicMock()
+    present.queue_declare.return_value.method.message_count = 2
+    missing = MagicMock()
+    missing.queue_declare.side_effect = pika.exceptions.ChannelClosedByBroker(
+        404, "NOT_FOUND"
+    )
+    connection.channel.side_effect = [present, missing, present]
+    with patch("pika.BlockingConnection", return_value=connection):
+        depths = run_log.dead_letter_depths()
+    assert depths == [
+        {"queue": "lineup_updates.dlq", "messages": 2},
+        {"queue": "draft_targets.dlq", "messages": 2},
+    ]
+    connection.close.assert_called_once()
+
+
+def test_dead_letter_depths_are_none_when_the_broker_is_down():
+    with patch("pika.BlockingConnection", side_effect=OSError("refused")):
+        assert run_log.dead_letter_depths() is None

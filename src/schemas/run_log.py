@@ -34,8 +34,15 @@ class JobHealth(Run):
     recent_failures: int = 0
 
 
+class DeadLetterQueue(BaseModel):
+    queue: str
+    messages: int
+
+
 class JobHealthList(BaseModel):
     items: list[JobHealth]
+    # None when the broker couldn't be read.
+    dead_letters: Optional[list[DeadLetterQueue]] = None
 
 
 class RunDetail(Run):

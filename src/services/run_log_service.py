@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from src.database import get_db_cursor
+from src.queue_contracts import DRAFT_TARGETS, LINEUP_UPDATES, WAIVER_ACTIONS
 from src.services.activity_service import league_id, redact
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,46 @@ def job_health():
             FROM run_log r ORDER BY r.job_name, r.started_at DESC"""
         )
         return _rows(c)
+
+
+# Each broker-owned queue dead-letters to `<queue>.dlq` (fantasy-infra's broker policy).
+DEAD_LETTER_QUEUES = tuple(
+    f"{queue}.dlq" for queue in (LINEUP_UPDATES, WAIVER_ACTIONS, DRAFT_TARGETS)
+)
+BROKER_TIMEOUT_SECONDS = 5
+
+
+def dead_letter_depths():
+    """Messages parked in each dead-letter queue, or None when the broker can't be read.
+    Nothing consumes these queues, so any message here is a failed action someone should
+    look at; the cluster doesn't scrape RabbitMQ metrics, so this is where it shows up.
+    """
+    import pika
+    from src.api.routes import AMQP_URL
+
+    connection = None
+    depths = []
+    try:
+        params = pika.URLParameters(AMQP_URL)
+        params.socket_timeout = BROKER_TIMEOUT_SECONDS
+        params.blocked_connection_timeout = BROKER_TIMEOUT_SECONDS
+        connection = pika.BlockingConnection(params)
+        for queue in DEAD_LETTER_QUEUES:
+            # A missing queue closes the channel, so each check gets its own.
+            channel = connection.channel()
+            try:
+                result = channel.queue_declare(queue=queue, passive=True)
+            except pika.exceptions.ChannelClosedByBroker:
+                continue
+            depths.append({"queue": queue, "messages": result.method.message_count})
+            channel.close()
+        return depths
+    except Exception:
+        logger.warning("Dead-letter queue depths unavailable", exc_info=True)
+        return None
+    finally:
+        if connection is not None and connection.is_open:
+            connection.close()
 
 
 def _resolve(c, ref_type, ids):

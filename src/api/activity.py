@@ -89,7 +89,10 @@ def run(identity: str):
 
 @activity_router.get("/jobs", response_model=JobHealthList)
 def jobs():
-    return {"items": run_log_service.job_health()}
+    return {
+        "items": run_log_service.job_health(),
+        "dead_letters": run_log_service.dead_letter_depths(),
+    }
 
 
 @activity_router.get("/trace", response_model=Trace)
