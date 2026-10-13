@@ -311,11 +311,16 @@ def sync_rumors(force: bool = False) -> None:
 
     if not acquire_sync_lock(r_client, force):
         logger.info("Rumor sync already ran recently (or is in progress); skipping fetch.")
+        run_log_service.add_summary(headline="Skipped: another sync ran recently")
         return
 
     sources = _sources()
     items = []
+    # Items per source for the run log; a source whose fetch failed shows 0 alongside the
+    # warning its fetcher logged.
+    per_source = {}
     for source_name, fetch_fn, normalize_fn in sources:
+        per_source[source_name] = 0
         try:
             raw_items = fetch_fn()
         except Exception as e:
@@ -327,6 +332,7 @@ def sync_rumors(force: bool = False) -> None:
                 continue
             normalized["source"] = source_name
             items.append(normalized)
+            per_source[source_name] += 1
 
     logger.info(f"Fetched {len(items)} total item(s) across {len(sources)} source(s).")
 
@@ -348,6 +354,14 @@ def sync_rumors(force: bool = False) -> None:
         new_ids = persist_signals(conn, rows)
 
     run_log_service.link("raw_signal", new_ids, "output")
+    empty = sorted(name for name, count in per_source.items() if count == 0)
+    run_log_service.add_summary(
+        headline=f"{len(items)} fetched, {len(new_ids)} new"
+        + (f" ({', '.join(empty)} returned nothing)" if empty else ""),
+        fetched=len(items),
+        new=len(new_ids),
+        per_source=per_source,
+    )
     mark_synced(r_client)
 
 

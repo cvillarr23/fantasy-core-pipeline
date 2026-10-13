@@ -336,6 +336,11 @@ def evaluate_and_publish_rumor_actions(
         finally:
             status = outcome.finalize(error is not None)
             run.summary.update(outcome.details)
+            run.summary["headline"] = (
+                f"{outcome.details.get('signals_fetched', 0)} signals, "
+                f"{outcome.details.get('actions_accepted', 0)} moves queued"
+                + (f" ({outcome.details['reason']})" if outcome.details.get("reason") else "")
+            )
             _record_execution(
                 status=status,
                 duration_ms=int((time.monotonic() - started_at) * 1000),

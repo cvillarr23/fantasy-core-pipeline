@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -62,8 +63,41 @@ def test_success_records_summary_and_links(recorded):
         run.summary["fetched"] = 3
         run_log.link("raw_signal", [1, 2], "output")
     assert recorded["links"] == [("run-1", "raw_signal", [1, 2], "output")]
-    assert recorded["finish"] == [("run-1", "success", None, {"fetched": 3})]
+    assert recorded["finish"][0][:3] == ("run-1", "success", None)
+    assert recorded["finish"][0][3]["fetched"] == 3
     assert run_log.current_run_id() is None
+
+
+def test_run_keeps_its_own_log_lines_as_the_outcome(recorded):
+    job_logger = logging.getLogger("RumorSignalSync")
+    job_logger.setLevel(logging.INFO)
+    with run_log.run_scope("sync_rumors", "manual"):
+        job_logger.warning("Reddit fetch failed")
+        logging.getLogger("pika.connection").info("Closing connection")
+        job_logger.info("Persisted 0 new raw signal row(s) of 5 fetched")
+        run_log.add_summary(headline="5 fetched, 0 new")
+    job_logger.info("after the run")
+    summary = recorded["finish"][0][3]
+    assert summary["log_tail"] == [
+        "WARNING Reddit fetch failed",
+        "INFO Persisted 0 new raw signal row(s) of 5 fetched",
+    ]
+    assert (summary["warnings"], summary["errors"]) == (1, 0)
+    assert summary["last_message"] == "Persisted 0 new raw signal row(s) of 5 fetched"
+    assert summary["headline"] == "5 fetched, 0 new"
+    assert not any(
+        isinstance(h, run_log._RunLogCapture) for h in logging.getLogger().handlers
+    )
+
+
+def test_log_lines_from_outside_the_run_are_not_captured(recorded):
+    job_logger = logging.getLogger("RumorSignalSync")
+    job_logger.setLevel(logging.INFO)
+    with run_log.run_scope("sync_rumors", "manual") as run:
+        token = run_log.current_run.set(None)
+        job_logger.info("another request's line")
+        run_log.current_run.reset(token)
+    assert recorded["finish"][0][3]["log_tail"] == []
 
 
 def test_exception_marks_failure_and_propagates(recorded):

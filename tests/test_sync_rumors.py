@@ -372,11 +372,18 @@ def test_sync_rumors_matches_and_persists_fetched_items():
     with patch("src.ingestion.sync_rumors.get_redis_client", return_value=mock_redis_instance), \
          patch("src.ingestion.sync_rumors.fetch_rotowire_rss", return_value=[rss_entry]), \
          patch("src.ingestion.sync_rumors.get_db_connection") as mock_get_conn, \
-         patch("src.ingestion.sync_rumors.persist_signals") as mock_persist:
+         patch("src.ingestion.sync_rumors.persist_signals", return_value=[91]) as mock_persist, \
+         patch("src.ingestion.sync_rumors.fetch_reddit_fantasyfootball", return_value=[]), \
+         patch("src.ingestion.sync_rumors.run_log_service") as run_log:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
 
         sync_rumors.sync_rumors(force=True)
 
+    run_log.link.assert_called_once_with("raw_signal", [91], "output")
+    summary = run_log.add_summary.call_args.kwargs
+    assert summary["headline"].startswith("1 fetched, 1 new (")
+    assert "returned nothing" in summary["headline"]
+    assert summary["per_source"]["rotowire_rss"] == 1
     mock_persist.assert_called_once()
     persisted_rows = mock_persist.call_args.args[1]
     assert len(persisted_rows) == 1
