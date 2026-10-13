@@ -1,6 +1,6 @@
 fastapi==0.111.0
 uvicorn==0.54.0
-pydantic==2.11.7
+pydantic==2.14.1
 espn-api==1.0.1
 nflreadpy==0.1.5
 pulp==3.3.2
@@ -13,7 +13,7 @@ polars==0.20.31
 redis==5.0.4
 feedparser==6.0.14
 rapidfuzz==3.9.7
-kubernetes==29.0.0
+kubernetes==37.0.1
 opentelemetry-api==1.45.1
 opentelemetry-sdk==1.45.1
 opentelemetry-instrumentation-fastapi==0.66b1
