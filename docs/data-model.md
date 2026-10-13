@@ -299,7 +299,7 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 | `activity_events.detail` | Per-stage detail. Dependency events carry `depends_on`, and failures add `reason`. |
 | `rumor_action_checkpoints.state` | `{watermark, signals, actions, failed_jobs}`. |
 | `run_log.trigger` | Scheduled or manual Jobs: `{cronjob, k8s_job}`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
-| `run_log.summary` | Per-job counters, such as the rumor action trigger's `RunOutcome` details or the digest's chunk and retry counts. |
+| `run_log.summary` | Always: `log_tail` (the run's last 50 INFO+ log lines, library noise excluded), `warnings`, `errors` and `last_message`. Jobs add their own counters and an optional one-line `headline`, such as the rumor syncer's `fetched`/`new`/`per_source` or the rumor action trigger's `RunOutcome` details. |
 
 ## Related
 

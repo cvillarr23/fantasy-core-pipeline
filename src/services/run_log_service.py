@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -81,10 +82,67 @@ def _trace_id():
         return None
 
 
+# What a run's page shows when the job itself records nothing: its own recent log lines.
+RUN_LOG_TAIL_LINES = 50
+RUN_LOG_LINE_CHARS = 300
+# Library loggers whose lines say nothing about what the job did.
+NOISY_LOGGER_PREFIXES = (
+    "pika",
+    "urllib3",
+    "httpx",
+    "httpcore",
+    "opentelemetry",
+    "DatabaseEngine",
+)
+
+
+class _RunLogCapture(logging.Handler):
+    """Keeps the active run's INFO+ log lines for its summary. Records are matched to the
+    run through current_run, so concurrent requests in the API process stay separate."""
+
+    def __init__(self, run):
+        super().__init__(logging.INFO)
+        self.run = run
+        self.lines = deque(maxlen=RUN_LOG_TAIL_LINES)
+        self.warnings = 0
+        self.errors = 0
+        self.last_info = None
+
+    def emit(self, record):
+        if current_run.get() is not self.run or record.name.startswith(
+            NOISY_LOGGER_PREFIXES
+        ):
+            return
+        try:
+            message = redact(record.getMessage())[:RUN_LOG_LINE_CHARS]
+        except Exception:
+            return
+        self.lines.append(f"{record.levelname} {message}")
+        if record.levelno >= logging.ERROR:
+            self.errors += 1
+        elif record.levelno >= logging.WARNING:
+            self.warnings += 1
+        else:
+            self.last_info = message
+
+    def summary(self):
+        captured = {
+            "log_tail": list(self.lines),
+            "warnings": self.warnings,
+            "errors": self.errors,
+        }
+        if self.last_info:
+            captured["last_message"] = self.last_info
+        return captured
+
+
 class Run:
     def __init__(self, identity):
         self.id = identity
         self.summary = {}
+
+    def add_summary(self, **fields):
+        self.summary.update(fields)
 
     def link(self, ref_type, ids, role):
         _insert_links(self.id, ref_type, ids, role)
@@ -165,23 +223,29 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     )
     run = Run(start_run(job_name, trigger_type, trigger, parent_run_id))
     token = current_run.set(run)
+    capture = _RunLogCapture(run)
+    logging.getLogger().addHandler(capture)
+
+    def finish(status, error=None):
+        logging.getLogger().removeHandler(capture)
+        finish_run(run.id, status, error, {**capture.summary(), **run.summary})
+
     try:
         yield run
     except SystemExit as exc:
         failed = exc.code not in (None, 0)
-        finish_run(
-            run.id,
+        finish(
             "failure" if failed else "success",
             f"exit code {exc.code}" if failed else None,
-            run.summary,
         )
         raise
     except BaseException as exc:
-        finish_run(run.id, "failure", f"{type(exc).__name__}: {exc}", run.summary)
+        finish("failure", f"{type(exc).__name__}: {exc}")
         raise
     else:
-        finish_run(run.id, "success", None, run.summary)
+        finish("success")
     finally:
+        logging.getLogger().removeHandler(capture)
         current_run.reset(token)
 
 
@@ -204,6 +268,13 @@ def run_main(job_name, main):
         if code not in (None, 0):
             raise SystemExit(code)
         return code
+
+
+def add_summary(**fields):
+    """Adds outcome fields (counts, a `headline`) to the active run; a no-op outside one."""
+    run = current_run.get()
+    if run:
+        run.add_summary(**fields)
 
 
 def current_run_id():
