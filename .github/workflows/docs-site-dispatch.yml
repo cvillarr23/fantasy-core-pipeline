@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   notify:
-    runs-on: fantasy-runners
+    runs-on: ubuntu-latest
     steps:
       - name: Rebuild the docs site
         uses: cvillarr23/fantasy-project/.github/actions/dispatch-docs@e140aa866f3e22453dbcae4e8471b3dbbe475605

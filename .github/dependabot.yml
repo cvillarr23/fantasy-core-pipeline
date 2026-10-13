@@ -1,8 +1,7 @@
 version: 2
-# Monthly and grouped: every Dependabot PR runs full CI on the self-hosted
-# runners (two jobs at a time across all fantasy repos), so a weekly batch of
-# single-package PRs queued CI for hours. Security updates are separate from
-# this schedule and still open immediately.
+# Monthly and grouped: every Dependabot PR runs full CI, and a weekly batch of
+# single-package PRs meant a lot of CI runs and reviews for small bumps.
+# Security updates are separate from this schedule and still open immediately.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
