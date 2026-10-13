@@ -14,6 +14,6 @@ jobs:
     runs-on: fantasy-runners
     steps:
       - name: Rebuild the docs site
-        uses: cvillarr23/fantasy-project/.github/actions/dispatch-docs@4f7da926c63b74d3db9917cef547ccea8b074ef2
+        uses: cvillarr23/fantasy-project/.github/actions/dispatch-docs@e140aa866f3e22453dbcae4e8471b3dbbe475605
         with:
           token: ${{ secrets.DOCS_SITE_DISPATCH_TOKEN }}
