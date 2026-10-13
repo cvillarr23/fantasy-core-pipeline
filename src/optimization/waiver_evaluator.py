@@ -46,6 +46,7 @@ from src.ir_eligibility import load_ineligible_ir_occupants, load_open_ir_slots
 from src.optimization import lineup_solver
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
+from src.services import run_log_service
 
 configure_trace_logging()
 logger = logging.getLogger("WaiverEvaluator")
@@ -372,4 +373,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     configure_tracing("waiver-evaluator")
-    sys.exit(main())
+    sys.exit(run_log_service.run_main("waiver_evaluator", main))

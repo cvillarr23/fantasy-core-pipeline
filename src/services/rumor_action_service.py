@@ -23,6 +23,7 @@ from src.api.draft import _redis_client
 from src.backtesting import waiver_strategy
 from src.database import get_db_connection
 from src.ingestion import sync_league
+from src.services import run_log_service
 from src.services.rumor_action_checkpoint import (
     load_checkpoint as _load_checkpoint,
     save_checkpoint as _save_checkpoint,
@@ -324,20 +325,24 @@ def evaluate_and_publish_rumor_actions(
     outcome = RunOutcome(team_id, season, week, source)
     started_at = time.monotonic()
     error = None
-    try:
-        return _evaluate_and_publish_rumor_actions(team_id, season, week, outcome)
-    except Exception as exc:
-        error = str(exc)
-        raise
-    finally:
-        status = outcome.finalize(error is not None)
-        _record_execution(
-            status=status,
-            duration_ms=int((time.monotonic() - started_at) * 1000),
-            error_message=error,
-            season=season,
-            outcome_details=outcome.details,
-        )
+    trigger_type = "http" if source == "http" else None
+    trigger = {"route": "/v1/trigger/rumor-action"} if source == "http" else None
+    with run_log_service.ensure_run("rumor_action_trigger", trigger_type, trigger) as run:
+        try:
+            return _evaluate_and_publish_rumor_actions(team_id, season, week, outcome)
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            status = outcome.finalize(error is not None)
+            run.summary.update(outcome.details)
+            _record_execution(
+                status=status,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                error_message=error,
+                season=season,
+                outcome_details=outcome.details,
+            )
 
 
 def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
@@ -364,6 +369,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             signals = fetch_new_signals(cursor, watermark)
+    run_log_service.link("rumor_signal", [s["id"] for s in signals], "input")
     outcome.details["signals_fetched"] = len(signals)
     outcome.signals = {s["id"]: "pending" for s in signals}
     entries = state["signals"]
@@ -827,4 +833,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    sys.exit(main())
+    sys.exit(run_log_service.run_main("rumor_action_trigger", main))

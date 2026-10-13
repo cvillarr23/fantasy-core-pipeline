@@ -8,6 +8,7 @@ import polars as pl
 
 from src.database import get_db_connection
 from src.nfl_schedule import last_completed_week, load_schedule
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NFLVerseIngestor")
@@ -769,4 +770,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_log_service.run_main("metrics_extractor", main))

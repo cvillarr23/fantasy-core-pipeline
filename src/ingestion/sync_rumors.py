@@ -26,6 +26,7 @@ import requests
 from rapidfuzz import fuzz, process
 
 from src.database import get_db_connection, get_redis_client
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RumorSignalSync")
@@ -274,24 +275,30 @@ def match_player(raw_text: str, player_lookup: list):
     return player_id, score / 100.0
 
 
-def persist_signals(conn, rows: list) -> None:
+def persist_signals(conn, rows: list) -> list:
+    """Inserts new rows and returns their ids; a dupe returns nothing, so the ids are only
+    what this run actually ingested."""
     if not rows:
-        return
+        return []
     insert_query = """
         INSERT INTO raw_signals
             (source, source_item_id, content_hash, raw_text, url, published_at, player_id, match_confidence)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (source, source_item_id) DO NOTHING;
+        ON CONFLICT (source, source_item_id) DO NOTHING
+        RETURNING id;
     """
+    new_ids = []
     with conn.cursor() as cursor:
-        cursor.executemany(insert_query, [
-            (
+        for row in rows:
+            cursor.execute(insert_query, (
                 row["source"], row["source_item_id"], row["content_hash"], row["raw_text"],
                 row["url"], row["published_at"], row["player_id"], row["match_confidence"],
-            )
-            for row in rows
-        ])
-    logger.info(f"Persisted {len(rows)} raw signal row(s) to PostgreSQL (dupes silently skipped).")
+            ))
+            inserted = cursor.fetchone()
+            if inserted:
+                new_ids.append(inserted[0])
+    logger.info(f"Persisted {len(new_ids)} new raw signal row(s) of {len(rows)} fetched (dupes skipped).")
+    return new_ids
 
 
 def sync_rumors(force: bool = False) -> None:
@@ -338,10 +345,12 @@ def sync_rumors(force: bool = False) -> None:
                 "match_confidence": confidence,
             })
 
-        persist_signals(conn, rows)
+        new_ids = persist_signals(conn, rows)
 
+    run_log_service.link("raw_signal", new_ids, "output")
     mark_synced(r_client)
 
 
 if __name__ == "__main__":
-    sync_rumors(force="--force" in sys.argv)
+    with run_log_service.run_scope("sync_rumors"):
+        sync_rumors(force="--force" in sys.argv)

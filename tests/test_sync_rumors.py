@@ -129,21 +129,32 @@ def test_persist_signals_dedupes_via_on_conflict():
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    sync_rumors.persist_signals(mock_conn, [_signal_row()])
+    mock_cursor.fetchone.return_value = (42,)
 
-    args, kwargs = mock_cursor.executemany.call_args
-    query, param_rows = args
+    assert sync_rumors.persist_signals(mock_conn, [_signal_row()]) == [42]
+
+    query, params = mock_cursor.execute.call_args.args
     assert "ON CONFLICT (source, source_item_id) DO NOTHING" in query
-    assert param_rows[0] == (
+    assert "RETURNING id" in query
+    assert params == (
         "rotowire_rss", "rotowire-1", "deadbeef", "Christian McCaffrey questionable",
         "https://www.rotowire.com/football/news/1", None, "4046", 1.0,
     )
 
 
+def test_persist_signals_returns_only_new_ids():
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_cursor.fetchone.side_effect = [(7,), None]
+
+    assert sync_rumors.persist_signals(mock_conn, [_signal_row(), _signal_row()]) == [7]
+
+
 def test_persist_signals_noop_on_empty_list():
     mock_conn = MagicMock()
 
-    sync_rumors.persist_signals(mock_conn, [])
+    assert sync_rumors.persist_signals(mock_conn, []) == []
 
     mock_conn.cursor.assert_not_called()
 

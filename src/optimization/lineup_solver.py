@@ -33,6 +33,7 @@ from src.ingestion.metrics_extractor import normalize_team
 from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import post_trigger_idempotent
+from src.services import run_log_service
 
 configure_trace_logging()
 logger = logging.getLogger("LineupSolver")
@@ -634,4 +635,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     configure_tracing("lineup-solver")
-    sys.exit(main())
+    sys.exit(run_log_service.run_main("lineup_optimizer", main))

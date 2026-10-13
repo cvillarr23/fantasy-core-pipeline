@@ -574,4 +574,7 @@ def main(argv=None):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    raise SystemExit(main())
+    # Imported here: run_log opens the database pool, which --dry-run must never do.
+    from src.services import run_log_service
+
+    raise SystemExit(run_log_service.run_main("sync_actual_scores", main))

@@ -319,4 +319,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync ESPN league settings and rosters.")
     parser.add_argument("--season", type=int, required=True)
     args = parser.parse_args()
-    sync_league(season=args.season)
+    # Imported here, not at the top: sync_actual_scores imports this module and must not
+    # open the database pool on import.
+    from src.services import run_log_service
+
+    with run_log_service.run_scope("sync_league"):
+        sync_league(season=args.season)

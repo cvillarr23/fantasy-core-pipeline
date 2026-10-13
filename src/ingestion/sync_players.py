@@ -11,6 +11,7 @@ import requests
 
 from src.queue_contracts import WAIVER_ACTIONS as WAIVER_ACTIONS_QUEUE
 from src.database import get_db_connection, get_redis_client
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SleeperPlayerSync")
@@ -246,4 +247,5 @@ def sync_players(force: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    sync_players(force="--force" in sys.argv)
+    with run_log_service.run_scope("sync_players"):
+        sync_players(force="--force" in sys.argv)

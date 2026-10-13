@@ -13,6 +13,8 @@ import time
 import requests
 from opentelemetry import propagate
 
+from src.services import run_log_service
+
 logger = logging.getLogger("TriggerClient")
 
 CORE_API_BASE_URL = os.getenv("CORE_API_BASE_URL", "http://fantasy-core-pipeline.core.svc.cluster.local:8000")
@@ -27,6 +29,9 @@ def post_trigger(path: str, payload: dict, core_api_base_url: str = CORE_API_BAS
     """
     headers: dict = {"X-API-Key": TRIGGER_API_KEY}
     propagate.inject(headers)
+    run_id = run_log_service.current_run_id()
+    if run_id:
+        headers[run_log_service.RUN_ID_HEADER] = run_id
 
     response = requests.post(
         f"{core_api_base_url}/v1/trigger/{path}",

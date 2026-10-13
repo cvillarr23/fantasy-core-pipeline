@@ -15,6 +15,7 @@ import polars as pl
 
 from src.database import get_db_connection
 from src.telemetry import configure_tracing, configure_trace_logging
+from src.services import run_log_service
 from opentelemetry import trace
 
 tracer = trace.get_tracer("vorp_matrix")
@@ -445,4 +446,5 @@ if __name__ == "__main__":
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, required=True)
     args = parser.parse_args()
-    run_vorp_pipeline(season=args.season, week=args.week)
+    with run_log_service.run_scope("vorp_matrix", trigger={"season": args.season, "week": args.week}):
+        run_vorp_pipeline(season=args.season, week=args.week)

@@ -52,6 +52,13 @@ AMQP_URL = os.getenv(
 TRIGGER_API_KEY = os.getenv("TRIGGER_API_KEY")
 
 
+# Set by trigger_client from the calling job's run_log entry; the queued action is linked
+# to that run as an output, which is how the audit log knows which run caused which move.
+RunIdHeader = Annotated[
+    Optional[str], Header(description="Run audit log id of the calling job, if any.")
+]
+
+
 def require_trigger_api_key(x_api_key: str = Header(...)) -> None:
     if not TRIGGER_API_KEY:
         raise HTTPException(
@@ -369,7 +376,7 @@ def health_check():
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_trigger_api_key)],
 )
-def trigger_lineup_swap(payload: LineupTriggerPayload):
+def trigger_lineup_swap(payload: LineupTriggerPayload, x_run_id: RunIdHeader = None):
     """
     Asymmetric API gateway: Translates incoming high-level HTTP payloads into structured
     persistent queue messages inside RabbitMQ to activate automated browser worker scripts.
@@ -380,7 +387,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
             continue
         _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
         _reject_internal_player_id(swap.add_player_id, swap.add_player_name)
-    return _accept_durable(LINEUP_UPDATES, payload)
+    return _accept_durable(LINEUP_UPDATES, payload, run_id=x_run_id)
 
 
 @router.post(
@@ -388,7 +395,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload):
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_trigger_api_key)],
 )
-def trigger_waiver_claim(payload: WaiverTriggerPayload):
+def trigger_waiver_claim(payload: WaiverTriggerPayload, x_run_id: RunIdHeader = None):
     """
     Waiver-claim counterpart to /trigger/lineup (CORE-15/#117): publishes a live waiver
     evaluation's recommended add/drop to the click-bot queue. Same asymmetric gateway shape
@@ -401,7 +408,7 @@ def trigger_waiver_claim(payload: WaiverTriggerPayload):
     if payload.drop_player_id:
         _reject_internal_player_id(payload.drop_player_id)
     _reject_player_rostered_elsewhere(payload)
-    return _accept_durable(WAIVER_ACTIONS, payload, depends_on=depends_on)
+    return _accept_durable(WAIVER_ACTIONS, payload, depends_on=depends_on, run_id=x_run_id)
 
 
 def _ir_move_to_wait_for(payload) -> str:
@@ -773,7 +780,7 @@ def _close_broker_connection(connection) -> None:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_trigger_api_key)],
 )
-def trigger_draft_pick(payload: DraftPickTriggerPayload):
+def trigger_draft_pick(payload: DraftPickTriggerPayload, x_run_id: RunIdHeader = None):
     """
     Draft-day counterpart to /trigger/lineup (CORE-08): publishes the live optimizer's
     recommended draft target to the click-bot queue. Same asymmetric gateway shape -
@@ -786,10 +793,10 @@ def trigger_draft_pick(payload: DraftPickTriggerPayload):
         raise HTTPException(
             409, "Pick deadline passed before the target could be queued."
         )
-    return _accept_durable(DRAFT_TARGETS, payload)
+    return _accept_durable(DRAFT_TARGETS, payload, run_id=x_run_id)
 
 
-def _accept_durable(queue, payload, depends_on=None):
+def _accept_durable(queue, payload, depends_on=None, run_id=None):
     """Persists the action, then delivers it. With depends_on it is only persisted: the
     activity runner delivers it once that action is verified_complete, or cancels it."""
     from src.services.activity_service import create_action
@@ -808,6 +815,10 @@ def _accept_durable(queue, payload, depends_on=None):
             503, "Submission was not accepted. Durable tracking is unavailable."
         ) from exc
     if identity == proposed_id:
+        if run_id:
+            from src.services import run_log_service
+
+            run_log_service.link("activity_action", [identity], "output", run_id=run_id)
         if queue == LINEUP_UPDATES:
             for swap in payload.optimized_swaps:
                 if isinstance(swap, IrMoveInstruction):

@@ -9,6 +9,7 @@ import re
 import pika
 from src.database import get_db_cursor
 from src.services.activity_service import action_detail, dependency_failure_reason, record_event
+from src.services import run_log_service
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +309,10 @@ def tick():
             "UPDATE activity_sessions SET content='[]',status=CASE WHEN status='running' THEN 'unknown' ELSE status END WHERE created_at<now()-(%s * interval '1 day') AND content!='[]'::jsonb",
             (days,),
         )
+    try:
+        run_log_service.purge_older_than(max(1, int(os.getenv("RUN_LOG_RETENTION_DAYS", "90"))))
+    except Exception:
+        logger.exception("Run log retention deferred")
 
 
 async def run(stop):

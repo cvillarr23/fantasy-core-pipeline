@@ -10,6 +10,7 @@ import polars as pl
 import requests
 
 from src.database import get_db_connection
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ProjectionsSync")
@@ -119,4 +120,5 @@ if __name__ == "__main__":
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, required=True)
     args = parser.parse_args()
-    sync_projections(season=args.season, week=args.week)
+    with run_log_service.run_scope("sync_projections", trigger={"season": args.season, "week": args.week}):
+        sync_projections(season=args.season, week=args.week)

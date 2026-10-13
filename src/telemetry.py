@@ -139,4 +139,7 @@ def configure_trace_logging() -> None:
         uvicorn_logger.handlers = []
         uvicorn_logger.propagate = True
     logging.getLogger("uvicorn.access").addFilter(HealthCheckAccessFilter())
+    # pika logs every connect/close at INFO, and the gateway opens a connection per
+    # publish, so at INFO it buries everything else in the gateway's logs.
+    logging.getLogger("pika").setLevel(logging.WARNING)
     _logging_configured = True
