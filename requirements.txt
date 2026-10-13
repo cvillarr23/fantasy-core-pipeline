@@ -1,7 +1,7 @@
 fastapi==0.111.0
 uvicorn==0.54.0
 pydantic==2.11.7
-espn-api==0.46.0
+espn-api==1.0.1
 nflreadpy==0.1.5
 pulp==3.3.2
 psycopg2-binary==2.9.9
