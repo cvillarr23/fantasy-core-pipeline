@@ -412,7 +412,10 @@ def test_get_current_team_roster_resolves_the_default_week_without_retry_sleeps(
 
 
 
-def _roster_with(players, ir_slot_count, monkeypatch):
+_SYNCED = object()
+
+
+def _roster_with(players, ir_slot_count, monkeypatch, slot_counts=_SYNCED):
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     our_team = _make_team(team_id=8, team_name="Our Team")
     our_team.roster = players
@@ -424,7 +427,8 @@ def _roster_with(players, ir_slot_count, monkeypatch):
          patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}), \
          patch("src.services.matchup_service._load_weekly_metrics_by_espn_id", return_value={}), \
          patch("src.services.matchup_service._load_rumor_signal_by_espn_id", return_value={}), \
-         patch("src.services.matchup_service._load_ir_slot_count", return_value=ir_slot_count):
+         patch("src.services.matchup_service._load_lineup_slot_counts",
+               return_value={"BE": 7, "IR": ir_slot_count} if slot_counts is _SYNCED else slot_counts):
         return matchup_service.get_current_team_roster(season=2026)
 
 
@@ -448,11 +452,33 @@ def test_get_current_team_roster_flags_an_active_player_in_ir(monkeypatch):
     assert result["ir_blocking_transactions"] is True
 
 
-def test_load_ir_slot_count_reads_league_settings_and_fails_soft():
+def test_load_lineup_slot_counts_reads_league_settings_and_fails_soft():
     cursor = MagicMock()
     with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
-         patch("src.services.matchup_service.load_ir_slot_count", return_value=2) as mock_count:
-        assert matchup_service._load_ir_slot_count(2026) == 2
-    mock_count.assert_called_once_with(cursor, 2026)
+         patch("src.services.matchup_service.load_lineup_slot_counts_row",
+               return_value={"QB": 1, "BE": 7, "IR": "1"}) as mock_counts:
+        assert matchup_service._load_lineup_slot_counts(2026) == {"QB": 1, "BE": 7, "IR": 1}
+    mock_counts.assert_called_once_with(cursor, 2026)
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.load_lineup_slot_counts_row", return_value=None):
+        assert matchup_service._load_lineup_slot_counts(2026) is None
     with patch("src.services.matchup_service.get_db_cursor", side_effect=RuntimeError("db down")):
-        assert matchup_service._load_ir_slot_count(2026) == 0
+        assert matchup_service._load_lineup_slot_counts(2026) is None
+
+
+def test_get_current_team_roster_returns_lineup_slot_counts(monkeypatch):
+    result = _roster_with([
+        _make_roster_player(playerId=2, position="WR", lineupSlot="BE", injuryStatus="ACTIVE"),
+    ], ir_slot_count=1, monkeypatch=monkeypatch)
+
+    assert result["lineup_slot_counts"] == {"BE": 7, "IR": 1}
+
+
+def test_get_current_team_roster_without_synced_settings_has_no_capacity_or_ir_hints(monkeypatch):
+    """An unsynced league must not guess a shape: no capacity, and no IR slot to suggest."""
+    result = _roster_with([
+        _make_roster_player(playerId=1, position="RB", lineupSlot="RB", injuryStatus="OUT"),
+    ], ir_slot_count=0, monkeypatch=monkeypatch, slot_counts=None)
+
+    assert result["starters"][0]["ir_suggestion"] is None
+    assert result["lineup_slot_counts"] is None

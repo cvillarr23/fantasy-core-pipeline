@@ -54,6 +54,18 @@ def test_load_ir_slot_count_is_zero_without_synced_settings():
     assert cursor.execute.call_count == 2  # the roster count is never needed
 
 
+def test_load_lineup_slot_counts_row_is_none_without_synced_settings():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    assert ir.load_lineup_slot_counts_row(cursor, 2026) is None
+
+
+def test_load_lineup_slot_counts_row_parses_json_text():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ('{"BE": 7, "IR": 1}',)
+    assert ir.load_lineup_slot_counts_row(cursor, 2026) == {"BE": 7, "IR": 1}
+
+
 def test_load_ir_slot_count_parses_json_text():
     cursor = MagicMock()
     cursor.fetchone.return_value = ('{"IR": 1}',)

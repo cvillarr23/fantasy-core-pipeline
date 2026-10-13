@@ -29,10 +29,10 @@ def open_ir_slots(lineup_slot_counts: dict, occupied: int) -> int:
     return max(0, int(lineup_slot_counts.get(IR_SLOT, 0) or 0) - occupied)
 
 
-def load_ir_slot_count(cursor, season: int) -> int:
-    """This league's IR slot count, from the lineup_slot_counts sync_league stores. Same
-    row lineup_solver.load_lineup_slot_counts reads, but no row means 0 here: its 9-starter
-    default carries no IR, and assuming a slot exists would suggest moves ESPN rejects."""
+def load_lineup_slot_counts_row(cursor, season: int) -> dict | None:
+    """This league's synced lineup_slot_counts (sync_league), or None when no row exists.
+    Unlike lineup_solver.load_lineup_slot_counts there is no default shape, so callers can
+    tell "not synced" apart from a real league setting."""
     cursor.execute(
         """
         SELECT lineup_slot_counts
@@ -47,7 +47,14 @@ def load_ir_slot_count(cursor, season: int) -> int:
     counts = row[0] if row else None
     if isinstance(counts, str):
         counts = json.loads(counts)
-    return open_ir_slots(counts, 0) if isinstance(counts, dict) else 0
+    return counts if isinstance(counts, dict) else None
+
+
+def load_ir_slot_count(cursor, season: int) -> int:
+    """This league's IR slot count. No synced row means 0: assuming a slot exists would
+    suggest moves ESPN rejects."""
+    counts = load_lineup_slot_counts_row(cursor, season)
+    return open_ir_slots(counts, 0) if counts is not None else 0
 
 
 def load_open_ir_slots(cursor, team_id: str, season: int) -> int:

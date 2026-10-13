@@ -82,7 +82,16 @@ def test_get_lineup_roster_success(client):
         response = client.get("/v1/matchup/roster?season=2026")
 
     assert response.status_code == 200
-    assert response.json() == {**fixture, "ir_blocking_transactions": False}
+    assert response.json() == {**fixture, "ir_blocking_transactions": False, "lineup_slot_counts": None}
+
+
+def test_get_lineup_roster_serializes_lineup_slot_counts(client):
+    fixture = {"starters": [], "bench": [], "lineup_slot_counts": {"QB": 1, "BE": 7, "IR": 1}}
+    with patch("src.api.matchup.get_current_team_roster", return_value=fixture):
+        response = client.get("/v1/matchup/roster?season=2026")
+
+    assert response.status_code == 200
+    assert response.json()["lineup_slot_counts"] == {"QB": 1, "BE": 7, "IR": 1}
 
 
 def test_get_lineup_roster_serializes_ir_suggestions(client):
