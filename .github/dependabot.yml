@@ -10,6 +10,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # The OpenTelemetry packages pin each other's exact versions, so a bump
+    # of one on its own fails pip install with ResolutionImpossible.
+    groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
