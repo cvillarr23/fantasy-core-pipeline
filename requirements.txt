@@ -13,7 +13,7 @@ polars==0.20.31
 redis==5.0.4
 feedparser==6.0.14
 rapidfuzz==3.9.7
-kubernetes==29.0.0
+kubernetes==37.0.1
 opentelemetry-api==1.45.1
 opentelemetry-sdk==1.45.1
 opentelemetry-instrumentation-fastapi==0.66b1
