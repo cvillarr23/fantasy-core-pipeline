@@ -252,7 +252,7 @@ def calculate_rank_at(league_config: dict, flex_alloc: dict) -> dict:
 def compute_vorp(df: pl.DataFrame, baselines: dict) -> pl.DataFrame:
     """vorp_base is signed, with no clamp - the explicit regression fix for the old
     `max(0.0, ...)` clamp that made every below-replacement player look identically 0.0."""
-    baseline_expr = pl.col("position").replace(baselines, default=0.0).cast(pl.Float64)
+    baseline_expr = pl.col("position").replace_strict(baselines, default=0.0).cast(pl.Float64)
     return df.with_columns((pl.col("adjusted_projected_points") - baseline_expr).alias("vorp_base"))
 
 
@@ -275,7 +275,7 @@ def compute_scarcity_multipliers(df: pl.DataFrame, rank_at: dict) -> dict:
 def apply_scarcity(df: pl.DataFrame, multipliers: dict) -> pl.DataFrame:
     """Scarcity scaling applies only to free-agent rows with a positive vorp_base;
     rostered players and anyone at/below replacement get a flat 1.0 multiplier."""
-    multiplier_expr = pl.col("position").replace(multipliers, default=1.0).cast(pl.Float64)
+    multiplier_expr = pl.col("position").replace_strict(multipliers, default=1.0).cast(pl.Float64)
     return df.with_columns(
         pl.when((~pl.col("is_rostered")) & (pl.col("vorp_base") > 0))
         .then(multiplier_expr)
