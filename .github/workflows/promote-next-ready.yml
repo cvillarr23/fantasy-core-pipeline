@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   promote-next:
-    runs-on: ubuntu-latest
+    runs-on: fantasy-runners
     steps:
       - name: Pick the next unblocked issue in this repo
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
