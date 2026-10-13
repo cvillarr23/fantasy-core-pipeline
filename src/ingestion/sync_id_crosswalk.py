@@ -13,6 +13,7 @@ import nflreadpy as nfl
 import polars as pl
 
 from src.database import get_db_connection
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IDCrosswalkSync")
@@ -80,4 +81,5 @@ def sync_id_crosswalk() -> int:
 
 
 if __name__ == "__main__":
-    sync_id_crosswalk()
+    with run_log_service.run_scope("sync_id_crosswalk"):
+        sync_id_crosswalk()

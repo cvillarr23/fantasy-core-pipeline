@@ -409,6 +409,24 @@
         "title": "CounterRequest",
         "type": "object"
       },
+      "DeadLetterQueue": {
+        "properties": {
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "queue": {
+            "title": "Queue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "queue",
+          "messages"
+        ],
+        "title": "DeadLetterQueue",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2259,6 +2277,147 @@
         "title": "IrMoveInstruction",
         "type": "object"
       },
+      "JobHealth": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_count": {
+            "default": 0,
+            "title": "Input Count",
+            "type": "integer"
+          },
+          "job_name": {
+            "title": "Job Name",
+            "type": "string"
+          },
+          "llm_count": {
+            "default": 0,
+            "title": "Llm Count",
+            "type": "integer"
+          },
+          "output_count": {
+            "default": 0,
+            "title": "Output Count",
+            "type": "integer"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
+          "recent_failures": {
+            "default": 0,
+            "title": "Recent Failures",
+            "type": "integer"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Summary",
+            "type": "object"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "trigger": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Trigger",
+            "type": "object"
+          },
+          "trigger_type": {
+            "title": "Trigger Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "job_name",
+          "trigger_type",
+          "status",
+          "started_at"
+        ],
+        "title": "JobHealth",
+        "type": "object"
+      },
+      "JobHealthList": {
+        "properties": {
+          "dead_letters": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DeadLetterQueue"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dead Letters"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/JobHealth"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "JobHealthList",
+        "type": "object"
+      },
       "LeagueTradeContext": {
         "properties": {
           "as_of_week": {
@@ -3700,6 +3859,315 @@
         "title": "RumorActionTriggerResponse",
         "type": "object"
       },
+      "Run": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_count": {
+            "default": 0,
+            "title": "Input Count",
+            "type": "integer"
+          },
+          "job_name": {
+            "title": "Job Name",
+            "type": "string"
+          },
+          "llm_count": {
+            "default": 0,
+            "title": "Llm Count",
+            "type": "integer"
+          },
+          "output_count": {
+            "default": 0,
+            "title": "Output Count",
+            "type": "integer"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Summary",
+            "type": "object"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "trigger": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Trigger",
+            "type": "object"
+          },
+          "trigger_type": {
+            "title": "Trigger Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "job_name",
+          "trigger_type",
+          "status",
+          "started_at"
+        ],
+        "title": "Run",
+        "type": "object"
+      },
+      "RunDetail": {
+        "properties": {
+          "children": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            },
+            "title": "Children",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_count": {
+            "default": 0,
+            "title": "Input Count",
+            "type": "integer"
+          },
+          "job_name": {
+            "title": "Job Name",
+            "type": "string"
+          },
+          "links": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            "default": {},
+            "title": "Links",
+            "type": "object"
+          },
+          "llm_count": {
+            "default": 0,
+            "title": "Llm Count",
+            "type": "integer"
+          },
+          "output_count": {
+            "default": 0,
+            "title": "Output Count",
+            "type": "integer"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Summary",
+            "type": "object"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "trigger": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Trigger",
+            "type": "object"
+          },
+          "trigger_type": {
+            "title": "Trigger Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "job_name",
+          "trigger_type",
+          "status",
+          "started_at"
+        ],
+        "title": "RunDetail",
+        "type": "object"
+      },
+      "RunList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Run"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RunList",
+        "type": "object"
+      },
+      "RunSummary": {
+        "properties": {
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_name": {
+            "title": "Job Name",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger_type": {
+            "title": "Trigger Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "job_name",
+          "trigger_type",
+          "status",
+          "started_at"
+        ],
+        "title": "RunSummary",
+        "type": "object"
+      },
       "ScheduleCoverage": {
         "properties": {
           "bye_weeks": {
@@ -4715,6 +5183,74 @@
           "receive_players"
         ],
         "title": "ThreadTurn",
+        "type": "object"
+      },
+      "Trace": {
+        "properties": {
+          "root": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Root",
+            "type": "object"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/TraceStage"
+            },
+            "title": "Stages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "root",
+          "stages"
+        ],
+        "title": "Trace",
+        "type": "object"
+      },
+      "TraceStage": {
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "runs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "sessions": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "title"
+        ],
+        "title": "TraceStage",
         "type": "object"
       },
       "TradeApprovalRequest": {
@@ -6142,6 +6678,24 @@
         "summary": "Bots"
       }
     },
+    "/v1/activity/jobs": {
+      "get": {
+        "operationId": "jobs_v1_activity_jobs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobHealthList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Jobs"
+      }
+    },
     "/v1/activity/read/{identity}": {
       "post": {
         "operationId": "read_v1_activity_read__identity__post",
@@ -6177,6 +6731,148 @@
           }
         },
         "summary": "Read"
+      }
+    },
+    "/v1/activity/runs": {
+      "get": {
+        "operationId": "runs_v1_activity_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "job",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(running|success|failure)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trigger",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(schedule|queue|http|manual)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trigger"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Runs"
+      }
+    },
+    "/v1/activity/runs/{identity}": {
+      "get": {
+        "operationId": "run_v1_activity_runs__identity__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "title": "Identity",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run"
       }
     },
     "/v1/activity/sessions": {
@@ -6265,6 +6961,56 @@
           }
         },
         "summary": "Session"
+      }
+    },
+    "/v1/activity/trace": {
+      "get": {
+        "operationId": "trace_v1_activity_trace_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "ref_type",
+            "required": true,
+            "schema": {
+              "pattern": "^(raw_signal|rumor_signal|activity_action)$",
+              "title": "Ref Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trace"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trace"
       }
     },
     "/v1/backtest/results": {
@@ -8368,6 +9114,24 @@
         "operationId": "trigger_draft_pick_v1_trigger_draft_pick_post",
         "parameters": [
           {
+            "description": "Run audit log id of the calling job, if any.",
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Run audit log id of the calling job, if any.",
+              "title": "X-Run-Id"
+            }
+          },
+          {
             "in": "header",
             "name": "x-api-key",
             "required": true,
@@ -8415,6 +9179,24 @@
         "description": "Asymmetric API gateway: Translates incoming high-level HTTP payloads into structured\npersistent queue messages inside RabbitMQ to activate automated browser worker scripts.",
         "operationId": "trigger_lineup_swap_v1_trigger_lineup_post",
         "parameters": [
+          {
+            "description": "Run audit log id of the calling job, if any.",
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Run audit log id of the calling job, if any.",
+              "title": "X-Run-Id"
+            }
+          },
           {
             "in": "header",
             "name": "x-api-key",
@@ -8508,6 +9290,24 @@
         "description": "Waiver-claim counterpart to /trigger/lineup (CORE-15/#117): publishes a live waiver\nevaluation's recommended add/drop to the click-bot queue. Same asymmetric gateway shape\nas /trigger/lineup - HTTP in, durable AMQP message out. No deadline handling (no pick\nclock), but the same idempotency claim protocol, week-scoped: see\nWAIVER_TRIGGER_IDEMPOTENCY_TTL_SECONDS.",
         "operationId": "trigger_waiver_claim_v1_trigger_waiver_post",
         "parameters": [
+          {
+            "description": "Run audit log id of the calling job, if any.",
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Run audit log id of the calling job, if any.",
+              "title": "X-Run-Id"
+            }
+          },
           {
             "in": "header",
             "name": "x-api-key",

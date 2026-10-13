@@ -20,6 +20,7 @@ import polars as pl
 
 from src.database import get_db_connection
 from src.ingestion.metrics_extractor import normalize_team
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DefenseStrengthSync")
@@ -137,4 +138,5 @@ if __name__ == "__main__":
         help="Upcoming season these rows are used FOR; source data is season - 1.",
     )
     args = parser.parse_args()
-    sync_defense_strength(season=args.season)
+    with run_log_service.run_scope("sync_defense_strength"):
+        sync_defense_strength(season=args.season)

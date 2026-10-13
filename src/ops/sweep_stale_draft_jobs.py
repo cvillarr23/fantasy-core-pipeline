@@ -34,6 +34,7 @@ from src.api.draft import (
     _batch_v1_api,
 )
 from src.database import get_redis_client
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("StaleDraftJobSweeper")
@@ -124,4 +125,5 @@ def sweep() -> None:
 
 
 if __name__ == "__main__":
-    sweep()
+    with run_log_service.run_scope("stale_draft_job_sweeper"):
+        sweep()

@@ -4,7 +4,7 @@ description: Every Postgres table, how they relate, who writes each one, and the
 sidebar_position: 1
 ---
 
-The `fantasy_football` Postgres database holds player metrics, league state, draft state, bot audit trails and queued actions. Core creates every table at API startup; see [Migrations](./migrations.md). The DDL lives in `src/models.py`, plus the `activity_*` tables in `src/services/activity_service.py`.
+The `fantasy_football` Postgres database holds player metrics, league state, draft state, bot audit trails and queued actions. Core creates every table at API startup; see [Migrations](./migrations.md). The DDL lives in `src/models.py`, plus the `activity_*` tables in `src/services/activity_service.py` and the `run_*` tables in `src/services/run_log_service.py`.
 
 :::tip[Two things to know first]
 - `players.player_id` is a **Sleeper** id. ESPN's id is `players.espn_id`. The two id spaces overlap numerically, so never use one where the other is expected.
@@ -108,6 +108,27 @@ erDiagram
 
 `bot_decisions.tracking_id` matches `activity_actions.id` for queued actions, but neither link is a foreign key.
 
+### Run audit log
+
+```mermaid
+erDiagram
+    run_log ||--o{ run_links : "run_id"
+    run_log ||--o{ run_log : "parent_run_id"
+    run_links }o--o| raw_signals : "ref_type=raw_signal"
+    run_links }o--o| rumor_signals : "ref_type=rumor_signal"
+    run_links }o--o| activity_sessions : "ref_type=llm_session"
+    run_links }o--o| activity_actions : "ref_type=activity_action"
+    run_log {
+        text id PK
+        text job_name
+        text trigger_type "schedule | queue | http | manual"
+        jsonb trigger "cronjob + k8s_job, or queue + tracking_id"
+        text status "running | success | failure"
+    }
+```
+
+A worker run's `trigger.tracking_id` is the `activity_actions.id` it executed, which links it to the run that queued that action. Only `run_links.run_id` is a foreign key.
+
 ### Score history
 
 ```mermaid
@@ -157,6 +178,8 @@ erDiagram
 | `activity_sessions` | LLM chat session transcripts. The runner clears old content. | `llm_history` and the activity runner. |
 | `activity_reads` | Which user has read which activity item. | Core API (`POST /v1/activity/read/{identity}`). |
 | `rumor_action_checkpoints` | Per-team watermark and in-flight state for rumor actions. | `rumor_action_service` |
+| `run_log` | One row per job or bot run: what triggered it, status, error and a `summary`. Purged after `RUN_LOG_RETENTION_DAYS` (90). | `run_log_service.run_scope` in core entrypoints; the worker's `db/run_log.js`. |
+| `run_links` | What each run read (`input`) and wrote (`output`): raw signals, rumor signals, LLM sessions, queued actions. | Same as `run_log`, plus the `/v1/trigger/*` handlers via `X-Run-Id`. |
 
 ### Signals and metrics
 
@@ -275,6 +298,8 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 | `activity_actions.payload`, `.evidence` | The queued message body, and what verification found. Secret-looking keys are redacted from the stored payload. |
 | `activity_events.detail` | Per-stage detail. Dependency events carry `depends_on`, and failures add `reason`. |
 | `rumor_action_checkpoints.state` | `{watermark, signals, actions, failed_jobs}`. |
+| `run_log.trigger` | Scheduled or manual Jobs: `{cronjob, k8s_job}`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
+| `run_log.summary` | Per-job counters, such as the rumor action trigger's `RunOutcome` details or the digest's chunk and retry counts. |
 
 ## Related
 

@@ -30,6 +30,7 @@ from espn_api.football.constant import POSITION_MAP
 
 from src.database import get_db_connection
 from src.ingestion.sync_league import build_league
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("KickerDSTSync")
@@ -229,4 +230,5 @@ if __name__ == "__main__":
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, required=True)
     args = parser.parse_args()
-    sync_kicker_dst(season=args.season, week=args.week)
+    with run_log_service.run_scope("sync_kicker_dst", trigger={"season": args.season, "week": args.week}):
+        sync_kicker_dst(season=args.season, week=args.week)

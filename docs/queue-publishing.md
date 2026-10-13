@@ -54,7 +54,7 @@ The outbox publishes with a passive queue declaration, so `lineup_updates`, `wai
 
 ## What do the messages contain?
 
-Every API message carries a nullable `traceparent` field, and the same value goes in the AMQP headers, so a worker span can join the API's trace. It is separate from `tracking_id`, which is the human-facing UUID. Lineup, waiver claim and draft player IDs are **ESPN IDs**; those trigger routes reject a Sleeper ID with a 422. Counter staging and injury alerts use Sleeper IDs.
+Every API message carries a nullable `traceparent` field, and the same value goes in the AMQP headers, so a worker span can join the API's trace. It is separate from `tracking_id`, which is the human-facing UUID. A caller running inside a recorded run (`run_log_service.run_scope`) also sends an `X-Run-Id` header through `trigger_client`, and the API links the new action to that run for the audit log. Lineup, waiver claim and draft player IDs are **ESPN IDs**; those trigger routes reject a Sleeper ID with a 422. Counter staging and injury alerts use Sleeper IDs.
 
 See the [queue contract explorer](/reference/queues) for schemas, required fields and placeholder examples, or download the [AsyncAPI 3.0 spec](./asyncapi.yaml).
 

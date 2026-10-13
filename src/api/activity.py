@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Request
+from src.schemas.run_log import JobHealthList, RunDetail, RunList, Trace
 from src.services import activity_service as service
+from src.services import run_log_service
 
 activity_router = APIRouter()
 
@@ -64,3 +66,41 @@ def read(identity: str, request: Request):
 @activity_router.get("/bots")
 def bots():
     return {"items": service.bot_summary()}
+
+
+@activity_router.get("/runs", response_model=RunList)
+def runs(
+    job: str | None = None,
+    status: str | None = Query(None, pattern="^(running|success|failure)$"),
+    trigger: str | None = Query(None, pattern="^(schedule|queue|http|manual)$"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    return {"items": run_log_service.list_runs(job, status, trigger, limit, offset)}
+
+
+@activity_router.get("/runs/{identity}", response_model=RunDetail)
+def run(identity: str):
+    try:
+        return run_log_service.run_detail(identity)
+    except run_log_service.RunNotFoundError:
+        raise HTTPException(404, "Run not found")
+
+
+@activity_router.get("/jobs", response_model=JobHealthList)
+def jobs():
+    return {
+        "items": run_log_service.job_health(),
+        "dead_letters": run_log_service.dead_letter_depths(),
+    }
+
+
+@activity_router.get("/trace", response_model=Trace)
+def trace(
+    ref_type: str = Query(..., pattern="^(raw_signal|rumor_signal|activity_action)$"),
+    ref_id: str = Query(..., min_length=1),
+):
+    try:
+        return run_log_service.trace(ref_type, ref_id)
+    except run_log_service.RunNotFoundError:
+        raise HTTPException(404, "Nothing found to trace")

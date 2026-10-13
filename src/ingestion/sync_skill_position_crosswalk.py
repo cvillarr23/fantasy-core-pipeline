@@ -27,6 +27,7 @@ from rapidfuzz import fuzz
 
 from src.database import get_db_connection
 from src.ingestion.sync_league import build_league
+from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SkillPositionCrosswalkSync")
@@ -161,4 +162,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill ESPN espn_id for remaining QB/RB/WR/TE players.")
     parser.add_argument("--season", type=int, required=True)
     args = parser.parse_args()
-    sync_skill_position_crosswalk(season=args.season)
+    with run_log_service.run_scope("sync_skill_position_crosswalk"):
+        sync_skill_position_crosswalk(season=args.season)

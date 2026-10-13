@@ -7,6 +7,7 @@ import hashlib
 from contextvars import ContextVar
 from functools import wraps
 from src.services.activity_service import session_start, session_event, redact
+from src.services import run_log_service
 
 current_session = ContextVar("llm_session", default=None)
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ def record_call(fn):
                 token = current_session.set(
                     session_start(kwargs.get("call_site") or "LLM run")
                 )
+                run_log_service.link("llm_session", [current_session.get()], "output")
             except Exception:
                 logger.exception("LLM history could not start")
         observe("prompt", {"system": kwargs.get("system_prompt"), "user": prompt})
