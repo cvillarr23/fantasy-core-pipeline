@@ -103,6 +103,7 @@ DESCRIPTIONS = {
     "GET /v1/activity/jobs": "Latest run and recent failure count per job, plus dead-letter queue depths.",
     "GET /v1/activity/trace": "Trace an article, rumor evaluation or move through the rumor pipeline.",
     "GET /v1/roster/deficits": "Show per-position roster deficits.",
+    "GET /v1/roster/bye-outlook": "Show which upcoming weeks NFL byes leave the lineup short.",
     "POST /v1/roster/move-preview": "Preview the effect of a roster move.",
     "GET /v1/waiver/recommendations": "Recommend waiver adds and drops.",
     "GET /v1/waiver/free-agents": "Browse all claimable free agents with metrics and same-position swap values.",

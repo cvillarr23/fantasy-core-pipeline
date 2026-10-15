@@ -25,6 +25,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from src.services.free_agent_service import browse_free_agents
+from src.services.roster_outlook_service import get_bye_outlook
 from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.trade_service import evaluate_trade
 from src.services.trade_context_service import get_league_trade_context
@@ -211,6 +212,22 @@ def get_league_trade_context_model(
     ownership, not a historical roster reconstruction. NFL matchup difficulty is separate.
     """
     return get_league_trade_context(league_id, season, week, horizon)
+
+
+@mcp.tool()
+def get_team_bye_outlook(
+    league_id: str, season: int, week: int, team_id: str, horizon: int = 4
+) -> dict:
+    """Which upcoming weeks NFL byes leave one team's lineup short.
+
+    Per horizon week: the best lineup VORP the roster can field, players on an NFL bye
+    (ESPN ids), empty starter seats, below-replacement starters, and crunch (byes leave a
+    seat empty or force a below-replacement starter). Each player carries nfl_bye_week.
+    Use it to find bye-complementary trade partners or fill-ins; never as a reason to
+    drop or trade a good player just because he has a bye - judge moves over the whole
+    horizon with score_trade_proposal.
+    """
+    return get_bye_outlook(league_id, season, week, horizon, team_id)
 
 
 @mcp.tool()

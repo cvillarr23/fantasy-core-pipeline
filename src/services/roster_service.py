@@ -7,6 +7,7 @@ over one implementation.
 from src.database import get_db_cursor
 from src.optimization.draft_matrix import compute_position_caps
 from src.optimization.vorp_matrix import SKILL_POSITIONS, load_league_config
+from src.nfl_byes import bye_week_for, bye_weeks_or_empty
 
 
 def compute_roster_deficits(season: int, week: int) -> dict:
@@ -92,6 +93,7 @@ def get_team_roster_players(team_id: str, season: int, week: int) -> dict:
     `season`/`week`. A player with no weekly_stats row for that week (bye, not synced yet)
     gets None for both, never 0.0. An unknown team_id returns empty lists, not an error.
     """
+    bye_weeks = bye_weeks_or_empty(season)
     with get_db_cursor() as cursor:
         cursor.execute(
             """
@@ -118,6 +120,7 @@ def get_team_roster_players(team_id: str, season: int, week: int) -> dict:
             "name": name,
             "position": position,
             "nfl_team": nfl_team,
+            "bye_week": bye_week_for(nfl_team, bye_weeks),
             "slot": slot,
             "injury_status": injury_status,
             "vorp_score": vorp,

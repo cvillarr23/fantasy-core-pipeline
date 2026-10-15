@@ -149,8 +149,8 @@ def test_waiver_question_gets_free_agent_and_recommendation_context(monkeypatch)
     free_agents = result["grounding"]["free_agents"]
     assert [p["name"] for p in free_agents["top_by_position"]["RB"]] == [f"Back {i}" for i in range(5)]
     assert free_agents["top_by_position"]["WR"] == [{
-        "name": "Open Wideout", "position": "WR", "pro_team": "NYJ", "injury_status": "QUESTIONABLE",
-        "projected_points": 8.0, "vorp_score": 2.0,
+        "name": "Open Wideout", "position": "WR", "pro_team": "NYJ", "bye_week": None,
+        "injury_status": "QUESTIONABLE", "projected_points": 8.0, "vorp_score": 2.0,
     }]
     assert free_agents["total_free_agents"] == 7
     waivers = result["grounding"]["waiver_recommendations"]
@@ -209,3 +209,39 @@ def test_follow_up_to_a_waiver_question_keeps_free_agent_context():
                             {"role": "answer", "content": "Back 0."}],
     )
     assert not chat_service._is_waiver_question("Should I start Kelce?", [])
+
+
+BYE_OUTLOOK = {
+    "team_id": "10", "team_name": "Us", "season": 2026, "start_week": 3, "end_week": 6,
+    "schedule_known": True, "median_lineup_value": 30.0, "crunch_weeks": [5],
+    "weeks": [{"week": 5, "value": 12.0, "shortfall": 18.0, "unfilled_slots": ["RB"], "held_slots": [],
+               "on_bye": ["101"], "unknown": [], "replacement_level_starters": 0, "crunch": True}],
+    "players": [{"espn_id": "101", "name": "Bye Back", "position": "RB", "nfl_team": "BUF",
+                 "nfl_bye_week": 5}],
+}
+
+
+def test_chat_is_grounded_in_the_bye_outlook_and_bye_rules():
+    with patch("src.services.chat_service.get_bye_outlook", return_value=BYE_OUTLOOK) as mock_outlook:
+        result, _, _, mock_complete = _ask(
+            "Who should I start?",
+            pool={"return_value": FREE_AGENT_POOL}, recommendations={"return_value": WAIVER_RECOMMENDATIONS},
+        )
+
+    mock_outlook.assert_called_once()
+    outlook = result["grounding"]["bye_outlook"]
+    assert outlook["crunch_weeks"] == [5]
+    assert outlook["by_week"][0]["on_bye"] == ["Bye Back"]
+    assert "Bye Back" in mock_complete.call_args.args[0]
+    system_prompt = mock_complete.call_args.kwargs["system_prompt"]
+    assert "just because he is on bye" in system_prompt
+
+
+def test_chat_survives_an_unavailable_bye_outlook():
+    with patch("src.services.chat_service.get_bye_outlook", side_effect=RuntimeError("ESPN down")):
+        result, _, _, _ = _ask(
+            "Who should I start?",
+            pool={"return_value": FREE_AGENT_POOL}, recommendations={"return_value": WAIVER_RECOMMENDATIONS},
+        )
+
+    assert result["grounding"]["bye_outlook"] == {"unavailable": "ESPN down"}

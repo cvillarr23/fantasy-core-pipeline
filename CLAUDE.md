@@ -140,6 +140,27 @@
   bye, or a since-released kicker) gets **no** `weekly_stats` row, never a 0.0 one, because
   the pregame pool reads a missing row as "on bye"; a row an earlier daily run wrote for
   that week is deleted (only `sync_kicker_dst` writes K/D-ST rows).
+- `sync_projections` follows the same rule for QB/RB/WR/TE: Sleeper lists a player whose
+  team is on bye with a `team` but `opponent: null` and no scoring stats. That row is
+  skipped, never stored as 0.0, and a 0.0 row an earlier run wrote for him is deleted
+  (unless actual scores were synced).
+
+## Bye weeks across recommenders
+
+- `src/nfl_byes.py` is the only bye lookup (nflverse schedule, cached per season). Display
+  paths use `bye_weeks_or_empty`, so an unreadable schedule leaves `bye_week` null rather
+  than failing.
+- Every recommender judges a roster move over a multi-week horizon, never one week's VORP,
+  so a player on bye is never dropped or traded away for that one idle week:
+  - Trades: the trade score.
+  - Waivers: `waiver_strategy.build_horizon_pools` gives the average VORP per week, with a
+    bye week counted as 0.0, which is replacement level.
+  - Fill-ins: `waiver_bye_fill`.
+- `roster_move_scoring` holds the shared per-week lineup comparison.
+- `bye_outlook` flags "crunch" weeks. A week is a crunch when a bye leaves a starter seat
+  empty, or forces more below-replacement starters than usual.
+- Bye fill-ins are recommend-only. The live waiver cron uses the horizon values with its
+  usual margin and never publishes a `bye_fill` move.
 
 ## CORE-06: PuLP lineup optimizer
 

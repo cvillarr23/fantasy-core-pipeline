@@ -219,3 +219,33 @@ def test_move_preview_handles_espn_card_shapes(monkeypatch):
 def test_point_projection_treats_missing_injury_status_as_available():
     p = player(1, status=[])
     assert dashboard.point_projection(p, 5, 5) == (10, "Published projection")
+
+
+def test_espn_bye_week_is_the_gap_in_the_player_schedule():
+    p = player(1)
+    p.schedule = {1: {}, 2: {}, 4: {}, 5: {}}
+    assert dashboard.espn_bye_week(p) == 3
+    p.schedule = {}
+    assert dashboard.espn_bye_week(p) is None
+
+
+def test_move_preview_warns_when_byes_leave_a_slot_unfillable(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    on_bye = espn_card(1, pts=12)
+    on_bye.schedule = {"5": [{}]}  # idle in week 6
+    cards = [on_bye, espn_card(2, pts=6), espn_card(3, pts=20)]
+    raw = {"settings": {"rosterSettings": {"lineupSlotCounts": {"2": 1, "20": 2}}}}
+    payload = SimpleNamespace(
+        kind="waiver", season=2026, start_week=6, end_week=6,
+        incoming_espn_ids=["3"], outgoing_espn_ids=["2"],
+    )
+    # Trading the healthy RB for one who also plays leaves week 6 covered; dropping him
+    # for nobody useful wouldn't. Here the incoming player is on bye too.
+    cards[2].schedule = {"5": [{}]}
+    with (
+        patch.object(dashboard, "build_league", return_value=preview_league(cards, [1, 2])),
+        patch.object(dashboard, "fetch_raw_league_data", return_value=raw),
+    ):
+        result = dashboard.move_preview(payload)
+    assert "Week 6: byes leave a starting slot unfillable after this move." in result["warnings"]
+    assert {p["espn_id"]: p["bye_week"] for p in result["after"]} == {"1": None, "3": None}

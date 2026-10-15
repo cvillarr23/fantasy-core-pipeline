@@ -43,6 +43,7 @@ from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion import sync_league
 from src.ir_eligibility import load_ineligible_ir_occupants, load_open_ir_slots
+from src.nfl_byes import bye_weeks_or_empty
 from src.optimization import lineup_solver
 from src.telemetry import configure_tracing, configure_trace_logging
 from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
@@ -252,12 +253,24 @@ class InsufficientWaiverInputError(Exception):
     missing - distinct from "no waiver move clears the margin" (a valid empty result)."""
 
 
+def _horizon_pools(cursor, team_id: str, season: int, week: int) -> tuple:
+    """(bench_by_position, free_agents_by_position) valued over waiver_strategy's horizon:
+    average VORP per week, a bye counting as replacement level. A stud on bye this week
+    keeps his value instead of reading as the worst bench player, so the margin rule
+    never auto-drops him. An unreadable schedule only means byes count as unknown weeks
+    (skipped), which can overrate but never underrate a bench player."""
+    pools = waiver_strategy.load_horizon_waiver_pools(
+        cursor, team_id, season, week, waiver_strategy.horizon_weeks(week),
+        bye_weeks_or_empty(season),
+    )
+    return pools["bench_by_position"], pools["free_agents_by_position"]
+
+
 def load_live_waiver_inputs(cursor, team_id: str, season: int, week: int) -> tuple:
-    """(bench_by_position, free_agents_by_position) for the target week. Both come from
-    exact-week weekly_stats joins (shared with backtesting). Missing free agents, or
-    missing bench metrics with no roster vacancy, fail instead of reporting no moves."""
-    bench_by_position = waiver_strategy.load_bench_by_position(cursor, team_id, season, week)
-    free_agents_by_position = waiver_strategy.load_best_free_agent_by_position(cursor, season, week)
+    """(bench_by_position, free_agents_by_position) for the target week, valued over the
+    horizon (_horizon_pools). Missing free agents, or missing bench metrics with no
+    roster vacancy, fail instead of reporting no moves."""
+    bench_by_position, free_agents_by_position = _horizon_pools(cursor, team_id, season, week)
     open_roster_slots = (
         waiver_strategy.load_open_roster_slots(cursor, team_id, season)
         if not bench_by_position else 0

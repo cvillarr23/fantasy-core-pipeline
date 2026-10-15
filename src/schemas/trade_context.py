@@ -19,6 +19,8 @@ class TradeContextPlayer(BaseModel):
     eligible_slots: list[str]
     injury_status: str | None
     metrics: dict[str, PlayerWeekMetrics]
+    # From the nflverse schedule; null when the schedule couldn't be read.
+    nfl_bye_week: int | None = None
 
 
 class TeamStrength(BaseModel):
@@ -45,6 +47,25 @@ class ScheduleCoverage(BaseModel):
     strength_known_weeks: int
 
 
+class ByeOutlookWeek(BaseModel):
+    week: int
+    # Best starting lineup VORP the roster can field; null when nobody has metrics.
+    value: float | None
+    shortfall: float | None
+    unfilled_slots: list[str]
+    held_slots: list[str]
+    on_bye: list[str]
+    unknown: list[str]
+    replacement_level_starters: int | None
+    crunch: bool
+
+
+class ByeOutlook(BaseModel):
+    median_lineup_value: float | None
+    crunch_weeks: list[int]
+    weeks: list[ByeOutlookWeek]
+
+
 class TradeContextTeam(BaseModel):
     team_id: str
     name: str
@@ -53,6 +74,7 @@ class TradeContextTeam(BaseModel):
     schedule: list[FantasyScheduleWeek]
     schedule_coverage: ScheduleCoverage
     schedule_strength_z: float | None
+    bye_outlook: ByeOutlook | None = None
 
 
 class RosterSnapshot(BaseModel):

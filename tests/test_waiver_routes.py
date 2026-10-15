@@ -41,7 +41,7 @@ def test_get_waiver_recommendations_success(client, monkeypatch):
     ]
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
-        response = client.get("/v1/waiver/recommendations?season=2026&week=3")
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3&horizon=1")
 
     assert response.status_code == 200
     body = response.json()
@@ -65,7 +65,7 @@ def test_get_waiver_recommendations_db_failure_returns_500(client):
         yield  # pragma: no cover
 
     with patch("src.services.waiver_service.get_db_cursor", _broken_cursor):
-        response = client.get("/v1/waiver/recommendations?season=2026&week=3")
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3&horizon=1")
 
     assert response.status_code == 500
 
@@ -107,7 +107,7 @@ def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch("src.services.waiver_service.load_open_ir_slots", return_value=1):
-        response = client.get("/v1/waiver/recommendations?season=2026&week=3")
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3&horizon=1")
 
     assert response.status_code == 200
     body = response.json()
@@ -118,6 +118,7 @@ def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
     assert body["open_ir_slots"] == 1
     assert body["ir_moves"] == [{"action": "move_to_ir", "position": "RB", "player": {
         "espn_id": "102", "name": "Hurt RB", "pro_team": "NYJ", "injury_status": "IR", "net_vorp": -1.0,
+        "bye_week": None,
     }}]
 
 

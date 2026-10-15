@@ -175,6 +175,20 @@ def leaders(season, week, totals=False):
     return cached(["leaders", *league_key(season), week, totals], 120, load)
 
 
+def espn_bye_week(p):
+    """The week missing between the first and last games of ESPN's player schedule, or
+    None when there's no such gap (a schedule that only lists later weeks says nothing
+    about earlier ones)."""
+    schedule = getattr(p, "schedule", None)
+    if not isinstance(schedule, dict) or not schedule:
+        return None
+    weeks = {int(k) for k in schedule if str(k).isdigit()}
+    if not weeks:
+        return None
+    idle = sorted(set(range(min(weeks), max(weeks) + 1)) - weeks)
+    return idle[0] if idle else None
+
+
 def shape_player(p):
     return {
         "espn_id": str(p.playerId),
@@ -182,6 +196,7 @@ def shape_player(p):
         "position": p.position,
         "pro_team": p.proTeam,
         "injury_status": p.injuryStatus,
+        "bye_week": espn_bye_week(p),
         "slot": getattr(p, "lineupSlot", ""),
         "eligible_slots": p.eligibleSlots,
         # ESPN's onTeamId is 0 for free agents; lets clients tell a waiver target from a
@@ -364,6 +379,8 @@ def move_preview(payload):
         byes = [p.name for p in after if p.schedule and week not in p.schedule]
         if byes:
             warnings.append(f"Week {week} byes: {', '.join(byes)}")
+        if byes and asource == "Incomplete eligible lineup":
+            warnings.append(f"Week {week}: byes leave a starting slot unfillable after this move.")
     return {
         "before": [shape_player(p) for p in before],
         "after": [shape_player(p) for p in after],

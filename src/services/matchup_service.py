@@ -10,6 +10,7 @@ import requests
 from src.database import get_db_cursor
 from src.ingestion.sync_league import build_league
 from src.ir_eligibility import lineup_ir_hints, load_lineup_slot_counts_row, open_ir_slots
+from src.nfl_byes import bye_week_for, bye_weeks_or_empty
 from src.nfl_schedule import WeekResolutionError, require_upcoming_week
 from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
@@ -52,7 +53,7 @@ def _headshot_url(espn_id: str) -> str:
     return f"https://a.espncdn.com/i/headshots/nfl/players/full/{espn_id}.png"
 
 
-def _shape_player_line(box_player) -> dict:
+def _shape_player_line(box_player, bye_weeks: dict | None = None) -> dict:
     espn_id = str(box_player.playerId)
     return {
         "player_id": espn_id,
@@ -63,6 +64,7 @@ def _shape_player_line(box_player) -> dict:
         "slot": box_player.slot_position,
         "points": box_player.points,
         "projected_points": box_player.projected_points,
+        "bye_week": bye_week_for(getattr(box_player, "proTeam", None), bye_weeks or {}),
         "headshot_url": _headshot_url(espn_id),
         "deficit_flag": False,
         "suggested_swap": None,
@@ -146,15 +148,15 @@ def _apply_rumor_signal(player_lines: list, signal_by_espn_id: dict) -> None:
         line["rumor_suggested_action"] = signal["suggested_action"]
 
 
-def _split_starters_bench(lineup: list) -> tuple[list, list]:
+def _split_starters_bench(lineup: list, bye_weeks: dict | None = None) -> tuple[list, list]:
     starters, bench = [], []
     for box_player in lineup:
-        line = _shape_player_line(box_player)
+        line = _shape_player_line(box_player, bye_weeks)
         (bench if box_player.slot_position in BENCH_AND_IR_SLOTS else starters).append(line)
     return starters, bench
 
 
-def _shape_lineup_player_line(player) -> dict:
+def _shape_lineup_player_line(player, bye_weeks: dict | None = None) -> dict:
     espn_id = str(player.playerId)
     return {
         "player_id": espn_id,
@@ -165,6 +167,7 @@ def _shape_lineup_player_line(player) -> dict:
         "slot": player.lineupSlot,
         "pro_team": player.proTeam,
         "injury_status": player.injuryStatus,
+        "bye_week": bye_week_for(player.proTeam, bye_weeks or {}),
         "headshot_url": _headshot_url(espn_id),
         "deficit_flag": False,
         "suggested_swap": None,
@@ -177,10 +180,10 @@ def _shape_lineup_player_line(player) -> dict:
     }
 
 
-def _split_roster_starters_bench(players: list) -> tuple[list, list]:
+def _split_roster_starters_bench(players: list, bye_weeks: dict | None = None) -> tuple[list, list]:
     starters, bench = [], []
     for player in players:
-        line = _shape_lineup_player_line(player)
+        line = _shape_lineup_player_line(player, bye_weeks)
         (bench if player.lineupSlot in BENCH_AND_IR_SLOTS else starters).append(line)
     return starters, bench
 
@@ -230,8 +233,8 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     }
 
 
-def _shape_team_side(team, lineup, score, projected) -> dict:
-    starters, bench = _split_starters_bench(lineup)
+def _shape_team_side(team, lineup, score, projected, bye_weeks: dict | None = None) -> dict:
+    starters, bench = _split_starters_bench(lineup, bye_weeks)
     return {
         "team": {
             "name": team.team_name,
@@ -296,8 +299,9 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
     our_projected = matched_box.home_projected if we_are_home else matched_box.away_projected
     opp_projected = matched_box.away_projected if we_are_home else matched_box.home_projected
 
-    our_side = _shape_team_side(our_team, our_lineup, our_score, our_projected)
-    opponent_side = _shape_team_side(opponent_team, opp_lineup, opp_score, opp_projected)
+    bye_weeks = bye_weeks_or_empty(season)
+    our_side = _shape_team_side(our_team, our_lineup, our_score, our_projected, bye_weeks)
+    opponent_side = _shape_team_side(opponent_team, opp_lineup, opp_score, opp_projected, bye_weeks)
 
     deficits = compute_roster_deficits(season, week)
     deficits_by_position = deficits["teams"].get(our_team_id, {})
@@ -368,7 +372,7 @@ def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     if our_team is None:
         raise ValueError(f"Team {our_team_id} not found in league for season {season}.")
 
-    starters, bench = _split_roster_starters_bench(our_team.roster)
+    starters, bench = _split_roster_starters_bench(our_team.roster, bye_weeks_or_empty(season))
 
     deficits = compute_roster_deficits(season, week)
     deficits_by_position = deficits["teams"].get(our_team_id, {})

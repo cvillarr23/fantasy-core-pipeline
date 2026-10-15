@@ -62,6 +62,7 @@ def test_shape_player_line_maps_box_player_fields():
         "slot": "RB",
         "points": 14.5,
         "projected_points": 11.2,
+        "bye_week": None,
         "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/4240657.png",
         "deficit_flag": False,
         "suggested_swap": None,
@@ -140,6 +141,7 @@ def test_shape_lineup_player_line_maps_roster_player_fields():
         "slot": "BE",
         "pro_team": "DET",
         "injury_status": "ACTIVE",
+        "bye_week": None,
         "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/5000001.png",
         "deficit_flag": False,
         "suggested_swap": None,
@@ -482,3 +484,8 @@ def test_get_current_team_roster_without_synced_settings_has_no_capacity_or_ir_h
 
     assert result["starters"][0]["ir_suggestion"] is None
     assert result["lineup_slot_counts"] is None
+
+def test_lineup_line_carries_the_players_nfl_bye_week():
+    line = matchup_service._shape_lineup_player_line(_make_roster_player(), {"DET": 8})
+
+    assert line["bye_week"] == 8

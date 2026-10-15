@@ -101,6 +101,18 @@ class RosterImpact(BaseModel):
     counterparty: TeamRosterImpact
 
 
+class TeamByeCoverage(BaseModel):
+    crunch_weeks_before: list[int]
+    crunch_weeks_after: list[int]
+    fixed: list[int]
+    created: list[int]
+
+
+class ByeCoverage(BaseModel):
+    us: TeamByeCoverage
+    counterparty: TeamByeCoverage
+
+
 class ScheduleWeek(BaseModel):
     week: int
     matchup_period: int | None
@@ -148,6 +160,7 @@ class TradeScore(BaseModel):
     horizon: ScoreHorizon
     weights: ScoreWeights
     roster_impact: RosterImpact
+    bye_coverage: ByeCoverage
     schedule: ScheduleTerms
     score: ScoreTerms
     coverage: ScoreCoverage

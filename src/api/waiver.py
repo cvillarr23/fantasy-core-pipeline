@@ -26,6 +26,7 @@ class FreeAgentPlayer(BaseModel):
     injury_status: Optional[str] = None
     projected_points: Optional[float] = None
     vorp_score: Optional[float] = None
+    bye_week: Optional[int] = None
 
 
 class FreeAgentEntry(FreeAgentPlayer):
@@ -68,7 +69,21 @@ class WaiverPlayerSummary(BaseModel):
     name: str
     pro_team: str
     injury_status: Optional[str] = None
+    # Per-week VORP averaged over horizon_weeks (a bye week counts as replacement level).
     net_vorp: float
+    bye_week: Optional[int] = None
+
+
+class WaiverLineupGain(BaseModel):
+    week: int
+    # Change to our best starting lineup's VORP that week; None when it can't be scored.
+    delta: Optional[float] = None
+
+
+class WaiverByeFill(BaseModel):
+    # The bye-crunch week this move patches, and how much it adds to that week's lineup.
+    week: int
+    lineup_gain: float
 
 
 class WaiverRecommendation(BaseModel):
@@ -80,6 +95,10 @@ class WaiverRecommendation(BaseModel):
     free_agent: WaiverPlayerSummary
     bench_player: Optional[WaiverPlayerSummary] = None
     ir_player: Optional[WaiverPlayerSummary] = None
+    weekly_lineup_gains: Optional[List[WaiverLineupGain]] = None
+    horizon_lineup_gain: Optional[float] = None
+    # Set on a bye fill-in: a recommend-only move the live waiver cron never claims.
+    bye_fill: Optional[WaiverByeFill] = None
     rumor_sentiment: Optional[str] = None
     rumor_confidence: Optional[float] = None
     rumor_suggested_action: Optional[str] = None
@@ -102,12 +121,16 @@ class WaiverRecommendationsResponse(BaseModel):
     # "target_week", or "rolling_prior_weeks" before the week's projections land (#185).
     source_mode: Optional[str] = None
     source_weeks: Optional[List[int]] = None
+    # Weeks every vorp value averages over; [week] when only one week is valued.
+    horizon_weeks: Optional[List[int]] = None
+    # Weeks where NFL byes leave our best lineup short (an empty or below-replacement seat).
+    bye_crunch_weeks: List[int] = []
 
 
 @waiver_router.get("/recommendations", response_model=WaiverRecommendationsResponse)
-def get_waiver_recommendations(season: int, week: int):
+def get_waiver_recommendations(season: int, week: int, horizon: int = Query(4, ge=1, le=18)):
     try:
-        return compute_waiver_recommendations(season, week)
+        return compute_waiver_recommendations(season, week, horizon)
     except WaiverInputsUnavailableError as e:
         raise HTTPException(status_code=503, detail=f"Waiver recommendations unavailable: {e}")
     except Exception as e:

@@ -85,3 +85,56 @@ def test_fetch_projections_aggregates_rows_across_positions():
 
     assert len(rows) == len(sp.SKILL_POSITIONS)
     assert mock_get.call_count == len(sp.SKILL_POSITIONS)
+
+
+def _bye_row(player_id="5970"):
+    # Sleeper's shape for a player whose team is on bye: a team, no opponent or game,
+    # and no scoring stats at all.
+    return {"player_id": player_id, "season": "2026", "week": 7, "team": "BUF",
+            "opponent": None, "game_id": None, "stats": {"adp_dd_ppr": 1000.0}}
+
+
+def test_build_projection_frame_skips_bye_week_players():
+    """A bye is no row, never a 0.0 one: lineup, waiver and trade code read a missing
+    row as "on bye", while a 0.0 row looks like a startable player with negative VORP."""
+    frame = sp.build_projection_frame([_proj_row(player_id="4046"), _bye_row()])
+
+    assert frame["player_id"].to_list() == ["4046"]
+
+
+def test_build_projection_frame_keeps_teamless_players_without_opponent():
+    """No team (a free agent in Sleeper's data) isn't a bye; keep the existing 0.0 row."""
+    row = {**_bye_row(player_id="999"), "team": None}
+
+    frame = sp.build_projection_frame([row])
+
+    assert frame["player_id"].to_list() == ["999"]
+
+
+def test_bye_week_player_ids_names_only_players_on_a_team_with_no_game():
+    raw = [_proj_row(player_id="4046"), _bye_row(player_id="5970"),
+           {**_bye_row(player_id="999"), "team": None}]
+
+    assert sp.bye_week_player_ids(raw) == {"5970"}
+
+
+def test_delete_bye_week_projections_only_touches_unscored_rows_for_that_week():
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_cursor.rowcount = 1
+
+    deleted = sp.delete_bye_week_projections(mock_conn, 2026, 7, {"5970"})
+
+    assert deleted == 1
+    query, params = mock_cursor.execute.call_args.args
+    assert "DELETE FROM weekly_stats" in query
+    assert "actual_points_source IS NULL" in query
+    assert params == (["5970"], 2026, 7)
+
+
+def test_delete_bye_week_projections_skips_the_query_with_no_byes():
+    mock_conn = MagicMock()
+
+    assert sp.delete_bye_week_projections(mock_conn, 2026, 7, set()) == 0
+    mock_conn.cursor.assert_not_called()

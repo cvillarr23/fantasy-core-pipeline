@@ -18,6 +18,10 @@ weekly_stats.vorp_score; bench and IR are worth nothing). ΔL is after minus bef
   standings indirectly, and more so ahead of their tougher matchups.
 - final_score = G* + C*.
 
+bye_coverage lists the bye-crunch weeks (src/optimization/bye_outlook) each side has
+before and after, so a proposal can say which bye weeks it fixes. It is evidence only;
+the lineup terms above already count every bye week.
+
 Nothing is filled in. A week lacking a traded player's metrics, mapping or a fillable
 lineup is unscored rather than counted as zero, and unknown opponent strength or pairing
 withholds the weighted terms instead of treating that opponent as average. The raw
@@ -27,14 +31,9 @@ single-week VORP totals come from trade_service.evaluate_trade unchanged.
 import logging
 import re
 
-from src.ingestion.metrics_extractor import normalize_team
-from src.optimization.lineup_solver import (
-    BENCH_AND_IR_SLOT_NAMES,
-    FLEX_SLOT_ELIGIBLE_POSITIONS,
-    build_and_solve_lineup,
-    hold_slots_without_metrics,
-    load_teams_playing,
-)
+from src.optimization.bye_outlook import build_bye_outlook
+from src.optimization.lineup_solver import load_teams_playing
+from src.optimization.roster_move_scoring import compare_week
 from src.services.trade_context_service import get_league_trade_context
 from src.services.trade_service import evaluate_trade
 
@@ -44,10 +43,6 @@ SCORING_VERSION = "trade-score-v1"
 STRENGTH_WEIGHT = 0.25
 Z_CLAMP = 2.0
 INDIRECT_FACTOR = 0.25
-OUT_STATUSES = {"OUT", "INJURY_RESERVE"}
-SUPPORTED_STARTER_SLOTS = {"QB", "RB", "WR", "TE", "K", "D/ST", *FLEX_SLOT_ELIGIBLE_POSITIONS}
-# ESPN's pro-team codes that differ from the nflverse schedule's.
-ESPN_TO_NFLVERSE_TEAM = {"WSH": "WAS"}
 
 _ESPN_PLAYER_ID = re.compile(r"-?[1-9]\d*")
 _ESPN_TEAM_ID = re.compile(r"[1-9]\d*")
@@ -109,120 +104,12 @@ def _multiplier(z):
     return 1 + STRENGTH_WEIGHT * max(-Z_CLAMP, min(Z_CLAMP, z))
 
 
-def _exclusion(player, week, as_of_week, playing):
-    """Why a player can't be in the lineup pool this week, or None if they can."""
-    if week == as_of_week and (
-        player.get("injury_status") in OUT_STATUSES or player.get("slot") == "IR"
-    ):
-        return "out"
-    if player.get("player_id") is None:
-        return "unmapped"
-    if player.get("position") is None:
-        return "unknown_position"
-    vorp = (player["metrics"].get(str(week)) or {}).get("vorp_score")
-    if vorp is not None:
-        return None
-    nfl_team = player.get("nfl_team")
-    nfl_team = normalize_team(ESPN_TO_NFLVERSE_TEAM.get(nfl_team, nfl_team))
-    if playing is not None and nfl_team is not None and nfl_team not in playing:
-        return "nfl_bye"
-    return "no_metrics"
-
-
-def _pool(roster, week, as_of_week, playing):
-    pool, excluded = [], {}
-    for player in roster:
-        reason = _exclusion(player, week, as_of_week, playing)
-        if reason:
-            excluded[player["espn_id"]] = reason
-            continue
-        pool.append(
-            {
-                "player_id": player["player_id"],
-                "espn_id": player["espn_id"],
-                "name": player.get("name"),
-                "position": player["position"],
-                "vorp_score": float(player["metrics"][str(week)]["vorp_score"]),
-            }
-        )
-    return pool, excluded
-
-
-def _solve(pool, slot_counts):
-    """Optimal starter VORP and starters, or None when the starter slots can't be filled."""
-    demand = sum(
-        int(count) for slot, count in slot_counts.items()
-        if slot not in BENCH_AND_IR_SLOT_NAMES and int(count) > 0
-    )
-    starters = build_and_solve_lineup(pool, lineup_slot_counts=slot_counts) if demand else []
-    if len(starters) != demand:
-        return None
-    by_id = {player["player_id"]: player for player in pool}
-    shaped = sorted(
-        (
-            {
-                "espn_id": by_id[s["player_id"]]["espn_id"],
-                "player_id": s["player_id"],
-                "name": s["name"],
-                "position": s["position"],
-                "vorp_score": s["vorp_score"],
-            }
-            for s in starters
-        ),
-        key=lambda starter: starter["espn_id"],
-    )
-    return sum(s["vorp_score"] for s in shaped), shaped
-
-
 def _team_week(before_roster, after_roster, traded_ids, week, context, playing):
     """One team's before/after lineup for one week, or (None, reasons) if unscorable."""
-    as_of_week = context["as_of_week"]
-    before_pool, before_excluded = _pool(before_roster, week, as_of_week, playing)
-    after_pool, after_excluded = _pool(after_roster, week, as_of_week, playing)
-    excluded = {**before_excluded, **after_excluded}
-    reasons = set()
-    for espn_id in traded_ids:
-        reason = excluded.get(espn_id)
-        if reason == "unmapped":
-            reasons.add("unmapped_traded_player")
-        elif reason == "unknown_position":
-            reasons.add("unknown_traded_player_position")
-        elif reason == "no_metrics":
-            reasons.add("schedule_unavailable" if playing is None else "missing_traded_player_metrics")
-    if not before_pool and not after_pool:
-        # Nobody has a row for this week (typically not refreshed yet); say so rather than
-        # blaming roster construction, even when the traded players happen to be on bye.
-        reasons.add("no_week_metrics")
-    slot_counts = context["lineup_slot_counts"]
-    if any(
-        slot not in BENCH_AND_IR_SLOT_NAMES and int(count) > 0 and slot not in SUPPORTED_STARTER_SLOTS
-        for slot, count in slot_counts.items()
-    ):
-        reasons.add("unsupported_lineup_slot")
-    if reasons:
-        return None, reasons
-    # A K/D-ST slot that can't be filled on either side is held on both, so the delta
-    # never credits a trade with filling a slot that was only empty for want of data.
-    _, held_before = hold_slots_without_metrics(slot_counts, before_pool)
-    _, held_after = hold_slots_without_metrics(slot_counts, after_pool)
-    held = sorted(set(held_before) | set(held_after))
-    solve_counts = {slot: count for slot, count in slot_counts.items() if slot not in held}
-    before, after = _solve(before_pool, solve_counts), _solve(after_pool, solve_counts)
-    if before is None or after is None:
-        return None, {"lineup_unfillable"}
-    return {
-        "week": week,
-        "before": before[0],
-        "after": after[0],
-        "delta": after[0] - before[0],
-        "starters_before": before[1],
-        "starters_after": after[1],
-        "held_slots": held,
-        "excluded_players": [
-            {"espn_id": espn_id, "reason": reason}
-            for espn_id, reason in sorted(excluded.items())
-        ],
-    }, set()
+    return compare_week(
+        before_roster, after_roster, traded_ids, week, context["as_of_week"],
+        context["lineup_slot_counts"], playing,
+    )
 
 
 def _roster_size(roster):
@@ -362,6 +249,21 @@ def shape_trade_score(
             "weeks": lineup_weeks[side],
         }
 
+    def bye_coverage(side):
+        before_roster, after_roster = rosters[side]
+        before, after = (
+            set(build_bye_outlook(
+                roster, weeks, context["as_of_week"], slot_counts, teams_playing_by_week,
+            )["crunch_weeks"])
+            for roster in (before_roster, after_roster)
+        )
+        return {
+            "crunch_weeks_before": sorted(before),
+            "crunch_weeks_after": sorted(after),
+            "fixed": sorted(before - after),
+            "created": sorted(after - before),
+        }
+
     unmapped = sorted(p["espn_id"] for p in send + receive if p.get("player_id") is None)
     teams = context["teams"]
     return {
@@ -389,6 +291,9 @@ def shape_trade_score(
             "indirect_factor": INDIRECT_FACTOR,
         },
         "roster_impact": {"us": impact("us"), "counterparty": impact("counterparty")},
+        # Evidence for proposals and pitches, not a score term: final_score already counts
+        # every bye week through the per-week lineups.
+        "bye_coverage": {"us": bye_coverage("us"), "counterparty": bye_coverage("counterparty")},
         "schedule": {"weeks": schedule},
         "score": {
             "our_lineup_gain": gain,

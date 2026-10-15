@@ -10,6 +10,8 @@ from statistics import mean, pstdev
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 
 from src.database import get_db_cursor
+from src.nfl_byes import bye_weeks_or_empty
+from src.optimization.bye_outlook import attach_bye_outlooks
 from src.espn_positions import DEFAULT_POSITIONS
 from src.ingestion.sync_league import (
     _extract_espn_player_id,
@@ -429,7 +431,7 @@ def get_league_trade_context(
                         }
                         for player_id, target_week, vorp, projected in cursor.fetchall()
                     }
-        return shape_trade_context(
+        context = shape_trade_context(
             raw,
             identities,
             metrics,
@@ -440,5 +442,8 @@ def get_league_trade_context(
             fetched_at,
             stored_events=load_stored_events(league_id, season),
         )
+        # Both teams' NFL byes and bye-crunch weeks, so trade proposals and negotiations
+        # can target a partner whose byes complement ours.
+        return attach_bye_outlooks(context, bye_weeks_or_empty(season))
 
     return cached(["trade-context", league_id, season, week, horizon], 60, load)

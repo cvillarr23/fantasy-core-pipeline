@@ -161,22 +161,20 @@ def test_run_weekly_waivers_live_wires_decision_logic_to_publish():
     resolved_target = {"player_id": "e-4046", "drop_player_id": "e-9999", "name": "Some Back", "team": "KC"}
 
     with patch("src.optimization.waiver_evaluator.get_db_connection") as mock_get_conn, \
-         patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position") as mock_bench, \
-         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position") as mock_fa, \
+         patch("src.optimization.waiver_evaluator._horizon_pools") as mock_pools, \
          patch("src.optimization.waiver_evaluator.waiver_strategy.propose_waiver_moves") as mock_propose, \
          patch("src.optimization.waiver_evaluator.resolve_live_waiver_moves", return_value=[resolved_target]) as mock_resolve, \
          patch("src.optimization.waiver_evaluator.publish_waiver_claim") as mock_publish:
         mock_conn = MagicMock()
         mock_get_conn.return_value.__enter__.return_value = mock_conn
-        mock_bench.return_value = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
-        mock_fa.return_value = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
+        bench = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
+        fa = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
+        mock_pools.return_value = (bench, fa)
         mock_propose.return_value = [{"position": "RB", "drop_player_id": "bench1", "add_player_id": "4046"}]
 
         result = we.run_weekly_waivers_live("7", 2023, 5)
 
-    mock_propose.assert_called_once_with(
-        mock_bench.return_value, mock_fa.return_value, margin=we.waiver_strategy.MARGIN_THRESHOLD,
-    )
+    mock_propose.assert_called_once_with(bench, fa, margin=we.waiver_strategy.MARGIN_THRESHOLD)
     # CORE-17 (#35): resolve_live_waiver_moves needs season/week to fold into
     # decision_inputs - the reasoning bot_decisions records for the eventual claim.
     expected_cursor = mock_conn.cursor.return_value.__enter__.return_value
@@ -194,9 +192,8 @@ import pytest
 
 
 def test_load_live_waiver_inputs_raises_when_no_free_agents_have_target_week_rows():
-    with patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position",
-               return_value={"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}), \
-         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position", return_value={}), \
+    with patch("src.optimization.waiver_evaluator._horizon_pools",
+               return_value=({"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}, {})), \
          pytest.raises(we.InsufficientWaiverInputError) as exc:
         we.load_live_waiver_inputs(MagicMock(), "7", 2026, 5)
     assert "free-agent" in str(exc.value)
@@ -204,9 +201,8 @@ def test_load_live_waiver_inputs_raises_when_no_free_agents_have_target_week_row
 
 
 def test_load_live_waiver_inputs_raises_when_bench_has_no_target_week_rows():
-    with patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position", return_value={}), \
-         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position",
-               return_value={"RB": {"player_id": "4046", "vorp_score": 5.0}}), \
+    with patch("src.optimization.waiver_evaluator._horizon_pools",
+               return_value=({}, {"RB": {"player_id": "4046", "vorp_score": 5.0}})), \
          pytest.raises(we.InsufficientWaiverInputError) as exc:
         we.load_live_waiver_inputs(MagicMock(), "7", 2026, 5)
     assert "bench" in str(exc.value)
@@ -215,9 +211,27 @@ def test_load_live_waiver_inputs_raises_when_bench_has_no_target_week_rows():
 def test_load_live_waiver_inputs_returns_both_pools():
     bench = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
     fa = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
-    with patch("src.optimization.waiver_evaluator.waiver_strategy.load_bench_by_position", return_value=bench), \
-         patch("src.optimization.waiver_evaluator.waiver_strategy.load_best_free_agent_by_position", return_value=fa):
+    with patch("src.optimization.waiver_evaluator._horizon_pools", return_value=(bench, fa)):
         assert we.load_live_waiver_inputs(MagicMock(), "7", 2026, 5) == (bench, fa)
+
+
+def test_live_pools_value_players_over_the_horizon_with_byes_as_replacement_level():
+    cursor = MagicMock()
+    # A bench stud on bye in week 5 and a scrub; the old single-week pool had no row
+    # for the stud (or a 0.0 one that made him the drop).
+    cursor.fetchall.return_value = [
+        ("stud", "e1", "Stud", "RB", "BUF", w, 12.0, True, False, "BE", None, None) for w in (6, 7, 8)
+    ] + [
+        ("scrub", "e2", "Scrub", "RB", "KC", w, 1.0, True, False, "BE", None, None) for w in (5, 6, 7, 8)
+    ] + [
+        ("fa", "e3", "FA", "RB", "KC", w, 5.0, False, None, None, None, None) for w in (5, 6, 7, 8)
+    ]
+    with patch("src.optimization.waiver_evaluator.bye_weeks_or_empty", return_value={"BUF": 5}):
+        bench, fa = we._horizon_pools(cursor, "7", 2026, 5)
+
+    moves = we.waiver_strategy.propose_waiver_moves(bench, fa)
+    assert [m["drop_player_id"] for m in moves] == ["scrub"]
+    assert cursor.execute.call_args.args[1] == ("7", 2026, 5, 8, "7")
 
 
 def test_run_weekly_waivers_live_publishes_nothing_on_insufficient_input():
@@ -755,8 +769,7 @@ def test_weekly_waivers_publishes_add_only_claims_first_without_ir_flag(monkeypa
 def test_live_input_allows_empty_bench_when_roster_has_capacity(monkeypatch):
     monkeypatch.setattr(we.waiver_strategy, "load_open_roster_slots", lambda *args: 1)
     fa = {"WR": {"player_id": "fa", "vorp_score": 5}}
-    with patch.object(we.waiver_strategy, "load_bench_by_position", return_value={}), \
-         patch.object(we.waiver_strategy, "load_best_free_agent_by_position", return_value=fa):
+    with patch.object(we, "_horizon_pools", return_value=({}, fa)):
         assert we.load_live_waiver_inputs(MagicMock(), "8", 2026, 5) == ({}, fa)
 
 
