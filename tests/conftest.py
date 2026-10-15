@@ -141,3 +141,15 @@ def no_live_roster_refresh():
         patch("src.services.waiver_service.rostered_team_for_espn_id", return_value=None),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def no_live_nfl_bye_schedule():
+    """Bye weeks come from nflverse's schedule download; a test must never reach it. Tests
+    that exercise byes patch load_schedule/bye_weeks_or_empty themselves, inside this."""
+    from src import nfl_byes
+
+    nfl_byes.load_bye_weeks.cache_clear()
+    with patch("src.nfl_byes.load_schedule", side_effect=RuntimeError("no live NFL schedule in tests")):
+        yield
+    nfl_byes.load_bye_weeks.cache_clear()

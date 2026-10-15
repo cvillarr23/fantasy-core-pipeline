@@ -209,6 +209,205 @@
         "title": "BacktestResultSummary",
         "type": "object"
       },
+      "ByeCoverage": {
+        "properties": {
+          "counterparty": {
+            "$ref": "#/components/schemas/TeamByeCoverage"
+          },
+          "us": {
+            "$ref": "#/components/schemas/TeamByeCoverage"
+          }
+        },
+        "required": [
+          "us",
+          "counterparty"
+        ],
+        "title": "ByeCoverage",
+        "type": "object"
+      },
+      "ByeOutlook": {
+        "properties": {
+          "crunch_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Crunch Weeks",
+            "type": "array"
+          },
+          "median_lineup_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Lineup Value"
+          },
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/ByeOutlookWeek"
+            },
+            "title": "Weeks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "median_lineup_value",
+          "crunch_weeks",
+          "weeks"
+        ],
+        "title": "ByeOutlook",
+        "type": "object"
+      },
+      "ByeOutlookPlayer": {
+        "properties": {
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "nfl_bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfl Bye Week"
+          },
+          "nfl_team": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfl Team"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          }
+        },
+        "required": [
+          "espn_id",
+          "name",
+          "position",
+          "nfl_team",
+          "nfl_bye_week"
+        ],
+        "title": "ByeOutlookPlayer",
+        "type": "object"
+      },
+      "ByeOutlookWeek": {
+        "properties": {
+          "crunch": {
+            "title": "Crunch",
+            "type": "boolean"
+          },
+          "held_slots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Held Slots",
+            "type": "array"
+          },
+          "on_bye": {
+            "items": {
+              "type": "string"
+            },
+            "title": "On Bye",
+            "type": "array"
+          },
+          "replacement_level_starters": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replacement Level Starters"
+          },
+          "shortfall": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shortfall"
+          },
+          "unfilled_slots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unfilled Slots",
+            "type": "array"
+          },
+          "unknown": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown",
+            "type": "array"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week",
+          "value",
+          "shortfall",
+          "unfilled_slots",
+          "held_slots",
+          "on_bye",
+          "unknown",
+          "replacement_level_starters",
+          "crunch"
+        ],
+        "title": "ByeOutlookWeek",
+        "type": "object"
+      },
       "ChatGrounding": {
         "properties": {
           "free_agents": {
@@ -1116,6 +1315,17 @@
               }
             ]
           },
+          "bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bye Week"
+          },
           "espn_id": {
             "title": "Espn Id",
             "type": "string"
@@ -1193,6 +1403,17 @@
       },
       "FreeAgentPlayer": {
         "properties": {
+          "bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bye Week"
+          },
           "espn_id": {
             "title": "Espn Id",
             "type": "string"
@@ -2486,6 +2707,17 @@
       },
       "LineupPlayerLine": {
         "properties": {
+          "bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bye Week"
+          },
           "deficit_flag": {
             "title": "Deficit Flag",
             "type": "boolean"
@@ -3019,6 +3251,17 @@
       },
       "PlayerLine": {
         "properties": {
+          "bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bye Week"
+          },
           "deficit_flag": {
             "title": "Deficit Flag",
             "type": "boolean"
@@ -4915,6 +5158,127 @@
         "title": "TeamAggregate",
         "type": "object"
       },
+      "TeamByeCoverage": {
+        "properties": {
+          "created": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Created",
+            "type": "array"
+          },
+          "crunch_weeks_after": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Crunch Weeks After",
+            "type": "array"
+          },
+          "crunch_weeks_before": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Crunch Weeks Before",
+            "type": "array"
+          },
+          "fixed": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Fixed",
+            "type": "array"
+          }
+        },
+        "required": [
+          "crunch_weeks_before",
+          "crunch_weeks_after",
+          "fixed",
+          "created"
+        ],
+        "title": "TeamByeCoverage",
+        "type": "object"
+      },
+      "TeamByeOutlook": {
+        "properties": {
+          "crunch_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Crunch Weeks",
+            "type": "array"
+          },
+          "end_week": {
+            "title": "End Week",
+            "type": "integer"
+          },
+          "median_lineup_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Lineup Value"
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/ByeOutlookPlayer"
+            },
+            "title": "Players",
+            "type": "array"
+          },
+          "schedule_known": {
+            "title": "Schedule Known",
+            "type": "boolean"
+          },
+          "season": {
+            "title": "Season",
+            "type": "integer"
+          },
+          "start_week": {
+            "title": "Start Week",
+            "type": "integer"
+          },
+          "team_id": {
+            "title": "Team Id",
+            "type": "string"
+          },
+          "team_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Name"
+          },
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/ByeOutlookWeek"
+            },
+            "title": "Weeks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "team_id",
+          "team_name",
+          "season",
+          "start_week",
+          "end_week",
+          "schedule_known",
+          "median_lineup_value",
+          "crunch_weeks",
+          "weeks",
+          "players"
+        ],
+        "title": "TeamByeOutlook",
+        "type": "object"
+      },
       "TeamInfo": {
         "properties": {
           "logo_url": {
@@ -5352,6 +5716,17 @@
             ],
             "title": "Name"
           },
+          "nfl_bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfl Bye Week"
+          },
           "nfl_team": {
             "anyOf": [
               {
@@ -5413,6 +5788,16 @@
       },
       "TradeContextTeam": {
         "properties": {
+          "bye_outlook": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ByeOutlook"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -5763,6 +6148,9 @@
             "title": "As Of Week",
             "type": "integer"
           },
+          "bye_coverage": {
+            "$ref": "#/components/schemas/ByeCoverage"
+          },
           "counterparty_team": {
             "$ref": "#/components/schemas/ScoreTeam"
           },
@@ -5837,6 +6225,7 @@
           "horizon",
           "weights",
           "roster_impact",
+          "bye_coverage",
           "schedule",
           "score",
           "coverage",
@@ -6210,6 +6599,24 @@
         "title": "VorpStat",
         "type": "object"
       },
+      "WaiverByeFill": {
+        "properties": {
+          "lineup_gain": {
+            "title": "Lineup Gain",
+            "type": "number"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week",
+          "lineup_gain"
+        ],
+        "title": "WaiverByeFill",
+        "type": "object"
+      },
       "WaiverIrMove": {
         "properties": {
           "action": {
@@ -6232,8 +6639,43 @@
         "title": "WaiverIrMove",
         "type": "object"
       },
+      "WaiverLineupGain": {
+        "properties": {
+          "delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week"
+        ],
+        "title": "WaiverLineupGain",
+        "type": "object"
+      },
       "WaiverPlayerSummary": {
         "properties": {
+          "bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bye Week"
+          },
           "espn_id": {
             "anyOf": [
               {
@@ -6289,8 +6731,29 @@
               }
             ]
           },
+          "bye_fill": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaiverByeFill"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "free_agent": {
             "$ref": "#/components/schemas/WaiverPlayerSummary"
+          },
+          "horizon_lineup_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Horizon Lineup Gain"
           },
           "ir_player": {
             "anyOf": [
@@ -6347,6 +6810,20 @@
           "vorp_delta": {
             "title": "Vorp Delta",
             "type": "number"
+          },
+          "weekly_lineup_gains": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/WaiverLineupGain"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekly Lineup Gains"
           }
         },
         "required": [
@@ -6359,6 +6836,28 @@
       },
       "WaiverRecommendationsResponse": {
         "properties": {
+          "bye_crunch_weeks": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Bye Crunch Weeks",
+            "type": "array"
+          },
+          "horizon_weeks": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Horizon Weeks"
+          },
           "ir_moves": {
             "default": [],
             "items": {
@@ -8142,6 +8641,105 @@
         "summary": "Get Player Summary Endpoint"
       }
     },
+    "/v1/roster/bye-outlook": {
+      "get": {
+        "description": "Which upcoming weeks NFL byes leave the lineup short. Defaults to our own league\nand team.",
+        "operationId": "get_roster_bye_outlook_v1_roster_bye_outlook_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "maximum": 2100,
+              "minimum": 2000,
+              "title": "Season",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "week",
+            "required": true,
+            "schema": {
+              "maximum": 18,
+              "minimum": 1,
+              "title": "Week",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "horizon",
+            "required": false,
+            "schema": {
+              "default": 4,
+              "maximum": 18,
+              "minimum": 1,
+              "title": "Horizon",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "league_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[1-9]\\d*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "League Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "team_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[1-9]\\d*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Team Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamByeOutlook"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Roster Bye Outlook"
+      }
+    },
     "/v1/roster/deficits": {
       "get": {
         "operationId": "get_roster_deficits_v1_roster_deficits_get",
@@ -9491,6 +10089,18 @@
             "required": true,
             "schema": {
               "title": "Week",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "horizon",
+            "required": false,
+            "schema": {
+              "default": 4,
+              "maximum": 18,
+              "minimum": 1,
+              "title": "Horizon",
               "type": "integer"
             }
           }

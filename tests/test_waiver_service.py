@@ -57,7 +57,7 @@ def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
     )
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
-        result = waiver_service.compute_waiver_recommendations(season=2026, week=3)
+        result = waiver_service.compute_waiver_recommendations(season=2026, week=3, horizon=1)
 
     assert result["season"] == 2026
     assert result["week"] == 3
@@ -70,6 +70,7 @@ def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
         "pro_team": "DAL",
         "injury_status": None,
         "net_vorp": 9.0,
+        "bye_week": None,
     }
     assert result["recommendations"][1]["bench_player"]["injury_status"] == "Questionable"
     assert result["recommendations"][0]["rumor_sentiment"] is None
@@ -92,7 +93,7 @@ def test_compute_waiver_recommendations_empty_when_no_moves(monkeypatch):
     )
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
-        result = waiver_service.compute_waiver_recommendations(season=2026, week=3)
+        result = waiver_service.compute_waiver_recommendations(season=2026, week=3, horizon=1)
 
     assert result["recommendations"] == []
 
@@ -119,7 +120,7 @@ def test_compute_waiver_recommendations_uses_display_margin_not_live_threshold(m
     monkeypatch.setattr(waiver_service.waiver_strategy, "propose_waiver_moves", _capture_margin)
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
-        waiver_service.compute_waiver_recommendations(season=2026, week=3)
+        waiver_service.compute_waiver_recommendations(season=2026, week=3, horizon=1)
 
     assert captured_margin["value"] == 0.0
 
@@ -165,7 +166,7 @@ def _run_with_empty_target_week(monkeypatch, fallback_rows, week=4, teams_playin
     )
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), schedule:
         try:
-            result = waiver_service.compute_waiver_recommendations(season=2026, week=week)
+            result = waiver_service.compute_waiver_recommendations(season=2026, week=week, horizon=1)
         except waiver_service.WaiverInputsUnavailableError as exc:
             result = exc
     return result, captured, cursor
@@ -182,7 +183,7 @@ def test_target_week_rows_are_used_without_fallback(monkeypatch):
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch("src.services.waiver_service.load_teams_playing") as mock_schedule:
-        result = waiver_service.compute_waiver_recommendations(season=2026, week=4)
+        result = waiver_service.compute_waiver_recommendations(season=2026, week=4, horizon=1)
 
     assert result["source_mode"] == "target_week"
     assert result["source_weeks"] == [4]
@@ -272,7 +273,7 @@ def _run_ir_case(monkeypatch, bench, free_agents, open_ir_slots, display_rows):
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch("src.services.waiver_service.load_open_ir_slots", return_value=open_ir_slots) as mock_slots:
-        result = waiver_service.compute_waiver_recommendations(season=2026, week=5)
+        result = waiver_service.compute_waiver_recommendations(season=2026, week=5, horizon=1)
     return result, mock_slots
 
 
@@ -364,7 +365,7 @@ def test_open_slot_recommends_add_without_a_bench(monkeypatch, fallback):
     with patch.object(waiver_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch.object(waiver_service, "load_open_ir_slots", return_value=0), \
          patch.object(waiver_service, "load_teams_playing", return_value={"SEA"}):
-        result = waiver_service.compute_waiver_recommendations(2026, 4)
+        result = waiver_service.compute_waiver_recommendations(2026, 4, horizon=1)
     assert result["open_roster_slots"] == 2
     assert result["source_mode"] == ("rolling_prior_weeks" if fallback else "target_week")
     assert [r["kind"] for r in result["recommendations"]] == ["add", "add"]
@@ -387,7 +388,7 @@ def test_add_recommendations_precede_larger_swap_gains(monkeypatch):
         {"player_id": "fa2", "position": "WR", "vorp_score": 7}])
     with patch.object(waiver_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch.object(waiver_service, "load_open_ir_slots", return_value=0):
-        result = waiver_service.compute_waiver_recommendations(2026, 4)
+        result = waiver_service.compute_waiver_recommendations(2026, 4, horizon=1)
     assert [(r["kind"], r["vorp_delta"]) for r in result["recommendations"]] == [("add", 8), ("swap", 17)]
 
 
@@ -415,8 +416,82 @@ def test_negative_vorp_open_slot_recommends_healthy_skill_add(monkeypatch, fallb
     with patch.object(waiver_service, "get_db_cursor", lambda: _fake_db_cursor(cursor)), \
          patch.object(waiver_service, "load_open_ir_slots", return_value=0), \
          patch.object(waiver_service, "load_teams_playing", return_value={"KC"}):
-        result = waiver_service.compute_waiver_recommendations(2026, 6)
+        result = waiver_service.compute_waiver_recommendations(2026, 6, horizon=1)
     assert result["open_roster_slots"] == 1
     assert [(r["kind"], r["position"], r["free_agent"]["name"]) for r in result["recommendations"]] == [
         ("add", "WR", "Xavier Worthy")]
     assert result["recommendations"][0]["bench_player"] is None
+
+
+def _horizon_rows():
+    """(player_id, espn_id, name, position, team, week, vorp, ours, is_starter, slot,
+    roster_injury, player_injury) for weeks 7-10. Our two starting RBs share BUF's week-8
+    bye; a stud WR on our bench is on bye *this* week (DAL, week 7)."""
+    def rows(pid, pos, team, by_week, ours=False, starter=False, slot="BE"):
+        return [(pid, f"e{pid}", pid, pos, team, w, v, ours, starter if ours else None,
+                 slot if ours else None, None, None) for w, v in by_week.items()]
+    every = lambda v: {w: v for w in (7, 8, 9, 10)}  # noqa: E731
+    return (
+        rows("qb", "QB", "KC", every(6.0), ours=True, starter=True, slot="QB")
+        + rows("rb1", "RB", "BUF", {7: 10.0, 9: 10.0, 10: 10.0}, ours=True, starter=True, slot="RB")
+        + rows("rb2", "RB", "BUF", {7: 8.0, 9: 8.0, 10: 8.0}, ours=True, starter=True, slot="RB")
+        + rows("wr", "WR", "KC", every(5.0), ours=True, starter=True, slot="RB/WR/TE")
+        + rows("stud_wr", "WR", "DAL", {8: 12.0, 9: 12.0, 10: 12.0}, ours=True)
+        + rows("scrub_wr", "WR", "KC", every(-1.0), ours=True)
+        + rows("scrub_te", "TE", "KC", every(-0.5), ours=True)
+        + rows("fa_wr", "WR", "KC", every(4.0))
+        + rows("fa_rb", "RB", "KC", every(1.0))
+    )
+
+
+def _run_horizon(monkeypatch, rows):
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *a: 0)
+    monkeypatch.setattr(waiver_service, "load_open_ir_slots", lambda *a: 0)
+    monkeypatch.setattr(
+        waiver_service, "load_lineup_slot_counts",
+        lambda cur, season: {"QB": 1, "RB": 2, "RB/WR/TE": 1, "BE": 5, "IR": 1},
+    )
+    monkeypatch.setattr(waiver_service, "bye_weeks_or_empty", lambda season: {"BUF": 8, "DAL": 7, "KC": 12})
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        rows,
+        [(pid, f"e{pid}", pid, team, None)
+         for pid, team in {r[0]: r[4] for r in rows}.items()],
+    ]
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        return waiver_service.compute_waiver_recommendations(2026, 7)
+
+
+def test_horizon_never_drops_a_stud_for_being_on_bye_this_week(monkeypatch):
+    result = _run_horizon(monkeypatch, _horizon_rows())
+
+    drops = [r["bench_player"]["name"] for r in result["recommendations"] if r["bench_player"]]
+    assert "stud_wr" not in drops
+    swap = next(r for r in result["recommendations"] if r["position"] == "WR" and not r["bye_fill"])
+    assert swap["bench_player"]["name"] == "scrub_wr"
+    assert swap["vorp_delta"] == pytest.approx(5.0)
+    assert result["horizon_weeks"] == [7, 8, 9, 10]
+    assert swap["free_agent"]["bye_week"] == 12
+
+
+def test_horizon_suggests_a_fill_in_for_a_bye_crunch_week(monkeypatch):
+    result = _run_horizon(monkeypatch, _horizon_rows())
+
+    assert result["bye_crunch_weeks"] == [8]
+    fill = next(r for r in result["recommendations"] if r["bye_fill"])
+    assert fill["free_agent"]["name"] == "fa_rb"
+    assert fill["bye_fill"]["week"] == 8
+    assert fill["horizon_lineup_gain"] > 0
+    assert fill["bench_player"]["name"] == "scrub_te"
+    # Fill-ins follow the season-value moves.
+    assert result["recommendations"][-1] is fill
+
+
+def test_horizon_fill_in_never_drops_a_valuable_bench_player(monkeypatch):
+    rows = [r for r in _horizon_rows() if r[0] != "scrub_te"]
+
+    result = _run_horizon(monkeypatch, rows)
+
+    # The only spare scrub is already the WR swap's drop; the stud is never offered up.
+    assert result["bye_crunch_weeks"] == [8]
+    assert not any(r["bye_fill"] for r in result["recommendations"])

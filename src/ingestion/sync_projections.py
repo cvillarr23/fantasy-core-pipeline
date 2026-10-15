@@ -59,12 +59,29 @@ def fetch_projections(season: int, week: int) -> list:
     return rows
 
 
+def _is_bye_row(row: dict) -> bool:
+    """Sleeper lists a player whose team is on bye with his team but no opponent and no
+    scoring stats. A teamless player (no NFL team at all) isn't on a bye."""
+    return bool(row.get("team")) and row.get("opponent") is None
+
+
+def bye_week_player_ids(raw: list) -> set:
+    """Pure. Player ids Sleeper lists as on their team's bye for the fetched week."""
+    return {row.get("player_id") for row in raw if _is_bye_row(row) and row.get("player_id")}
+
+
 def build_projection_frame(raw: list) -> pl.DataFrame:
     """Pure. Shapes the raw Sleeper payload to (player_id, season, week,
-    projected_points), defaulting a missing/null scoring field to 0.0."""
+    projected_points), defaulting a missing/null scoring field to 0.0.
+
+    Bye-week players get no row, never a 0.0 one, matching sync_kicker_dst: lineup,
+    waiver and trade code read a missing row as "on bye", while a 0.0 row looks like a
+    startable player with a negative VORP."""
     schema = {"player_id": pl.Utf8, "season": pl.Int64, "week": pl.Int64, "projected_points": pl.Float64}
     records = []
     for row in raw:
+        if _is_bye_row(row):
+            continue
         stats = row.get("stats") or {}
         records.append({
             "player_id": row.get("player_id"),
@@ -99,6 +116,24 @@ def persist_projections(conn, frame: pl.DataFrame, known_player_ids: set) -> int
     return len(rows)
 
 
+def delete_bye_week_projections(conn, season: int, week: int, player_ids: set) -> int:
+    """Removes the 0.0 rows earlier runs wrote for players on bye in `week`. The refresher
+    re-targets the same weeks daily, so without this a bye player keeps his stale row.
+    Rows with synced actual scores are left alone."""
+    if not player_ids:
+        return 0
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            DELETE FROM weekly_stats
+            WHERE player_id = ANY(%s) AND season = %s AND week = %s
+              AND actual_points_source IS NULL;
+            """,
+            (sorted(player_ids), season, week),
+        )
+        return cursor.rowcount
+
+
 def sync_projections(season: int, week: int) -> int:
     logger.info(f"Syncing Sleeper projections for {season} week {week} (scoring field={SCORING_FIELD})...")
     raw = fetch_projections(season, week)
@@ -110,6 +145,9 @@ def sync_projections(season: int, week: int) -> int:
             cursor.execute("SELECT player_id FROM players;")
             known_player_ids = {row[0] for row in cursor.fetchall()}
         written = persist_projections(conn, frame, known_player_ids)
+        removed = delete_bye_week_projections(conn, season, week, bye_week_player_ids(raw))
+    if removed:
+        logger.info(f"Removed {removed} stale projection row(s) for players on bye in week {week}.")
 
     logger.info(f"Persisted {written} projected_points row(s) for {season} week {week}.")
     return written

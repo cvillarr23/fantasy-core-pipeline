@@ -4,6 +4,7 @@ import os
 
 from src.database import get_db_cursor
 from src.ingestion.metrics_extractor import normalize_team
+from src.nfl_byes import bye_week_for, bye_weeks_or_empty
 from src.ingestion.sync_league import refresh_rosters_if_stale
 from src.optimization.lineup_solver import (
     METRIC_SOURCE,
@@ -62,6 +63,7 @@ def browse_free_agents(
     """
     team_id = os.getenv("ESPN_TEAM_ID")
     refresh_rosters_if_stale(season)
+    bye_weeks = bye_weeks_or_empty(season)
     with get_db_cursor() as cursor:
         source, teams_playing = _load_source(cursor, team_id, season, week)
         cursor.execute(
@@ -118,6 +120,7 @@ def browse_free_agents(
             "injury_status": injury,
             "projected_points": projected,
             "vorp_score": vorp,
+            "bye_week": bye_week_for(team, bye_weeks),
         }
         if on_bench:
             if vorp is not None:

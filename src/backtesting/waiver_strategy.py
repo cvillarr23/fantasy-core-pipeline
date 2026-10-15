@@ -8,10 +8,16 @@ import json
 import logging
 
 from src.ir_eligibility import is_ir_eligible
+from src.nfl_byes import bye_week_for
 
 logger = logging.getLogger("BacktestWaiverStrategy")
 
 MARGIN_THRESHOLD = 3.0
+# Live waivers and the waiver page value players over this many weeks (the refresher
+# keeps projections for the upcoming week and the three after it).
+HORIZON_WEEKS = 4
+LAST_REGULAR_SEASON_WEEK = 18
+_OUT_INJURY_CODES = {"OUT": "OUT", "IR": "INJURY_RESERVE", "INJURY_RESERVE": "INJURY_RESERVE"}
 
 
 def load_bench_by_position(cursor, team_id: str, season: int, week: int) -> dict:
@@ -58,6 +64,114 @@ def load_best_free_agent_by_position(cursor, season: int, week: int) -> dict:
         if current is None or vorp_score > current["vorp_score"]:
             best_by_position[position] = {"player_id": player_id, "vorp_score": vorp_score}
     return best_by_position
+
+
+def horizon_weeks(week: int, horizon: int = HORIZON_WEEKS) -> list:
+    return list(range(week, min(week + horizon - 1, LAST_REGULAR_SEASON_WEEK) + 1))
+
+
+def horizon_mean_vorp(vorp_by_week: dict, weeks: list, bye_week) -> float | None:
+    """A player's average VORP per week over `weeks`. A confirmed bye week counts as 0.0,
+    which is exactly replacement level - what an idle week is worth - so a player on bye
+    now is neither inflated nor sunk by it. A week with no row that isn't his bye is
+    unknown and skipped, never zeroed."""
+    values = []
+    for week in weeks:
+        if vorp_by_week.get(week) is not None:
+            values.append(float(vorp_by_week[week]))
+        elif week == bye_week:
+            values.append(0.0)
+    return sum(values) / len(values) if values else None
+
+
+def build_horizon_pools(rows: list, week: int, weeks: list, bye_weeks: dict) -> dict:
+    """Pure. Horizon-valued waiver pools in the single-week loaders' shapes, so the same
+    decision functions (plan_waiver_moves, plan_add_only_moves) run on them unchanged.
+
+    rows: (player_id, espn_id, name, position, team, week, vorp_score, ours, is_starter,
+    slot_position, roster_injury_status, player_injury_status) for our roster and
+    unrostered players. A player is usable when he has a `week` row, or is on bye in
+    `week` with a row later in the horizon; vorp_score is horizon_mean_vorp.
+
+    Also returns roster/free_agents in roster_move_scoring's entry shape, for scoring a
+    move by the lineups it produces week by week."""
+    players: dict = {}
+    for (player_id, espn_id, name, position, team, row_week, vorp, ours, is_starter,
+         slot_position, roster_injury, player_injury) in rows:
+        entry = players.setdefault(player_id, {
+            "player_id": player_id, "espn_id": espn_id or player_id, "name": name,
+            "position": position, "nfl_team": team, "ours": bool(ours),
+            "is_starter": bool(is_starter), "slot": slot_position,
+            "injury_status": roster_injury if ours else player_injury,
+            "vorp_by_week": {},
+        })
+        if vorp is not None:
+            entry["vorp_by_week"][row_week] = vorp
+
+    bench_by_position: dict = {}
+    free_agents_by_position: dict = {}
+    add_candidates: list = []
+    roster: list = []
+    free_agents: dict = {}
+    value_by_player: dict = {}
+    for player_id, entry in players.items():
+        bye_week = bye_week_for(entry["nfl_team"], bye_weeks)
+        scoring_entry = {
+            "espn_id": entry["espn_id"], "player_id": player_id, "name": entry["name"],
+            "position": entry["position"], "nfl_team": entry["nfl_team"],
+            "slot": entry["slot"], "nfl_bye_week": bye_week,
+            "injury_status": _OUT_INJURY_CODES.get(str(entry["injury_status"] or "").strip().upper()),
+            "metrics": {str(w): {"vorp_score": v} for w, v in entry["vorp_by_week"].items()},
+        }
+        if entry["ours"]:
+            roster.append(scoring_entry)
+        usable = week in entry["vorp_by_week"] or (bye_week == week and entry["vorp_by_week"])
+        value = horizon_mean_vorp(entry["vorp_by_week"], weeks, bye_week) if usable else None
+        if value is None:
+            continue
+        value_by_player[player_id] = value
+        position = entry["position"]
+        if entry["ours"]:
+            if not entry["is_starter"] and entry["slot"] != "IR":
+                bench_by_position.setdefault(position, []).append(
+                    {"player_id": player_id, "vorp_score": value,
+                     "espn_injury_status": entry["injury_status"]}
+                )
+            continue
+        free_agents[player_id] = scoring_entry
+        add_candidates.append({"player_id": player_id, "position": position,
+                               "vorp_score": value, "injury_status": entry["injury_status"]})
+        best = free_agents_by_position.get(position)
+        if best is None or value > best["vorp_score"]:
+            free_agents_by_position[position] = {"player_id": player_id, "vorp_score": value}
+    return {
+        "bench_by_position": bench_by_position,
+        "free_agents_by_position": free_agents_by_position,
+        "add_candidates": add_candidates,
+        "roster": roster,
+        "free_agents": free_agents,
+        "value_by_player": value_by_player,
+    }
+
+
+def load_horizon_waiver_pools(cursor, team_id: str, season: int, week: int,
+                              weeks: list, bye_weeks: dict) -> dict:
+    """build_horizon_pools over our roster's and every unrostered player's weekly_stats
+    rows for `weeks`."""
+    cursor.execute(
+        """
+        SELECT p.player_id, p.espn_id, p.name, p.position, p.team, s.week, s.vorp_score,
+               (r.team_id = %s) AS ours, r.is_starter, r.slot_position,
+               r.espn_injury_status, p.injury_status
+        FROM weekly_stats s
+        JOIN players p ON p.player_id = s.player_id
+        LEFT JOIN league_rosters r ON r.player_id = p.player_id
+        WHERE s.season = %s AND s.week BETWEEN %s AND %s AND s.vorp_score IS NOT NULL
+          AND (r.player_id IS NULL OR r.team_id = %s);
+        """,
+        (str(team_id), season, weeks[0], weeks[-1], str(team_id)),
+    )
+    return build_horizon_pools(cursor.fetchall(), week, weeks, bye_weeks)
 
 
 def load_open_roster_slots(cursor, team_id: str, season: int) -> int:

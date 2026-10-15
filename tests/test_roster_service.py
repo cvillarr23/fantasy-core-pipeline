@@ -106,8 +106,8 @@ def test_get_team_roster_players_splits_starters_and_bench_sorted_by_vorp():
     assert [p["name"] for p in result["starters"]] == ["High Starter", "Low Starter", "Bye Starter"]
     assert [p["name"] for p in result["bench"]] == ["Bench Guy"]
     assert result["starters"][0] == {
-        "player_id": "p2", "name": "High Starter", "position": "RB", "nfl_team": "SF", "slot": "RB",
-        "injury_status": "Questionable", "vorp_score": 8.0, "projected_points": 17.2,
+        "player_id": "p2", "name": "High Starter", "position": "RB", "nfl_team": "SF", "bye_week": None,
+        "slot": "RB", "injury_status": "Questionable", "vorp_score": 8.0, "projected_points": 17.2,
     }
     bye = result["starters"][2]
     assert bye["vorp_score"] is None and bye["projected_points"] is None

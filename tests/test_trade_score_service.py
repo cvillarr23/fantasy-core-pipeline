@@ -540,3 +540,30 @@ def test_raw_vorp_parity_with_real_evaluate_trade(context):
     assert {k: (sorted(v) if isinstance(v, list) else v) for k, v in raw.items()} == {
         k: (sorted(v) if isinstance(v, list) else v) for k, v in direct.items()
     }
+
+
+def test_bye_coverage_reports_crunch_weeks_a_trade_fixes(context):
+    # Both our RBs share a week-6 bye, leaving the RB seat empty; two BUF RBs cover it.
+    for p in context["teams"]["1"]["roster"][1:3]:
+        p["nfl_team"] = "DAL"
+        p["metrics"]["6"]["vorp_score"] = None
+    playing = {5: set(ALL_TEAMS), 6: ALL_TEAMS - {"DAL"}}
+
+    result = score(context, send=("104",), receive=("202", "204"), playing=playing)
+
+    assert result["bye_coverage"]["us"] == {
+        "crunch_weeks_before": [6], "crunch_weeks_after": [], "fixed": [6], "created": [],
+    }
+    assert result["bye_coverage"]["counterparty"]["created"] == []
+    TradeScore.model_validate(result)
+
+
+def test_bye_coverage_reports_a_crunch_a_trade_creates(context):
+    # Trading away our only healthy RB depth leaves week 6's bye uncovered.
+    context["teams"]["1"]["roster"][1]["nfl_team"] = "DAL"
+    context["teams"]["1"]["roster"][1]["metrics"]["6"]["vorp_score"] = None
+    playing = {5: set(ALL_TEAMS), 6: ALL_TEAMS - {"DAL"}}
+
+    result = score(context, send=("103",), receive=("201",), playing=playing)
+
+    assert result["bye_coverage"]["us"]["created"] == [6]

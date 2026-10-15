@@ -34,6 +34,8 @@ class PlayerLine(BaseModel):
     slot: str
     points: Optional[float]
     projected_points: Optional[float]
+    # The player's NFL bye week; None when the schedule couldn't be read.
+    bye_week: Optional[int] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
@@ -120,6 +122,8 @@ class LineupPlayerLine(BaseModel):
     slot: str
     pro_team: str
     injury_status: Optional[str] = None
+    # The player's NFL bye week; None when the schedule couldn't be read.
+    bye_week: Optional[int] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None

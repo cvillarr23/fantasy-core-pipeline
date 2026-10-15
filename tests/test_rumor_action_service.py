@@ -51,14 +51,13 @@ def test_qualifying_boost_waiver_signal_publishes_matching_move():
 
     with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
          patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
-         patch("src.services.rumor_action_service.waiver_strategy.load_bench_by_position") as mock_bench, \
-         patch("src.services.rumor_action_service.waiver_strategy.load_best_free_agent_by_position") as mock_fa, \
+         patch("src.optimization.waiver_evaluator._horizon_pools", return_value=(
+             {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]},
+             {"RB": {"player_id": "4046", "vorp_score": 5.0}},
+         )), \
          patch("src.services.rumor_action_service.waiver_strategy.propose_waiver_moves", return_value=[move]), \
          patch("src.services.rumor_action_service.resolve_live_waiver_moves", return_value=[resolved_target]) as mock_resolve, \
          patch("src.services.rumor_action_service.publish_waiver_claim") as mock_publish:
-        mock_bench.return_value = {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]}
-        mock_fa.return_value = {"RB": {"player_id": "4046", "vorp_score": 5.0}}
-
         result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
 
     mock_resolve.assert_called_once_with(signals_cursor, [move], 2026, 3)
@@ -232,8 +231,7 @@ def test_signal_below_threshold_is_never_published():
 
     with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
          patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
-         patch("src.services.rumor_action_service.waiver_strategy.load_bench_by_position"), \
-         patch("src.services.rumor_action_service.waiver_strategy.load_best_free_agent_by_position"), \
+         patch("src.optimization.waiver_evaluator._horizon_pools", return_value=({}, {})), \
          patch("src.services.rumor_action_service.waiver_strategy.propose_waiver_moves") as mock_propose, \
          patch("src.services.rumor_action_service.publish_waiver_claim") as mock_publish:
         result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)
@@ -251,8 +249,10 @@ def test_qualifying_signal_with_no_matching_proposed_move_still_advances_waterma
 
     with patch("src.services.rumor_action_service._redis_client", return_value=redis_client), \
          patch("src.services.rumor_action_service.get_db_connection", return_value=_db_context(signals_cursor)), \
-         patch("src.services.rumor_action_service.waiver_strategy.load_bench_by_position"), \
-         patch("src.services.rumor_action_service.waiver_strategy.load_best_free_agent_by_position"), \
+         patch("src.optimization.waiver_evaluator._horizon_pools", return_value=(
+             {"RB": [{"player_id": "bench1", "vorp_score": 1.0}]},
+             {"RB": {"player_id": "9999", "vorp_score": 2.0}},
+         )), \
          patch("src.services.rumor_action_service.waiver_strategy.propose_waiver_moves", return_value=[]), \
          patch("src.services.rumor_action_service.publish_waiver_claim") as mock_publish:
         result = ras.evaluate_and_publish_rumor_actions("7", 2026, 3)

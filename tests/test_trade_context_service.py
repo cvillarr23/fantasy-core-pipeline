@@ -487,9 +487,10 @@ def test_context_cache_is_horizon_scoped_and_invalidated_by_verified_moves(
 
 
 def test_populated_context_matches_the_public_response_schema(raw):
+    from src.optimization.bye_outlook import attach_bye_outlooks
     from src.schemas.trade_context import LeagueTradeContext
 
-    result = shape(raw)
+    result = attach_bye_outlooks(shape(raw), {"KC": 9, "BUF": 7})
     assert LeagueTradeContext.model_validate(result).model_dump() == result
 
 

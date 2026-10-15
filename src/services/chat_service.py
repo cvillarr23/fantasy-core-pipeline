@@ -25,6 +25,7 @@ from src.llm_client import complete_with_fallback, parse_priority_chain
 from src.schemas.chat import TradeProposal
 from src.services.roster_service import compute_roster_deficits, get_team_roster_players
 from src.services.free_agent_service import browse_free_agents
+from src.services.roster_outlook_service import get_bye_outlook
 from src.services.trade_service import evaluate_trade
 from src.services.waiver_service import (
     WaiverInputsUnavailableError,
@@ -38,7 +39,12 @@ SYSTEM_PROMPT = (
     "instead of guessing. Answer player-level questions (weakest starters, who to bench, who to "
     "start) from the manager's own roster section, and pickup questions from the free-agent and "
     "waiver-recommendation sections when present; a null vorp_score or projected_points means no "
-    "data for that week (bye or not yet synced), not a zero. You are read-only: never claim to "
+    "data for that week (bye or not yet synced), not a zero. Each player's bye_week is his NFL bye. "
+    "Never recommend dropping, benching for good, or trading away a player just because he is on "
+    "bye: judge every move over the bye outlook's whole horizon, where a bye costs one week, not his "
+    "value. When the bye outlook shows crunch weeks (byes leave a starter seat empty or force a "
+    "below-replacement starter), suggest covering them with the waiver bye_fill moves or a trade "
+    "for a player whose team plays that week, and say which week it covers. You are read-only: never claim to "
     "have made or submitted a trade, waiver claim, or lineup change -- you can only describe and "
     "recommend, not act."
 )
@@ -52,7 +58,9 @@ WAIVER_QUESTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 FREE_AGENTS_PER_POSITION = 5
-FREE_AGENT_FIELDS = ("name", "position", "pro_team", "injury_status", "projected_points", "vorp_score")
+FREE_AGENT_FIELDS = (
+    "name", "position", "pro_team", "bye_week", "injury_status", "projected_points", "vorp_score",
+)
 
 
 def _chat_provider_chain() -> list[tuple[str, str]]:
@@ -87,7 +95,7 @@ def _compact_free_agents(season: int, week: int) -> dict:
     for player in pool["free_agents"]:
         top = by_position.setdefault(player["position"], [])
         if len(top) < FREE_AGENTS_PER_POSITION:
-            top.append({field: _round(player[field]) for field in FREE_AGENT_FIELDS})
+            top.append({field: _round(player.get(field)) for field in FREE_AGENT_FIELDS})
     return {
         "season": season,
         "week": week,
@@ -104,6 +112,7 @@ def _summarize_waiver_player(player: Optional[dict]) -> Optional[dict]:
     return {
         "name": player["name"],
         "pro_team": player["pro_team"],
+        "bye_week": player.get("bye_week"),
         "injury_status": player["injury_status"],
         "net_vorp": _round(player["net_vorp"]),
     }
@@ -124,6 +133,9 @@ def _compact_waiver_recommendations(team_id: str, season: int, week: int) -> dic
         "week": week,
         "source_mode": result.get("source_mode"),
         "source_weeks": result.get("source_weeks"),
+        # vorp values are per-week averages over these weeks (a bye counts as replacement level).
+        "horizon_weeks": result.get("horizon_weeks"),
+        "bye_crunch_weeks": result.get("bye_crunch_weeks", []),
         "open_roster_slots": result["open_roster_slots"],
         "open_ir_slots": result["open_ir_slots"],
         "recommendations": [
@@ -131,6 +143,8 @@ def _compact_waiver_recommendations(team_id: str, season: int, week: int) -> dic
                 "kind": rec["kind"],
                 "position": rec["position"],
                 "vorp_delta": _round(rec["vorp_delta"]),
+                "horizon_lineup_gain": _round(rec.get("horizon_lineup_gain")),
+                "bye_fill": rec.get("bye_fill"),
                 "add": _summarize_waiver_player(rec["free_agent"]),
                 "drop": _summarize_waiver_player(rec["bench_player"]),
                 "move_to_ir": _summarize_waiver_player(rec["ir_player"]),
@@ -144,6 +158,31 @@ def _compact_waiver_recommendations(team_id: str, season: int, week: int) -> dic
     }
 
 
+def _compact_bye_outlook(team_id: str, season: int, week: int) -> dict:
+    """The team's upcoming NFL bye weeks and crunch weeks, by player name. Best-effort:
+    it reads the live ESPN league, so a failure is reported instead of failing chat."""
+    try:
+        outlook = get_bye_outlook(os.getenv("ESPN_LEAGUE_ID") or "", season, week, 4, str(team_id))
+    except Exception as exc:
+        return {"unavailable": str(exc)}
+    names = {p["espn_id"]: p["name"] for p in outlook["players"]}
+    return {
+        "weeks": [outlook["start_week"], outlook["end_week"]],
+        "schedule_known": outlook["schedule_known"],
+        "crunch_weeks": outlook["crunch_weeks"],
+        "by_week": [
+            {
+                "week": w["week"],
+                "on_bye": [names.get(espn_id, espn_id) for espn_id in w["on_bye"]],
+                "empty_starter_slots": w["unfilled_slots"],
+                "below_replacement_starters": w["replacement_level_starters"],
+                "crunch": w["crunch"],
+            }
+            for w in outlook["weeks"]
+        ],
+    }
+
+
 def _build_prompt(
     question: str,
     team_id: str,
@@ -152,6 +191,7 @@ def _build_prompt(
     trade_evaluation: Optional[dict],
     free_agents: Optional[dict] = None,
     waiver_recommendations: Optional[dict] = None,
+    bye_outlook: Optional[dict] = None,
 ) -> str:
     sections = [
         f'You are advising the manager of team_id "{team_id}".',
@@ -160,6 +200,11 @@ def _build_prompt(
         f"for this week):\n{json.dumps(team_roster)}",
         f"League roster/VORP context (all teams):\n{json.dumps(roster_deficits)}",
     ]
+    if bye_outlook is not None:
+        sections.append(
+            "The manager's NFL bye outlook for the next few weeks (who is on bye each week, empty "
+            f"or below-replacement starter seats, and crunch weeks to cover):\n{json.dumps(bye_outlook)}"
+        )
     if trade_evaluation is not None:
         sections.append(f"Proposed trade evaluation:\n{json.dumps(trade_evaluation)}")
     if free_agents is not None:
@@ -204,6 +249,7 @@ def answer_chat_query(
         # the prompt for little benefit; league-wide comparisons are covered by the deficits.
         team_roster = get_team_roster_players(team_id, season, week)
         roster_deficits = compute_roster_deficits(season, week)
+        bye_outlook = _compact_bye_outlook(team_id, season, week)
 
         trade_evaluation = None
         if trade_proposal is not None:
@@ -226,6 +272,7 @@ def answer_chat_query(
         grounding = {
             "team_roster": team_roster,
             "roster_deficits": roster_deficits,
+            "bye_outlook": bye_outlook,
             "trade_evaluation": trade_evaluation,
             "free_agents": free_agents,
             "waiver_recommendations": waiver_recommendations,
@@ -233,7 +280,7 @@ def answer_chat_query(
         observe("tool_result", grounding)
         prompt = _build_prompt(
             question, team_id, team_roster, roster_deficits, trade_evaluation,
-            free_agents, waiver_recommendations,
+            free_agents, waiver_recommendations, bye_outlook,
         )
         if history:
             prompt += (

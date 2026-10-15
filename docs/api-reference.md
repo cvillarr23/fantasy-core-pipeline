@@ -101,6 +101,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 
 | Method | Path | Purpose | `X-API-Key` | Publishes to |
 |---|---|---|---|---|
+| `GET` | `/v1/roster/bye-outlook` | Show which upcoming weeks NFL byes leave the lineup short. | No |  |
 | `GET` | `/v1/roster/deficits` | Show per-position roster deficits. | No |  |
 | `POST` | `/v1/roster/move-preview` | Preview the effect of a roster move. | No |  |
 | `GET` | `/v1/waiver/free-agents` | Browse all claimable free agents with metrics and same-position swap values. | No |  |

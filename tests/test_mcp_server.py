@@ -209,3 +209,11 @@ def test_mcp_app_mounted_v1_routes_resolve_and_authenticated_handshake_succeeds(
     assert auth_response.status_code == 200
     assert '"serverInfo"' in auth_response.text
     assert "fantasy-core-mcp" in auth_response.text
+
+
+def test_get_team_bye_outlook_delegates_to_roster_outlook_service():
+    with patch("src.api.mcp_server.get_bye_outlook", return_value={"crunch_weeks": [8]}) as mock_outlook:
+        result = mcp_server.get_team_bye_outlook("123", 2026, 7, "4")
+
+    mock_outlook.assert_called_once_with("123", 2026, 7, 4, "4")
+    assert result == {"crunch_weeks": [8]}
