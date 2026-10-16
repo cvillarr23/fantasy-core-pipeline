@@ -30,6 +30,7 @@ from espn_api.football.constant import POSITION_MAP
 
 from src.database import get_db_connection
 from src.ingestion.sync_league import build_league
+from src.nfl_byes import bye_week_for, bye_weeks_or_empty
 from src.services import run_log_service
 
 logging.basicConfig(level=logging.INFO)
@@ -144,7 +145,7 @@ def persist_espn_ids(conn, matches: list) -> int:
     return len(matches)
 
 
-def persist_projections(conn, matches: list, season: int, week: int) -> int:
+def persist_projections(conn, matches: list, season: int, week: int, bye_weeks: dict | None = None) -> int:
     """Writes weekly_stats.projected_points (and team) for resolved K/D-ST rows, sourced
     from ESPN's own per-player projection. Same upsert shape as
     sync_projections.persist_projections, plus `team`: draft_matrix.load_undrafted_pool
@@ -158,13 +159,17 @@ def persist_projections(conn, matches: list, season: int, week: int) -> int:
     gets no row: lineup_solver's pregame pool reads "no target-week row" as "on bye", so a
     0.0 row would make it look startable. The refresher re-targets the same week daily, so
     a row an earlier run wrote for such a player is deleted. Only this module writes K/D-ST
-    weekly_stats rows (metrics_extractor is QB/RB/WR/TE only), so nothing else is lost."""
+    weekly_stats rows (metrics_extractor is QB/RB/WR/TE only), so nothing else is lost.
+
+    ESPN projects some bye-week players at 0 instead of leaving the week out, so a player
+    whose team is on bye in `week` per `bye_weeks` (the NFL schedule) counts as having no
+    projection too."""
     if not matches:
         return 0
     rows, without_projection = [], []
     for player_id, espn_player in matches:
         points = _projected_points(espn_player, week)
-        if points is None:
+        if points is None or bye_week_for(espn_player.proTeam, bye_weeks or {}) == week:
             without_projection.append(player_id)
         else:
             rows.append((player_id, season, week, points, _normalize_team(espn_player.proTeam)))
@@ -205,7 +210,7 @@ def sync_kicker_dst(season: int, week: int) -> dict:
         all_matches = dst_matches + k_matches
 
         espn_id_written = persist_espn_ids(conn, all_matches)
-        projections_written = persist_projections(conn, all_matches, season, week)
+        projections_written = persist_projections(conn, all_matches, season, week, bye_weeks_or_empty(season))
 
     if dst_unmatched:
         logger.warning(f"Could not resolve an ESPN D/ST for team(s): {sorted(dst_unmatched)}")

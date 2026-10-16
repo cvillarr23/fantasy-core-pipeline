@@ -116,6 +116,9 @@ def build_horizon_pools(rows: list, week: int, weeks: list, bye_weeks: dict) -> 
     value_by_player: dict = {}
     for player_id, entry in players.items():
         bye_week = bye_week_for(entry["nfl_team"], bye_weeks)
+        # The schedule wins over a row for his bye week (ESPN's 0-point kicker
+        # projection, or a Sleeper row under a stale team).
+        entry["vorp_by_week"].pop(bye_week, None)
         scoring_entry = {
             "espn_id": entry["espn_id"], "player_id": player_id, "name": entry["name"],
             "position": entry["position"], "nfl_team": entry["nfl_team"],

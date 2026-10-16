@@ -114,4 +114,52 @@ def test_lineup_gains_by_week_reports_unscorable_weeks_as_none():
 
     assert [g["week"] for g in gains] == WEEKS
     assert gains[-1]["delta"] is None
-    assert gains[1]["delta"] == pytest.approx(1.5)
+    # Week 8: both RBs are on bye, so the stream fills an empty RB seat. An empty seat
+    # scores zero points, i.e. minus the RB replacement baseline, not replacement level.
+    assert gains[1]["delta"] == pytest.approx(1.5 + bf.EMPTY_SEAT_VORP["RB"] * -1)
+
+
+def test_a_below_replacement_free_agent_still_fills_an_empty_seat():
+    """Any healthy free agent beats a starter seat left empty by byes."""
+    fa = entry("stream", "RB", -2.0, team="DAL")
+
+    moves, _ = bf.plan_bye_fill_moves(
+        ROSTER, {"stream": fa}, value(ROSTER, [fa]), 7, WEEKS, SLOTS, playing({8: {"BUF"}}),
+        open_roster_slots=1,
+    )
+
+    [move] = moves
+    assert move["add_player_id"] == "stream"
+    assert move["bye_fill"]["lineup_gain"] > 0
+
+
+def test_lists_several_fill_in_options_for_a_crunch_week_best_first():
+    fas = {pid: entry(pid, "RB", v, team="DAL") for pid, v in (("a", 1.0), ("b", 3.0), ("c", 2.0), ("d", 0.5))}
+
+    moves, _ = bf.plan_bye_fill_moves(
+        ROSTER, fas, value(ROSTER, list(fas.values())), 7, WEEKS, SLOTS, playing({8: {"BUF"}}),
+        open_roster_slots=1,
+    )
+
+    assert [m["add_player_id"] for m in moves] == ["b", "c", "a"]
+    assert {m["bye_fill"]["week"] for m in moves} == {8}
+
+
+def test_kicker_on_bye_gets_a_fill_in_even_with_a_stale_zero_projection():
+    slots = {"QB": 1, "K": 1, "BE": 3}
+    roster = [
+        entry("qb", "QB", 6.0, starter=True, slot="QB"),
+        # ESPN's 0-point bye projection left a row for his bye week.
+        entry("k", "K", 1.0, team="BUF", starter=True, slot="K"),
+        entry("scrub", "QB", -4.0),
+    ]
+    fa = entry("k_stream", "K", -3.0, team="DAL")
+
+    moves, outlook = bf.plan_bye_fill_moves(
+        roster, {"k_stream": fa}, value(roster, [fa]), 7, WEEKS, slots, playing({8: {"BUF"}}),
+        open_roster_slots=0,
+    )
+
+    assert outlook["crunch_weeks"] == [8]
+    [move] = moves
+    assert (move["add_player_id"], move["drop_player_id"], move["bye_fill"]["week"]) == ("k_stream", "scrub", 8)

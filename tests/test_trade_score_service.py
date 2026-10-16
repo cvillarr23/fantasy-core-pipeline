@@ -343,8 +343,10 @@ def test_out_players_sit_only_in_the_as_of_week(context):
 
 
 def test_traded_player_on_nfl_bye_sits_and_the_week_is_scored(context):
+    # His own team, so the rest of team 2 (BUF) still plays week 5.
+    context["teams"]["2"]["roster"][2]["nfl_team"] = "PHI"
     context["teams"]["2"]["roster"][2]["metrics"]["5"]["vorp_score"] = None
-    playing = {5: ALL_TEAMS - {"BUF"}, 6: set(ALL_TEAMS)}
+    playing = {5: ALL_TEAMS - {"PHI"}, 6: set(ALL_TEAMS)}
     result = score(context, playing=playing)
     week = result["roster_impact"]["us"]["weeks"][0]
     assert week["excluded_players"] == [{"espn_id": "203", "reason": "nfl_bye"}]
