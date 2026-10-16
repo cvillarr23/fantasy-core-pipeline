@@ -116,6 +116,29 @@ def test_build_and_solve_lineup_infeasible_roster_returns_empty():
     assert ls.build_and_solve_lineup(pool) == []
 
 
+def test_build_and_solve_lineup_allow_unfilled_leaves_short_slot_empty_and_fills_the_rest():
+    # Only 1 RB with metrics (the other is on bye): the second RB slot stays empty rather
+    # than the whole lineup failing.
+    pool = [
+        _player("qb1", "QB", 10.0),
+        _player("rb1", "RB", 8.0),
+        _player("wr1", "WR", 6.0),
+        _player("wr2", "WR", 5.0),
+        _player("te1", "TE", 4.0),
+        _player("dst1", "D/ST", 3.0),
+        _player("k1", "K", 2.0),
+    ]
+    starters = ls.build_and_solve_lineup(pool, allow_unfilled=True)
+    assert {p["player_id"] for p in starters} == {"qb1", "rb1", "wr1", "wr2", "te1", "dst1", "k1"}
+
+
+def test_build_and_solve_lineup_allow_unfilled_still_starts_negative_vorp_players():
+    # An empty slot scores nothing, so a below-replacement starter still beats it.
+    pool = [_player("qb1", "QB", -3.0), _player("rb1", "RB", -1.0)]
+    starters = ls.build_and_solve_lineup(pool, {"QB": 1, "RB": 2}, allow_unfilled=True)
+    assert {p["player_id"] for p in starters} == {"qb1", "rb1"}
+
+
 def test_build_and_solve_lineup_empty_pool_returns_empty():
     assert ls.build_and_solve_lineup([]) == []
 
@@ -718,6 +741,18 @@ def test_optimize_raises_when_a_skill_slot_cannot_be_filled():
     mock_post.assert_not_called()
 
 
+def test_optimize_leaves_a_slot_empty_when_byes_short_it_in_fallback_mode():
+    """BUF on bye takes out rb1 (and wr_old): the second RB slot can't be filled, which is
+    a bye, not a data gap, so the rest of the lineup is still optimized."""
+    result, mock_post, _ = _run_optimize(
+        ROSTER, _metric_rows(4, BASE_VORP), teams_playing=ALL_TEAMS_PLAYING - {"BUF"},
+    )
+
+    assert result == 1
+    [swap] = mock_post.call_args[0][1]["optimized_swaps"]
+    assert (swap["drop_player_id"], swap["add_player_id"]) == (ESPN_ID_BY_PID["wr_old"], ESPN_ID_BY_PID["wr_bench"])
+
+
 def test_optimize_raises_when_schedule_unavailable_in_fallback_mode():
     result, mock_post, _ = _run_optimize(
         ROSTER, _metric_rows(4, BASE_VORP), teams_playing=RuntimeError("nflverse down"),
@@ -932,6 +967,23 @@ def test_evaluate_lineup_still_holds_kdst_slots_when_their_target_week_metrics_a
 
     assert result["source"]["held_slots"] == ["D/ST", "K"]
     assert result["swaps"] == []
+
+
+def test_evaluate_lineup_swaps_out_starter_when_byes_leave_a_slot_unfillable():
+    """Two RB slots but only one RB with this week's metrics (rb1 on bye: no row). The
+    unfillable slot stays as it is; the Out QB is still swapped for the healthy backup."""
+    roster = [
+        ("qb1", "QB One", "QB", "KC", "Out") if row[0] == "qb1" else row for row in ROSTER
+    ] + [("qb_bench", "Bench QB", "QB", "LAR", None)]
+    vorp = {pid: v for pid, v in dict(BASE_VORP, qb_bench=2.0).items() if pid != "rb1"}
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.side_effect = [roster, _metric_rows(TARGET_WEEK, vorp), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS):
+        result = ls.evaluate_lineup(mock_cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+    [swap] = result["swaps"]
+    assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == ("qb1", "qb_bench", "QB")
+    assert result["source"]["unfilled_slots"] == ["RB"]
 
 
 # ---------------------------------------------------------------------------

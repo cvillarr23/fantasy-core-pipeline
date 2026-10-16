@@ -198,10 +198,18 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
             ) from exc
 
     pool = []
+    # Positions of players left out only because their metrics are missing. In
+    # target_week mode a missing row is a bye; in rolling mode the schedule already
+    # handled byes, so a missing value is a data gap.
+    missing_metric_positions = set()
     for pid, name, position, team, injury_status in roster:
-        if pid not in vorp_by_player or injury_status == "Out":
+        if injury_status == "Out":
             continue
         if teams_playing is not None and normalize_team(team) not in teams_playing:
+            continue
+        if pid not in vorp_by_player:
+            if mode == "rolling_prior_weeks" and position not in HOLDABLE_WITHOUT_METRICS:
+                missing_metric_positions.add(position)
             continue
         pool.append({
             "player_id": pid, "name": name, "position": position,
@@ -214,7 +222,10 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
             f"({mode}, Season {season} Weeks {weeks})"
         )
 
-    source = {"metric_source": METRIC_SOURCE, "source_mode": mode, "source_season": season, "source_weeks": weeks}
+    source = {
+        "metric_source": METRIC_SOURCE, "source_mode": mode, "source_season": season, "source_weeks": weeks,
+        "missing_metric_positions": sorted(missing_metric_positions),
+    }
     return pool, vorp_by_player, source
 
 
@@ -229,20 +240,36 @@ def hold_slots_without_metrics(lineup_slot_counts: dict, roster_pool: list) -> t
     return {slot: count for slot, count in lineup_slot_counts.items() if slot not in held}, held
 
 
-def describe_unfilled_slots(roster_pool: list, lineup_slot_counts: dict) -> str:
-    """Human-readable slot demand vs. pool supply, for an infeasible-solve error."""
-    starter_slots = {
+def _starter_slots(lineup_slot_counts: dict) -> dict:
+    return {
         slot: int(count) for slot, count in lineup_slot_counts.items()
         if slot not in BENCH_AND_IR_SLOT_NAMES and int(count) > 0
     }
+
+
+def _supply_by_position(roster_pool: list) -> dict:
     supply = {}
     for player in roster_pool:
         supply[player["position"]] = supply.get(player["position"], 0) + 1
-    short = [
-        slot for slot, count in starter_slots.items()
+    return supply
+
+
+def short_slots(roster_pool: list, lineup_slot_counts: dict) -> list:
+    """Starter slots with fewer eligible pool players than the slot count."""
+    supply = _supply_by_position(roster_pool)
+    return [
+        slot for slot, count in _starter_slots(lineup_slot_counts).items()
         if sum(supply.get(pos, 0) for pos in FLEX_SLOT_ELIGIBLE_POSITIONS.get(slot, (slot,))) < count
     ]
-    return f"slots {starter_slots} vs players with metrics by position {supply}; short: {short or 'combined FLEX demand'}"
+
+
+def describe_unfilled_slots(roster_pool: list, lineup_slot_counts: dict) -> str:
+    """Human-readable slot demand vs. pool supply, for an infeasible-solve error."""
+    short = short_slots(roster_pool, lineup_slot_counts)
+    return (
+        f"slots {_starter_slots(lineup_slot_counts)} vs players with metrics by position "
+        f"{_supply_by_position(roster_pool)}; short: {short or 'combined FLEX demand'}"
+    )
 
 
 def load_lineup_slot_counts(cursor, season: int) -> dict:
@@ -268,9 +295,20 @@ def load_lineup_slot_counts(cursor, season: int) -> dict:
     return counts or dict(DEFAULT_LINEUP_SLOT_COUNTS)
 
 
-def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = None) -> list:
+# Objective weight per filled slot when empty slots are allowed. It dwarfs any VORP gap,
+# so the solver fills as many slots as it can before comparing VORP: an empty slot scores
+# nothing, so even a below-replacement starter beats it.
+FILLED_SLOT_WEIGHT = 1000.0
+
+
+def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = None,
+                           allow_unfilled: bool = False) -> list:
     """Pure ILP solve: assign players to configured starter slots (including FLEX and
-    non-skill slots like D/ST and K) maximizing total vorp_score."""
+    non-skill slots like D/ST and K) maximizing total vorp_score.
+
+    By default every slot must be filled, or the solve fails and returns []. With
+    allow_unfilled, a slot no pool player can fill (e.g. both RBs on bye) is left empty
+    and the rest of the lineup is still optimized."""
     if not roster_pool:
         return []
     slot_counts = lineup_slot_counts or DEFAULT_LINEUP_SLOT_COUNTS
@@ -309,8 +347,9 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
     # weekly_stats.vorp_score itself stays canonical (vorp_matrix.py never overwrites it).
     # .get(..., 1.0) so a roster_pool built without this key (e.g. season_replay's naive/
     # hindsight pools) is unaffected rather than raising.
+    fill_weight = FILLED_SLOT_WEIGHT if allow_unfilled else 0.0
     prob += pulp.lpSum(
-        var * by_id[pid]["vorp_score"] * by_id[pid].get("defense_matchup_multiplier", 1.0)
+        var * (by_id[pid]["vorp_score"] * by_id[pid].get("defense_matchup_multiplier", 1.0) + fill_weight)
         for (pid, _, _), var in player_vars.items()
     ), "Total_VORP"
 
@@ -321,8 +360,9 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
             for (pid, slot_name, slot_index), var in player_vars.items()
             if slot_name == slot["name"] and slot_index == slot["index"]
         ]
+        filled = pulp.lpSum(slot_vars)
         prob += (
-            pulp.lpSum(slot_vars) == 1,
+            filled <= 1 if allow_unfilled else filled == 1,
             f"Fill_{slot_slug}_{slot['index']}",
         )
     for player in roster_pool:
@@ -533,10 +573,24 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
             load_lineup_slot_counts(cursor, season), roster_pool,
         )
         source["held_slots"] = held_slots
+        # Byes can leave a slot with no one to start. That slot stays as it is, and the
+        # rest of the lineup is still optimized, so an Out starter elsewhere still gets
+        # swapped for his backup.
+        # A slot short only because of a data gap stays an error: the missing player
+        # might be the right starter.
+        unfilled_slots = short_slots(roster_pool, lineup_slot_counts)
+        gap_positions = set(source.pop("missing_metric_positions"))
+        if any(gap_positions & set(FLEX_SLOT_ELIGIBLE_POSITIONS.get(slot, (slot,))) for slot in unfilled_slots):
+            raise InsufficientLineupInputError(
+                "could not fill the starting lineup from players with usable metrics: "
+                + describe_unfilled_slots(roster_pool, lineup_slot_counts)
+            )
+        source["unfilled_slots"] = unfilled_slots
     logger.info(
         f"Evaluating Team {team_id} Season {season} Week {week} from {METRIC_SOURCE} "
         f"({source['source_mode']}, Season {season} Week(s) {source['source_weeks']}); "
-        f"{len(roster_pool)} eligible player(s); held slots without metrics: {held_slots or 'none'}."
+        f"{len(roster_pool)} eligible player(s); held slots without metrics: {held_slots or 'none'}; "
+        f"slots short of eligible players: {unfilled_slots or 'none'}."
     )
     span = trace.get_current_span()
     span.set_attribute("source_mode", source["source_mode"])
@@ -544,7 +598,7 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
     span.set_attribute("held_slots", held_slots)
 
     with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
-        optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts)
+        optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts, allow_unfilled=True)
         if not optimal_starters:
             raise InsufficientLineupInputError(
                 "could not fill the starting lineup from players with usable metrics: "

@@ -200,7 +200,11 @@
   (Sleeper's are QB/RB/WR/TE only), run in the daily refresher before `vorp_matrix` (#183).
   When that data is missing, a `HOLDABLE_WITHOUT_METRICS` slot no pool player can fill is
   **held**: removed from the ILP, and its current starter is
-  left out of the diff so it's never dropped. An unfillable skill slot is an error.
+  left out of the diff so it's never dropped. A skill slot that byes or Out players leave
+  with no one to start stays as it is (`allow_unfilled`; logged as `unfilled_slots`), and
+  the rest of the lineup is still optimized, so an Out QB still gets swapped for his
+  backup. A skill slot short only because of a mode (2) data gap is still an error.
+  Trade scoring and backtests keep the all-or-nothing solve.
 - A defaulted week comes from `src/nfl_schedule.py`: the earliest regular-season week of
   the requested season with a game not yet final (week 1 before kickoff; `None` once the
   regular season is over). The nflverse schedule read retries with backoff (6 attempts,
