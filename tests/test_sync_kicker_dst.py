@@ -279,3 +279,23 @@ def test_sync_kicker_dst_writes_target_week_projections_for_rostered_kicker_and_
         ("11792", 2026, week, 8.4, "MIN"),
         ("PHI", 2026, week, 7.0, "PHI"),
     ]
+
+
+def test_persist_projections_treats_espns_zero_point_bye_projection_as_none():
+    """ESPN projects a kicker on bye at 0 instead of leaving the week out. The NFL bye
+    map decides, so he gets no row and the old one is deleted."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    on_bye = _espn_player("Will Reichard", "MIN", 4567, week=6, projected_points=0.0)
+    playing = _espn_player("SF D/ST", "SF", -16025, week=6, projected_points=5.5)
+
+    written = skd.persist_projections(
+        mock_conn, [("k1", on_bye), ("SF", playing)], season=2026, week=6, bye_weeks={"MIN": 6, "SF": 14},
+    )
+
+    assert written == 1
+    _, rows = mock_cursor.executemany.call_args.args
+    assert rows == [("SF", 2026, 6, 5.5, "SF")]
+    _, params = mock_cursor.execute.call_args.args
+    assert params == (["k1"], 2026, 6)

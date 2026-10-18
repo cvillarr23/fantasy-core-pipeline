@@ -52,3 +52,21 @@ def test_lineup_week_without_any_metrics_is_unknown_not_zero():
 
     assert week["value"] is None
     assert week["unknown"] == ["1", "2"]
+
+
+def test_exclusion_trusts_the_schedule_over_a_stale_row_in_a_bye_week():
+    """ESPN projects 0 for a kicker on bye, and Sleeper can list a player with a team that
+    doesn't match ESPN's. A row for a week his team doesn't play is never a reason to start him."""
+    p = player("1", "K", {6: -10.9}, nfl_team="MIN")
+
+    assert rms.exclusion(p, 6, 5, playing={"KC"}) == "nfl_bye"
+
+
+def test_lineup_week_counts_a_held_slot_as_empty_when_its_starter_is_on_bye():
+    slots = {"QB": 1, "K": 1, "BE": 2}
+    roster = [player("1", "QB", {6: 5.0}), player("2", "K", {6: None}, nfl_team="BUF")]
+
+    week = rms.lineup_week(roster, 6, 5, slots, playing={"KC"})
+
+    assert week["unfilled_slots"] == ["K"]
+    assert week["held_slots"] == []

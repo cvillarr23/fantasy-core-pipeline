@@ -159,6 +159,14 @@
 - `roster_move_scoring` holds the shared per-week lineup comparison.
 - `bye_outlook` flags "crunch" weeks. A week is a crunch when a bye leaves a starter seat
   empty, or forces more below-replacement starters than usual.
+- The schedule beats the data: a player whose team is idle that week is on bye even if a
+  `weekly_stats` row exists (ESPN projects a bye-week K/D-ST at 0, and Sleeper can carry a
+  stale team). `roster_move_scoring.exclusion`, `build_horizon_pools` and
+  `sync_kicker_dst` all apply this. A K/D-ST slot held only because its starter is on bye
+  counts as an empty seat, so it can be a crunch.
+- Fill-ins score an empty seat at `EMPTY_SEAT_VORP` (minus vorp_matrix's default
+  replacement baseline), not 0.0: an empty seat scores zero points. So a below-replacement
+  free agent still beats an empty seat. Up to 3 alternatives are listed per crunch week.
 - Bye fill-ins are recommend-only. The live waiver cron uses the horizon values with its
   usual margin and never publishes a `bye_fill` move.
 

@@ -38,12 +38,14 @@ def exclusion(player, week, as_of_week, playing):
         return "unmapped"
     if player.get("position") is None:
         return "unknown_position"
-    vorp = ((player.get("metrics") or {}).get(str(week)) or {}).get("vorp_score")
-    if vorp is not None:
-        return None
+    # The schedule is checked before the row: ESPN projects a kicker on bye at 0 rather
+    # than leaving him out, and Sleeper can carry a stale team, so a bye-week row exists.
     nfl_team = to_nflverse_team(player.get("nfl_team"))
     if playing is not None and nfl_team is not None and nfl_team not in playing:
         return "nfl_bye"
+    vorp = ((player.get("metrics") or {}).get(str(week)) or {}).get("vorp_score")
+    if vorp is not None:
+        return None
     return "no_metrics"
 
 
@@ -188,9 +190,15 @@ def lineup_week(roster, week, as_of_week, slot_counts, playing):
             "held_slots": [], "on_bye": on_bye, "unknown": unknown,
         }
     solve_counts, held = hold_slots_without_metrics(slot_counts, pool)
-    unfilled = unfilled_starter_slots(pool, solve_counts)
-    for slot in unfilled:
+    # A K or D/ST slot is held when nobody has metrics for it. When that's because our
+    # player there is on bye, the seat is really empty, and the outlook should say so.
+    bye_positions = {p["position"] for p in roster if excluded.get(p["espn_id"]) == "nfl_bye"}
+    emptied = [slot for slot in held if slot in bye_positions]
+    held = [slot for slot in held if slot not in emptied]
+    short = unfilled_starter_slots(pool, solve_counts)
+    for slot in short:
         solve_counts[slot] = int(solve_counts[slot]) - 1
+    unfilled = sorted(short + [slot for slot in emptied for _ in range(int(slot_counts[slot]))])
     solved = solve_lineup(pool, solve_counts)
     value, starters = solved if solved is not None else (None, [])
     return {

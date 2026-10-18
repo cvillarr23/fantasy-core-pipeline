@@ -95,3 +95,13 @@ def test_horizon_weeks_stop_at_the_regular_season():
     assert ws.horizon_weeks(7) == [7, 8, 9, 10]
     assert ws.horizon_weeks(17) == [17, 18]
     assert ws.horizon_weeks(7, horizon=1) == [7]
+
+
+def test_a_row_in_the_players_bye_week_is_ignored():
+    """The schedule wins over a stale or zero projection for a week his team is idle."""
+    rows = rows_for("fa", "QB", {7: 4.0, 8: 4.0, 9: 4.0, 10: 4.0}, team="MIN")
+
+    pools = ws.build_horizon_pools(rows, 7, WEEKS, {"MIN": 7})
+
+    assert pools["free_agents"]["fa"]["metrics"].get("7") is None
+    assert pools["free_agents_by_position"]["QB"]["vorp_score"] == pytest.approx(3.0)

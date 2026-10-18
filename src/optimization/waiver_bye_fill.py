@@ -15,20 +15,43 @@ Two guards keep a fill-in from costing season-long value:
 from src.optimization.bye_outlook import build_bye_outlook
 from src.optimization.lineup_solver import BENCH_AND_IR_SLOT_NAMES, FLEX_SLOT_ELIGIBLE_POSITIONS
 from src.optimization.roster_move_scoring import lineup_week
+from src.optimization.vorp_matrix import DEFAULT_BASELINES
 
 # Each candidate pair costs two lineup solves per horizon week; these keep a request fast.
-CANDIDATES_PER_CRUNCH_WEEK = 2
+CANDIDATES_PER_CRUNCH_WEEK = 6
 DROPS_PER_CRUNCH_WEEK = 2
+# Alternatives listed per crunch week, so there's a choice when the top add is gone.
+OPTIONS_PER_CRUNCH_WEEK = 3
+
+# What an empty starter seat is worth in VORP terms. It scores zero points, which is the
+# replacement baseline below replacement level, not replacement level itself. Without
+# this, a seat left empty by byes looked as good as a replacement starter, so filling it
+# with a typical (below-replacement) free agent read as a loss. FLEX uses its costliest
+# eligible position. These are vorp_matrix's default baselines, an approximation of the
+# week's real ones, which aren't stored.
+EMPTY_SEAT_VORP = {
+    **{pos: -base for pos, base in DEFAULT_BASELINES.items()},
+    **{slot: -max(DEFAULT_BASELINES.get(p, 0.0) for p in positions)
+       for slot, positions in FLEX_SLOT_ELIGIBLE_POSITIONS.items()},
+}
 
 
 def _week_vorp(player, week):
     return ((player.get("metrics") or {}).get(str(week)) or {}).get("vorp_score")
 
 
+def _seated_value(week_row):
+    """A week's lineup VORP with each empty seat counted at EMPTY_SEAT_VORP."""
+    if week_row["value"] is None:
+        return None
+    return week_row["value"] + sum(EMPTY_SEAT_VORP.get(slot, 0.0) for slot in week_row["unfilled_slots"])
+
+
 def lineup_gains_by_week(roster, add, drop, as_of_week, weeks, slot_counts, playing_by_week):
     """[{week, delta}] of our best lineup after adding `add` (and dropping `drop`, if
     any). Unlike roster_move_scoring.compare_week, a lineup with an empty seat still
-    scores (the seat adds nothing), since filling that seat is the point of a fill-in.
+    scores, with the seat at EMPTY_SEAT_VORP, since filling that seat is the point of a
+    fill-in.
     delta is None for a week with no metrics, or one where a moved player's projection
     is missing for a reason other than a confirmed bye."""
     after = [p for p in roster if drop is None or p["player_id"] != drop["player_id"]] + [add]
@@ -39,10 +62,11 @@ def lineup_gains_by_week(roster, add, drop, as_of_week, weeks, slot_counts, play
         before_week = lineup_week(roster, week, as_of_week, slot_counts, playing)
         after_week = lineup_week(after, week, as_of_week, slot_counts, playing)
         unknown = moved & (set(before_week["unknown"]) | set(after_week["unknown"]))
-        if before_week["value"] is None or after_week["value"] is None or unknown:
+        before_value, after_value = _seated_value(before_week), _seated_value(after_week)
+        if before_value is None or after_value is None or unknown:
             gains.append({"week": week, "delta": None})
         else:
-            gains.append({"week": week, "delta": after_week["value"] - before_week["value"]})
+            gains.append({"week": week, "delta": after_value - before_value})
     return gains
 
 
@@ -60,21 +84,27 @@ def _needed_positions(roster, crunch, as_of_week, slot_counts, playing):
 
 def plan_bye_fill_moves(roster, free_agents, value_by_player, as_of_week, weeks, slot_counts,
                         playing_by_week, open_roster_slots, claimed_player_ids=frozenset()):
-    """(moves, outlook). At most one move per crunch week, best horizon lineup gain first;
-    moves never reuse a player already claimed by another recommendation."""
+    """(moves, outlook). Up to OPTIONS_PER_CRUNCH_WEEK alternative moves per crunch week,
+    best horizon lineup gain first. Options for one week are alternatives, so they may
+    share a drop; an add is never offered for two weeks, and moves never reuse a player
+    already claimed by another recommendation.
+
+    A below-replacement free agent qualifies: when byes empty a seat, he still beats it."""
     outlook = build_bye_outlook(roster, weeks, as_of_week, slot_counts, playing_by_week)
     claimed = set(claimed_player_ids)
     moves = []
+    add_only_weeks = 0
     for crunch in (w for w in outlook["weeks"] if w["crunch"]):
         week = crunch["week"]
         needed = _needed_positions(roster, crunch, as_of_week, slot_counts, playing_by_week.get(week))
         candidates = sorted(
             (fa for pid, fa in free_agents.items()
              if pid not in claimed and fa["position"] in needed
-             and (_week_vorp(fa, week) or 0.0) > 0 and fa.get("injury_status") is None),
+             and _week_vorp(fa, week) is not None and fa.get("injury_status") is None),
             key=lambda fa: -_week_vorp(fa, week),
         )[:CANDIDATES_PER_CRUNCH_WEEK]
-        if open_roster_slots > len([m for m in moves if m["drop_player_id"] is None]):
+        uses_open_slot = open_roster_slots > add_only_weeks
+        if uses_open_slot:
             drops = [None]
         else:
             drops = sorted(
@@ -83,8 +113,9 @@ def plan_bye_fill_moves(roster, free_agents, value_by_player, as_of_week, weeks,
                  and p["player_id"] not in claimed and p["player_id"] in value_by_player),
                 key=lambda p: value_by_player[p["player_id"]],
             )[:DROPS_PER_CRUNCH_WEEK]
-        best = None
+        options = []
         for fa in candidates:
+            best = None
             add_value = value_by_player.get(fa["player_id"], 0.0)
             for drop in drops:
                 drop_value = None if drop is None else value_by_player[drop["player_id"]]
@@ -109,7 +140,11 @@ def plan_bye_fill_moves(roster, free_agents, value_by_player, as_of_week, weeks,
                         "weekly_lineup_gains": gains,
                         "horizon_lineup_gain": total,
                     }
-        if best is not None:
-            moves.append(best)
-            claimed.update(pid for pid in (best["add_player_id"], best["drop_player_id"]) if pid)
+            if best is not None:
+                options.append(best)
+        options = sorted(options, key=lambda m: -m["horizon_lineup_gain"])[:OPTIONS_PER_CRUNCH_WEEK]
+        if options and uses_open_slot:
+            add_only_weeks += 1
+        moves.extend(options)
+        claimed.update(m["add_player_id"] for m in options)
     return moves, outlook
