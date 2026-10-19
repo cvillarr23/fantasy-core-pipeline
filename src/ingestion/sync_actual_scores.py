@@ -172,7 +172,7 @@ def validate_scoreboard(board, season, week, expected_ids=None):
         raise IncompleteScoresError("NFL games are missing or not final")
 
 
-def shape_player(entry, season, week, team_id):
+def shape_player(entry, season, week, team_id, bye_teams=frozenset()):
     raw = (
         (entry.get("playerPoolEntry") or {}).get("player") or entry.get("player") or {}
     )
@@ -198,7 +198,11 @@ def shape_player(entry, season, week, team_id):
     if actual is None:
         actual = number(entry.get("appliedStatTotal"))
     if actual is None and slot not in {"BE", "IR"}:
-        raise IncompleteScoresError("Missing starter actual score")
+        # ESPN writes no actual stat line for a player whose NFL team is idle, so a bye
+        # starter is a true zero. Anyone else missing a score is still unknown.
+        if raw.get("proTeamId") not in bye_teams:
+            raise IncompleteScoresError("Missing starter actual score")
+        actual = 0.0
     return {
         "espn_id": espn_id,
         "player_id": espn_id,
@@ -237,6 +241,7 @@ def shape_week(snapshot, box, board, league_id, season, week):
     schedule = shape_schedule(snapshot, league_id, season)
     target = {r["team_id"]: r for r in schedule if week in r["weeks"]}
     teams = {str(t["id"]): t for t in snapshot["teams"]}
+    bye_teams = frozenset(snapshot.get("_nfl_bye_teams_by_week", {}).get(str(week), []))
     result, players, seen = [], [], set()
     for game in box.get("schedule", []):
         period = integer(game.get("matchupPeriodId"))
@@ -270,7 +275,7 @@ def shape_week(snapshot, box, board, league_id, season, week):
             entries = own.get("rosterForCurrentScoringPeriod", {}).get("entries")
             if not isinstance(entries, list) or not entries:
                 raise IncompleteScoresError("Missing historical lineup")
-            lineup = [shape_player(e, season, week, team_id) for e in entries]
+            lineup = [shape_player(e, season, week, team_id, bye_teams) for e in entries]
             seen.add(team_id)
             starters = [p for p in lineup if p["slot"] not in {"BE", "IR"}]
             bench = [p for p in lineup if p["slot"] in {"BE", "IR"}]
@@ -316,7 +321,10 @@ def fetch_snapshot(league):
     pro = league.espn_request.get_pro_schedule()
     ids = defaultdict(set)
     official = defaultdict(list)
+    byes = defaultdict(list)
     for team in pro.get("settings", {}).get("proTeams", []):
+        if team.get("byeWeek"):
+            byes[str(team["byeWeek"])].append(team["id"])
         for week, games in team.get("proGamesByScoringPeriod", {}).items():
             for game in games:
                 ids[str(week)].add(str(game["id"]))
@@ -327,6 +335,7 @@ def fetch_snapshot(league):
     raw["_nfl_official_weeks"] = [
         week for week, flags in official.items() if all(flags)
     ]
+    raw["_nfl_bye_teams_by_week"] = dict(byes)
     return raw
 
 

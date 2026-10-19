@@ -157,6 +157,9 @@
     bye week counted as 0.0, which is replacement level.
   - Fill-ins: `waiver_bye_fill`.
 - `roster_move_scoring` holds the shared per-week lineup comparison.
+- `sync_actual_scores` is the exception: it is ESPN-only and read-only, so it takes byes from
+  ESPN's pro schedule (`byeWeek`), which it already fetches. A starter on a bye scores 0.0;
+  any other starter with no actual stat line still fails the run.
 - `bye_outlook` flags "crunch" weeks. A week is a crunch when a bye leaves a starter seat
   empty, or forces more below-replacement starters than usual.
 - The schedule beats the data: a player whose team is idle that week is on bye even if a
