@@ -126,13 +126,28 @@ def boundary(monkeypatch):
         row["status"] = status
         row["outcome_details"]["approval"] = copy.deepcopy(approval)
 
-    with patch.object(service, "get_db_cursor", transaction), patch.object(
-        service, "_read_offers_for_update", side_effect=read
-    ), patch.object(service, "_save_approval", side_effect=update), patch(
-        "src.api.routes._record_bot_decision"
-    ) as audit, patch(
-        "src.api.routes.pika.BlockingConnection"
-    ) as connection:
+    def edit(cur, row, originals, offer):
+        edited = {
+            **copy.deepcopy(row),
+            "id": max(r["id"] for r in rows) + 1,
+            "counter_offer": copy.deepcopy(offer),
+        }
+        rows.append(edited)
+        for original in originals:
+            if original["status"] == "awaiting_approval":
+                stored = next(r for r in rows if r["id"] == original["id"])
+                stored["status"] = "superseded"
+                stored["counter_offer"]["superseded_by"] = offer["offer_key"]
+        return copy.deepcopy(edited)
+
+    with (
+        patch.object(service, "_save_edited_offer", side_effect=edit),
+        patch.object(service, "get_db_cursor", transaction),
+        patch.object(service, "_read_offers_for_update", side_effect=read),
+        patch.object(service, "_save_approval", side_effect=update),
+        patch("src.api.routes._record_bot_decision") as audit,
+        patch("src.api.routes.pika.BlockingConnection") as connection,
+    ):
         yield rows, connection.return_value.channel.return_value, audit
 
 
@@ -231,13 +246,13 @@ def test_non_awaiting_rejected(client, boundary, status):
     channel.basic_publish.assert_not_called()
 
 
-def test_request_cannot_override_offer(client, boundary):
+def test_request_cannot_override_player_terms(client, boundary):
     rows, channel, _ = boundary
     key = rows[0]["counter_offer"]["offer_key"]
     assert (
         client.post(
             f"/v1/trade/offers/{key}/approve",
-            json={"approved_by": "conor", "message": "edit"},
+            json={"approved_by": "conor", "to_team_id": "4"},
         ).status_code
         == 422
     )
@@ -278,7 +293,8 @@ def test_pre_publish_failure_releases_claim(client, boundary):
     channel.basic_publish.assert_not_called()
 
 
-def test_concurrent_approval_is_blocked(boundary):
+@pytest.mark.parametrize("message", [None, "Edited pitch"])
+def test_concurrent_approval_is_blocked(boundary, message):
     rows, channel, _ = boundary
     entered, release = threading.Event(), threading.Event()
 
@@ -291,11 +307,11 @@ def test_concurrent_approval_is_blocked(boundary):
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor() as pool:
-        first = pool.submit(service.approve_offer, key, "conor")
+        first = pool.submit(service.approve_offer, key, "conor", message)
         assert entered.wait(5)
         try:
             with pytest.raises(service.OfferConflict):
-                service.approve_offer(key, "other")
+                service.approve_offer(key, "other", message)
         finally:
             release.set()
         first.result()
@@ -600,7 +616,9 @@ def test_invalid_evaluation_is_null_and_logged_without_breaking_list(
 
 
 @pytest.mark.parametrize("evaluation", ["absent", "valid", "garbage"])
-def test_approval_ignores_evaluation(client, boundary, context, evaluation):  # noqa: F811
+def test_approval_ignores_evaluation(
+    client, boundary, context, evaluation
+):  # noqa: F811
     rows, channel, audit = boundary
     stored = {
         "absent": None,
@@ -658,3 +676,210 @@ def test_list_shows_counter_linkage(client):
     assert offers[1]["thread_root_id"] == "tx-1"
     assert offers[2]["related_transaction_id"] is None
     assert offers[2]["thread_root_id"] is None
+
+
+@pytest.mark.parametrize("counter", [False, True])
+def test_approve_edited_message(client, boundary, context, counter):  # noqa: F811
+    rows, channel, audit = boundary
+    evaluation = proposal_evaluation(context, "  Fair deal?  ")
+    rows[0] = staged_counter() if counter else staged("  Fair deal?  ", evaluation)
+    original_message = rows[0]["counter_offer"]["message"]
+    rows.append({**copy.deepcopy(rows[0]), "id": 2})
+    original_key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{original_key}/approve",
+        json={"approved_by": "conor", "message": "My own pitch"},
+    )
+    assert response.status_code == 202, response.text
+    key = response.json()["offer_key"]
+    assert key != original_key
+    assert [r["status"] for r in rows] == ["superseded", "superseded", "approved"]
+    edited = rows[-1]
+    offer = edited["counter_offer"]
+    assert service._validated_offer(edited, key) == offer
+    assert offer["drafted_message"] == original_message
+    assert offer["message_edited"] is True
+    assert offer["edited_by"] == "conor"
+    sent = json.loads(channel.basic_publish.call_args.kwargs["body"])
+    assert sent["message"] == "My own pitch"
+    assert sent["approval"] == {"offer_key": key, "approved_by": "conor"}
+    if counter:
+        assert sent["related_transaction_id"] == "tx-3"
+        assert sent["thread_root_id"] == "tx-1"
+    else:
+        assert offer["evaluation"] == evaluation
+        listed = list_offers_response(client, [edited])[edited["id"]]
+        assert listed["evaluation"] == evaluation
+        assert listed["drafted_message"] == original_message
+        assert listed["message_edited"] is True
+        assert listed["approval"]["approved_by"] == "conor"
+    for retry_key in (original_key, key):
+        for message in (None, "My own pitch"):
+            retry = client.post(
+                f"/v1/trade/offers/{retry_key}/approve",
+                json={"approved_by": "other", "message": message},
+            )
+            assert retry.status_code == 200, retry.text
+            assert retry.json() == {**response.json(), "duplicate": True}
+        conflict = client.post(
+            f"/v1/trade/offers/{retry_key}/approve",
+            json={"approved_by": "other", "message": "A different pitch"},
+        )
+        assert conflict.status_code == 409
+    channel.basic_publish.assert_called_once()
+    audit.assert_called_once()
+
+
+@pytest.mark.parametrize("message", [None, "  Fair deal?  "])
+def test_explicit_unchanged_message(client, boundary, message):
+    rows, channel, _ = boundary
+    rows[0] = staged("  Fair deal?  ")
+    key = rows[0]["counter_offer"]["offer_key"]
+    for expected in (202, 200):
+        response = client.post(
+            f"/v1/trade/offers/{key}/approve",
+            json={"approved_by": "conor", "message": message},
+        )
+        assert response.status_code == expected
+        assert response.json()["offer_key"] == key
+    assert len(rows) == 1
+    assert not rows[0]["counter_offer"].get("message_edited", False)
+    channel.basic_publish.assert_called_once()
+
+
+@pytest.mark.parametrize("message", ["", " \n\t", "x" * 1001])
+def test_invalid_approval_message(client, boundary, message):
+    rows, channel, audit = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "conor", "message": message},
+    )
+    assert response.status_code == 422
+    assert rows[0]["status"] == "awaiting_approval"
+    channel.basic_publish.assert_not_called()
+    audit.assert_not_called()
+
+
+def test_message_length_boundary(client, boundary):
+    rows, _, _ = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    assert (
+        client.post(
+            f"/v1/trade/offers/{key}/approve",
+            json={"approved_by": "conor", "message": "x" * 1000},
+        ).status_code
+        == 202
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", ["audit", "before_publish", "ambiguous", "confirmation"]
+)
+def test_edited_approval_failures(client, boundary, failure):
+    rows, channel, audit = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    if failure == "audit":
+        audit.side_effect = RuntimeError("audit unavailable")
+    elif failure == "before_publish":
+        channel.queue_declare.side_effect = RuntimeError("queue unavailable")
+    elif failure == "ambiguous":
+        channel.basic_publish.side_effect = TimeoutError("unknown send")
+    else:
+        save = service._save_approval.side_effect
+
+        def fail_confirmation(cur, row_id, status, approval):
+            if status == "approved":
+                raise RuntimeError("confirmation unavailable")
+            save(cur, row_id, status, approval)
+
+        service._save_approval.side_effect = fail_confirmation
+    if failure in ("audit", "confirmation"):
+        with pytest.raises(RuntimeError):
+            service.approve_offer(key, "conor", "Edited")
+    else:
+        with pytest.raises(service.PublishUnavailable):
+            service.approve_offer(key, "conor", "Edited")
+    if failure == "audit":
+        assert len(rows) == 1 and rows[0]["status"] == "awaiting_approval"
+        channel.basic_publish.assert_not_called()
+    elif failure == "before_publish":
+        assert rows[0]["status"] == "superseded"
+        assert rows[1]["status"] == "awaiting_approval"
+        channel.queue_declare.side_effect = None
+        assert (
+            service.approve_offer(key, "conor", "Edited")["offer_key"]
+            == rows[1]["counter_offer"]["offer_key"]
+        )
+        channel.basic_publish.assert_called_once()
+    else:
+        assert rows[1]["status"] == "approval_pending"
+        with pytest.raises(service.OfferConflict):
+            service.approve_offer(key, "conor", "Edited")
+        channel.basic_publish.assert_called_once()
+
+
+def test_edit_after_unedited_approval_conflicts(client, boundary):
+    rows, channel, _ = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    service.approve_offer(key, "conor")
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "conor", "message": "New pitch"},
+    )
+    assert response.status_code == 409
+    channel.basic_publish.assert_called_once()
+
+
+def test_edit_collision_fails_closed(boundary):
+    rows, channel, _ = boundary
+    original = rows[0]
+    target = staged("  Fair deal?  ", row_id=2)
+    rows.append(target)
+    with pytest.raises(service.OfferConflict, match="already exists"):
+        service.approve_offer(
+            original["counter_offer"]["offer_key"], "conor", "  Fair deal?  "
+        )
+    assert all(row["status"] == "awaiting_approval" for row in rows)
+    channel.basic_publish.assert_not_called()
+
+
+def test_edited_key_contention_fails_closed(boundary):
+    rows, channel, _ = boundary
+    with patch.object(
+        service, "_lock_edited_key", side_effect=service.OfferConflict("busy")
+    ):
+        with pytest.raises(service.OfferConflict):
+            service.approve_offer(
+                rows[0]["counter_offer"]["offer_key"], "conor", "Edit"
+            )
+    assert len(rows) == 1 and rows[0]["status"] == "awaiting_approval"
+    channel.basic_publish.assert_not_called()
+
+
+def test_unedited_list_defaults(client):
+    offer = list_offers_response(client, [staged()])[1]
+    assert offer["drafted_message"] is None
+    assert offer["message_edited"] is False
+
+
+def test_save_edited_offer_sql():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (9,)
+    original = staged()
+    offer = {**original["counter_offer"], "offer_key": "new", "message": "Edit"}
+    edited = service._save_edited_offer(cursor, original, [original], offer)
+    assert edited["id"] == 9 and edited["counter_offer"] == offer
+    insert, supersede = cursor.execute.call_args_list
+    assert "INSERT INTO execution_log" in insert.args[0]
+    assert json.loads(insert.args[1][-1]) == offer
+    assert "status = 'superseded'" in supersede.args[0]
+    assert supersede.args[1] == ("new", 1)
+
+
+def test_edited_key_lock_is_nonblocking():
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (False,)
+    with pytest.raises(service.OfferConflict):
+        service._lock_edited_key(cursor, "key")
+    assert "pg_try_advisory_xact_lock" in cursor.execute.call_args.args[0]

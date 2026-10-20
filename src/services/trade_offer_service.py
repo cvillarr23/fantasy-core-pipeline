@@ -159,7 +159,53 @@ def _response(key, approval, duplicate=False):
     )
 
 
-def approve_offer(key, approved_by):
+def _lock_edited_key(cursor, key):
+    # Never wait while holding the original key: two opposing edits could deadlock.
+    cursor.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s))", (key,))
+    if not cursor.fetchone()[0]:
+        raise OfferConflict("The edited offer is being approved; retry later.")
+
+
+def _edited_offer_key(row, offer, message):
+    return compute_offer_key(
+        dict(
+            leagueId=row["league_id"],
+            seasonId=row["season"],
+            fromTeamId=offer["from_team_id"],
+            toTeamId=offer["to_team_id"],
+            incomingPlayerIds=offer["incoming_player_ids"],
+            outgoingPlayerIds=offer["outgoing_player_ids"],
+            message=message,
+            relatedTransactionId=offer.get("related_transaction_id"),
+        )
+    )
+
+
+def _save_edited_offer(cursor, row, rows, offer):
+    cursor.execute(
+        "INSERT INTO execution_log (transaction_type, bot_name, status, league_id, "
+        "season, offering_team_id, counter_offer, dry_run) "
+        "VALUES ('trade_offer_submit', 'trade_builder', 'awaiting_approval', "
+        "%s, %s, %s, %s::jsonb, false) RETURNING id",
+        (
+            row["league_id"],
+            row["season"],
+            offer["to_team_id"] if offer["source"] == "counter_offer" else None,
+            json.dumps(offer),
+        ),
+    )
+    edited_row = {**row, "id": cursor.fetchone()[0], "counter_offer": offer}
+    for original in rows:
+        if original["status"] == "awaiting_approval":
+            cursor.execute(
+                "UPDATE execution_log SET status = 'superseded', counter_offer = "
+                "counter_offer || jsonb_build_object('superseded_by', %s::text) WHERE id = %s",
+                (offer["offer_key"], original["id"]),
+            )
+    return edited_row
+
+
+def approve_offer(key, approved_by, message=None):
     # Imported lazily: routes owns the established AMQP/audit conventions.
     from src.api import routes
 
@@ -169,6 +215,27 @@ def approve_offer(key, approved_by):
         rows = _read_offers_for_update(cursor, key)
         if not rows:
             raise OfferNotFound("Offer not found.")
+        replacements = {
+            row["counter_offer"].get("superseded_by")
+            for row in rows
+            if row["status"] == "superseded"
+        }
+        if replacements:
+            if len(replacements) != 1 or not next(iter(replacements)):
+                raise OfferConflict("Superseded offer linkage is invalid.")
+            replacement = next(iter(replacements))
+            _lock_edited_key(cursor, replacement)
+            rows = _read_offers_for_update(cursor, replacement)
+            if not rows:
+                raise OfferConflict("The replacement offer is missing.")
+            key = replacement
+            if message is not None and any(
+                row["counter_offer"].get("message") != message
+                for row in rows
+                if row["status"]
+                in ("approved", "awaiting_approval", "approval_pending")
+            ):
+                raise OfferConflict("This offer has already been edited.")
         # Check the entire key, not only the latest dry fill. A new staged row must not
         # hide an earlier pending/confirmed publish or an actual worker submission.
         for row in rows:
@@ -178,7 +245,9 @@ def approve_offer(key, approved_by):
                 )
         for row in rows:
             if row["status"] == "approved":
-                _validated_offer(row, key)
+                approved_offer = _validated_offer(row, key)
+                if message is not None and message != approved_offer.get("message"):
+                    raise OfferConflict("An approved offer cannot be edited.")
                 approval = (row["outcome_details"] or {}).get("approval", {})
                 if not all(
                     approval.get(k)
@@ -204,6 +273,23 @@ def approve_offer(key, approved_by):
                     "thread_root_id"
                 ):
                     raise OfferConflict("Staged copies disagree on counter thread.")
+        if message is not None and message != offer.get("message"):
+            if offer.get("message_edited"):
+                raise OfferConflict("This offer has already been edited.")
+            edited_key = _edited_offer_key(row, offer, message)
+            _lock_edited_key(cursor, edited_key)
+            if _read_offers_for_update(cursor, edited_key):
+                raise OfferConflict("An offer with the edited terms already exists.")
+            offer = {
+                **offer,
+                "offer_key": edited_key,
+                "message": message,
+                "drafted_message": offer.get("message"),
+                "message_edited": True,
+                "edited_by": approved_by,
+            }
+            row = _save_edited_offer(cursor, row, rows, offer)
+            key = edited_key
         tracking_id = str(uuid.uuid4())
         approval = dict(
             offer_key=key,
@@ -371,6 +457,8 @@ def list_offers(
                     "incoming_player_ids",
                     "outgoing_player_ids",
                     "message",
+                    "drafted_message",
+                    "message_edited",
                     "related_transaction_id",
                     "thread_root_id",
                 )

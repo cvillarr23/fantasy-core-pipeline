@@ -5626,6 +5626,19 @@
             "minLength": 1,
             "title": "Approved By",
             "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
           }
         },
         "required": [
@@ -5929,6 +5942,17 @@
             ],
             "title": "Approval"
           },
+          "drafted_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drafted Message"
+          },
           "evaluation": {
             "anyOf": [
               {
@@ -5994,6 +6018,11 @@
               }
             ],
             "title": "Message"
+          },
+          "message_edited": {
+            "default": false,
+            "title": "Message Edited",
+            "type": "boolean"
           },
           "offer_key": {
             "anyOf": [
@@ -9527,6 +9556,7 @@
                 "awaiting_approval",
                 "approval_pending",
                 "approved",
+                "superseded",
                 "submit_blocked",
                 "dry_run_filled",
                 "submitting",
