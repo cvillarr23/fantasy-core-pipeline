@@ -14,6 +14,9 @@ nfl_team, injury_status, slot, metrics {str(week): {vorp_score, ...}}. Nothing i
 in: a missing projection is "no_metrics" (or "nfl_bye" when the NFL schedule confirms
 the team is idle), never a zero.
 """
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from src.nfl_byes import to_nflverse_team
 from src.optimization.lineup_solver import (
     BENCH_AND_IR_SLOT_NAMES,
@@ -26,6 +29,20 @@ OUT_STATUSES = {"OUT", "INJURY_RESERVE"}
 SUPPORTED_STARTER_SLOTS = {"QB", "RB", "WR", "TE", "K", "D/ST", *FLEX_SLOT_ELIGIBLE_POSITIONS}
 # Reasons a player sits a week without making the roster's lineup unknowable.
 SITS_KNOWINGLY = {"out", "nfl_bye"}
+
+_solve_cache = ContextVar("lineup_solve_cache", default=None)
+
+
+@contextmanager
+def lineup_solve_cache():
+    """Memoizes solve_lineup inside the block. A batch scorer re-solves every team's
+    unchanged "before" lineup once per package; the key keeps pool order, so a cached
+    answer is the one CBC would have given, ties included."""
+    token = _solve_cache.set({})
+    try:
+        yield
+    finally:
+        _solve_cache.reset(token)
 
 
 def exclusion(player, week, as_of_week, playing):
@@ -71,6 +88,21 @@ def lineup_pool(roster, week, as_of_week, playing):
 
 def solve_lineup(pool, slot_counts):
     """Optimal starter VORP and starters, or None when the starter slots can't be filled."""
+    cache = _solve_cache.get()
+    if cache is None:
+        return _solve_lineup(pool, slot_counts)
+    key = (
+        tuple((p["player_id"], p["espn_id"], p.get("name"), p["position"], p["vorp_score"]) for p in pool),
+        tuple((slot, int(count)) for slot, count in slot_counts.items()),
+    )
+    if key not in cache:
+        cache[key] = _solve_lineup(pool, slot_counts)
+    result = cache[key]
+    # Callers own what they get back, so hand out copies of the starter dicts.
+    return None if result is None else (result[0], [dict(s) for s in result[1]])
+
+
+def _solve_lineup(pool, slot_counts):
     demand = sum(
         int(count) for slot, count in slot_counts.items()
         if slot not in BENCH_AND_IR_SLOT_NAMES and int(count) > 0

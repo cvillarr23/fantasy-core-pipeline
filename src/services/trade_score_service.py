@@ -342,8 +342,18 @@ def score_trade(
         season,
         context["as_of_week"],
     )
+    teams_playing = load_teams_playing_by_week(season, context["start_week"], context["end_week"])
+    return shape_trade_score(
+        context, our_team_id, counterparty_team_id, send_espn_ids, receive_espn_ids,
+        raw_vorp, teams_playing,
+    )
+
+
+def load_teams_playing_by_week(season: int, start_week: int, end_week: int) -> dict:
+    """{week: NFL teams with a game} for shape_trade_score, None for a week whose
+    schedule couldn't be read."""
     teams_playing = {}
-    for target_week in range(context["start_week"], context["end_week"] + 1):
+    for target_week in range(start_week, end_week + 1):
         try:
             teams_playing[target_week] = load_teams_playing(season, target_week)
         except Exception as error:
@@ -351,7 +361,4 @@ def score_trade(
             # bye, so those players stay unknown rather than being treated as idle.
             logger.warning(f"NFL schedule unavailable for {season} week {target_week}: {error}")
             teams_playing[target_week] = None
-    return shape_trade_score(
-        context, our_team_id, counterparty_team_id, send_espn_ids, receive_espn_ids,
-        raw_vorp, teams_playing,
-    )
+    return teams_playing

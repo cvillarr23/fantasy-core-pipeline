@@ -408,6 +408,91 @@
         "title": "ByeOutlookWeek",
         "type": "object"
       },
+      "CandidatePlayer": {
+        "properties": {
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "nfl_bye_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfl Bye Week"
+          },
+          "nfl_team": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfl Team"
+          },
+          "player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Id"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "vorp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vorp"
+          }
+        },
+        "required": [
+          "espn_id",
+          "player_id",
+          "name",
+          "position",
+          "nfl_team",
+          "vorp",
+          "nfl_bye_week"
+        ],
+        "title": "CandidatePlayer",
+        "type": "object"
+      },
       "ChatGrounding": {
         "properties": {
           "free_agents": {
@@ -5279,6 +5364,39 @@
         "title": "TeamByeOutlook",
         "type": "object"
       },
+      "TeamCandidateCounts": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_drop": {
+            "title": "Needs Drop",
+            "type": "integer"
+          },
+          "one_sided": {
+            "title": "One Sided",
+            "type": "integer"
+          },
+          "proposable": {
+            "title": "Proposable",
+            "type": "integer"
+          },
+          "team_id": {
+            "title": "Team Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_id",
+          "name",
+          "proposable",
+          "needs_drop",
+          "one_sided"
+        ],
+        "title": "TeamCandidateCounts",
+        "type": "object"
+      },
       "TeamInfo": {
         "properties": {
           "logo_url": {
@@ -5684,6 +5802,224 @@
           "approved_at"
         ],
         "title": "TradeApprovalResponse",
+        "type": "object"
+      },
+      "TradeCandidate": {
+        "properties": {
+          "bye_coverage": {
+            "$ref": "#/components/schemas/ByeCoverage"
+          },
+          "candidate_key": {
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "complete_horizon": {
+            "title": "Complete Horizon",
+            "type": "boolean"
+          },
+          "counterparty": {
+            "$ref": "#/components/schemas/ScoreTeam"
+          },
+          "counterparty_lineup_change": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Lineup Change"
+          },
+          "counterparty_weighted_benefit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Weighted Benefit"
+          },
+          "final_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Score"
+          },
+          "horizon_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Horizon Weeks",
+            "type": "array"
+          },
+          "our_lineup_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Our Lineup Gain"
+          },
+          "our_schedule_adjustment": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Our Schedule Adjustment"
+          },
+          "our_weighted_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Our Weighted Gain"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "receive": {
+            "items": {
+              "$ref": "#/components/schemas/CandidatePlayer"
+            },
+            "title": "Receive",
+            "type": "array"
+          },
+          "scored_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Scored Weeks",
+            "type": "array"
+          },
+          "send": {
+            "items": {
+              "$ref": "#/components/schemas/CandidatePlayer"
+            },
+            "title": "Send",
+            "type": "array"
+          },
+          "shape": {
+            "enum": [
+              "1for1",
+              "2for1",
+              "1for2"
+            ],
+            "title": "Shape",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "proposable",
+              "needs_drop",
+              "one_sided"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "counterparty",
+          "shape",
+          "receive",
+          "send",
+          "final_score",
+          "our_lineup_gain",
+          "our_weighted_gain",
+          "counterparty_lineup_change",
+          "counterparty_weighted_benefit",
+          "our_schedule_adjustment",
+          "scored_weeks",
+          "horizon_weeks",
+          "complete_horizon",
+          "bye_coverage",
+          "status",
+          "reasons"
+        ],
+        "title": "TradeCandidate",
+        "type": "object"
+      },
+      "TradeCandidateList": {
+        "properties": {
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "horizon": {
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TradeCandidate"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "league_id": {
+            "title": "League Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "season": {
+            "title": "Season",
+            "type": "integer"
+          },
+          "team_counts": {
+            "items": {
+              "$ref": "#/components/schemas/TeamCandidateCounts"
+            },
+            "title": "Team Counts",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "league_id",
+          "season",
+          "week",
+          "horizon",
+          "run_id",
+          "computed_at",
+          "total",
+          "team_counts",
+          "items"
+        ],
+        "title": "TradeCandidateList",
         "type": "object"
       },
       "TradeContextPlayer": {
@@ -9012,6 +9348,196 @@
           }
         },
         "summary": "Browse Vorp Endpoint"
+      }
+    },
+    "/v1/trade/candidates": {
+      "get": {
+        "operationId": "list_trade_candidates_endpoint_v1_trade_candidates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "league_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[1-9]\\d*$",
+              "title": "League Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "maximum": 2100,
+              "minimum": 2000,
+              "title": "Season",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "week",
+            "required": true,
+            "schema": {
+              "maximum": 18,
+              "minimum": 1,
+              "title": "Week",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "counterparty_team_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[1-9]\\d*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Counterparty Team Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "receive_position",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 10,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Receive Position"
+            }
+          },
+          {
+            "in": "query",
+            "name": "send_position",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 10,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Send Position"
+            }
+          },
+          {
+            "in": "query",
+            "name": "shape",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "1for1",
+                    "2for1",
+                    "1for2"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Shape"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "proposable",
+              "enum": [
+                "proposable",
+                "needs_drop",
+                "one_sided",
+                "all"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "final_score",
+              "enum": [
+                "final_score",
+                "our_gain",
+                "their_benefit"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TradeCandidateList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Trade Candidates Endpoint"
       }
     },
     "/v1/trade/context": {

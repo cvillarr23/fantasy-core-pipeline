@@ -37,6 +37,7 @@ from src.models import (
     CREATE_BACKTEST_RESULTS_TABLE,
     CREATE_DEFENSE_POSITION_STRENGTH_TABLE,
     CREATE_BOT_DECISIONS_TABLE,
+    CREATE_TRADE_CANDIDATE_TABLES,
     CREATE_RUMOR_SIGNALS_TABLE,
     CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE,
     CREATE_INDICES,
@@ -143,6 +144,10 @@ def run_migrations():
             # 4h. Execute bot decision audit trail ledger (CORE-17)
             logger.info("Validating 'bot_decisions' audit trail ledger...")
             cursor.execute(CREATE_BOT_DECISIONS_TABLE)
+
+            # 4h2. Execute league-wide trade candidate ledger
+            logger.info("Validating 'trade_candidates' ledger...")
+            cursor.execute(CREATE_TRADE_CANDIDATE_TABLES)
 
             # 4i. Execute rumor-signal interpretation ledger (WORKER-13)
             logger.info("Validating 'rumor_signals' interpretation ledger...")

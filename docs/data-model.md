@@ -180,6 +180,8 @@ erDiagram
 | `rumor_action_checkpoints` | Per-team watermark and in-flight state for rumor actions. | `rumor_action_service` |
 | `run_log` | One row per job or bot run: what triggered it, status, error and a `summary`. Purged after `RUN_LOG_RETENTION_DAYS` (90). | `run_log_service.run_scope` in core entrypoints; the worker's `db/run_log.js`. |
 | `run_links` | What each run read (`input`) and wrote (`output`): raw signals, rumor signals, LLM sessions, queued actions. | Same as `run_log`, plus the `/v1/trigger/*` handlers via `X-Run-Id`. |
+| `trade_candidate_runs` | The latest trade-candidate run per league, season and week: `run_id` (the `run_log` id), `computed_at`, horizon and `counts`. A missing row means the job never ran for that week. | `python -m src.jobs.trade_candidates` |
+| `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
 
 ### Signals and metrics
 
@@ -304,6 +306,8 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 | `activity_actions.payload`, `.evidence` | The queued message body, and what verification found. Secret-looking keys are redacted from the stored payload. |
 | `activity_events.detail` | Per-stage detail. Dependency events carry `depends_on`, and failures add `reason`. |
 | `rumor_action_checkpoints.state` | `{watermark, signals, actions, failed_jobs}`. |
+| `trade_candidate_runs.counts` | `{enumerated, prefiltered, scored, proposable, needs_drop, one_sided, teams: [{team_id, name, proposable, needs_drop, one_sided}]}`. |
+| `trade_candidates.score` | The `POST /v1/trade/score` response for the package, as scored at `computed_at`. `send_players` / `receive_players` hold `{espn_id, player_id, name, position, nfl_team, vorp, nfl_bye_week}`. |
 | `run_log.trigger` | Scheduled or manual Jobs: `{cronjob, k8s_job}`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
 | `run_log.summary` | Always: `log_tail` (the run's last 50 INFO+ log lines, library noise excluded), `warnings`, `errors` and `last_message`. Jobs add their own counters and an optional one-line `headline`, such as the rumor syncer's `fetched`/`new`/`per_source` or the rumor action trigger's `RunOutcome` details. |
 

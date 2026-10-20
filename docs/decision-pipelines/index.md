@@ -29,6 +29,7 @@ flowchart LR
 | Drop candidates, IR and claims | [Waivers](waivers.md) |
 | Fantasy strength and schedule evidence | [Trade context](trade-context.md) |
 | Before/after starter value and G*, C* | [Trade scoring](trade-scoring.md) |
+| League-wide candidate packages | [Trade candidates](trade-candidates.md) |
 | Evaluation, staging and approval | [Outgoing trades](outgoing-trades.md) |
 | Ranking, shadow policy and review evidence | [Incoming trades](incoming-trades.md) |
 | Event-triggered decisions and durable retries | [Rumor actions](rumor-actions.md) |

@@ -30,6 +30,7 @@ from src.services.roster_service import compute_roster_deficits, get_team_roster
 from src.services.trade_service import evaluate_trade
 from src.services.trade_context_service import get_league_trade_context
 from src.services.trade_score_service import score_trade
+from src.services.trade_candidate_service import list_trade_candidates as list_candidates
 
 logger = logging.getLogger("MCPEngine")
 
@@ -254,6 +255,37 @@ def score_trade_proposal(
     return score_trade(
         league_id, season, week, horizon, our_team_id, counterparty_team_id,
         send_espn_ids, receive_espn_ids,
+    )
+
+
+@mcp.tool()
+def list_trade_candidates(
+    league_id: str,
+    season: int,
+    week: int,
+    counterparty_team_id: str | None = None,
+    receive_position: str | None = None,
+    send_position: str | None = None,
+    shape: str | None = None,
+    status: str = "proposable",
+    sort: str = "final_score",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Precomputed league-wide trade candidates from the latest trade_candidates job run.
+
+    Every 1-for-1, 2-for-1 and 1-for-2 package (shape is named from our side: "2for1" =
+    we send two, receive one) is scored with score_trade_proposal and classified by the
+    worker's staging gates: proposable, needs_drop (only a roster limit fails) or
+    one_sided (reasons lists the failed gates). Filters: counterparty_team_id,
+    receive_position / send_position, shape, status ("all" for every status). sort is
+    final_score, our_gain or their_benefit (the counterparty's lineup change). Player ids
+    are ESPN ids. Re-score a candidate live with score_trade_proposal before acting on it,
+    since rosters may have changed since computed_at.
+    """
+    return list_candidates(
+        league_id, season, week, counterparty_team_id, receive_position, send_position,
+        shape, status, sort, min(max(limit, 1), 200), max(offset, 0),
     )
 
 

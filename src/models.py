@@ -554,6 +554,57 @@ CREATE TABLE IF NOT EXISTS fantasy_player_week_scores (
 """
 
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
+# League-wide trade candidates (src/services/trade_candidate_service.py), written by
+# `python -m src.jobs.trade_candidates`. A run replaces its league/season/week's rows in
+# one transaction. trade_candidate_runs exists separately so "the job never ran" (404)
+# differs from "it ran and found nothing" (an empty list). Only scored packages are
+# stored; score holds the full trade-score response, the other columns are copies of
+# its key fields for filtering and sorting.
+CREATE_TRADE_CANDIDATE_TABLES = """
+CREATE TABLE IF NOT EXISTS trade_candidate_runs (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    week INT NOT NULL,
+    horizon INT NOT NULL,
+    run_id TEXT NOT NULL,
+    computed_at TIMESTAMPTZ NOT NULL,
+    our_team_id VARCHAR(50) NOT NULL,
+    counts JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (league_id, season, week)
+);
+CREATE TABLE IF NOT EXISTS trade_candidates (
+    league_id VARCHAR(50) NOT NULL,
+    season INT NOT NULL,
+    week INT NOT NULL,
+    horizon INT NOT NULL,
+    run_id TEXT NOT NULL,
+    computed_at TIMESTAMPTZ NOT NULL,
+    our_team_id VARCHAR(50) NOT NULL,
+    candidate_key CHAR(64) NOT NULL,
+    counterparty_team_id VARCHAR(50) NOT NULL,
+    counterparty_name TEXT,
+    shape VARCHAR(10) NOT NULL CHECK (shape IN ('1for1', '2for1', '1for2')),
+    send_espn_ids TEXT[] NOT NULL,
+    receive_espn_ids TEXT[] NOT NULL,
+    send_positions TEXT[] NOT NULL,
+    receive_positions TEXT[] NOT NULL,
+    send_players JSONB NOT NULL,
+    receive_players JSONB NOT NULL,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('proposable', 'needs_drop', 'one_sided')),
+    reasons TEXT[] NOT NULL,
+    final_score DOUBLE PRECISION,
+    our_lineup_gain DOUBLE PRECISION,
+    our_weighted_gain DOUBLE PRECISION,
+    counterparty_lineup_change DOUBLE PRECISION,
+    counterparty_weighted_benefit DOUBLE PRECISION,
+    our_schedule_adjustment DOUBLE PRECISION,
+    scored_week_count INT NOT NULL,
+    complete_horizon BOOLEAN NOT NULL,
+    score JSONB NOT NULL,
+    PRIMARY KEY (league_id, season, week, candidate_key)
+);
+"""
+
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_execution_log_trade_offer_key
     ON execution_log ((counter_offer->>'offer_key'))
@@ -574,6 +625,8 @@ CREATE INDEX IF NOT EXISTS idx_rumor_signals_player_id ON rumor_signals(player_i
 CREATE INDEX IF NOT EXISTS idx_rumor_signals_max_raw_signal_id ON rumor_signals(max_raw_signal_id);
 CREATE INDEX IF NOT EXISTS idx_bot_decisions_bot_name_decided_at ON bot_decisions(bot_name, decided_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_decisions_tracking_id ON bot_decisions(tracking_id);
+CREATE INDEX IF NOT EXISTS trade_candidates_by_status
+    ON trade_candidates (league_id, season, week, status);
 """
 
 
