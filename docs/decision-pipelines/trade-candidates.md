@@ -44,9 +44,12 @@ The counterparty check is looser than "both sides gain a starter", because the g
 
 | Ordering and cap | Rule |
 | --- | --- |
-| Upper bound | Per week, the sum of each incoming player's VORP minus his group's weakest starter, floored at 0 |
-| Order | Our bound, then theirs, both descending, then `candidate_key` |
+| Estimate | Per side and week: the incoming players' VORP above their group's weakest starter (floored at 0), minus the largest gap between a departing starter and his best bench or incoming replacement |
+| Order | Packages that fit both roster limits first, then those whose counterparty estimate isn't negative, then our estimate and theirs (descending), then `candidate_key` |
+| Spread | Counterparties are interleaved round-robin, each in that order, so every team keeps its best packages |
 | Cap | The first 400 are scored. The rest are counted in `prefiltered` but not stored. |
+
+The estimates only rank the shortlist; they never decide what the prefilter keeps.
 
 ## How is each package classified?
 

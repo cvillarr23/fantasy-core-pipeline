@@ -88,7 +88,7 @@ def brute_force(context):
     results = []
     with roster_move_scoring.lineup_solve_cache():
         for counterparty, send, receive in service.enumerate_packages(context, "1"):
-            keep, _, _ = prefilter.check("1", counterparty, send, receive)
+            keep, _ = prefilter.check("1", counterparty, send, receive)
             score = full_score(context, counterparty, send, receive)
             status = service.classify(service.eligibility_reasons(score))
             results.append((counterparty, [p["espn_id"] for p in send], [p["espn_id"] for p in receive], keep, status))
@@ -203,9 +203,11 @@ def test_out_and_ir_players_are_never_traded(context):
     assert not traded & {"203", "305", "101"}
 
 
-def test_shortlist_is_capped_in_bound_order_and_keys_are_stable(context):
+def test_shortlist_is_capped_in_rank_order_and_keys_are_stable(context):
     rows, counts = service.build_candidates(context, "1", PLAYING, {}, max_candidates=3)
     assert len(rows) == counts["scored"] == 3
+    # Interleaved across counterparties, so the cap doesn't spend itself on one team.
+    assert [r["counterparty_team_id"] for r in rows] == ["2", "3", "2"]
     assert counts["prefiltered"] > 3
     again, _ = service.build_candidates(deepcopy(context), "1", PLAYING, {}, max_candidates=3)
     assert [r["candidate_key"] for r in rows] == [r["candidate_key"] for r in again]

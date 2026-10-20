@@ -194,17 +194,20 @@ def _gain_bound(baseline, incoming, week, context, playing):
     return bound, reaches
 
 
-def _certain_loss(baseline, outgoing, incoming, week, context, playing, groups):
-    """True when losing the outgoing players must lower this week's lineup: a starter
-    leaves and no bench or incoming player in his group is as good. K/D-ST are skipped,
-    since the scorer holds a slot the trade leaves empty instead of counting the loss."""
+def _loss_bound(baseline, outgoing, incoming, week, context, playing, groups):
+    """Lower bound on what losing the outgoing players costs this week's lineup: the
+    largest gap between a departing starter and the best bench or incoming player in his
+    group. K/D-ST are skipped, since the scorer holds a slot the trade leaves empty
+    instead of counting the loss. A starter nobody can replace makes the week
+    unscorable, so his gap is taken against 0 just for ranking."""
     if baseline is None:
-        return False
+        return 0.0
     incoming_values = [
         (player["position"], value)
         for player in incoming
         if (value := _week_vorp(player, week, context, playing)) is not None
     ]
+    loss = 0.0
     for player in outgoing:
         if player["espn_id"] not in baseline["starters"] or player["position"] in HOLDABLE_WITHOUT_METRICS:
             continue
@@ -213,9 +216,13 @@ def _certain_loss(baseline, outgoing, incoming, week, context, playing, groups):
         replacements = [baseline["best_bench"].get(player["position"], -math.inf)] + [
             v for position, v in incoming_values if position in group
         ]
-        if value - max(replacements) > _TOLERANCE:
-            return True
-    return False
+        best = max(replacements)
+        loss = max(loss, value - (best if math.isfinite(best) else 0.0))
+    return loss
+
+
+def _roster_size(roster):
+    return sum(1 for player in roster if player.get("slot") != "IR")
 
 
 def enumerate_packages(context, our_team_id):
@@ -240,6 +247,9 @@ class Prefilter:
         self.playing = teams_playing_by_week
         self.weeks = list(range(context["start_week"], context["end_week"] + 1))
         self.groups = position_groups(context["lineup_slot_counts"])
+        slot_counts = context["lineup_slot_counts"]
+        self.roster_limit = sum(int(count) for slot, count in slot_counts.items() if slot != "IR")
+        self.roster_sizes = {team_id: _roster_size(team["roster"]) for team_id, team in context["teams"].items()}
         self.baselines = {
             (team_id, week): _baseline(team["roster"], week, context, self.playing.get(week), self.groups)
             for team_id, team in context["teams"].items()
@@ -247,8 +257,11 @@ class Prefilter:
         }
 
     def check(self, our_team_id, counterparty_team_id, send, receive):
-        """(keep, our gain bound, their gain bound) for one package."""
-        our_bound = their_bound = 0.0
+        """(keep, rank key) for one package. The rank key orders the shortlist: packages
+        that fit both rosters first, then those not estimated to hurt the counterparty,
+        then by our estimated gain and theirs. Estimates are each side's gain bound minus
+        its loss bound; they only rank, never decide what is kept."""
+        our_estimate = their_estimate = 0.0
         we_gain = they_can_hold = False
         for week in self.weeks:
             playing = self.playing.get(week)
@@ -256,15 +269,20 @@ class Prefilter:
             theirs = self.baselines[(counterparty_team_id, week)]
             if UNSCORABLE in (ours, theirs):
                 continue
-            bound, reaches = _gain_bound(ours, receive, week, self.context, playing)
-            our_bound += bound if math.isfinite(bound) else 0.0
+            gain, reaches = _gain_bound(ours, receive, week, self.context, playing)
             we_gain |= reaches
-            bound, reaches = _gain_bound(theirs, send, week, self.context, playing)
-            their_bound += bound if math.isfinite(bound) else 0.0
-            they_can_hold |= reaches or not _certain_loss(
-                theirs, receive, send, week, self.context, playing, self.groups
-            )
-        return we_gain and they_can_hold, our_bound, their_bound
+            loss = _loss_bound(ours, send, receive, week, self.context, playing, self.groups)
+            our_estimate += (gain if math.isfinite(gain) else 0.0) - loss
+            gain, reaches = _gain_bound(theirs, send, week, self.context, playing)
+            loss = _loss_bound(theirs, receive, send, week, self.context, playing, self.groups)
+            they_can_hold |= reaches or loss <= _TOLERANCE
+            their_estimate += (gain if math.isfinite(gain) else 0.0) - loss
+        overflows = (
+            self.roster_sizes[our_team_id] - len(send) + len(receive) > self.roster_limit
+            or self.roster_sizes[counterparty_team_id] - len(receive) + len(send) > self.roster_limit
+        )
+        rank = (overflows, their_estimate < -_TOLERANCE, -our_estimate, -their_estimate)
+        return we_gain and they_can_hold, rank
 
 
 def _candidate_player(player, as_of_week):
@@ -280,6 +298,16 @@ def _candidate_player(player, as_of_week):
     }
 
 
+def _interleave_by_counterparty(ranked):
+    """Round-robin over counterparties, each in rank order, so the cap leaves every team
+    its best packages instead of filling up with one deep roster's."""
+    by_team = {}
+    for item in ranked:
+        by_team.setdefault(item[2], []).append(item)
+    queues = [by_team[team_id] for team_id in sorted(by_team, key=int)]
+    return [item for group in itertools.zip_longest(*queues) for item in group if item is not None]
+
+
 def build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_player,
                      max_candidates=DEFAULT_MAX_CANDIDATES):
     """Pure over one trade-context snapshot: (scored candidate rows, counts)."""
@@ -292,7 +320,7 @@ def _build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_playe
     enumerated, shortlist = 0, []
     for counterparty_team_id, send, receive in enumerate_packages(context, our_team_id):
         enumerated += 1
-        keep, our_bound, their_bound = prefilter.check(our_team_id, counterparty_team_id, send, receive)
+        keep, rank = prefilter.check(our_team_id, counterparty_team_id, send, receive)
         if not keep:
             continue
         send_ids = [p["espn_id"] for p in send]
@@ -301,9 +329,9 @@ def _build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_playe
             context["league_id"], context["season"], our_team_id, counterparty_team_id,
             send_ids, receive_ids,
         )
-        shortlist.append((our_bound, their_bound, key, counterparty_team_id, send, receive))
+        shortlist.append((rank, key, counterparty_team_id, send, receive))
     prefiltered = len(shortlist)
-    shortlist.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    shortlist = _interleave_by_counterparty(sorted(shortlist, key=lambda item: (item[0], item[1])))
     if len(shortlist) > max_candidates:
         logger.info(f"Shortlist capped at {max_candidates}; {len(shortlist) - max_candidates} prefiltered package(s) not scored")
     shortlist = shortlist[:max_candidates]
@@ -315,7 +343,7 @@ def _build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_playe
         if team_id != our_team_id
     }
     rows = []
-    for _, _, key, counterparty_team_id, send, receive in shortlist:
+    for _, key, counterparty_team_id, send, receive in shortlist:
         send_ids = [p["espn_id"] for p in send]
         receive_ids = [p["espn_id"] for p in receive]
         raw_vorp = summarize_raw_vorp(
