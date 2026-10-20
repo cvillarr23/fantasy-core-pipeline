@@ -71,7 +71,7 @@ Incoming inbox ranking uses total final score instead. The outgoing ranking keep
 | `offer_key` | Digest of identity, player sides, exact message and related transaction ID for counters |
 | Thread root | Tracing metadata outside the digest |
 
-Edits to keyed terms require a new key. Core checks configured league/team, player sides and source; conflicting staged copies fail closed.
+Editing the message at approval creates a new key over the exact edited text. Core checks configured league/team, player sides and source; conflicting staged copies fail closed.
 
 </details>
 
@@ -79,6 +79,7 @@ Edits to keyed terms require a new key. Core checks configured league/team, play
 
 ```mermaid
 stateDiagram-v2
+    awaiting_approval --> superseded: Edited approval creates replacement offer
     awaiting_approval --> approval_pending: Lock and commit claim plus audit
     approval_pending --> approved: Broker confirms publication
     approval_pending --> awaiting_approval: Proven pre-publication failure
@@ -90,6 +91,7 @@ stateDiagram-v2
 | --- | --- |
 | Route | `POST /v1/trade/offers/{offer_key}/approve` |
 | Approver | Nonblank self-reported `approved_by` audit label |
+| Optional message | `message`: nonblank after whitespace check, at most 1000 characters; exact text is preserved |
 | Authentication | No application-layer auth; deployment trust boundary applies |
 | Lock | Read all rows for key under PostgreSQL advisory lock |
 | Eligible state | `awaiting_approval` |
@@ -97,6 +99,31 @@ stateDiagram-v2
 | Committed before send | Exact payload, approver, time, tracking ID and `bot_decisions` audit |
 | New confirmed publication | 202, `approved` |
 | Duplicate approval | 200, original receipt, no send |
+
+An omitted or null `message`, or text exactly equal to the staged message, keeps the
+original key and approval behavior. For changed text, core creates a replacement row,
+marks all staged copies of the original key `superseded`, and commits the replacement
+claim and audit in the same transaction. The published payload contains the edited
+`message` and approval for the new key; the response's `offer_key` is that new key.
+An existing offer under the edited key returns 409 rather than merging histories.
+
+`GET /v1/trade/offers?status=approved` exposes `drafted_message` (the original generated
+text, which can be null) and `message_edited: true` on edited rows. Unedited rows return
+`drafted_message: null` and `message_edited: false`. The editor is the original
+`approval.approved_by`; it is also retained as `edited_by` in stored offer metadata.
+`evaluation.pitch` remains the generated, evidence-backed draft. Human edits are not
+validated against score evidence and do not change the stored evaluation.
+
+Repeating the same edited approval through either the original or new key returns 200
+with `duplicate: true`, the new key and the original receipt. Omitting the message on
+either key also returns that receipt. A different message after approval returns 409.
+Pending or ambiguous publication remains blocked. A proven pre-publication failure can
+retry the same edited offer through either key; the original draft stays superseded.
+A busy edited-key lock returns 409 and can be retried.
+
+The 1000-character limit is a fallback pending the ESPN request capture in
+[fantasy-browser-worker#124](https://github.com/cvillarr23/fantasy-browser-worker/issues/124).
+Blank or oversized text returns 422 before changing any rows.
 
 :::warning[An approved receipt is a broker receipt]
 Worker enable, dry-run, approval and execution gates still apply. For an ambiguous send or crash, reconcile broker, worker and ESPN evidence before releasing the indefinitely pending claim.

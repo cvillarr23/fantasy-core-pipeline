@@ -10,6 +10,7 @@ OfferStatus = Literal[
     "awaiting_approval",
     "approval_pending",
     "approved",
+    "superseded",
     "submit_blocked",
     "dry_run_filled",
     "submitting",
@@ -25,6 +26,16 @@ class TradeApprovalRequest(BaseModel):
         max_length=200,
         description="Self-reported approver; trade routes have no application-layer authentication.",
     )
+
+    # TODO: Replace fallback once fantasy-browser-worker#124 captures the ESPN limit.
+    message: str | None = Field(None, min_length=1, max_length=1000)
+
+    @field_validator("message")
+    @classmethod
+    def nonblank_message(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("message must not be blank")
+        return value
 
     @field_validator("approved_by")
     @classmethod
@@ -79,7 +90,8 @@ class ProposalPitch(BaseModel):
 
 class ProposalEvaluation(BaseModel):
     """Score evidence the worker stored with a generated proposal. `score` is the verbatim
-    POST /v1/trade/score response, and each pitch evidence `path` is a JSON Pointer into it."""
+    POST /v1/trade/score response, and each pitch evidence `path` is a JSON Pointer into it.
+    """
 
     version: Literal["proposal-evaluation-v1"]
     evaluated_at: AwareDatetime
@@ -105,6 +117,8 @@ class TradeOffer(BaseModel):
     incoming_players: list[OfferPlayer]
     outgoing_players: list[OfferPlayer]
     message: str | None = None
+    drafted_message: str | None = None
+    message_edited: bool = False
     # Set on a counter: the incoming ESPN offer it answers (part of offer_key) and that offer's
     # thread root (tracing only).
     related_transaction_id: str | None = None

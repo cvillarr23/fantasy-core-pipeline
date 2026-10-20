@@ -244,7 +244,9 @@ def approve_trade_offer(
     offer_key: str = Path(pattern=r"^[0-9a-f]{64}$"),
 ):
     try:
-        result = trade_offer_service.approve_offer(offer_key, payload.approved_by)
+        result = trade_offer_service.approve_offer(
+            offer_key, payload.approved_by, payload.message
+        )
     except trade_offer_service.OfferNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except trade_offer_service.OfferConflict as error:
