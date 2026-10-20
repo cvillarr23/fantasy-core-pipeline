@@ -104,6 +104,7 @@ Worker enable, dry-run, approval and execution gates still apply. For an ambiguo
 
 ## Related
 
+- [Trade candidates](trade-candidates.md): precomputed packages that already passed these gates
 - [Incoming counters and review](incoming-trades.md)
 - [Trade context](trade-context.md)
 - Core: [trade_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_service.py), [trade_offer_service.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/services/trade_offer_service.py)

@@ -76,3 +76,30 @@ def test_evaluate_trade_rejects_player_on_both_sides():
             season=2026,
             week=3,
         )
+
+
+def test_load_vorp_by_player_reads_every_id_in_one_query():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("p1", 10.0), ("p2", -1.5)]
+
+    with patch("src.services.trade_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = trade_service.load_vorp_by_player(2026, 3, ("p1", "p2", "p3"))
+
+    assert result == {"p1": 10.0, "p2": -1.5}
+    cursor.execute.assert_called_once()
+    assert cursor.execute.call_args.args[1] == (2026, 3, ["p1", "p2", "p3"])
+
+
+def test_summarize_raw_vorp_matches_evaluate_trade():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("p1", 10.0), ("p3", 6.0)]
+    with patch("src.services.trade_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        evaluated = trade_service.evaluate_trade(["p1"], ["p2", "p3"], 2026, 3)
+
+    summarized = trade_service.summarize_raw_vorp({"p1": 10.0, "p3": 6.0, "p9": 1.0}, ["p1"], ["p2", "p3"])
+    assert summarized == evaluated == {
+        "incoming_total": 10.0,
+        "outgoing_total": 6.0,
+        "delta_vorp": 4.0,
+        "missing_player_ids": ["p2"],
+    }

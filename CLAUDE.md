@@ -66,6 +66,13 @@
   week is scored only from its own `weekly_stats` rows, never carried forward. The formula
   constants live in the service docstring and the README "Trade scoring" section; change
   `SCORING_VERSION` if they change.
+- `trade_candidate_service` (`GET /v1/trade/candidates`, MCP `list_trade_candidates`) is filled
+  by `python -m src.jobs.trade_candidates`. It enumerates 1for1/2for1/1for2 packages (shape named
+  from our side), scores a prefiltered shortlist with `shape_trade_score` over one shared context,
+  and classifies them with the worker's `eligibilityReasons` codes. The prefilter must never drop
+  a package that full scoring marks `proposable`: the brute-force test enforces that, so change it
+  only alongside its soundness note. `lineup_solve_cache()` memoizes solves for the batch only;
+  `POST /v1/trade/score` never uses it. 404 means no `trade_candidate_runs` row for that week.
 - `GET /v1/trade/offers` returns `evaluation` (`ProposalEvaluation` in `src/schemas/trade.py`,
   reusing `TradeScore`), the worker's stored score evidence for generated proposals. It is
   display-only: keep it out of `compute_offer_key`, `_validated_offer` and the approval

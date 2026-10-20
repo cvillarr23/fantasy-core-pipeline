@@ -30,17 +30,34 @@ def evaluate_trade(
     if overlap:
         raise ValueError(f"player_id(s) {sorted(overlap)} cannot appear on both sides of a trade.")
 
-    all_ids = list(incoming_set | outgoing_set)
+    return summarize_raw_vorp(
+        load_vorp_by_player(season, week, list(incoming_set | outgoing_set)),
+        incoming_player_ids,
+        outgoing_player_ids,
+    )
+
+
+def load_vorp_by_player(season: int, week: int, player_ids: list[str]) -> dict:
+    """{player_id: vorp_score} for the ids with a weekly_stats row that season/week. One
+    query, so a caller scoring many packages can read every rostered player at once."""
     with get_db_cursor() as cursor:
         cursor.execute(
             """
             SELECT player_id, vorp_score FROM weekly_stats
             WHERE season = %s AND week = %s AND player_id = ANY(%s);
             """,
-            (season, week, all_ids),
+            (season, week, list(player_ids)),
         )
-        vorp_by_player = dict(cursor.fetchall())
+        return dict(cursor.fetchall())
 
+
+def summarize_raw_vorp(
+    vorp_by_player: dict,
+    incoming_player_ids: list[str],
+    outgoing_player_ids: list[str],
+) -> dict:
+    """evaluate_trade's totals over an already-loaded {player_id: vorp_score} map."""
+    all_ids = list(set(incoming_player_ids) | set(outgoing_player_ids))
     missing_player_ids = [pid for pid in all_ids if pid not in vorp_by_player]
     incoming_total = sum(vorp_by_player.get(pid, 0.0) for pid in incoming_player_ids)
     outgoing_total = sum(vorp_by_player.get(pid, 0.0) for pid in outgoing_player_ids)

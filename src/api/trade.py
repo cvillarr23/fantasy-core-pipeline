@@ -21,6 +21,13 @@ from pydantic import BaseModel
 from src.services.trade_service import evaluate_trade
 from src.schemas.trade_context import LeagueTradeContext
 from src.schemas.trade_score import TradeScore, TradeScoreRequest
+from src.schemas.trade_candidates import (
+    CandidateShape,
+    CandidateSort,
+    CandidateStatusFilter,
+    TradeCandidateList,
+)
+from src.services import trade_candidate_service
 from src.services.trade_context_service import (
     TradeContextUnavailable,
     get_league_trade_context,
@@ -282,6 +289,31 @@ def score_trade_endpoint(payload: TradeScoreRequest):
             payload.send_espn_ids,
             payload.receive_espn_ids,
         )
+    except Exception as error:
+        _raise_for_trade_read_error(error)
+
+
+@trade_router.get("/candidates", response_model=TradeCandidateList)
+def list_trade_candidates_endpoint(
+    league_id: str = Query(pattern=r"^[1-9]\d*$"),
+    season: int = Query(ge=2000, le=2100),
+    week: int = Query(ge=1, le=18),
+    counterparty_team_id: str | None = Query(None, pattern=r"^[1-9]\d*$"),
+    receive_position: str | None = Query(None, min_length=1, max_length=10),
+    send_position: str | None = Query(None, min_length=1, max_length=10),
+    shape: CandidateShape | None = None,
+    status: CandidateStatusFilter = "proposable",
+    sort: CandidateSort = "final_score",
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    try:
+        return trade_candidate_service.list_trade_candidates(
+            league_id, season, week, counterparty_team_id, receive_position,
+            send_position, shape, status, sort, limit, offset,
+        )
+    except trade_candidate_service.TradeCandidatesNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
     except Exception as error:
         _raise_for_trade_read_error(error)
 

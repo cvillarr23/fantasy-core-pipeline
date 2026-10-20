@@ -51,6 +51,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 
 | Method | Path | Purpose | `X-API-Key` | Publishes to |
 |---|---|---|---|---|
+| `GET` | `/v1/trade/candidates` | List the latest precomputed league-wide trade candidates. | No |  |
 | `GET` | `/v1/trade/context` | Show current rosters and head-to-head schedule evidence for trades. | No |  |
 | `POST` | `/v1/trade/evaluate` | Compute raw VORP delta for a trade. | No |  |
 | `GET` | `/v1/trade/incoming` | List incoming trade offers with scores and negotiation state. | No |  |

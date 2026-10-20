@@ -78,6 +78,7 @@ DESCRIPTIONS = {
     "POST /v1/trade/evaluate": "Compute raw VORP delta for a trade.",
     "POST /v1/trade/score": "Compute the schedule-aware trade score.",
     "GET /v1/trade/context": "Show current rosters and head-to-head schedule evidence for trades.",
+    "GET /v1/trade/candidates": "List the latest precomputed league-wide trade candidates.",
     "GET /v1/draft/config": "Read the stored live draft config.",
     "POST /v1/draft/config": "Store the league, team, season and mode for the draft listener.",
     "POST /v1/draft/start": "Create the draft-sync Kubernetes Job.",
