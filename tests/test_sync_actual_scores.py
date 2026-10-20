@@ -152,6 +152,39 @@ def test_missing_starter_actual_fails_without_inventing_zero(snapshot):
         sync.shape_week(snapshot, box_for(snapshot), scoreboard(), "123", 2026, 4)
 
 
+def test_starter_on_nfl_bye_scores_zero(snapshot):
+    entry = snapshot["schedule"][0]["home"]["rosterForCurrentScoringPeriod"]["entries"][0]
+    entry["playerPoolEntry"]["player"].update(stats=[], proTeamId=12)
+    snapshot["_nfl_bye_teams_by_week"] = {"4": [12]}
+    data = sync.shape_week(snapshot, box_for(snapshot), scoreboard(), "123", 2026, 4)
+    by_id = {p["espn_id"]: p for p in data["players"]}
+    assert by_id["100"]["actual_points"] == 0.0
+
+
+def test_missing_starter_actual_still_fails_when_their_team_played(snapshot):
+    entry = snapshot["schedule"][0]["home"]["rosterForCurrentScoringPeriod"]["entries"][0]
+    entry["playerPoolEntry"]["player"].update(stats=[], proTeamId=12)
+    snapshot["_nfl_bye_teams_by_week"] = {"4": [29]}
+    with pytest.raises(sync.IncompleteScoresError):
+        sync.shape_week(snapshot, box_for(snapshot), scoreboard(), "123", 2026, 4)
+
+
+def test_fetch_snapshot_records_nfl_bye_teams_by_week():
+    league = MagicMock()
+    league.espn_request.get_pro_schedule.return_value = {
+        "settings": {
+            "proTeams": [
+                {"id": 12, "byeWeek": 5, "proGamesByScoringPeriod": {"4": [{"id": 1}]}},
+                {"id": 29, "byeWeek": 5, "proGamesByScoringPeriod": {"4": [{"id": 1}]}},
+                {"id": 0, "byeWeek": 0, "proGamesByScoringPeriod": {}},
+            ]
+        }
+    }
+    with patch.object(sync, "fetch_raw_league_data", return_value={}):
+        raw = sync.fetch_snapshot(league)
+    assert raw["_nfl_bye_teams_by_week"] == {"5": [12, 29]}
+
+
 def test_idempotent_persistence_only_mirrors_actuals(snapshot):
     data = sync.shape_week(snapshot, box_for(snapshot), scoreboard(), "123", 2026, 4)
     conn = MagicMock()
