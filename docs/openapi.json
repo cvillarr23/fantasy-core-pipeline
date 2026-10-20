@@ -5630,14 +5630,13 @@
           "message": {
             "anyOf": [
               {
-                "maxLength": 1000,
-                "minLength": 1,
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
+            "description": "Exact message text; changed messages are limited to 1000 characters.",
             "title": "Message"
           }
         },
@@ -5952,6 +5951,17 @@
               }
             ],
             "title": "Drafted Message"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
           },
           "evaluation": {
             "anyOf": [

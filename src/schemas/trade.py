@@ -27,8 +27,10 @@ class TradeApprovalRequest(BaseModel):
         description="Self-reported approver; trade routes have no application-layer authentication.",
     )
 
-    # TODO: Replace fallback once fantasy-browser-worker#124 captures the ESPN limit.
-    message: str | None = Field(None, min_length=1, max_length=1000)
+    message: str | None = Field(
+        None,
+        description="Exact message text; changed messages are limited to 1000 characters.",
+    )
 
     @field_validator("message")
     @classmethod
@@ -119,6 +121,7 @@ class TradeOffer(BaseModel):
     message: str | None = None
     drafted_message: str | None = None
     message_edited: bool = False
+    edited_by: str | None = None
     # Set on a counter: the incoming ESPN offer it answers (part of offer_key) and that offer's
     # thread root (tracing only).
     related_transaction_id: str | None = None

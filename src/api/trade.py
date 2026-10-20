@@ -253,6 +253,8 @@ def approve_trade_offer(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except trade_offer_service.PublishUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if result["duplicate"]:
         response.status_code = 200
     return result
