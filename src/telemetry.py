@@ -84,12 +84,12 @@ class LogfmtFormatter(logging.Formatter):
 
 
 class HealthCheckAccessFilter(logging.Filter):
-    """Drops uvicorn access lines for the kubelet's /v1/health probe, which otherwise
+    """Drops uvicorn access lines for the kubelet's /v1/health and /v1/livez probes, which otherwise
     dominate the gateway's log volume without carrying any signal."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args if isinstance(record.args, tuple) else ()
-        return not (len(args) >= 3 and args[2] == "/v1/health")
+        return not (len(args) >= 3 and args[2] in ("/v1/health", "/v1/livez"))
 
 
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")

@@ -181,4 +181,6 @@ def test_configure_trace_logging_routes_uvicorn_through_root_and_drops_health_ch
     health = _record('%s - "%s %s HTTP/%s" %d', "10.1.0.40:5598", "GET", "/v1/health", "1.1", 200)
     other = _record('%s - "%s %s HTTP/%s" %d', "10.1.0.40:5598", "POST", "/v1/roster/move-preview", "1.1", 500)
     assert not access.filter(health)
+    livez = _record('%s - "%s %s HTTP/%s" %d', "10.1.0.40:5598", "GET", "/v1/livez", "1.1", 200)
+    assert not access.filter(livez)
     assert access.filter(other)

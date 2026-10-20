@@ -45,7 +45,7 @@ AREAS = [
     ),
     ("Players and stats", "Players and stats", ("/v1/players", "/v1/stats")),
     ("Backtests", "Backtests", ("/v1/backtest",)),
-    ("Other", "Chat and health", ("/v1/chat", "/v1/health")),
+    ("Other", "Chat and health", ("/v1/chat", "/v1/health", "/v1/livez")),
 ]
 
 # Queue each endpoint publishes to, checked against src/api/routes.py,
@@ -67,6 +67,7 @@ DESCRIPTIONS = {
     "POST /v1/trigger/draft-pick": "Queue the recommended draft pick.",
     "POST /v1/trigger/rumor-action": "Evaluate rumor signals now and queue the resulting moves.",
     "GET /v1/health": "Check Postgres and RabbitMQ reachability.",
+    "GET /v1/livez": "Liveness probe; checks no dependencies.",
     "GET /v1/trade/incoming": "List incoming trade offers with scores and negotiation state.",
     "GET /v1/trade/incoming/{espn_transaction_id}/thread": "Show one offer's negotiation thread.",
     "POST /v1/trade/incoming/{espn_transaction_id}/decision": "Queue an accept or decline for an incoming offer.",
