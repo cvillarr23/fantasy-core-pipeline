@@ -24,6 +24,7 @@ ROW_COLUMNS = (
     "executed_at",
     "outcome_details",
     "counter_offer",
+    "dry_run",
 )
 SELECT_COLUMNS = ", ".join(ROW_COLUMNS)
 
@@ -108,16 +109,7 @@ def _validated_offer(row, key):
             if related is None:
                 raise ValueError("thread root without a related transaction")
             identifier(thread_root)
-        normalized = dict(
-            leagueId=league,
-            seasonId=str(row["season"]),
-            fromTeamId=source_team,
-            toTeamId=target_team,
-            incomingPlayerIds=sides[0],
-            outgoingPlayerIds=sides[1],
-            message=message,
-            relatedTransactionId=related,
-        )
+        normalized = _offer_key_fields(row, offer, message)
         if offer["offer_key"] != key or compute_offer_key(normalized) != key:
             raise ValueError("offer key mismatch")
         if league != os.getenv("ESPN_LEAGUE_ID") or source_team != os.getenv(
@@ -129,11 +121,11 @@ def _validated_offer(row, key):
     return offer
 
 
-def _read_offers_for_update(cursor, key):
+def _read_offers(cursor, key, *, for_update=True):
     cursor.execute(
         f"SELECT {SELECT_COLUMNS} FROM execution_log "
         "WHERE transaction_type = 'trade_offer_submit' AND counter_offer->>'offer_key' = %s "
-        "ORDER BY executed_at DESC, id DESC FOR UPDATE",
+        "ORDER BY executed_at DESC, id DESC" + (" FOR UPDATE" if for_update else ""),
         (key,),
     )
     return [dict(zip(ROW_COLUMNS, row)) for row in cursor.fetchall()]
@@ -166,19 +158,40 @@ def _lock_edited_key(cursor, key):
         raise OfferConflict("The edited offer is being approved; retry later.")
 
 
-def _edited_offer_key(row, offer, message):
-    return compute_offer_key(
-        dict(
-            leagueId=row["league_id"],
-            seasonId=row["season"],
-            fromTeamId=offer["from_team_id"],
-            toTeamId=offer["to_team_id"],
-            incomingPlayerIds=offer["incoming_player_ids"],
-            outgoingPlayerIds=offer["outgoing_player_ids"],
-            message=message,
-            relatedTransactionId=offer.get("related_transaction_id"),
-        )
+def _offer_key_fields(row, offer, message):
+    return dict(
+        leagueId=row["league_id"],
+        seasonId=row["season"],
+        fromTeamId=offer["from_team_id"],
+        toTeamId=offer["to_team_id"],
+        incomingPlayerIds=offer["incoming_player_ids"],
+        outgoingPlayerIds=offer["outgoing_player_ids"],
+        message=message,
+        relatedTransactionId=offer.get("related_transaction_id"),
     )
+
+
+def _edited_offer_key(row, offer, message):
+    return compute_offer_key(_offer_key_fields(row, offer, message))
+
+
+def _duplicate_receipt(rows, key, message):
+    if any(row["status"] == "approval_pending" for row in rows):
+        raise OfferConflict(
+            "Approval is pending or its publish outcome is unknown; reconcile before retrying."
+        )
+    for row in rows:
+        if row["status"] == "approved":
+            offer = _validated_offer(row, key)
+            if message is not None and message != offer.get("message"):
+                raise OfferConflict("An approved offer cannot be edited.")
+            approval = (row["outcome_details"] or {}).get("approval", {})
+            if not all(
+                approval.get(k) for k in ("tracking_id", "approved_by", "approved_at")
+            ):
+                raise OfferConflict("Approval audit metadata is missing.")
+            return _response(key, approval, duplicate=True)
+    return None
 
 
 def _save_edited_offer(cursor, row, rows, offer):
@@ -186,12 +199,13 @@ def _save_edited_offer(cursor, row, rows, offer):
         "INSERT INTO execution_log (transaction_type, bot_name, status, league_id, "
         "season, offering_team_id, counter_offer, dry_run) "
         "VALUES ('trade_offer_submit', 'trade_builder', 'awaiting_approval', "
-        "%s, %s, %s, %s::jsonb, false) RETURNING id",
+        "%s, %s, %s, %s::jsonb, %s) RETURNING id",
         (
             row["league_id"],
             row["season"],
             offer["to_team_id"] if offer["source"] == "counter_offer" else None,
             json.dumps(offer),
+            row["dry_run"],
         ),
     )
     edited_row = {**row, "id": cursor.fetchone()[0], "counter_offer": offer}
@@ -212,7 +226,7 @@ def approve_offer(key, approved_by, message=None):
     with get_db_cursor() as cursor:
         # Same key and locking primitive as the worker's live-submit claim.
         cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
-        rows = _read_offers_for_update(cursor, key)
+        rows = _read_offers(cursor, key)
         if not rows:
             raise OfferNotFound("Offer not found.")
         replacements = {
@@ -220,12 +234,38 @@ def approve_offer(key, approved_by, message=None):
             for row in rows
             if row["status"] == "superseded"
         }
-        if replacements:
+        if replacements and not any(
+            row["status"]
+            in (
+                "awaiting_approval",
+                "approval_pending",
+                "approved",
+                "submitting",
+                "submitted",
+            )
+            for row in rows
+        ):
             if len(replacements) != 1 or not next(iter(replacements)):
                 raise OfferConflict("Superseded offer linkage is invalid.")
             replacement = next(iter(replacements))
+            # An echo of the addressed draft means unchanged, even after replacement.
+            if message is not None and all(
+                message == _validated_offer(row, key).get("message")
+                for row in rows
+                if row["status"] == "superseded"
+            ):
+                message = None
+            # Confirmed receipts are immutable. A plain read can return one while the
+            # worker holds the replacement lock, without risking an opposing-edit deadlock.
+            receipt = _duplicate_receipt(
+                _read_offers(cursor, replacement, for_update=False),
+                replacement,
+                message,
+            )
+            if receipt is not None:
+                return receipt
             _lock_edited_key(cursor, replacement)
-            rows = _read_offers_for_update(cursor, replacement)
+            rows = _read_offers(cursor, replacement)
             if not rows:
                 raise OfferConflict("The replacement offer is missing.")
             key = replacement
@@ -238,33 +278,21 @@ def approve_offer(key, approved_by, message=None):
                 raise OfferConflict("This offer has already been edited.")
         # Check the entire key, not only the latest dry fill. A new staged row must not
         # hide an earlier pending/confirmed publish or an actual worker submission.
-        for row in rows:
-            if row["status"] == "approval_pending":
-                raise OfferConflict(
-                    "Approval is pending or its publish outcome is unknown; reconcile before retrying."
-                )
-        for row in rows:
-            if row["status"] == "approved":
-                approved_offer = _validated_offer(row, key)
-                if message is not None and message != approved_offer.get("message"):
-                    raise OfferConflict("An approved offer cannot be edited.")
-                approval = (row["outcome_details"] or {}).get("approval", {})
-                if not all(
-                    approval.get(k)
-                    for k in ("tracking_id", "approved_by", "approved_at")
-                ):
-                    raise OfferConflict("Approval audit metadata is missing.")
-                return _response(key, approval, duplicate=True)
+        receipt = _duplicate_receipt(rows, key, message)
+        if receipt is not None:
+            return receipt
         if any(row["status"] in ("submitting", "submitted") for row in rows):
             raise OfferConflict(
                 "The worker has already claimed or submitted this offer."
             )
-        row = rows[0]
+        row = next((r for r in rows if r["status"] == "awaiting_approval"), rows[0])
         if row["status"] != "awaiting_approval":
             raise OfferConflict("Offer is no longer awaiting approval.")
         offer = _validated_offer(row, key)
         # Reject conflicting staged copies rather than choosing an arbitrary version.
-        for other in rows[1:]:
+        for other in rows:
+            if other["id"] == row["id"]:
+                continue
             if other["status"] == "awaiting_approval":
                 _validated_offer(other, key)
                 if other["counter_offer"]["source"] != offer["source"]:
@@ -276,9 +304,12 @@ def approve_offer(key, approved_by, message=None):
         if message is not None and message != offer.get("message"):
             if offer.get("message_edited"):
                 raise OfferConflict("This offer has already been edited.")
+            # TODO: Replace fallback once fantasy-browser-worker#124 captures the ESPN limit.
+            if len(message) > 1000:
+                raise ValueError("Changed message must be at most 1000 characters.")
             edited_key = _edited_offer_key(row, offer, message)
             _lock_edited_key(cursor, edited_key)
-            if _read_offers_for_update(cursor, edited_key):
+            if _read_offers(cursor, edited_key):
                 raise OfferConflict("An offer with the edited terms already exists.")
             offer = {
                 **offer,
@@ -442,7 +473,7 @@ def list_offers(
         item = {
             k: v
             for k, v in row.items()
-            if k not in ("counter_offer", "outcome_details")
+            if k not in ("counter_offer", "outcome_details", "dry_run")
         }
         item.update(
             {
@@ -459,6 +490,7 @@ def list_offers(
                     "message",
                     "drafted_message",
                     "message_edited",
+                    "edited_by",
                     "related_transaction_id",
                     "thread_root_id",
                 )

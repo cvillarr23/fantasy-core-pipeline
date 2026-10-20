@@ -91,7 +91,7 @@ stateDiagram-v2
 | --- | --- |
 | Route | `POST /v1/trade/offers/{offer_key}/approve` |
 | Approver | Nonblank self-reported `approved_by` audit label |
-| Optional message | `message`: nonblank after whitespace check, at most 1000 characters; exact text is preserved |
+| Optional message | `message`: nonblank after whitespace check; changed text is limited to 1000 characters; exact text is preserved |
 | Authentication | No application-layer auth; deployment trust boundary applies |
 | Lock | Read all rows for key under PostgreSQL advisory lock |
 | Eligible state | `awaiting_approval` |
@@ -109,8 +109,10 @@ An existing offer under the edited key returns 409 rather than merging histories
 
 `GET /v1/trade/offers?status=approved` exposes `drafted_message` (the original generated
 text, which can be null) and `message_edited: true` on edited rows. Unedited rows return
-`drafted_message: null` and `message_edited: false`. The editor is the original
-`approval.approved_by`; it is also retained as `edited_by` in stored offer metadata.
+`drafted_message: null`, `message_edited: false` and `edited_by: null`. Edited rows expose
+`edited_by`, the self-reported label of the person who changed the message.
+`approval.approved_by` identifies the latest successful approver; after a proven failed
+publish, a different person may re-approve without changing the editor.
 `evaluation.pitch` remains the generated, evidence-backed draft. Human edits are not
 validated against score evidence and do not change the stored evaluation.
 
@@ -119,7 +121,12 @@ with `duplicate: true`, the new key and the original receipt. Omitting the messa
 either key also returns that receipt. A different message after approval returns 409.
 Pending or ambiguous publication remains blocked. A proven pre-publication failure can
 retry the same edited offer through either key; the original draft stays superseded.
-A busy edited-key lock returns 409 and can be retried.
+Echoing the original draft through the original key also returns the replacement receipt,
+even when that draft exceeds 1000 characters. Confirmed duplicate receipts through the
+original key do not require the edited-key lock, so a worker claim does not block them.
+A busy edited-key lock still returns retryable 409 when a new publication is needed.
+If a later scan stages the original key again, its live staged row takes precedence over
+the historical redirect and can be approved independently.
 
 The 1000-character limit is a fallback pending the ESPN request capture in
 [fantasy-browser-worker#124](https://github.com/cvillarr23/fantasy-browser-worker/issues/124).

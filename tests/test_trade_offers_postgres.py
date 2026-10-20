@@ -117,3 +117,74 @@ def test_failed_audit_rolls_back_edit_and_supersession(postgres):
         cursor.execute("SELECT count(*) FROM bot_decisions")
         assert cursor.fetchone() == (0,)
     channel.basic_publish.assert_not_called()
+
+
+def test_duplicate_receipt_while_worker_holds_replacement_lock(postgres):
+    from concurrent.futures import ThreadPoolExecutor
+
+    db, key, channel = postgres
+    first = service.approve_offer(key, "editor", "Edited pitch")
+    with db() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", (first["offer_key"],)
+        )
+        # Worker claims also lock their execution rows; receipt reads must avoid both.
+        cursor.execute(
+            "SELECT id FROM execution_log WHERE counter_offer->>'offer_key' = %s FOR UPDATE",
+            (first["offer_key"],),
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(service.approve_offer, key, "retry", "  Fair deal?  ")
+            try:
+                assert result.result(timeout=3) == {**first, "duplicate": True}
+            finally:
+                # Release locks even if a regression causes the retry to wait.
+                cursor.connection.commit()
+    channel.basic_publish.assert_called_once()
+
+
+@pytest.mark.parametrize("dry_run", [True, False, None])
+def test_edit_preserves_original_dry_run(postgres, dry_run):
+    db, key, _ = postgres
+    with db() as cursor:
+        cursor.execute("UPDATE execution_log SET dry_run = %s", (dry_run,))
+    result = service.approve_offer(key, "editor", "Edited pitch")
+    with db() as cursor:
+        cursor.execute(
+            "SELECT dry_run FROM execution_log WHERE counter_offer->>'offer_key' = %s",
+            (result["offer_key"],),
+        )
+        assert cursor.fetchone() == (dry_run,)
+
+
+def test_offer_key_expression_index_is_migrated_idempotently(postgres):
+    db, key, _ = postgres
+    with patch.object(migrations, "get_db_cursor", db):
+        migrations.run_migrations()
+    with db() as cursor:
+        cursor.execute("SET LOCAL enable_seqscan = off")
+        cursor.execute(
+            "EXPLAIN SELECT id FROM execution_log "
+            "WHERE transaction_type = 'trade_offer_submit' "
+            "AND counter_offer->>'offer_key' = %s FOR UPDATE",
+            (key,),
+        )
+        plan = "\n".join(row[0] for row in cursor.fetchall())
+        assert "idx_execution_log_trade_offer_key" in plan
+
+
+def test_restaged_original_is_not_hidden_by_redirect(postgres):
+    db, key, channel = postgres
+    service.approve_offer(key, "editor", "Edited pitch")
+    with db() as cursor:
+        cursor.execute(
+            "INSERT INTO execution_log (transaction_type, status, league_id, season, counter_offer) "
+            "SELECT transaction_type, 'awaiting_approval', league_id, season, "
+            "counter_offer - 'superseded_by' FROM execution_log "
+            "WHERE counter_offer->>'offer_key' = %s LIMIT 1",
+            (key,),
+        )
+    result = service.approve_offer(key, "new approver", "  Fair deal?  ")
+    assert result["offer_key"] == key
+    assert service.approve_offer(key, "retry") == {**result, "duplicate": True}
+    assert channel.basic_publish.call_count == 2

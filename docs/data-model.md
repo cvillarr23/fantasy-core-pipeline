@@ -220,7 +220,7 @@ Which fields exist depends on `transaction_type`.
 
 | `transaction_type` | Written by | Fields you can rely on |
 |---|---|---|
-| `trade_offer_submit` | Worker stages it; core approves it. | `offer_key`, `source` (`counter_offer`, `proposal` or `manual`), `from_team_id`, `to_team_id`, `incoming_player_ids`, `outgoing_player_ids`. Optional: `message`, `related_transaction_id`, `thread_root_id`, `evaluation`. |
+| `trade_offer_submit` | Worker stages it; core approves it. | `offer_key`, `source` (`counter_offer`, `proposal` or `manual`), `from_team_id`, `to_team_id`, `incoming_player_ids`, `outgoing_player_ids`. Optional: `message`, `related_transaction_id`, `thread_root_id`, `evaluation`, `drafted_message` (original text, possibly null), `message_edited` (boolean), `edited_by` (editor label), `superseded_by` (replacement offer key). |
 | `trade_inbox` | Worker refresh; core adds `triage`. | `espn_transaction_id`, `fingerprint`, `proposing_team_id`, `our_team_id`, `send_espn_ids`, `receive_espn_ids`, `proposed_date`, `expiration_date`, `comment`. Optional: `thread_root_id`, `score`, `evaluation`, `triage`, `our_counter`. |
 | `trade_response` | Worker | `espn_transaction_id`, `action`, `decision_key`. |
 
@@ -244,6 +244,12 @@ Stored under the `approval` key when a human approves an offer.
 | `publish_error` | Set when the publish failed before sending, so the approval can be retried. |
 
 The row's `status` moves `awaiting_approval` → `approval_pending` → `approved`.
+An edited approval moves original staged copies from `awaiting_approval` → `superseded`,
+with `counter_offer.superseded_by` pointing to the replacement key. The replacement keeps
+the original `dry_run` and stores `drafted_message`, `message_edited: true` and `edited_by`;
+the editor remains unchanged when another approver retries a proven failed publication.
+A partial expression index on `counter_offer->>'offer_key'` for `trade_offer_submit` rows
+supports approval lookups.
 </details>
 
 <details>

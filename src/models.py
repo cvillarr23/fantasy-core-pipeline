@@ -555,6 +555,9 @@ CREATE TABLE IF NOT EXISTS fantasy_player_week_scores (
 
 # Append high-performance indices to ensure Grafana panel metrics execute in sub-milliseconds
 CREATE_INDICES = """
+CREATE INDEX IF NOT EXISTS idx_execution_log_trade_offer_key
+    ON execution_log ((counter_offer->>'offer_key'))
+    WHERE transaction_type = 'trade_offer_submit';
 CREATE INDEX IF NOT EXISTS idx_players_injury ON players(injury_status);
 CREATE INDEX IF NOT EXISTS idx_weekly_stats_lookup ON weekly_stats(week);
 CREATE INDEX IF NOT EXISTS idx_players_gsis_id ON players(gsis_id);

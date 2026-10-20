@@ -29,6 +29,7 @@ def staged(message=None, evaluation=None, row_id=1):
         season=2026,
         executed_at="2026-10-03T12:00:00",
         outcome_details={},
+        dry_run=True,
         counter_offer=dict(
             offer_key=fixture["key"],
             source="counter_offer",
@@ -116,7 +117,7 @@ def boundary(monkeypatch):
                 rows[:] = original
                 raise
 
-    def read(cur, key):
+    def read(cur, key, **kwargs):
         return copy.deepcopy(
             [r for r in rows if r["counter_offer"]["offer_key"] == key]
         )
@@ -143,7 +144,7 @@ def boundary(monkeypatch):
     with (
         patch.object(service, "_save_edited_offer", side_effect=edit),
         patch.object(service, "get_db_cursor", transaction),
-        patch.object(service, "_read_offers_for_update", side_effect=read),
+        patch.object(service, "_read_offers", side_effect=read),
         patch.object(service, "_save_approval", side_effect=update),
         patch("src.api.routes._record_bot_decision") as audit,
         patch("src.api.routes.pika.BlockingConnection") as connection,
@@ -345,7 +346,7 @@ def test_list_filters_and_espn_names(client):
 
 def test_sql_claim_reads_every_matching_row_under_lock():
     cursor = MagicMock()
-    service._read_offers_for_update(cursor, "key")
+    service._read_offers(cursor, "key")
     sql, params = cursor.execute.call_args.args
     assert "transaction_type = 'trade_offer_submit'" in sql
     assert "counter_offer->>'offer_key' = %s" in sql
@@ -863,16 +864,19 @@ def test_unedited_list_defaults(client):
     assert offer["message_edited"] is False
 
 
-def test_save_edited_offer_sql():
+@pytest.mark.parametrize("dry_run", [True, False, None])
+def test_save_edited_offer_sql(dry_run):
     cursor = MagicMock()
     cursor.fetchone.return_value = (9,)
     original = staged()
+    original["dry_run"] = dry_run
     offer = {**original["counter_offer"], "offer_key": "new", "message": "Edit"}
     edited = service._save_edited_offer(cursor, original, [original], offer)
     assert edited["id"] == 9 and edited["counter_offer"] == offer
     insert, supersede = cursor.execute.call_args_list
     assert "INSERT INTO execution_log" in insert.args[0]
-    assert json.loads(insert.args[1][-1]) == offer
+    assert json.loads(insert.args[1][-2]) == offer
+    assert insert.args[1][-1] is dry_run
     assert "status = 'superseded'" in supersede.args[0]
     assert supersede.args[1] == ("new", 1)
 
@@ -883,3 +887,138 @@ def test_edited_key_lock_is_nonblocking():
     with pytest.raises(service.OfferConflict):
         service._lock_edited_key(cursor, "key")
     assert "pg_try_advisory_xact_lock" in cursor.execute.call_args.args[0]
+
+
+@pytest.mark.parametrize("edit_again", [False, True])
+def test_restaged_original_can_be_approved(client, boundary, edit_again):
+    rows, channel, _ = boundary
+    original = copy.deepcopy(rows[0])
+    key = original["counter_offer"]["offer_key"]
+    service.approve_offer(key, "editor", "First edit")
+    rows.insert(0, {**original, "id": 3})
+    message = "Second edit" if edit_again else None
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "new approver", "message": message},
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["approved_by"] == "new approver"
+    assert rows[0]["status"] == ("superseded" if edit_again else "approved")
+    if not edit_again:
+        retry = client.post(
+            f"/v1/trade/offers/{key}/approve", json={"approved_by": "retry"}
+        )
+        assert retry.status_code == 200
+        assert retry.json() == {**response.json(), "duplicate": True}
+    assert channel.basic_publish.call_count == 2
+
+
+@pytest.mark.parametrize("long_draft", [False, True])
+def test_original_draft_echo_returns_edited_receipt(client, boundary, long_draft):
+    rows, channel, _ = boundary
+    rows[0] = staged("  Fair deal?  ")
+    if long_draft:
+        rows[0]["counter_offer"]["message"] = "x" * 1001
+        rows[0]["counter_offer"]["offer_key"] = service._edited_offer_key(
+            rows[0], rows[0]["counter_offer"], "x" * 1001
+        )
+    key = rows[0]["counter_offer"]["offer_key"]
+    draft = rows[0]["counter_offer"]["message"]
+    first = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "editor", "message": "Edited pitch"},
+    )
+    assert first.status_code == 202
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "other", "message": draft},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {**first.json(), "duplicate": True}
+    channel.basic_publish.assert_called_once()
+
+
+def test_editor_survives_reapproval_by_another_person(client, boundary):
+    rows, channel, _ = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    channel.queue_declare.side_effect = RuntimeError("before send")
+    with pytest.raises(service.PublishUnavailable):
+        service.approve_offer(key, "editor", "Edited pitch")
+    channel.queue_declare.side_effect = None
+    service.approve_offer(key, "approver")
+    listed = list_offers_response(client, [rows[-1]])[rows[-1]["id"]]
+    assert listed["edited_by"] == "editor"
+    assert listed["approval"]["approved_by"] == "approver"
+    assert list_offers_response(client, [staged()])[1]["edited_by"] is None
+    schema = client.get("/openapi.json").json()["components"]["schemas"]["TradeOffer"]
+    assert "edited_by" in schema["properties"]
+
+
+@pytest.mark.parametrize("counter", [False, True])
+def test_validation_and_edit_share_key_fields(boundary, counter):
+    row = staged_counter() if counter else staged("  Fair deal?  ")
+    offer = row["counter_offer"]
+    with patch.object(
+        service, "_offer_key_fields", wraps=service._offer_key_fields
+    ) as fields:
+        service._validated_offer(row, offer["offer_key"])
+        key = service._edited_offer_key(row, offer, offer.get("message"))
+    assert key == offer["offer_key"]
+    assert fields.call_count == 2
+    assert fields.call_args_list[0] == fields.call_args_list[1]
+
+
+def test_long_stored_draft_echo_is_unchanged(client, boundary):
+    rows, channel, _ = boundary
+    row = rows[0]
+    row["counter_offer"]["message"] = "x" * 1001
+    key = service._edited_offer_key(row, row["counter_offer"], "x" * 1001)
+    row["counter_offer"]["offer_key"] = key
+    for status in (202, 200):
+        response = client.post(
+            f"/v1/trade/offers/{key}/approve",
+            json={"approved_by": "approver", "message": "x" * 1001},
+        )
+        assert response.status_code == status, response.text
+        assert response.json()["offer_key"] == key
+    channel.basic_publish.assert_called_once()
+
+
+def test_confirmed_redirect_retry_does_not_lock_edited_key(boundary):
+    rows, channel, _ = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    first = service.approve_offer(key, "editor", "Edited pitch")
+    with patch.object(
+        service, "_lock_edited_key", side_effect=AssertionError("worker lock")
+    ):
+        assert service.approve_offer(key, "retry") == {**first, "duplicate": True}
+    channel.basic_publish.assert_called_once()
+
+
+@pytest.mark.parametrize("message", ["", " \n\t"])
+def test_blank_messages_use_one_validation_error(client, boundary, message):
+    rows, channel, _ = boundary
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "approver", "message": message},
+    )
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["type"] == "value_error"
+    assert error["msg"] == "Value error, message must not be blank"
+    channel.basic_publish.assert_not_called()
+
+
+def test_edited_offer_metadata_is_documented():
+    docs = Path(__file__).parents[1] / "docs"
+    model = (docs / "data-model.md").read_text()
+    offer_contract = model.split("### `execution_log.counter_offer`", 1)[1].split(
+        "### ", 1
+    )[0]
+    for field in ("drafted_message", "message_edited", "edited_by", "superseded_by"):
+        assert f"`{field}`" in offer_contract
+    assert "`awaiting_approval` → `superseded`" in model
+    guide = (docs / "decision-pipelines/outgoing-trades.md").read_text()
+    assert "`edited_by`, the self-reported label" in guide
+    assert "`approval.approved_by` identifies the latest successful approver" in guide
