@@ -8782,6 +8782,23 @@
         "summary": "Get Teams"
       }
     },
+    "/v1/livez": {
+      "get": {
+        "description": "Kubernetes liveness probe: answers as long as the event loop is serving requests.\nIt never checks Postgres or RabbitMQ, so a dependency outage takes the pod out of\nrotation through /v1/health (readiness) instead of restarting it.",
+        "operationId": "liveness_check_v1_livez_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness Check"
+      }
+    },
     "/v1/matchup": {
       "get": {
         "operationId": "get_matchup_v1_matchup_get",

@@ -69,6 +69,15 @@ def test_health_check_healthy(client):
     assert response.json() == {"status": "healthy", "database": "connected", "broker": "connected"}
 
 
+def test_liveness_probe_answers_without_touching_dependencies(client):
+    with patch("src.api.routes.get_db_cursor", side_effect=AssertionError("no DB")), \
+         patch("src.api.routes.pika.BlockingConnection", side_effect=AssertionError("no broker")):
+        response = client.get("/v1/livez")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
 def test_health_check_database_unavailable(client):
     @contextmanager
     def _broken_db_cursor():

@@ -142,6 +142,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 |---|---|---|---|---|
 | `POST` | `/v1/chat/query` | Ask the LLM a roster or waiver question. | No |  |
 | `GET` | `/v1/health` | Check Postgres and RabbitMQ reachability. | No |  |
+| `GET` | `/v1/livez` | Liveness probe; checks no dependencies. | No |  |
 
 <!-- END GENERATED: endpoints -->
 

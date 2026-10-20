@@ -341,6 +341,16 @@ class DraftPickTriggerPayload(BaseModel):
 # ------------------------------------------------------------------------------
 # ROUTE ENDPOINTS
 # ------------------------------------------------------------------------------
+@router.get("/livez", status_code=status.HTTP_200_OK)
+async def liveness_check():
+    """
+    Kubernetes liveness probe: answers as long as the event loop is serving requests.
+    It never checks Postgres or RabbitMQ, so a dependency outage takes the pod out of
+    rotation through /v1/health (readiness) instead of restarting it.
+    """
+    return {"status": "alive"}
+
+
 @router.get("/health", status_code=status.HTTP_200_OK)
 def health_check():
     """
