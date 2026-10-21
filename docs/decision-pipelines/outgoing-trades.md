@@ -64,7 +64,7 @@ Incoming inbox ranking uses total final score instead. The outgoing ranking keep
 | Evidence | Contents |
 | --- | --- |
 | Pitch | Deterministic score facts with cited evidence IDs |
-| `proposal-evaluation-v1` | Exact request/response, target deficit, ranking basis/value/counts and pitch evidence paths |
+| `proposal-evaluation-v1` | Exact request/response, target (deficit fields only for deficit-sourced targets), ranking basis/value/counts and pitch evidence paths |
 | Pitch paths | JSON Pointers into the stored score |
 | Invalid/absent evaluation | Unavailable panel; no inference from LLM text |
 | `GET /v1/trade/offers` IDs | ESPN IDs even in `incoming_player_ids`/`outgoing_player_ids` |

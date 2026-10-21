@@ -64,9 +64,11 @@ class OfferPlayer(BaseModel):
 
 class ProposalTarget(BaseModel):
     team_id: str
-    position: str
-    deficit: int
-    severity: float
+    # Targets drawn from the precomputed trade-candidate set carry only team_id; the deficit
+    # fields exist only when the worker picked the team from a roster deficit.
+    position: str | None = None
+    deficit: int | None = None
+    severity: float | None = None
 
 
 class ProposalRanking(BaseModel):

@@ -1022,3 +1022,34 @@ def test_edited_offer_metadata_is_documented():
     guide = (docs / "decision-pipelines/outgoing-trades.md").read_text()
     assert "`edited_by`, the self-reported label" in guide
     assert "`approval.approved_by` identifies the latest successful approver" in guide
+
+
+def candidate_evaluation(trade_context, message):
+    """Candidate-sourced proposals have no deficit target and carry extra ranking fields."""
+    evaluation = proposal_evaluation(trade_context, message)
+    evaluation["target"] = dict(team_id="2")
+    evaluation["ranking"].update(source="candidates", candidate_rank=2)
+    return evaluation
+
+
+def test_list_returns_candidate_sourced_evaluation(client, context):  # noqa: F811
+    stored = candidate_evaluation(context, "  Fair deal?  ")
+    offers = list_offers_response(client, [staged("  Fair deal?  ", stored)])
+    evaluation = offers[1]["evaluation"]
+    assert evaluation is not None
+    assert evaluation["target"]["team_id"] == "2"
+    assert evaluation["target"]["position"] is None
+    assert evaluation["target"]["deficit"] is None
+    assert evaluation["target"]["severity"] is None
+
+
+def test_stored_evaluation_accepts_candidate_target_and_unknown_ranking_fields(
+    context, caplog  # noqa: F811
+):
+    stored = candidate_evaluation(context, PITCH)
+    stored["ranking"]["future_field"] = "x"
+    row = staged(None, stored)
+    with caplog.at_level("WARNING"):
+        result = service._stored_evaluation(row, row["counter_offer"])
+    assert result is not None and result.target.team_id == "2"
+    assert not caplog.records
