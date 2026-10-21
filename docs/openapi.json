@@ -3734,16 +3734,37 @@
       "ProposalTarget": {
         "properties": {
           "deficit": {
-            "title": "Deficit",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deficit"
           },
           "position": {
-            "title": "Position",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
           },
           "severity": {
-            "title": "Severity",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Severity"
           },
           "team_id": {
             "title": "Team Id",
@@ -3751,10 +3772,7 @@
           }
         },
         "required": [
-          "team_id",
-          "position",
-          "deficit",
-          "severity"
+          "team_id"
         ],
         "title": "ProposalTarget",
         "type": "object"
