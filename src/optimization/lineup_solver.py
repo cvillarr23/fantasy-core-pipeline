@@ -423,27 +423,59 @@ def load_current_starters(cursor, team_id: str, season: int, week: int) -> dict:
     }
 
 
+def _slot_accepts(slot_position: str, position: str) -> bool:
+    """Whether a roster slot_position ("RB1", "WR2", "FLEX", "RB/WR/TE") can hold a player
+    of `position`. Ordinal suffixes are not distinct slots, and ESPN's "FLEX" is the
+    RB/WR/TE slot. Unknown slot names accept only their own name, so an unrecognised slot
+    is never treated as a wildcard."""
+    base = slot_position.rstrip("0123456789").upper()
+    if base == "FLEX":
+        base = "RB/WR/TE"
+    return position in FLEX_SLOT_ELIGIBLE_POSITIONS.get(base, (base,))
+
+
 def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list:
     """Diffs the solver's optimal lineup against the currently-set starters, pairing
-    each add with a same-position drop where possible (falling back to any remaining
-    drop, e.g. an added RB filling what had been a WR's FLEX slot). The emitted "slot"
-    is the *dropped* starter's actual roster slot_position (e.g. "FLEX"), not the
-    added player's position - that's the lineup frame actually being replaced."""
+    each add with a drop whose slot can legally hold the added player: a same-position
+    drop first, otherwise one sitting in a flex slot (e.g. an added RB filling what had
+    been a WR's FLEX slot). The emitted "slot" is the *dropped* starter's actual roster
+    slot_position (e.g. "FLEX"), not the added player's position - that's the lineup
+    frame actually being replaced.
+
+    An add with no drop in an eligible slot is skipped: pairing it with, say, a WR in a
+    dedicated WR slot would publish a swap ESPN rejects with HTTP 409
+    (TRAN_ROSTER_INELIGIBLE), failing the whole lineup message."""
     optimal_by_id = {p["player_id"]: p for p in optimal_starters}
     optimal_ids = set(optimal_by_id)
     current_ids = set(current_starters)
 
-    to_add = [optimal_by_id[pid] for pid in optimal_ids - current_ids]
+    def eligible_drops(add_player, drops):
+        return [
+            pid for pid in drops
+            if current_starters[pid]["position"] == add_player["position"]
+            or _slot_accepts(current_starters[pid]["slot_position"], add_player["position"])
+        ]
+
     to_drop = list(current_ids - optimal_ids)
+    # Most constrained adds first, so a flexible add can't take the only slot a stricter one fits.
+    to_add = sorted(
+        (optimal_by_id[pid] for pid in optimal_ids - current_ids),
+        key=lambda add_player: len(eligible_drops(add_player, to_drop)),
+    )
 
     swaps = []
     remaining_drops = list(to_drop)
     for add_player in to_add:
+        candidates = eligible_drops(add_player, remaining_drops)
         drop_id = next(
-            (pid for pid in remaining_drops if current_starters[pid]["position"] == add_player["position"]),
-            remaining_drops[0] if remaining_drops else None,
+            (pid for pid in candidates if current_starters[pid]["position"] == add_player["position"]),
+            candidates[0] if candidates else None,
         )
         if drop_id is None:
+            logger.warning(
+                "No droppable starter sits in a slot %s (%s) can fill; skipping that swap.",
+                add_player.get("name", add_player["player_id"]), add_player["position"],
+            )
             continue
         remaining_drops.remove(drop_id)
         matchup_multiplier = add_player.get("defense_matchup_multiplier", 1.0)

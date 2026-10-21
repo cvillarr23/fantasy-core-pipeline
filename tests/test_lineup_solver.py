@@ -341,6 +341,34 @@ def test_compute_lineup_swaps_reports_dropped_players_actual_flex_slot():
     }]
 
 
+def test_compute_lineup_swaps_never_targets_a_slot_the_added_player_cannot_fill():
+    # An RB cannot start in a dedicated WR slot (ESPN 409s with TRAN_ROSTER_INELIGIBLE).
+    # With a WR in WR1 and a WR in FLEX both dropped, the RB must take the FLEX frame.
+    optimal = [
+        {"player_id": "rb_new", "name": "New RB", "position": "RB", "vorp_score": 8.0},
+        {"player_id": "wr_new", "name": "New WR", "position": "WR", "vorp_score": 7.0},
+    ]
+    current = {
+        "wr_in_wr": _current("WR", "WR1", vorp_score=2.0),
+        "wr_in_flex": _current("WR", "FLEX", vorp_score=1.0),
+    }
+
+    swaps = {s["add_player_id"]: s for s in ls.compute_lineup_swaps(optimal, current)}
+
+    assert swaps["rb_new"]["slot"] == "FLEX"
+    assert swaps["rb_new"]["drop_player_id"] == "wr_in_flex"
+    assert swaps["wr_new"]["slot"] == "WR1"
+
+
+def test_compute_lineup_swaps_skips_add_with_no_eligible_drop_slot():
+    # Only drop is a WR in a dedicated WR slot: an RB add has nowhere legal to go, so no
+    # swap is published rather than one ESPN will reject.
+    optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB", "vorp_score": 8.0}]
+    current = {"wr_in_wr": _current("WR", "WR1", vorp_score=2.0)}
+
+    assert ls.compute_lineup_swaps(optimal, current) == []
+
+
 def test_compute_lineup_swaps_includes_decision_inputs_with_both_vorp_scores():
     """CORE-17 (#35): decision_inputs must carry both sides of the swap's VORP, not just
     the added player's - the audit trail needs to show what was actually gained."""
