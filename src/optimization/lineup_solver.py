@@ -430,6 +430,13 @@ def _slot_key(slot_position: str) -> str:
     return "RB/WR/TE" if base == "FLEX" else base
 
 
+def _worker_slot(slot_position: str) -> str:
+    """The slot name the browser worker resolves (lineup_slots.json). league_rosters stores
+    the flex slot as "RB/WR/TE", which the worker rejects as unrecognised - a permanent
+    failure that discards the whole message - so it is published as ESPN's "FLEX"."""
+    return "FLEX" if _slot_key(slot_position) == "RB/WR/TE" else slot_position
+
+
 def _slot_accepts(slot_position: str, position: str) -> bool:
     """Whether a roster slot_position can hold a player of `position`. Unknown slot names
     accept only their own name, so an unrecognised slot is never treated as a wildcard."""
@@ -523,7 +530,7 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
         swaps.append({
             "drop_player_id": end,
             "add_player_id": add_id,
-            "slot": slot_of[chain[0]],
+            "slot": _worker_slot(slot_of[chain[0]]),
             "matchup_multiplier": matchup_multiplier,
             # CORE-17 (#35): the numbers that justified this swap, for bot_decisions'
             # audit trail. season/week deliberately not included here - this is a pure
@@ -547,9 +554,9 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
         swap.setdefault("moves", []).append({
             "kind": "move",
             "player_id": pid,
-            "slot": new_slot,
+            "slot": _worker_slot(new_slot),
             "decision_inputs": {
-                "reason": f"frees {slot_of[pid]} for {optimal_by_id[swap['add_player_id']].get('name', swap['add_player_id'])}",
+                "reason": f"frees {_worker_slot(slot_of[pid])} for {optimal_by_id[swap['add_player_id']].get('name', swap['add_player_id'])}",
             },
         })
 

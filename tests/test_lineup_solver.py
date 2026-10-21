@@ -397,6 +397,36 @@ def test_compute_lineup_swaps_reslots_a_kept_flex_player_to_free_flex_for_an_rb(
     }]
 
 
+def test_compute_lineup_swaps_names_the_flex_slot_the_way_the_worker_reads_it():
+    # league_rosters stores FLEX as "RB/WR/TE", but the worker only resolves "FLEX"
+    # (lineup_slots.json); an unrecognised slot is a permanent failure that drops the message.
+    optimal = [
+        {"player_id": "rb_new", "name": "New RB", "position": "RB"},
+        {"player_id": "wr_kept", "name": "Kept WR", "position": "WR"},
+    ]
+    current = {"wr_drop": _current("WR", "WR1"), "wr_kept": _current("WR", "RB/WR/TE")}
+
+    [swap] = ls.compute_lineup_swaps(optimal, current)
+
+    assert swap["slot"] == "FLEX"
+    assert swap["moves"][0]["slot"] == "WR1"
+
+
+def test_compute_lineup_swaps_names_a_flex_destination_for_a_moved_starter():
+    optimal = [
+        {"player_id": "wr_new", "name": "New WR", "position": "WR"},
+        {"player_id": "rb_kept", "name": "Kept RB", "position": "RB"},
+    ]
+    # The new WR can only take the dropped RB's RB slot via the kept RB moving to FLEX.
+    current = {"rb_drop": _current("RB", "RB1"), "rb_kept": _current("RB", "RB2")}
+    current["flex_drop"] = _current("WR", "RB/WR/TE")
+
+    swaps = ls.compute_lineup_swaps(optimal, current)
+
+    assert all(s["slot"] != "RB/WR/TE" for s in swaps)
+    assert all(m["slot"] != "RB/WR/TE" for s in swaps for m in s.get("moves", []))
+
+
 def test_compute_lineup_swaps_direct_pairing_carries_no_moves():
     optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB"}]
     current = {"rb_old": _current("RB", "RB1")}
@@ -634,7 +664,7 @@ def test_optimize_uses_rolling_prior_weeks_when_target_week_has_no_rows():
     assert path == "lineup"
     [swap] = payload["optimized_swaps"]
     assert (swap["drop_player_id"], swap["add_player_id"], swap["slot"]) == (
-        ESPN_ID_BY_PID["wr_old"], ESPN_ID_BY_PID["wr_bench"], "RB/WR/TE",
+        ESPN_ID_BY_PID["wr_old"], ESPN_ID_BY_PID["wr_bench"], "FLEX",
     )
     inputs = swap["decision_inputs"]
     # Rolling mean of weeks 3 and 4, and the dropped starter's VORP from the same source.
