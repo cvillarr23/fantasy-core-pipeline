@@ -169,17 +169,53 @@ class IrMoveInstruction(BaseModel):
         return self
 
 
+class SlotMoveInstruction(BaseModel):
+    kind: Literal["move"] = Field(
+        ...,
+        description=(
+            "Moves player_id to slot, benching nobody. Used to re-slot a starter who is "
+            "staying in the lineup so another player's swap has room: a kept WR leaving FLEX "
+            "for a WR slot so an RB can start in FLEX."
+        ),
+    )
+    player_id: str = Field(
+        ...,
+        description="ESPN player id of the player to move. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap as SwapInstruction's ids",
+    )
+    slot: str = Field(..., description="Target lineup slot (e.g., RB1, WR2, FLEX). Not IR: that is the 'ir' kind's job")
+    player_name: Optional[str] = Field(
+        None,
+        description="Display name of the player, for the gateway's id-namespace cross-check.",
+    )
+    decision_inputs: Optional[dict] = Field(
+        None,
+        description="Why this move was proposed. Recorded to bot_decisions; never forwarded to the click bot.",
+    )
+
+    @model_validator(mode="after")
+    def _slot_is_not_ir(self):
+        slot = re.sub(r"\d+$", "", self.slot.strip().upper())
+        if not slot:
+            raise ValueError("slot is required")
+        if slot == "IR":
+            raise ValueError("kind 'move' cannot target IR; use kind 'ir', which checks eligibility")
+        return self
+
+
 def _lineup_entry_tag(value) -> str:
     # A plain Field(discriminator="kind") rejects an entry with no kind even when the swap
     # model defaults it, and every existing caller sends none, so the tag is computed here.
     kind = value.get("kind", "swap") if isinstance(value, dict) else getattr(value, "kind", "swap")
-    return "ir_move" if kind in IR_MOVE_KINDS else kind
+    if kind in IR_MOVE_KINDS:
+        return "ir_move"
+    return "slot_move" if kind == "move" else kind
 
 
 LineupEntry = Annotated[
     Union[
         Annotated[SwapInstruction, Tag("swap")],
         Annotated[IrMoveInstruction, Tag("ir_move")],
+        Annotated[SlotMoveInstruction, Tag("slot_move")],
     ],
     Discriminator(_lineup_entry_tag),
 ]
@@ -193,7 +229,8 @@ class LineupTriggerPayload(BaseModel):
         ...,
         description=(
             "Lineup moves, applied in one ESPN transaction. An entry without kind is a bench + "
-            "promote swap; kind 'ir' / 'activate_ir' moves one player into or out of IR."
+            "promote swap; kind 'ir' / 'activate_ir' moves one player into or out of IR; kind "
+            "'move' re-slots one starter."
         ),
     )
     idempotency_key: Optional[str] = Field(
@@ -392,7 +429,7 @@ def trigger_lineup_swap(payload: LineupTriggerPayload, x_run_id: RunIdHeader = N
     persistent queue messages inside RabbitMQ to activate automated browser worker scripts.
     """
     for swap in payload.optimized_swaps:
-        if isinstance(swap, IrMoveInstruction):
+        if isinstance(swap, (IrMoveInstruction, SlotMoveInstruction)):
             _reject_internal_player_id(swap.player_id, swap.player_name)
             continue
         _reject_internal_player_id(swap.drop_player_id, swap.drop_player_name)
@@ -833,6 +870,8 @@ def _accept_durable(queue, payload, depends_on=None, run_id=None):
             for swap in payload.optimized_swaps:
                 if isinstance(swap, IrMoveInstruction):
                     action, target, drop = IR_MOVE_ACTIONS[swap.kind], swap.player_id, None
+                elif isinstance(swap, SlotMoveInstruction):
+                    action, target, drop = "lineup_slot_move", swap.player_id, None
                 else:
                     action, target, drop = "lineup_swap", swap.add_player_id, swap.drop_player_id
                 _record_bot_decision(

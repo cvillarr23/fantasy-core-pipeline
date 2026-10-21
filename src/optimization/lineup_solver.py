@@ -423,69 +423,107 @@ def load_current_starters(cursor, team_id: str, season: int, week: int) -> dict:
     }
 
 
-def _slot_accepts(slot_position: str, position: str) -> bool:
-    """Whether a roster slot_position ("RB1", "WR2", "FLEX", "RB/WR/TE") can hold a player
-    of `position`. Ordinal suffixes are not distinct slots, and ESPN's "FLEX" is the
-    RB/WR/TE slot. Unknown slot names accept only their own name, so an unrecognised slot
-    is never treated as a wildcard."""
+def _slot_key(slot_position: str) -> str:
+    """Normalises a roster slot_position ("RB1", "WR2", "FLEX") to the ESPN slot it names.
+    Ordinal suffixes are not distinct slots, and ESPN's "FLEX" is the RB/WR/TE slot."""
     base = slot_position.rstrip("0123456789").upper()
-    if base == "FLEX":
-        base = "RB/WR/TE"
-    return position in FLEX_SLOT_ELIGIBLE_POSITIONS.get(base, (base,))
+    return "RB/WR/TE" if base == "FLEX" else base
+
+
+def _slot_accepts(slot_position: str, position: str) -> bool:
+    """Whether a roster slot_position can hold a player of `position`. Unknown slot names
+    accept only their own name, so an unrecognised slot is never treated as a wildcard."""
+    key = _slot_key(slot_position)
+    return position in FLEX_SLOT_ELIGIBLE_POSITIONS.get(key, (key,))
 
 
 def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list:
-    """Diffs the solver's optimal lineup against the currently-set starters, pairing
-    each add with a drop whose slot can legally hold the added player: a same-position
-    drop first, otherwise one sitting in a flex slot (e.g. an added RB filling what had
-    been a WR's FLEX slot). The emitted "slot" is the *dropped* starter's actual roster
-    slot_position (e.g. "FLEX"), not the added player's position - that's the lineup
-    frame actually being replaced.
+    """Diffs the solver's optimal lineup against the currently-set starters.
 
-    An add with no drop in an eligible slot is skipped: pairing it with, say, a WR in a
-    dedicated WR slot would publish a swap ESPN rejects with HTTP 409
-    (TRAN_ROSTER_INELIGIBLE), failing the whole lineup message."""
+    Each add (a bench player the solver starts) is placed in a slot freed by a drop (a
+    starter it sits). An add whose only legal slot is held by a kept starter - an RB who
+    can only start in FLEX while a kept WR sits there - displaces that starter into
+    another slot it can fill, which may in turn displace another, until the chain ends in
+    a slot a drop vacated. Shortest chains win, and a same-position drop is preferred, so
+    the common case is still a plain add-for-drop swap.
+
+    A swap benches `drop_player_id` and starts `add_player_id` in `slot`, the slot the add
+    ends in. Displaced starters ride along under the swap's "moves" as {kind: "move"}
+    entries, so the swap keeps its meaning for every consumer that reads only drop and add
+    (matchup badges, rumor bench_watch); flatten_lineup_entries expands them at publish
+    time. An add with no chain to a freed slot is skipped, since pairing it with an
+    ineligible slot makes ESPN reject the whole message (HTTP 409 TRAN_ROSTER_INELIGIBLE)."""
     optimal_by_id = {p["player_id"]: p for p in optimal_starters}
-    optimal_ids = set(optimal_by_id)
-    current_ids = set(current_starters)
 
-    def eligible_drops(add_player, drops):
-        return [
-            pid for pid in drops
-            if current_starters[pid]["position"] == add_player["position"]
-            or _slot_accepts(current_starters[pid]["slot_position"], add_player["position"])
-        ]
+    def position_of(pid):
+        return optimal_by_id[pid]["position"] if pid in optimal_by_id else current_starters[pid]["position"]
 
-    to_drop = list(current_ids - optimal_ids)
+    # A slot is identified by the starter who sits in it now. Kept starters stay put unless
+    # displaced; a drop's slot is free.
+    slot_of = {pid: info["slot_position"] for pid, info in current_starters.items()}
+    free = [pid for pid in current_starters if pid not in optimal_by_id]
+    occupant = {pid: pid for pid in current_starters if pid in optimal_by_id}
+    adds = [p for p in optimal_starters if p["player_id"] not in current_starters]
+
+    def fits(pid, slot_id):
+        return _slot_accepts(slot_of[slot_id], position_of(pid))
+
     # Most constrained adds first, so a flexible add can't take the only slot a stricter one fits.
-    to_add = sorted(
-        (optimal_by_id[pid] for pid in optimal_ids - current_ids),
-        key=lambda add_player: len(eligible_drops(add_player, to_drop)),
-    )
+    adds.sort(key=lambda p: sum(fits(p["player_id"], s) for s in slot_of))
 
-    swaps = []
-    remaining_drops = list(to_drop)
-    for add_player in to_add:
-        candidates = eligible_drops(add_player, remaining_drops)
-        drop_id = next(
-            (pid for pid in candidates if current_starters[pid]["position"] == add_player["position"]),
-            candidates[0] if candidates else None,
-        )
-        if drop_id is None:
+    swaps: list[dict] = []
+    displaced_by: dict[str, int] = {}  # kept player_id -> index of the swap whose chain last moved them
+    for add_player in adds:
+        add_id = add_player["player_id"]
+        # Breadth-first from the add: each visited slot's occupant must find another slot.
+        parent: dict[str, str | None] = {}  # slot_id -> slot_id the displaced occupant came from (None: the add itself)
+        queue = []
+        for slot_id in sorted(
+            (s for s in slot_of if fits(add_id, s)),
+            key=lambda s: current_starters[s]["position"] != add_player["position"],
+        ):
+            parent[slot_id] = None
+            queue.append(slot_id)
+        end = next((s for s in queue if s in free), None)
+        head = 0
+        while end is None and head < len(queue):
+            here = queue[head]
+            head += 1
+            mover = occupant.get(here)
+            # Only a starter we found in place can move; an add placed by an earlier chain stays.
+            if mover not in current_starters:
+                continue
+            for slot_id in slot_of:
+                if slot_id in parent or not fits(mover, slot_id):
+                    continue
+                parent[slot_id] = here
+                queue.append(slot_id)
+                if slot_id in free:
+                    end = slot_id
+                    break
+        if end is None:
             logger.warning(
-                "No droppable starter sits in a slot %s (%s) can fill; skipping that swap.",
-                add_player.get("name", add_player["player_id"]), add_player["position"],
+                "No chain of legal slot moves places %s (%s) in the lineup; skipping that swap.",
+                add_player.get("name", add_id), add_player["position"],
             )
             continue
-        remaining_drops.remove(drop_id)
+
+        # Walk back from the freed slot: each occupant shifts one step toward it.
+        chain = [end]
+        while parent[chain[-1]] is not None:
+            chain.append(parent[chain[-1]])
+        chain.reverse()  # [slot the add enters, ..., freed slot]
+        free.remove(end)
+        for slot_id, next_slot in zip(reversed(chain[:-1]), reversed(chain[1:])):
+            occupant[next_slot] = occupant[slot_id]
+            displaced_by[occupant[slot_id]] = len(swaps)
+        occupant[chain[0]] = add_id
+
         matchup_multiplier = add_player.get("defense_matchup_multiplier", 1.0)
         swaps.append({
-            "drop_player_id": drop_id,
-            "add_player_id": add_player["player_id"],
-            "slot": current_starters[drop_id]["slot_position"],
-            # Opponent-defense-strength multiplier applied to the added player's VORP this
-            # week (#93); 1.0/neutral when the feature is off or add_player predates this
-            # field (e.g. a caller building starter dicts without it).
+            "drop_player_id": end,
+            "add_player_id": add_id,
+            "slot": slot_of[chain[0]],
             "matchup_multiplier": matchup_multiplier,
             # CORE-17 (#35): the numbers that justified this swap, for bot_decisions'
             # audit trail. season/week deliberately not included here - this is a pure
@@ -493,12 +531,38 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
             # isn't worth it; those columns are simply NULL for lineup_swap rows.
             "decision_inputs": {
                 "add_player_vorp_score": add_player.get("vorp_score"),
-                "drop_player_vorp_score": current_starters[drop_id].get("vorp_score"),
+                "drop_player_vorp_score": current_starters[end].get("vorp_score"),
                 "matchup_multiplier": matchup_multiplier,
             },
         })
 
+    # A displaced player's final slot, once every chain has run. Moving between slots of one
+    # kind (RB1 -> RB2) is the same ESPN slot, so it is not a move.
+    final_slot = {pid: slot_id for slot_id, pid in occupant.items() if pid in current_starters}
+    for pid, swap_index in displaced_by.items():
+        new_slot = slot_of[final_slot[pid]]
+        if _slot_key(new_slot) == _slot_key(slot_of[pid]):
+            continue
+        swap = swaps[swap_index]
+        swap.setdefault("moves", []).append({
+            "kind": "move",
+            "player_id": pid,
+            "slot": new_slot,
+            "decision_inputs": {
+                "reason": f"frees {slot_of[pid]} for {optimal_by_id[swap['add_player_id']].get('name', swap['add_player_id'])}",
+            },
+        })
+
     return swaps
+
+
+def flatten_lineup_entries(swaps: list) -> list:
+    """The /v1/trigger/lineup body for `swaps`: each swap, then the moves it carries."""
+    entries = []
+    for swap in swaps:
+        entries.append({k: v for k, v in swap.items() if k != "moves"})
+        entries.extend(swap.get("moves", []))
+    return entries
 
 
 def resolve_lineup_swaps(cursor, swaps: list) -> list:
@@ -522,6 +586,19 @@ def resolve_lineup_swaps(cursor, swaps: list) -> list:
             )
             if identity is None
         ]
+        # A swap's moves free its slot, so publishing the swap without one would overfill it.
+        resolved_moves = []
+        for move in swap.get("moves", []):
+            move_identity = resolve_espn_identity(cursor, move["player_id"])
+            if move_identity is None:
+                missing.append(f"move {move['player_id']}")
+                continue
+            resolved_moves.append(dict(
+                move,
+                player_id=str(move_identity["espn_id"]),
+                player_name=move_identity["name"],
+                decision_inputs=dict(move.get("decision_inputs") or {}, player_internal_id=move["player_id"]),
+            ))
         if missing:
             logger.warning(f"Skipping lineup swap into {swap['slot']}: no espn_id resolved yet for {', '.join(missing)}.")
             continue
@@ -536,6 +613,7 @@ def resolve_lineup_swaps(cursor, swaps: list) -> list:
                 add_player_internal_id=swap["add_player_id"],
                 drop_player_internal_id=swap["drop_player_id"],
             ),
+            **({"moves": resolved_moves} if resolved_moves else {}),
         ))
     if swaps and not resolved:
         raise InsufficientLineupInputError(
@@ -553,8 +631,9 @@ def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = Non
     (JOB_NAME, from the CronJob's downward API), scopes it to one Job: a new scheduled or
     manual Job is a new decision and always publishes.
 
-    IR entries ({kind, player_id, slot}) are keyed by all three; a swap keeps its original
+    IR and move entries ({kind, player_id, slot}) are keyed by all three; a swap keeps its original
     [drop, add, slot] material, so keys computed before IR entries existed still match."""
+    swaps = flatten_lineup_entries(swaps)
     weeks = sorted({
         (s.get("decision_inputs") or {}).get("season", 0) * 100 + (s.get("decision_inputs") or {}).get("week", 0)
         for s in swaps
@@ -564,7 +643,7 @@ def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = Non
         "team_id": str(team_id),
         "weeks": weeks,
         "swaps": sorted(
-            [str(s["kind"]), str(s["player_id"]), str(s["slot"])] if s.get("kind") in ("ir", "activate_ir")
+            [str(s["kind"]), str(s["player_id"]), str(s["slot"])] if s.get("kind") in ("ir", "activate_ir", "move")
             else [str(s["drop_player_id"]), str(s["add_player_id"]), str(s["slot"])]
             for s in swaps
         ),
@@ -581,7 +660,8 @@ def publish_lineup_swaps(team_id: str, swaps: list, *, idempotency_key: str | No
         return False
 
     key = idempotency_key or lineup_idempotency_key(team_id, swaps, job_name=os.getenv("JOB_NAME"))
-    response = post_trigger_idempotent("lineup", {"team_id": team_id, "optimized_swaps": swaps}, key, timeout=10)
+    entries = flatten_lineup_entries(swaps)
+    response = post_trigger_idempotent("lineup", {"team_id": team_id, "optimized_swaps": entries}, key, timeout=10)
     try:
         status = response.json().get("status")
     except Exception:
@@ -589,7 +669,7 @@ def publish_lineup_swaps(team_id: str, swaps: list, *, idempotency_key: str | No
     if status == "duplicate":
         logger.info(f"Lineup swap(s) for Team {team_id} were already published under {key}; not re-enqueued.")
         return False
-    logger.info(f"Published {len(swaps)} lineup swap(s) for Team {team_id} to the control plane (idempotency key {key}).")
+    logger.info(f"Published {len(swaps)} lineup swap(s) ({len(entries)} entries) for Team {team_id} to the control plane (idempotency key {key}).")
     return True
 
 
@@ -649,7 +729,8 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
         swaps = compute_lineup_swaps(optimal_starters, current_starters)
     for swap in swaps:
         # season/week are lifted into bot_decisions' own columns by the trigger route.
-        swap["decision_inputs"].update(source, season=season, week=week)
+        for entry in (swap, *swap.get("moves", [])):
+            entry["decision_inputs"].update(source, season=season, week=week)
     return {"swaps": swaps, "optimal_starters": optimal_starters, "roster_pool": roster_pool, "source": source}
 
 
