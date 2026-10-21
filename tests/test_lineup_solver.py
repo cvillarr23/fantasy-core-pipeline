@@ -369,6 +369,115 @@ def test_compute_lineup_swaps_skips_add_with_no_eligible_drop_slot():
     assert ls.compute_lineup_swaps(optimal, current) == []
 
 
+def test_compute_lineup_swaps_reslots_a_kept_flex_player_to_free_flex_for_an_rb():
+    # Week 7 shape: the only drop is a WR in a dedicated WR slot, and the RB add can only
+    # start in FLEX, which a kept WR occupies. The kept WR has to move into the WR slot.
+    optimal = [
+        {"player_id": "rb_new", "name": "New RB", "position": "RB", "vorp_score": 8.0},
+        {"player_id": "wr_kept", "name": "Kept WR", "position": "WR"},
+        {"player_id": "rb_a", "name": "RB A", "position": "RB"},
+        {"player_id": "rb_b", "name": "RB B", "position": "RB"},
+    ]
+    current = {
+        "wr_drop": _current("WR", "WR1", vorp_score=2.0),
+        "wr_kept": _current("WR", "FLEX"),
+        "rb_a": _current("RB", "RB1"),
+        "rb_b": _current("RB", "RB2"),
+    }
+
+    swaps = ls.compute_lineup_swaps(optimal, current)
+
+    assert len(swaps) == 1
+    assert swaps[0]["drop_player_id"] == "wr_drop"
+    assert swaps[0]["add_player_id"] == "rb_new"
+    assert swaps[0]["slot"] == "FLEX"
+    assert swaps[0]["moves"] == [{
+        "kind": "move", "player_id": "wr_kept", "slot": "WR1",
+        "decision_inputs": {"reason": "frees FLEX for New RB"},
+    }]
+
+
+def test_compute_lineup_swaps_direct_pairing_carries_no_moves():
+    optimal = [{"player_id": "rb_new", "name": "New RB", "position": "RB"}]
+    current = {"rb_old": _current("RB", "RB1")}
+
+    assert "moves" not in ls.compute_lineup_swaps(optimal, current)[0]
+
+
+def test_compute_lineup_swaps_does_not_move_a_kept_player_between_slots_of_one_kind():
+    # RB1 and RB2 are the same ESPN slot, so shuffling between them is not a move.
+    optimal = [
+        {"player_id": "rb_new", "name": "New RB", "position": "RB"},
+        {"player_id": "rb_kept", "name": "Kept RB", "position": "RB"},
+    ]
+    current = {"rb_kept": _current("RB", "RB1"), "rb_old": _current("RB", "RB2")}
+
+    swaps = ls.compute_lineup_swaps(optimal, current)
+
+    assert "moves" not in swaps[0]
+    assert swaps[0]["slot"] == "RB2"
+
+
+def test_flatten_lineup_entries_puts_each_swaps_moves_right_after_it():
+    swap_a = {"drop_player_id": "d1", "add_player_id": "a1", "slot": "FLEX",
+              "moves": [{"kind": "move", "player_id": "k1", "slot": "WR1"}]}
+    swap_b = {"drop_player_id": "d2", "add_player_id": "a2", "slot": "RB2"}
+
+    assert ls.flatten_lineup_entries([swap_a, swap_b]) == [
+        {"drop_player_id": "d1", "add_player_id": "a1", "slot": "FLEX"},
+        {"kind": "move", "player_id": "k1", "slot": "WR1"},
+        {"drop_player_id": "d2", "add_player_id": "a2", "slot": "RB2"},
+    ]
+
+
+def test_lineup_idempotency_key_changes_when_a_move_changes():
+    swap = {"drop_player_id": "d", "add_player_id": "a", "slot": "FLEX"}
+    with_move = dict(swap, moves=[{"kind": "move", "player_id": "k", "slot": "WR1"}])
+    other_move = dict(swap, moves=[{"kind": "move", "player_id": "k", "slot": "WR2"}])
+
+    keys = {ls.lineup_idempotency_key("8", s) for s in ([swap], [with_move], [other_move])}
+
+    assert len(keys) == 3
+
+
+def _identity_cursor(identities):
+    """resolve_lineup_swaps looks ids up through espn_identity; stub it per internal id."""
+    return patch.object(ls, "resolve_espn_identity", side_effect=lambda _c, pid: identities.get(pid))
+
+
+def test_resolve_lineup_swaps_translates_a_swaps_moves_to_espn_ids():
+    swap = {
+        "drop_player_id": "d", "add_player_id": "a", "slot": "FLEX", "decision_inputs": {},
+        "moves": [{"kind": "move", "player_id": "k", "slot": "WR1", "decision_inputs": {"reason": "r"}}],
+    }
+    identities = {
+        "d": {"espn_id": 1, "name": "Drop"}, "a": {"espn_id": 2, "name": "Add"},
+        "k": {"espn_id": 3, "name": "Kept"},
+    }
+    with _identity_cursor(identities):
+        resolved = ls.resolve_lineup_swaps(MagicMock(), [swap])
+
+    assert resolved[0]["moves"] == [{
+        "kind": "move", "player_id": "3", "player_name": "Kept", "slot": "WR1",
+        "decision_inputs": {"reason": "r", "player_internal_id": "k"},
+    }]
+
+
+def test_resolve_lineup_swaps_skips_a_swap_whose_move_has_no_espn_id():
+    # Publishing the swap without its move would overfill the slot and fail the whole message.
+    swap = {
+        "drop_player_id": "d", "add_player_id": "a", "slot": "FLEX", "decision_inputs": {},
+        "moves": [{"kind": "move", "player_id": "k", "slot": "WR1"}],
+    }
+    identities = {"d": {"espn_id": 1, "name": "Drop"}, "a": {"espn_id": 2, "name": "Add"}}
+    with _identity_cursor(identities):
+        try:
+            ls.resolve_lineup_swaps(MagicMock(), [swap])
+        except ls.InsufficientLineupInputError:
+            return
+    raise AssertionError("expected InsufficientLineupInputError")
+
+
 def test_compute_lineup_swaps_includes_decision_inputs_with_both_vorp_scores():
     """CORE-17 (#35): decision_inputs must carry both sides of the swap's VORP, not just
     the added player's - the audit trail needs to show what was actually gained."""

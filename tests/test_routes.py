@@ -876,6 +876,61 @@ def test_trigger_lineup_records_one_bot_decision_per_entry_kind(client):
     assert {c.kwargs["bot_name"] for c in captured["audit"].call_args_list} == {"lineup_bot"}
 
 
+MOVE_ENTRY = {
+    "kind": "move", "player_id": "4361741", "slot": "WR1", "player_name": "Drake London",
+    "decision_inputs": {"season": 2026, "week": 7},
+}
+
+
+def test_trigger_lineup_publishes_a_slot_move_after_its_swap(client):
+    response, captured = _post_lineup_capturing(client, {
+        "team_id": "8", "optimized_swaps": [LEGACY_SWAP, MOVE_ENTRY],
+    })
+
+    assert response.status_code == 202
+    swap, move = captured["body"]["optimized_swaps"]
+    assert swap["add_player_id"] == "4360761" and "kind" not in swap
+    assert move == {
+        "kind": "move", "player_id": "4361741", "slot": "WR1", "player_name": "Drake London",
+        "decision_inputs": {"season": 2026, "week": 7},
+    }
+
+
+def test_trigger_lineup_records_a_slot_move_as_its_own_bot_decision(client):
+    response, captured = _post_lineup_capturing(client, {
+        "team_id": "8", "optimized_swaps": [LEGACY_SWAP, MOVE_ENTRY],
+    })
+
+    assert response.status_code == 202
+    rows = [
+        (c.kwargs["action"], c.kwargs["target_player_id"], c.kwargs["drop_player_id"])
+        for c in captured["audit"].call_args_list
+    ]
+    assert rows == [("lineup_swap", "4360761", "16737"), ("lineup_slot_move", "4361741", None)]
+
+
+@pytest.mark.parametrize("slot", ["IR", " ir ", ""])
+def test_slot_move_cannot_target_ir_or_an_empty_slot(slot):
+    # Moving into IR needs the injury check, which only the dedicated 'ir' kind carries.
+    with pytest.raises(ValueError):
+        routes.LineupTriggerPayload(
+            team_id="8", optimized_swaps=[{"kind": "move", "player_id": "4361741", "slot": slot}],
+        )
+
+
+def test_trigger_lineup_slot_move_rejects_an_internal_player_id(client):
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [("Matthew Stafford",), ("Jack Bech",)]
+
+    response, captured = _post_lineup_capturing(client, {
+        "team_id": "8",
+        "optimized_swaps": [{"kind": "move", "player_id": "12483", "player_name": "Jack Bech", "slot": "WR1"}],
+    }, cursor=cursor)
+
+    assert response.status_code == 422
+    assert "body" not in captured
+
+
 def test_trigger_lineup_duplicate_ir_submission_records_no_bot_decisions():
     payload = routes.LineupTriggerPayload(team_id="8", optimized_swaps=[IR_ENTRY])
     with patch("src.services.activity_service.create_action", return_value="previous"), \

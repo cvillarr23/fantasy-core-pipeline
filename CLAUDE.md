@@ -275,6 +275,16 @@
   eligibility: the worker reads ESPN live and rejects ineligible players, a full IR slot or "not
   in IR" permanently. `activity_runner.reconcile_action` verifies an IR entry by that one player's
   slot.
+- `/v1/trigger/lineup` also accepts a slot move, `{kind: "move", player_id, slot}` (not IR; that
+  stays the `ir` kind's job): it re-slots a starter who is staying in the lineup, benching nobody.
+  `lineup_solver.compute_lineup_swaps` emits one when an add's only legal slot is held by a kept
+  starter (an RB who can only start in FLEX while a kept WR sits there), so the WR moves to the
+  slot a drop vacated. Moves ride on their swap under `"moves"` so `drop_player_id` / `add_player_id`
+  consumers (matchup badges, rumor bench_watch) are unaffected; `flatten_lineup_entries` expands
+  them, right after their swap, in `publish_lineup_swaps` and `lineup_idempotency_key`.
+  `resolve_lineup_swaps` drops a swap whose move has no `espn_id`, since the swap alone would
+  overfill the slot. The worker needs the `move` kind (browser-worker `lineup_bot.js`) before
+  core publishes one, or it rejects the whole message as an unknown kind.
 - `ir_and_add` auto-publish (#219) is gated by `AUTO_PUBLISH_IR_MOVES` (read per call, off unless
   `1`/`true`/`yes`). Flag off is an exact no-op. With it on, `plan_live_waiver_moves` returns the
   IR + add moves after the swaps (so a failed one can't hold the week's swaps back), unless one of

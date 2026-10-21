@@ -2965,7 +2965,7 @@
             "title": "Idempotency Key"
           },
           "optimized_swaps": {
-            "description": "Lineup moves, applied in one ESPN transaction. An entry without kind is a bench + promote swap; kind 'ir' / 'activate_ir' moves one player into or out of IR.",
+            "description": "Lineup moves, applied in one ESPN transaction. An entry without kind is a bench + promote swap; kind 'ir' / 'activate_ir' moves one player into or out of IR; kind 'move' re-slots one starter.",
             "items": {
               "oneOf": [
                 {
@@ -2973,6 +2973,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/IrMoveInstruction"
+                },
+                {
+                  "$ref": "#/components/schemas/SlotMoveInstruction"
                 }
               ]
             },
@@ -5013,6 +5016,58 @@
           "decline_max"
         ],
         "title": "ShadowThresholds",
+        "type": "object"
+      },
+      "SlotMoveInstruction": {
+        "properties": {
+          "decision_inputs": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why this move was proposed. Recorded to bot_decisions; never forwarded to the click bot.",
+            "title": "Decision Inputs"
+          },
+          "kind": {
+            "const": "move",
+            "description": "Moves player_id to slot, benching nobody. Used to re-slot a starter who is staying in the lineup so another player's swap has room: a kept WR leaving FLEX for a WR slot so an RB can start in FLEX.",
+            "title": "Kind",
+            "type": "string"
+          },
+          "player_id": {
+            "description": "ESPN player id of the player to move. Must be ESPN's, not the internal Sleeper players.player_id - same id-namespace trap as SwapInstruction's ids",
+            "title": "Player Id",
+            "type": "string"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Display name of the player, for the gateway's id-namespace cross-check.",
+            "title": "Player Name"
+          },
+          "slot": {
+            "description": "Target lineup slot (e.g., RB1, WR2, FLEX). Not IR: that is the 'ir' kind's job",
+            "title": "Slot",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "player_id",
+          "slot"
+        ],
+        "title": "SlotMoveInstruction",
         "type": "object"
       },
       "Starter": {
