@@ -254,6 +254,8 @@ A partial expression index on `counter_offer->>'offer_key'` for `trade_offer_sub
 supports approval lookups.
 </details>
 
+`outcome_details.resolution` on a `trade_offer_submit` row is `{outcome, resolved_at, espn_transaction_id}`, set when the worker reports how ESPN resolved the sent offer. Its presence ends the hold on the offer's outgoing players.
+
 <details>
 <summary>Incoming inbox publications (<code>transaction_type = 'trade_inbox'</code>)</summary>
 

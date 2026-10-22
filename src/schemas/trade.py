@@ -57,6 +57,30 @@ class TradeApprovalResponse(BaseModel):
     duplicate: bool = False
 
 
+OfferOutcome = Literal[
+    "accepted", "declined", "expired", "withdrawn", "vetoed", "cancelled"
+]
+
+
+class OfferResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: OfferOutcome
+    resolved_at: AwareDatetime | None = None
+    espn_transaction_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class OfferResolution(BaseModel):
+    outcome: OfferOutcome
+    resolved_at: AwareDatetime
+    espn_transaction_id: str | None = None
+
+
+class OfferResolutionResponse(OfferResolution):
+    offer_key: str
+    duplicate: bool = False
+
+
 class OfferPlayer(BaseModel):
     espn_id: str
     name: str | None
@@ -129,6 +153,8 @@ class TradeOffer(BaseModel):
     related_transaction_id: str | None = None
     thread_root_id: str | None = None
     approval: dict | None = None
+    # Worker-reported end state of a sent offer; null while it is still pending on ESPN.
+    resolution: OfferResolution | None = None
     # Advisory only: it is not part of offer_key and is never sent on approval.
     evaluation: ProposalEvaluation | None = None
 

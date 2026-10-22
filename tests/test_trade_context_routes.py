@@ -59,6 +59,7 @@ def test_rest_and_mcp_share_the_same_context_service(client):
         },
         "coverage": {"unmapped_espn_ids": [], "missing_metric_count": 0},
         "teams": {},
+        "committed_players": [],
     }
     with patch("src.api.trade.get_league_trade_context", return_value=payload) as rest:
         response = client.get(

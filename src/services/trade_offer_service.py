@@ -29,6 +29,12 @@ ROW_COLUMNS = (
 SELECT_COLUMNS = ", ".join(ROW_COLUMNS)
 
 
+# A sent offer holds its players until the worker reports how ESPN resolved it. Core is never
+# told about offers the worker stops watching, so the hold also lapses after this long.
+COMMITTED_STATUSES = ("approved", "submitting", "submitted")
+DEFAULT_COMMIT_HOURS = 72
+
+
 class OfferConflict(ValueError):
     pass
 
@@ -138,6 +144,66 @@ def _save_approval(cursor, row_id, status, approval):
         "WHERE id = %s",
         (status, json.dumps(approval), row_id),
     )
+
+
+def _save_resolution(cursor, row_id, resolution):
+    cursor.execute(
+        "UPDATE execution_log SET outcome_details = "
+        "COALESCE(outcome_details, '{}'::jsonb) || jsonb_build_object('resolution', %s::jsonb) "
+        "WHERE id = %s",
+        (json.dumps(resolution), row_id),
+    )
+
+
+def resolve_offer(key, outcome, resolved_at=None, espn_transaction_id=None):
+    """Records how ESPN resolved a sent offer, releasing its players for new trades."""
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+        rows = _read_offers(cursor, key)
+        if not rows:
+            raise OfferNotFound("Offer not found.")
+        sent = [r for r in rows if r["status"] in COMMITTED_STATUSES]
+        if not sent:
+            raise OfferConflict("Offer was never approved or sent.")
+        stored = [
+            (r["outcome_details"] or {}).get("resolution")
+            for r in sent
+            if (r["outcome_details"] or {}).get("resolution")
+        ]
+        if any(s["outcome"] != outcome for s in stored):
+            raise OfferConflict("Offer is already resolved with a different outcome.")
+        if len(stored) == len(sent):
+            return dict(offer_key=key, duplicate=True, **stored[0])
+        resolution = dict(
+            outcome=outcome,
+            resolved_at=(resolved_at or datetime.now(timezone.utc)).isoformat(),
+            espn_transaction_id=espn_transaction_id,
+        )
+        for r in sent:
+            _save_resolution(cursor, r["id"], resolution)
+    return dict(offer_key=key, duplicate=False, **resolution)
+
+
+def committed_outgoing_players(league_id, season):
+    """ESPN ids we have promised in unresolved outgoing offers, mapped to their offer keys."""
+    hours = int(os.getenv("OUTGOING_COMMIT_HOURS", DEFAULT_COMMIT_HOURS))
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT counter_offer FROM execution_log "
+            "WHERE transaction_type = 'trade_offer_submit' AND status = ANY(%s) "
+            "AND league_id = %s AND season = %s "
+            "AND NOT (COALESCE(outcome_details, '{}'::jsonb) ? 'resolution') "
+            "AND executed_at >= NOW() - make_interval(hours => %s)",
+            (list(COMMITTED_STATUSES), league_id, season, hours),
+        )
+        rows = cursor.fetchall()
+    committed = {}
+    for (offer,) in rows:
+        for player_id in offer.get("outgoing_player_ids", []):
+            keys = committed.setdefault(player_id, [])
+            if offer["offer_key"] not in keys:
+                keys.append(offer["offer_key"])
+    return committed
 
 
 def _response(key, approval, duplicate=False):
@@ -513,6 +579,7 @@ def list_offers(
         item["approval"] = (
             {k: v for k, v in audit.items() if k != "payload"} if audit else None
         )
+        item["resolution"] = (row["outcome_details"] or {}).get("resolution")
         item["evaluation"] = _stored_evaluation(row, offer)
         result.append(item)
     return dict(offers=result, limit=limit, offset=offset)

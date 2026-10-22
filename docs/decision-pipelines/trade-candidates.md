@@ -24,12 +24,12 @@ flowchart LR
 | --- | --- |
 | Entrypoint | `python -m src.jobs.trade_candidates` (`--league-id`, `--team-id`, `--season`, `--week`, `--horizon 4`, `--max-candidates 400`) |
 | Week | `--week`, or the upcoming week from `resolve_upcoming_week`. Exit 1 if it can't be resolved; exit 0 without writing once the season is over. |
-| Reads | `get_league_trade_context`, the NFL schedule for each horizon week, and as-of-week VORP for every rostered player. Each is read **once** per run. |
-| Universe | For each counterparty, every 1-for-1, 2-for-1 and 1-for-2 package. A player is left out when he is in an IR slot, `OUT`/`INJURY_RESERVE`, has no internal id mapping, or has no position. |
+| Reads | `get_league_trade_context`, the NFL schedule for each horizon week, and as-of-week VORP for every rostered player. Each is read **once** per run. The context also carries the players committed to our pending offers. |
+| Universe | For each counterparty, every 1-for-1, 2-for-1 and 1-for-2 package. A player is left out when he is in an IR slot, `OUT`/`INJURY_RESERVE`, has no internal id mapping, or has no position. Players in one of our unresolved outgoing offers (`committed_players` in the context) are also left out of what we send; the other team's players are not affected. |
 | Shape | Named from our side: `2for1` means we send two players and receive one. |
 | Scoring | `shape_trade_score` with the shared context, so each item matches `POST /v1/trade/score` for the same package at `computed_at`. |
 | Storage | `trade_candidate_runs` (one row per league/season/week) and `trade_candidates` (one row per scored package). A run replaces its week in one transaction. |
-| Audit | `run_log` row `trade_candidates`, whose summary holds the `enumerated`, `prefiltered`, `scored`, `proposable`, `needs_drop`, `one_sided` and `duration_seconds` counts. |
+| Audit | `run_log` row `trade_candidates`, whose summary holds the `enumerated`, `prefiltered`, `scored`, `excluded_committed`, `proposable`, `needs_drop`, `one_sided` and `duration_seconds` counts. |
 
 ## What does the prefilter keep?
 
