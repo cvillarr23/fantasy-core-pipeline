@@ -441,15 +441,23 @@ def _stored_evaluation(row, offer):
 def list_offers(
     status="awaiting_approval", league_id=None, season=None, limit=50, offset=0
 ):
-    conditions = ["transaction_type = 'trade_offer_submit'", "status = %s"]
+    # execution_log keeps one row per lifecycle step, so status is filtered on each
+    # offer's latest row, never on any row: an offer already submitted must not still
+    # list as awaiting approval because its earlier staged row says so.
+    conditions = ["status = %s"]
     params = [status]
     for field, value in (("league_id", league_id), ("season", season)):
         if value is not None:
             conditions.append(f"{field} = %s")
             params.append(value)
+    offer_group = "COALESCE(counter_offer->>'offer_key', id::text)"
     with get_db_cursor() as cursor:
         cursor.execute(
-            f"SELECT {SELECT_COLUMNS} FROM execution_log WHERE {' AND '.join(conditions)} "
+            f"SELECT {SELECT_COLUMNS} FROM ("
+            f"SELECT DISTINCT ON ({offer_group}) {SELECT_COLUMNS} FROM execution_log "
+            "WHERE transaction_type = 'trade_offer_submit' "
+            f"ORDER BY {offer_group}, executed_at DESC, id DESC"
+            f") latest WHERE {' AND '.join(conditions)} "
             "ORDER BY executed_at DESC, id DESC LIMIT %s OFFSET %s",
             params + [limit, offset],
         )

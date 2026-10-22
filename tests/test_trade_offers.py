@@ -544,6 +544,22 @@ def list_offers_response(client, rows):
     return {offer["id"]: offer for offer in response.json()["offers"]}
 
 
+def test_list_filters_status_on_each_offers_latest_row(client):
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[], []]
+    with patch.object(service, "get_db_cursor") as db:
+        db.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/trade/offers?league_id=L&season=2026")
+    assert response.status_code == 200, response.text
+    query, params = cursor.execute.call_args_list[0].args
+    inner, outer = query.split(") latest WHERE ")
+    assert "DISTINCT ON (COALESCE(counter_offer->>'offer_key', id::text))" in inner
+    assert "executed_at DESC, id DESC" in inner
+    assert "status = %s" not in inner
+    assert "status = %s" in outer
+    assert params == ["awaiting_approval", "L", 2026, 50, 0]
+
+
 def test_list_passes_stored_evaluation_through(client, context):  # noqa: F811
     stored = proposal_evaluation(context, "  Fair deal?  ")
     offers = list_offers_response(client, [staged("  Fair deal?  ", stored)])
