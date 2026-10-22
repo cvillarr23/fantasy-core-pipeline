@@ -35,6 +35,8 @@ from src.services.trade_context_service import (
 from src.services.trade_score_service import TradeOwnershipError, score_trade
 
 from src.schemas.trade import (
+    OfferResolutionRequest,
+    OfferResolutionResponse,
     OfferStatus,
     TradeApprovalRequest,
     TradeApprovalResponse,
@@ -265,6 +267,28 @@ def approve_trade_offer(
     if result["duplicate"]:
         response.status_code = 200
     return result
+
+
+@trade_router.post(
+    "/offers/{offer_key}/resolution",
+    response_model=OfferResolutionResponse,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def resolve_trade_offer(
+    payload: OfferResolutionRequest,
+    offer_key: str = Path(pattern=r"^[0-9a-f]{64}$"),
+):
+    try:
+        return trade_offer_service.resolve_offer(
+            offer_key,
+            payload.outcome,
+            payload.resolved_at,
+            payload.espn_transaction_id,
+        )
+    except trade_offer_service.OfferNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except trade_offer_service.OfferConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @trade_router.get("/context", response_model=LeagueTradeContext)

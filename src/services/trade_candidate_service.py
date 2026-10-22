@@ -12,6 +12,11 @@ Classification uses the worker's gates (fantasy-browser-worker eligibilityReason
 - needs_drop: only exceeds_roster_limit fails, so the offer would need a drop.
 - one_sided: anything else; reasons lists the failed gates.
 
+Players in one of our unresolved outgoing offers (`context["committed_players"]`) are
+never sent again: ESPN still lists them on our roster, so without this a second package
+could give away a player we have already promised. Only our side is filtered; the other
+team's received players stay, and the prefilter baselines still use full rosters.
+
 The prefilter must never drop a package that full scoring would mark proposable. It
 leans on the lineup being a matroid (players matched into slots), so each week's optimal
 lineup changes by exchanges:
@@ -225,10 +230,18 @@ def _roster_size(roster):
     return sum(1 for player in roster if player.get("slot") != "IR")
 
 
+def committed_espn_ids(context):
+    return {p["espn_id"] for p in context.get("committed_players", [])}
+
+
 def enumerate_packages(context, our_team_id):
     """Every (counterparty, send, receive) in the candidate universe, in a fixed order."""
     teams = context["teams"]
-    ours = [p for p in teams[our_team_id]["roster"] if tradeable(p)]
+    committed = committed_espn_ids(context)
+    ours = [
+        p for p in teams[our_team_id]["roster"]
+        if tradeable(p) and p["espn_id"] not in committed
+    ]
     for counterparty_team_id in sorted(teams, key=int):
         if counterparty_team_id == our_team_id:
             continue
@@ -369,10 +382,15 @@ def _build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_playe
             "reasons": reasons,
             "score": score,
         })
+    committed = committed_espn_ids(context)
     counts = {
         "enumerated": enumerated,
         "prefiltered": prefiltered,
         "scored": len(rows),
+        "excluded_committed": sum(
+            1 for p in teams[our_team_id]["roster"]
+            if tradeable(p) and p["espn_id"] in committed
+        ),
         **{status: sum(1 for row in rows if row["status"] == status) for status in STATUSES},
     }
     return rows, {**counts, "teams": list(team_counts.values())}

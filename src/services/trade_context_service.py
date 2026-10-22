@@ -21,6 +21,7 @@ from src.ingestion.sync_league import (
     fetch_raw_league_data,
 )
 from src.services.read_cache import cached
+from src.services.trade_offer_service import committed_outgoing_players
 from src.services.score_history import load_stored_events
 
 
@@ -446,4 +447,13 @@ def get_league_trade_context(
         # can target a partner whose byes complement ours.
         return attach_bye_outlooks(context, bye_weeks_or_empty(season))
 
-    return cached(["trade-context", league_id, season, week, horizon], 60, load)
+    context = cached(["trade-context", league_id, season, week, horizon], 60, load)
+    # Read per call, outside the 60s cache: a resolution or new submission must show at once.
+    committed = committed_outgoing_players(league_id, season)
+    return {
+        **context,
+        "committed_players": [
+            {"espn_id": espn_id, "offer_keys": keys}
+            for espn_id, keys in sorted(committed.items())
+        ],
+    }

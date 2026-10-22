@@ -641,6 +641,27 @@
         "title": "ChatQueryResponse",
         "type": "object"
       },
+      "CommittedPlayer": {
+        "properties": {
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "offer_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Offer Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "espn_id",
+          "offer_keys"
+        ],
+        "title": "CommittedPlayer",
+        "type": "object"
+      },
       "ContextCoverage": {
         "properties": {
           "missing_metric_count": {
@@ -2730,6 +2751,13 @@
             "title": "As Of Week",
             "type": "integer"
           },
+          "committed_players": {
+            "items": {
+              "$ref": "#/components/schemas/CommittedPlayer"
+            },
+            "title": "Committed Players",
+            "type": "array"
+          },
           "coverage": {
             "$ref": "#/components/schemas/ContextCoverage"
           },
@@ -3213,6 +3241,139 @@
           "name"
         ],
         "title": "OfferPlayer",
+        "type": "object"
+      },
+      "OfferResolution": {
+        "properties": {
+          "espn_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Espn Transaction Id"
+          },
+          "outcome": {
+            "enum": [
+              "accepted",
+              "declined",
+              "expired",
+              "withdrawn",
+              "vetoed",
+              "cancelled"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "resolved_at": {
+            "format": "date-time",
+            "title": "Resolved At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "resolved_at"
+        ],
+        "title": "OfferResolution",
+        "type": "object"
+      },
+      "OfferResolutionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "espn_transaction_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Espn Transaction Id"
+          },
+          "outcome": {
+            "enum": [
+              "accepted",
+              "declined",
+              "expired",
+              "withdrawn",
+              "vetoed",
+              "cancelled"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "OfferResolutionRequest",
+        "type": "object"
+      },
+      "OfferResolutionResponse": {
+        "properties": {
+          "duplicate": {
+            "default": false,
+            "title": "Duplicate",
+            "type": "boolean"
+          },
+          "espn_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Espn Transaction Id"
+          },
+          "offer_key": {
+            "title": "Offer Key",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "accepted",
+              "declined",
+              "expired",
+              "withdrawn",
+              "vetoed",
+              "cancelled"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "resolved_at": {
+            "format": "date-time",
+            "title": "Resolved At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "resolved_at",
+          "offer_key"
+        ],
+        "title": "OfferResolutionResponse",
         "type": "object"
       },
       "OurCounter": {
@@ -6479,6 +6640,16 @@
             ],
             "title": "Related Transaction Id"
           },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OfferResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "season": {
             "anyOf": [
               {
@@ -6874,6 +7045,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -10322,6 +10500,65 @@
           }
         },
         "summary": "Approve Trade Offer"
+      }
+    },
+    "/v1/trade/offers/{offer_key}/resolution": {
+      "post": {
+        "operationId": "resolve_trade_offer_v1_trade_offers__offer_key__resolution_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "offer_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Offer Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfferResolutionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfferResolutionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Trade Offer"
       }
     },
     "/v1/trade/score": {

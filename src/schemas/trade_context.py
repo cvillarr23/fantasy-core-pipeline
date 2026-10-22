@@ -1,7 +1,7 @@
 """League trade context: ESPN ownership, scoped metrics and fantasy schedule evidence."""
 
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PlayerWeekMetrics(BaseModel):
@@ -98,6 +98,11 @@ class ContextCoverage(BaseModel):
     missing_metric_count: int
 
 
+class CommittedPlayer(BaseModel):
+    espn_id: str
+    offer_keys: list[str]
+
+
 class LeagueTradeContext(BaseModel):
     league_id: str
     season: int
@@ -110,3 +115,5 @@ class LeagueTradeContext(BaseModel):
     strength_metric: StrengthMetric
     coverage: ContextCoverage
     teams: dict[str, TradeContextTeam]
+    # Our players in an unresolved outgoing offer: not available to send in another trade.
+    committed_players: list[CommittedPlayer] = Field(default_factory=list)

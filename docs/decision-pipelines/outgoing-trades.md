@@ -107,6 +107,18 @@ claim and audit in the same transaction. The published payload contains the edit
 `message` and approval for the new key; the response's `offer_key` is that new key.
 An existing offer under the edited key returns 409 rather than merging histories.
 
+## How is an offer resolved?
+
+Core cannot see ESPN, so the worker reports the end state of a sent offer with `POST /v1/trade/offers/{offer_key}/resolution` (`X-API-Key` required):
+
+```json
+{"outcome": "declined", "resolved_at": "2026-10-22T03:00:00Z", "espn_transaction_id": "tx-9"}
+```
+
+`outcome` is `accepted`, `declined`, `expired`, `withdrawn`, `vetoed` or `cancelled`; `resolved_at` and `espn_transaction_id` are optional. The marker is stored at `outcome_details.resolution` on every sent row for the key and the row's `status` is unchanged. Repeating the same outcome returns the stored marker with `duplicate: true`; a different outcome is 409, as is an offer that was never approved. An unknown key is 404. `GET /v1/trade/offers` returns it as `resolution` (null while pending).
+
+Until resolved, the offer's outgoing players are committed (see [trade context](./trade-context.md#what-are-committed-players)) and are not sent in other trades.
+
 `GET /v1/trade/offers?status=approved` exposes `drafted_message` (the original generated
 text, which can be null) and `message_edited: true` on edited rows. Unedited rows return
 `drafted_message: null`, `message_edited: false` and `edited_by: null`. Edited rows expose

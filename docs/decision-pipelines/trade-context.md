@@ -50,6 +50,12 @@ strength_z = (points_per_week − league_mean) / population_standard_deviation
 
 Positive z means stronger fantasy scoring. It describes completed points, not win probability or NFL defense strength.
 
+## What are committed players?
+
+`committed_players` lists our players (ESPN ids) who are in an outgoing offer that is `approved`, `submitting` or `submitted` and not yet resolved. ESPN still shows them on our roster, so recommenders and the worker's LLM fallback must not send them in another trade. Each entry has `espn_id` and the `offer_keys` holding him.
+
+An offer stops counting when its [resolution is recorded](./outgoing-trades.md#how-is-an-offer-resolved) or after `OUTGOING_COMMIT_HOURS` (default 72) from its `executed_at`, whichever comes first. The list is read on every call, not from the 60-second cache.
+
 ## What does schedule coverage mean?
 
 | Weekly status | Meaning |

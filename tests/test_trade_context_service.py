@@ -19,6 +19,12 @@ def game(period, home, away=None, home_points=0, away_points=0, winner="UNDECIDE
     return row
 
 
+@pytest.fixture(autouse=True)
+def no_committed_offers():
+    with patch.object(service, "committed_outgoing_players", return_value={}) as committed:
+        yield committed
+
+
 @pytest.fixture
 def raw():
     return {
@@ -491,6 +497,7 @@ def test_populated_context_matches_the_public_response_schema(raw):
     from src.schemas.trade_context import LeagueTradeContext
 
     result = attach_bye_outlooks(shape(raw), {"KC": 9, "BUF": 7})
+    result["committed_players"] = [{"espn_id": "100", "offer_keys": ["k"]}]
     assert LeagueTradeContext.model_validate(result).model_dump() == result
 
 
@@ -639,3 +646,24 @@ def test_partial_multiweek_store_uses_completed_live_totals(raw):
     assert result == shape(raw)
     assert result["teams"]["1"]["strength"]["points_per_week"] == 100
     assert result["teams"]["1"]["strength"]["completed_scoring_weeks"] == 2
+
+
+def test_context_lists_committed_players_outside_the_cache(monkeypatch, raw, no_committed_offers):
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "123")
+    no_committed_offers.return_value = {"500": ["k1"], "100": ["k1", "k2"]}
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[], []]
+
+    @contextmanager
+    def db():
+        yield cursor
+
+    with patch.object(service, "build_league"), patch.object(
+        service, "fetch_raw_league_data", return_value=raw
+    ), patch.object(service, "get_db_cursor", db):
+        result = service.get_league_trade_context("123", 2026, 3, 4)
+    no_committed_offers.assert_called_once_with("123", 2026)
+    assert result["committed_players"] == [
+        {"espn_id": "100", "offer_keys": ["k1", "k2"]},
+        {"espn_id": "500", "offer_keys": ["k1"]},
+    ]

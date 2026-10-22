@@ -203,6 +203,25 @@ def test_out_and_ir_players_are_never_traded(context):
     assert not traded & {"203", "305", "101"}
 
 
+def test_committed_players_leave_only_our_side(context):
+    context["committed_players"] = [
+        {"espn_id": "101", "offer_keys": ["k"]},
+        {"espn_id": "203", "offer_keys": ["k"]},
+    ]
+    packages = list(service.enumerate_packages(context, "1"))
+    sent = {p["espn_id"] for _, send, _ in packages for p in send}
+    received = {p["espn_id"] for _, _, receive in packages for p in receive}
+    assert "101" not in sent and "203" in received
+    _, counts = service.build_candidates(context, "1", PLAYING, {})
+    assert counts["excluded_committed"] == 1
+
+
+def test_no_committed_players_changes_nothing(context):
+    baseline = list(service.enumerate_packages(context, "1"))
+    context["committed_players"] = []
+    assert list(service.enumerate_packages(context, "1")) == baseline
+
+
 def test_shortlist_is_capped_in_rank_order_and_keys_are_stable(context):
     rows, counts = service.build_candidates(context, "1", PLAYING, {}, max_candidates=3)
     assert len(rows) == counts["scored"] == 3

@@ -62,6 +62,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `POST` | `/v1/trade/incoming/{espn_transaction_id}/triage` | Dismiss or snooze an incoming offer. | Yes |  |
 | `GET` | `/v1/trade/offers` | List generated trade proposals with their stored score evidence. | No |  |
 | `POST` | `/v1/trade/offers/{offer_key}/approve` | Approve a staged proposal and queue it. | No | `trade_submissions` |
+| `POST` | `/v1/trade/offers/{offer_key}/resolution` | Record how ESPN resolved a sent offer, freeing its players for new trades. | Yes |  |
 | `POST` | `/v1/trade/score` | Compute the schedule-aware trade score. | No |  |
 
 ### Draft day
