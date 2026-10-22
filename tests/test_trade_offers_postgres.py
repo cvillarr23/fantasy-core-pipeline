@@ -188,3 +188,21 @@ def test_restaged_original_is_not_hidden_by_redirect(postgres):
     assert result["offer_key"] == key
     assert service.approve_offer(key, "retry") == {**result, "duplicate": True}
     assert channel.basic_publish.call_count == 2
+
+
+def test_list_shows_each_offer_once_at_its_latest_status(postgres):
+    db, key, _ = postgres
+    with db() as cursor:
+        cursor.execute(
+            "UPDATE execution_log SET status = 'approved' WHERE id = "
+            "(SELECT max(id) FROM execution_log)"
+        )
+        cursor.execute(
+            "INSERT INTO execution_log (transaction_type, status, league_id, season, counter_offer) "
+            "SELECT transaction_type, 'submitted', league_id, season, counter_offer "
+            "FROM execution_log WHERE id = (SELECT max(id) FROM execution_log)"
+        )
+    awaiting = service.list_offers("awaiting_approval")["offers"]
+    assert [o for o in awaiting if o["offer_key"] == key] == []
+    submitted = service.list_offers("submitted")["offers"]
+    assert [o["offer_key"] for o in submitted] == [key]
