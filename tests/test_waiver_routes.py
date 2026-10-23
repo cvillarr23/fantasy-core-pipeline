@@ -61,28 +61,26 @@ def test_get_waiver_recommendations_success(client, monkeypatch):
 
 
 def test_cross_position_swap_returns_each_players_default_position(client, monkeypatch):
-    from src.services import waiver_service
-
-    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 0)
-    monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position", lambda *args: {})
-    monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position", lambda *args: {})
-    monkeypatch.setattr(waiver_service.waiver_strategy, "plan_waiver_moves", lambda *args, **kwargs: ([{
-        "kind": "swap",
-        "position": "D/ST",
-        "add_player_id": "jax_dst",
-        "drop_player_id": "godwin",
-        "add_vorp_score": 8.0,
-        "drop_vorp_score": 2.0,
-    }], []))
+    _mock_waiver_strategy_calls(
+        monkeypatch,
+        [
+            {
+                "position": "D/ST",
+                "add_player_id": "jax_dst",
+                "drop_player_id": "godwin",
+                "add_vorp_score": 8.0,
+                "drop_vorp_score": 2.0,
+            }
+        ],
+    )
     cursor = MagicMock()
     cursor.fetchall.return_value = [
-        ("jax_dst", "JAX", "Jacksonville Jaguars", "D/ST", "JAX", None),
+        ("jax_dst", "-16030", "Jacksonville Jaguars", "D/ST", "JAX", None),
         ("godwin", "3116165", "Chris Godwin", "WR", "TB", None),
     ]
 
-    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
-         patch("src.services.waiver_service.load_open_ir_slots", return_value=0):
-        response = client.get("/v1/waiver/recommendations?season=2026&week=7&horizon=1")
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=3&horizon=1")
 
     assert response.status_code == 200
     [recommendation] = response.json()["recommendations"]
