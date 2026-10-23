@@ -36,8 +36,8 @@ def test_get_waiver_recommendations_success(client, monkeypatch):
     )
     cursor = MagicMock()
     cursor.fetchall.return_value = [
-        ("rb_fa", "101", "FA RB", "SEA", None),
-        ("rb_bench", "102", "Bench RB", "NYJ", "Out"),
+        ("rb_fa", "101", "FA RB", "RB", "SEA", None),
+        ("rb_bench", "102", "Bench RB", "RB", "NYJ", "Out"),
     ]
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
@@ -52,10 +52,43 @@ def test_get_waiver_recommendations_success(client, monkeypatch):
     assert rec["position"] == "RB"
     assert rec["vorp_delta"] == 6.0
     assert rec["free_agent"]["name"] == "FA RB"
+    assert rec["free_agent"]["position"] == "RB"
+    assert rec["bench_player"]["position"] == "RB"
     assert rec["bench_player"]["injury_status"] == "Out"
     assert rec["rumor_sentiment"] is None
     assert body["source_mode"] == "target_week"
     assert body["source_weeks"] == [3]
+
+
+def test_cross_position_swap_returns_each_players_default_position(client, monkeypatch):
+    from src.services import waiver_service
+
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 0)
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position", lambda *args: {})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position", lambda *args: {})
+    monkeypatch.setattr(waiver_service.waiver_strategy, "plan_waiver_moves", lambda *args, **kwargs: ([{
+        "kind": "swap",
+        "position": "D/ST",
+        "add_player_id": "jax_dst",
+        "drop_player_id": "godwin",
+        "add_vorp_score": 8.0,
+        "drop_vorp_score": 2.0,
+    }], []))
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("jax_dst", "JAX", "Jacksonville Jaguars", "D/ST", "JAX", None),
+        ("godwin", "3116165", "Chris Godwin", "WR", "TB", None),
+    ]
+
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.waiver_service.load_open_ir_slots", return_value=0):
+        response = client.get("/v1/waiver/recommendations?season=2026&week=7&horizon=1")
+
+    assert response.status_code == 200
+    [recommendation] = response.json()["recommendations"]
+    assert recommendation["position"] == "D/ST"
+    assert recommendation["free_agent"]["position"] == "D/ST"
+    assert recommendation["bench_player"]["position"] == "WR"
 
 
 def test_get_waiver_recommendations_db_failure_returns_500(client):
@@ -101,8 +134,8 @@ def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
     )
     cursor = MagicMock()
     cursor.fetchall.return_value = [
-        ("rb_fa", "101", "FA RB", "SEA", None),
-        ("rb_hurt", "102", "Hurt RB", "NYJ", "IR"),
+        ("rb_fa", "101", "FA RB", "RB", "SEA", None),
+        ("rb_hurt", "102", "Hurt RB", "RB", "NYJ", "IR"),
     ]
 
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
@@ -117,7 +150,7 @@ def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
     assert rec["ir_player"]["name"] == "Hurt RB"
     assert body["open_ir_slots"] == 1
     assert body["ir_moves"] == [{"action": "move_to_ir", "position": "RB", "player": {
-        "espn_id": "102", "name": "Hurt RB", "pro_team": "NYJ", "injury_status": "IR", "net_vorp": -1.0,
+        "espn_id": "102", "name": "Hurt RB", "position": "RB", "pro_team": "NYJ", "injury_status": "IR", "net_vorp": -1.0,
         "bye_week": None,
     }}]
 
@@ -127,7 +160,7 @@ def test_get_waiver_recommendations_serializes_add_only(client):
         "season": 2026, "week": 5, "open_roster_slots": 1,
         "recommendations": [{
             "kind": "add", "position": "WR", "vorp_delta": 8.0,
-            "free_agent": {"espn_id": "101", "name": "Free Agent", "pro_team": "SEA", "net_vorp": 8.0},
+            "free_agent": {"espn_id": "101", "name": "Free Agent", "position": "WR", "pro_team": "SEA", "net_vorp": 8.0},
             "bench_player": None, "ir_player": None,
         }],
     }

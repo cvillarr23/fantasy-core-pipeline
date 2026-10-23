@@ -7045,13 +7045,6 @@
       },
       "ValidationError": {
         "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
           "loc": {
             "items": {
               "anyOf": [
@@ -7332,6 +7325,10 @@
             "title": "Net Vorp",
             "type": "number"
           },
+          "position": {
+            "title": "Position",
+            "type": "string"
+          },
           "pro_team": {
             "title": "Pro Team",
             "type": "string"
@@ -7339,6 +7336,7 @@
         },
         "required": [
           "name",
+          "position",
           "pro_team",
           "net_vorp"
         ],

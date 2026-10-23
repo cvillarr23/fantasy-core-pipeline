@@ -71,7 +71,7 @@ Standalone stash hints can overlap an IR + add suggestion. Choose one action pla
 | `waiver_service` | Exact week when both pools exist; otherwise prior three same-season weeks | >0 for swaps/IR; none for adds | Recommendations and `ir_moves`; no publication |
 | `waiver_evaluator` | Exact-week pools required | >3 for swaps/IR; none for adds | Live claims and gated IR + add |
 
-Both refresh stale roster ownership before planning. Add-only recommendations come first; within each group, recommendations sort by `vorp_delta` and expose the kind, position, add, bench/IR player and source weeks; rumor fields are currently null.
+Both refresh stale roster ownership before planning. Add-only recommendations come first; within each group, recommendations sort by `vorp_delta` and expose the kind, lineup-slot `position`, add, bench/IR player and source weeks. Each player summary also includes that player's own default `position`, which can differ from the lineup slot on a cross-position move. Rumor fields are currently null.
 
 <details>
 <summary>Read fallback and unavailable inputs</summary>

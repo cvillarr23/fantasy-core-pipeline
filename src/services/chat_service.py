@@ -111,6 +111,7 @@ def _summarize_waiver_player(player: Optional[dict]) -> Optional[dict]:
         return None
     return {
         "name": player["name"],
+        "position": player["position"],
         "pro_team": player["pro_team"],
         "bye_week": player.get("bye_week"),
         "injury_status": player["injury_status"],
