@@ -12,17 +12,17 @@ def _fake_db_cursor(cursor):
 
 
 def _players_rows(*rows):
-    """rows: (player_id, espn_id, name, team, injury_status)"""
+    """rows: (player_id, espn_id, name, position, team, injury_status)"""
     return list(rows)
 
 
 def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
     cursor = MagicMock()
     cursor.fetchall.return_value = _players_rows(
-        ("rb_fa", "101", "FA RB", "SEA", None),
-        ("rb_bench", "102", "Bench RB", "NYJ", "Questionable"),
-        ("wr_fa", "201", "FA WR", "DAL", None),
-        ("wr_bench", "202", "Bench WR", "MIA", None),
+        ("rb_fa", "101", "FA RB", "RB", "SEA", None),
+        ("rb_bench", "102", "Bench RB", "RB", "NYJ", "Questionable"),
+        ("wr_fa", "201", "FA WR", "WR", "DAL", None),
+        ("wr_bench", "202", "Bench WR", "WR", "MIA", None),
     )
 
     monkeypatch.setattr(
@@ -67,6 +67,7 @@ def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
     assert result["recommendations"][0]["free_agent"] == {
         "espn_id": "201",
         "name": "FA WR",
+        "position": "WR",
         "pro_team": "DAL",
         "injury_status": None,
         "net_vorp": 9.0,
@@ -76,6 +77,30 @@ def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
     assert result["recommendations"][0]["rumor_sentiment"] is None
     assert result["recommendations"][0]["rumor_confidence"] is None
     assert result["recommendations"][0]["rumor_suggested_action"] is None
+
+
+def test_cross_position_swap_keeps_each_players_default_position():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("jax_dst", "JAX", "Jacksonville Jaguars", "D/ST", "JAX", None),
+        ("godwin", "3116165", "Chris Godwin", "WR", "TB", None),
+    ]
+    display_by_player_id = waiver_service._load_player_display(cursor, {"jax_dst", "godwin"})
+    recommendation = waiver_service._shape_recommendation(
+        {
+            "kind": "swap",
+            "position": "D/ST",
+            "add_player_id": "jax_dst",
+            "drop_player_id": "godwin",
+            "add_vorp_score": 8.0,
+            "drop_vorp_score": 4.0,
+        },
+        display_by_player_id,
+    )
+
+    assert recommendation["position"] == "D/ST"
+    assert recommendation["free_agent"]["position"] == "D/ST"
+    assert recommendation["bench_player"]["position"] == "WR"
 
 
 def test_compute_waiver_recommendations_empty_when_no_moves(monkeypatch):
@@ -278,9 +303,9 @@ def _run_ir_case(monkeypatch, bench, free_agents, open_ir_slots, display_rows):
 
 
 IR_DISPLAY_ROWS = [
-    ("hurt_rb", "e-hurt", "Hurt Back", "NYJ", "Out"),
-    ("healthy_rb", "e-healthy", "Healthy Back", "MIA", None),
-    ("fa_rb", "e-fa", "FA Back", "SEA", None),
+    ("hurt_rb", "e-hurt", "Hurt Back", "RB", "NYJ", "Out"),
+    ("healthy_rb", "e-healthy", "Healthy Back", "RB", "MIA", None),
+    ("fa_rb", "e-fa", "FA Back", "RB", "SEA", None),
 ]
 IR_BENCH = {"RB": [
     {"player_id": "hurt_rb", "vorp_score": -2.0, "espn_injury_status": "OUT"},
@@ -356,7 +381,7 @@ def test_open_slot_recommends_add_without_a_bench(monkeypatch, fallback):
     candidates = [{"player_id": "fa1", "position": "WR", "vorp_score": 8.0},
                   {"player_id": "fa2", "position": "WR", "vorp_score": 7.0}]
     monkeypatch.setattr(waiver_service.waiver_strategy, "load_add_candidates", lambda *args: candidates)
-    display = [("fa1", "1", "First", "SEA", None), ("fa2", "2", "Second", "SEA", None)]
+    display = [("fa1", "1", "First", "WR", "SEA", None), ("fa2", "2", "Second", "WR", "SEA", None)]
     if fallback:
         cursor.fetchall.side_effect = [[("fa1", "WR", "SEA", 3, 8.0, False, None),
                                         ("fa2", "WR", "SEA", 3, 7.0, False, None)], display]
@@ -375,9 +400,9 @@ def test_open_slot_recommends_add_without_a_bench(monkeypatch, fallback):
 
 def test_add_recommendations_precede_larger_swap_gains(monkeypatch):
     cursor = MagicMock()
-    cursor.fetchall.return_value = [("fa1", "1", "First", "SEA", None),
-                                   ("fa2", "2", "Second", "SEA", None),
-                                   ("bench", "3", "Bench", "SEA", None)]
+    cursor.fetchall.return_value = [("fa1", "1", "First", "WR", "SEA", None),
+                                   ("fa2", "2", "Second", "WR", "SEA", None),
+                                   ("bench", "3", "Bench", "WR", "SEA", None)]
     monkeypatch.setattr(waiver_service.waiver_strategy, "load_open_roster_slots", lambda *args: 1)
     monkeypatch.setattr(waiver_service.waiver_strategy, "load_bench_by_position",
                         lambda *args: {"WR": [{"player_id": "bench", "vorp_score": -10}]})
@@ -406,7 +431,7 @@ def test_negative_vorp_open_slot_recommends_healthy_skill_add(monkeypatch, fallb
     monkeypatch.setattr(waiver_service.waiver_strategy, "load_best_free_agent_by_position",
                         lambda *args: {} if fallback else {"WR": {"player_id": "worthy", "vorp_score": -4.78}})
     monkeypatch.setattr(waiver_service.waiver_strategy, "load_add_candidates", lambda *args: candidates)
-    display = [("worthy", "1", "Xavier Worthy", "KC", None)]
+    display = [("worthy", "1", "Xavier Worthy", "WR", "KC", None)]
     if fallback:
         rows = [(p["player_id"], p["position"], "KC", 5, p["vorp_score"], False,
                  p.get("injury_status")) for p in candidates]
@@ -453,10 +478,11 @@ def _run_horizon(monkeypatch, rows):
     )
     monkeypatch.setattr(waiver_service, "bye_weeks_or_empty", lambda season: {"BUF": 8, "DAL": 7, "KC": 12})
     cursor = MagicMock()
+    display = {r[0]: (r[3], r[4]) for r in rows}
     cursor.fetchall.side_effect = [
         rows,
-        [(pid, f"e{pid}", pid, team, None)
-         for pid, team in {r[0]: r[4] for r in rows}.items()],
+        [(pid, f"e{pid}", pid, position, team, None)
+         for pid, (position, team) in display.items()],
     ]
     with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         return waiver_service.compute_waiver_recommendations(2026, 7)

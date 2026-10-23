@@ -115,12 +115,15 @@ FREE_AGENT_POOL = {
     ],
 }
 WAIVER_RECOMMENDATIONS = {
-    "season": 2026, "week": 3, "open_roster_slots": 1, "open_ir_slots": 0, "ir_moves": [],
+    "season": 2026, "week": 3, "open_roster_slots": 0, "open_ir_slots": 0, "ir_moves": [],
     "source_mode": "target_week", "source_weeks": [3],
     "recommendations": [{
-        "kind": "add", "position": "WR", "vorp_delta": 2.0, "bench_player": None, "ir_player": None,
-        "free_agent": {"espn_id": "99", "name": "Open Wideout", "pro_team": "NYJ",
-                       "injury_status": "QUESTIONABLE", "net_vorp": 2.0},
+        "kind": "swap", "position": "D/ST", "vorp_delta": 2.0,
+        "bench_player": {"espn_id": "3116165", "name": "Chris Godwin", "position": "WR",
+                         "pro_team": "TB", "injury_status": None, "net_vorp": 2.0},
+        "ir_player": None,
+        "free_agent": {"espn_id": "JAX", "name": "Jacksonville Jaguars", "position": "D/ST",
+                       "pro_team": "JAX", "injury_status": None, "net_vorp": 4.0},
         "rumor_sentiment": None, "rumor_confidence": None, "rumor_suggested_action": None,
     }],
 }
@@ -154,9 +157,12 @@ def test_waiver_question_gets_free_agent_and_recommendation_context(monkeypatch)
     }]
     assert free_agents["total_free_agents"] == 7
     waivers = result["grounding"]["waiver_recommendations"]
-    assert waivers["open_roster_slots"] == 1
-    assert waivers["recommendations"][0]["kind"] == "add"
-    assert waivers["recommendations"][0]["drop"] is None
+    assert waivers["open_roster_slots"] == 0
+    recommendation = waivers["recommendations"][0]
+    assert recommendation["kind"] == "swap"
+    assert recommendation["position"] == "D/ST"
+    assert recommendation["add"]["position"] == "D/ST"
+    assert recommendation["drop"]["position"] == "WR"
     prompt = mock_complete.call_args.args[0]
     assert "Open Wideout" in prompt
     assert "Back 4" in prompt and "Back 5" not in prompt

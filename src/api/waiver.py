@@ -67,6 +67,7 @@ def get_free_agents(
 class WaiverPlayerSummary(BaseModel):
     espn_id: Optional[str] = None
     name: str
+    position: Optional[str] = None
     pro_team: str
     injury_status: Optional[str] = None
     # Per-week VORP averaged over horizon_weeks (a bye week counts as replacement level).

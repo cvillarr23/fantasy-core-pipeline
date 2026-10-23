@@ -135,21 +135,22 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
 
 
 def _load_player_display(cursor, player_ids: set, bye_weeks: dict | None = None) -> dict:
-    """player_id -> {espn_id, name, pro_team, injury_status, bye_week}, one batched query."""
+    """player_id -> {espn_id, name, position, pro_team, injury_status, bye_week}, one batched query."""
     if not player_ids:
         return {}
     cursor.execute(
         """
-        SELECT player_id, espn_id, name, team, injury_status
+        SELECT player_id, espn_id, name, position, team, injury_status
         FROM players
         WHERE player_id = ANY(%s);
         """,
         (list(player_ids),),
     )
     return {
-        player_id: {"espn_id": espn_id, "name": name, "pro_team": team, "injury_status": injury_status,
+        player_id: {"espn_id": espn_id, "name": name, "position": position, "pro_team": team,
+                    "injury_status": injury_status,
                     "bye_week": bye_week_for(team, bye_weeks or {})}
-        for player_id, espn_id, name, team, injury_status in cursor.fetchall()
+        for player_id, espn_id, name, position, team, injury_status in cursor.fetchall()
     }
 
 
