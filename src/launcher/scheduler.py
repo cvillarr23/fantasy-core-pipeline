@@ -84,6 +84,8 @@ class RunRow:
 
 
 class SchedulerState(Protocol):
+    def record_heartbeat(self, queue_depths: dict[str, int | None]) -> None: ...
+
     def run_exists(self, dedupe_key: str) -> bool: ...
 
     def paused(self, name: str, now: datetime) -> bool: ...
@@ -228,6 +230,10 @@ class Scheduler:
     def tick(self, now: datetime | None = None) -> None:
         """Fire due chain slots, advance running chains, then fire due job slots."""
         now = now or self.clock()
+        try:
+            self.state.record_heartbeat(read_queue_depths())
+        except Exception:
+            logger.exception("Could not record launcher heartbeat")
         for name, chain in self.catalog.chains.items():
             if chain.schedule:
                 self._guard(f"chain {name} slot", self._chain_slot, name, chain, now)
@@ -567,6 +573,41 @@ def _window(schedule: Schedule) -> timedelta:
 
 
 _ROW_COLUMNS = "id,job_name,status,attempt,scheduled_for,chain_root_id,trigger"
+HEARTBEAT_QUEUES = ("job_runs", "job_runs.dlq")
+BROKER_TIMEOUT_SECONDS = 5
+
+
+def read_queue_depths() -> dict[str, int | None]:
+    """Read broker queue depths without creating queues or consuming messages."""
+    import pika
+    from src.api.routes import AMQP_URL
+
+    connection = None
+    depths: dict[str, int | None] = {queue: None for queue in HEARTBEAT_QUEUES}
+    try:
+        params = pika.URLParameters(AMQP_URL)
+        params.socket_timeout = BROKER_TIMEOUT_SECONDS
+        params.blocked_connection_timeout = BROKER_TIMEOUT_SECONDS
+        connection = pika.BlockingConnection(params)
+        for queue in HEARTBEAT_QUEUES:
+            channel = connection.channel()
+            try:
+                result = channel.queue_declare(queue=queue, passive=True)
+                depths[queue] = result.method.message_count
+            except pika.exceptions.ChannelClosedByBroker:
+                pass
+            finally:
+                if channel.is_open:
+                    channel.close()
+    except Exception:
+        logger.warning("Launcher queue depths unavailable", exc_info=True)
+    finally:
+        if connection is not None and connection.is_open:
+            try:
+                connection.close()
+            except Exception:
+                logger.warning("Could not close RabbitMQ connection cleanly")
+    return depths
 
 
 def _row(values: tuple) -> RunRow:
@@ -593,6 +634,14 @@ class PostgresSchedulerState:
 
             cursor_factory = get_db_cursor
         self._cursor = cursor_factory
+
+    def record_heartbeat(self, queue_depths: dict[str, int | None]) -> None:
+        with self._cursor() as c:
+            c.execute(
+                """INSERT INTO launcher_heartbeat(id,at,queue_depths) VALUES (1,now(),%s)
+                ON CONFLICT(id) DO UPDATE SET at=now(),queue_depths=EXCLUDED.queue_depths""",
+                (json.dumps(queue_depths),),
+            )
 
     def run_exists(self, dedupe_key: str) -> bool:
         with self._cursor() as c:

@@ -1,5 +1,6 @@
 """Reusable launcher job operations for REST, CLI, and MCP callers."""
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -7,7 +8,7 @@ from src.database import get_db_cursor
 from src.launcher.catalog import Catalog, UnknownJobError, load_catalog_from_env, validate_run_params
 from src.launcher.consumer import overlap_refuses
 from src.launcher.publish import publish_run
-from src.schemas.jobs import JobsResponse
+from src.schemas.jobs import JobsResponse, LauncherHealthResponse
 from src.services import run_log_service
 
 
@@ -33,6 +34,10 @@ class RunNotCancellableError(Exception):
 
 class PauseNotFoundError(Exception):
     """No pause override exists for the requested name."""
+
+
+class LauncherHealthUnavailableError(Exception):
+    """The launcher has not recorded a heartbeat yet."""
 
 
 def _scheduler(catalog: Catalog):
@@ -112,6 +117,31 @@ def list_jobs() -> JobsResponse:
         for name, chain in catalog.chains.items()
     ]
     return JobsResponse(jobs=jobs, chains=chains)
+
+
+def launcher_health() -> LauncherHealthResponse:
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT at,queue_depths FROM launcher_heartbeat WHERE id=1")
+        heartbeat = cursor.fetchone()
+        if heartbeat is None:
+            raise LauncherHealthUnavailableError("Launcher heartbeat is unavailable")
+        cursor.execute(
+            """SELECT count(*) FILTER (WHERE status='running'),
+            count(*) FILTER (WHERE status='queued') FROM run_log"""
+        )
+        running_count, queued_count = cursor.fetchone()
+
+    heartbeat_at, queue_depths = heartbeat
+    if isinstance(queue_depths, str):
+        queue_depths = json.loads(queue_depths)
+    age = max(0.0, (datetime.now(timezone.utc) - heartbeat_at).total_seconds())
+    return LauncherHealthResponse(
+        heartbeat_at=heartbeat_at,
+        heartbeat_age_seconds=age,
+        queue_depths=queue_depths,
+        running_count=running_count,
+        queued_count=queued_count,
+    )
 
 
 def start_run(

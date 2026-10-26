@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -13,6 +15,7 @@ from src.launcher.catalog import Schedule, Season, load_catalog
 from src.launcher.scheduler import (
     NflSeasonCalendar,
     RunRow,
+    PostgresSchedulerState,
     Scheduler,
     latest_slot,
     slot_key,
@@ -628,3 +631,38 @@ def test_tuesday_weekly_edges_match_infra_schedule_order():
         "waiver-trigger": "20:30",
         "rumor-action-trigger": "21:45",
     }
+
+
+def test_tick_records_heartbeat_with_queue_depths(scheduler, state, monkeypatch):
+    queue_depths = {"job_runs": 3, "job_runs.dlq": 1}
+    monkeypatch.setattr("src.launcher.scheduler.read_queue_depths", lambda: queue_depths)
+    state.heartbeats = []
+    state.record_heartbeat = lambda depths: state.heartbeats.append(depths)
+
+    scheduler.tick(ct(2026, 10, 27, 16, 0, 30))
+
+    assert state.heartbeats == [queue_depths]
+
+
+def test_postgres_state_upserts_launcher_heartbeat():
+    class RecordingCursor:
+        query = ""
+        params = None
+
+        def execute(self, query, params=None):
+            self.query = query
+            self.params = params
+
+    cursor = RecordingCursor()
+
+    @contextmanager
+    def cursor_context():
+        yield cursor
+
+    PostgresSchedulerState(cursor_context).record_heartbeat(
+        {"job_runs": 3, "job_runs.dlq": 1}
+    )
+
+    assert "INSERT INTO launcher_heartbeat" in cursor.query
+    assert "ON CONFLICT(id) DO UPDATE" in cursor.query
+    assert json.loads(cursor.params[0]) == {"job_runs": 3, "job_runs.dlq": 1}
