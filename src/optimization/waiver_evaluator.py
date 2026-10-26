@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from typing import Optional
 
 from opentelemetry import trace
@@ -43,6 +44,7 @@ from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion import sync_league
 from src.ir_eligibility import load_ineligible_ir_occupants, load_open_ir_slots
+from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
 from src.nfl_byes import bye_weeks_or_empty
 from src.optimization import lineup_solver
 from src.telemetry import configure_tracing
@@ -371,14 +373,27 @@ def main(argv=None) -> int:
     exiting nonzero, so the CronJob's pod retry re-runs every claim: already-queued ones
     come back "duplicate" under their week-scoped keys (#191)."""
     parser = argparse.ArgumentParser(description="Evaluate and publish this week's live waiver claims.")
-    parser.add_argument("--team-id", required=True)
-    parser.add_argument("--season", required=True, type=int)
-    parser.add_argument("--week", required=True, type=int)
+    parser.add_argument("--team-id", default=os.getenv("ESPN_TEAM_ID"))
+    parser.add_argument("--season", type=int, default=int(os.getenv("CURRENT_YEAR", datetime.now().year)))
+    parser.add_argument("--week", type=int, default=None)
     args = parser.parse_args(argv)
+    if not args.team_id:
+        parser.error("--team-id is required (or set the ESPN_TEAM_ID env var)")
+
+    week = args.week
+    if week is None:
+        try:
+            week = resolve_upcoming_week(args.season)
+        except WeekResolutionError as exc:
+            logger.error(f"Could not resolve the upcoming week for Season {args.season}: {exc}")
+            return 1
+        if week is None:
+            logger.info(f"The {args.season} regular season is over; no waiver claims to evaluate.")
+            return 0
     try:
-        run_weekly_waivers_live(args.team_id, args.season, args.week)
+        run_weekly_waivers_live(args.team_id, args.season, week)
     except InsufficientWaiverInputError as exc:
-        logger.error(f"Waiver evaluator cannot evaluate Team {args.team_id} Season {args.season} Week {args.week}: {exc}")
+        logger.error(f"Waiver evaluator cannot evaluate Team {args.team_id} Season {args.season} Week {week}: {exc}")
         return 1
     return 0
 

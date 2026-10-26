@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from src.optimization import waiver_evaluator as we
+from src.nfl_schedule import WeekResolutionError
 
 
 def test_resolve_live_waiver_moves_translates_to_espn_identity():
@@ -26,6 +27,54 @@ def test_resolve_live_waiver_moves_translates_to_espn_identity():
             "week": 5,
         },
     }]
+
+
+def test_main_defaults_team_season_and_week_from_environment(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "team-7")
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    with patch.object(we, "resolve_upcoming_week", return_value=8) as resolve, \
+         patch.object(we, "run_weekly_waivers_live") as run:
+        assert we.main([]) == 0
+    resolve.assert_called_once_with(2026)
+    run.assert_called_once_with("team-7", 2026, 8)
+
+
+def test_main_resolves_week_when_team_and_season_are_explicit(monkeypatch):
+    monkeypatch.delenv("ESPN_TEAM_ID", raising=False)
+    monkeypatch.delenv("CURRENT_YEAR", raising=False)
+    with patch.object(we, "resolve_upcoming_week", return_value=5) as resolve, \
+         patch.object(we, "run_weekly_waivers_live") as run:
+        assert we.main(["--team-id", "team-2", "--season", "2025"]) == 0
+    resolve.assert_called_once_with(2025)
+    run.assert_called_once_with("team-2", 2025, 5)
+
+
+def test_main_does_not_resolve_an_explicit_week(monkeypatch):
+    monkeypatch.delenv("ESPN_TEAM_ID", raising=False)
+    monkeypatch.delenv("CURRENT_YEAR", raising=False)
+    with patch.object(we, "resolve_upcoming_week") as resolve, \
+         patch.object(we, "run_weekly_waivers_live") as run:
+        assert we.main(["--team-id", "team-2", "--season", "2025", "--week", "4"]) == 0
+    resolve.assert_not_called()
+    run.assert_called_once_with("team-2", 2025, 4)
+
+
+def test_main_returns_success_without_running_after_regular_season(monkeypatch):
+    monkeypatch.delenv("ESPN_TEAM_ID", raising=False)
+    monkeypatch.delenv("CURRENT_YEAR", raising=False)
+    with patch.object(we, "resolve_upcoming_week", return_value=None), \
+         patch.object(we, "run_weekly_waivers_live") as run:
+        assert we.main(["--team-id", "team-2", "--season", "2025"]) == 0
+    run.assert_not_called()
+
+
+def test_main_fails_when_upcoming_week_cannot_be_resolved(monkeypatch):
+    monkeypatch.delenv("ESPN_TEAM_ID", raising=False)
+    monkeypatch.delenv("CURRENT_YEAR", raising=False)
+    with patch.object(we, "resolve_upcoming_week", side_effect=WeekResolutionError("down")), \
+         patch.object(we, "run_weekly_waivers_live") as run:
+        assert we.main(["--team-id", "team-2", "--season", "2025"]) == 1
+    run.assert_not_called()
 
 
 def test_resolve_live_waiver_moves_includes_vorp_scores_and_season_week_in_decision_inputs():
