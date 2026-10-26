@@ -13,6 +13,13 @@ class RunSummary(BaseModel):
     status: str
     started_at: datetime
     finished_at: Optional[datetime] = None
+    dedupe_key: Optional[str] = None
+    scheduled_for: Optional[datetime] = None
+    attempt: int = 1
+    requested_by: Optional[str] = None
+    chain_root_id: Optional[str] = None
+    event_id: Optional[str] = None
+    end_reason: Optional[str] = None
 
 
 class Run(RunSummary):

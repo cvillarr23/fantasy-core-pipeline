@@ -75,6 +75,7 @@ Dropping or renaming something is a multi-step change: stop reading it, deploy, 
 |---|---|
 | `src/models.py` | DDL constants for every table except `activity_*`. Comments on each constant explain the design. |
 | `src/services/activity_service.py` | The `SCHEMA` string for `activity_actions`, `activity_events`, `activity_outbox`, `activity_sessions` and `activity_reads`. |
+| `src/services/run_log_service.py` | The `SCHEMA` string for `run_log`, `run_links`, `job_overrides` and `launcher_heartbeat`, including additive launcher columns on existing `run_log` tables. |
 | `src/migrations.py` | The execution order. |
 
 ## Related

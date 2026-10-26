@@ -1,4 +1,7 @@
 import logging
+import os
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,6 +59,56 @@ def test_no_cronjob_env_is_manual(monkeypatch):
     monkeypatch.delenv("RUN_K8S_JOB", raising=False)
     monkeypatch.setenv("HOSTNAME", "laptop")
     assert run_log.trigger_from_env() == ("manual", {"host": "laptop"})
+
+
+@pytest.mark.parametrize("trigger", ["chain", "event", "cli", "mcp"])
+def test_explicit_trigger_env_takes_precedence(monkeypatch, trigger):
+    monkeypatch.setenv("RUN_TRIGGER", trigger)
+    monkeypatch.setenv("RUN_CRONJOB", "fantasy-rumor-syncer")
+    monkeypatch.setenv("RUN_K8S_JOB", "fantasy-rumor-syncer-29865000")
+    assert run_log.trigger_from_env()[0] == trigger
+
+
+def test_outer_scope_adopts_launcher_run_id_once(recorded, monkeypatch):
+    monkeypatch.setenv("RUN_ID", "launcher-run")
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    monkeypatch.delenv("RUN_PARENT_ID", raising=False)
+    adopted = []
+    with patch.object(run_log, "adopt_run", side_effect=lambda *args: adopted.append(args)):
+        with run_log.run_scope("sync_rumors") as outer:
+            assert outer.id == "launcher-run"
+            assert os.getenv("RUN_ID") is None
+            assert os.getenv("RUN_PARENT_ID") == "launcher-run"
+            with run_log.run_scope("child") as child:
+                assert child.id == "run-1"
+    assert adopted == [("launcher-run", "sync_rumors", "schedule", {}, None)]
+    assert recorded["start"][0][0] == "child"
+    assert recorded["start"][0][3] == "launcher-run"
+    assert os.getenv("RUN_PARENT_ID") is None
+
+
+def test_scope_without_launcher_run_leaves_process_env_alone(recorded, monkeypatch):
+    """The API runs overlapping scopes in one process, so only adopted runs may export an id."""
+    monkeypatch.delenv("RUN_ID", raising=False)
+    monkeypatch.delenv("RUN_PARENT_ID", raising=False)
+    with run_log.run_scope("http_job", "http"):
+        assert os.getenv("RUN_PARENT_ID") is None
+        with run_log.run_scope("http_child", "http"):
+            assert os.getenv("RUN_PARENT_ID") is None
+    assert recorded["start"][1][3] == "run-1"
+
+
+def test_subprocess_in_run_scope_inherits_parent_run_id(recorded, monkeypatch):
+    monkeypatch.setenv("RUN_ID", "launcher-run")
+    with patch.object(run_log, "adopt_run"):
+        with run_log.run_scope("refresher"):
+            result = subprocess.run(
+                [sys.executable, "-c", "import os; print(os.getenv('RUN_PARENT_ID'))"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+    assert result.stdout.strip() == "launcher-run"
 
 
 def test_success_records_summary_and_links(recorded):

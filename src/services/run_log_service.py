@@ -28,8 +28,18 @@ CREATE TABLE IF NOT EXISTS run_log (
  id TEXT PRIMARY KEY, job_name TEXT NOT NULL, trigger_type TEXT NOT NULL,
  trigger JSONB NOT NULL DEFAULT '{}', parent_run_id TEXT, status TEXT NOT NULL DEFAULT 'running',
  started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ, error TEXT,
- summary JSONB NOT NULL DEFAULT '{}', trace_id TEXT
+ summary JSONB NOT NULL DEFAULT '{}', trace_id TEXT,
+ dedupe_key TEXT, scheduled_for TIMESTAMPTZ, attempt INTEGER NOT NULL DEFAULT 1,
+ requested_by TEXT, chain_root_id TEXT, event_id TEXT, end_reason TEXT
 );
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS requested_by TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS chain_root_id TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS event_id TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS end_reason TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS run_log_dedupe_key ON run_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS run_log_recent ON run_log(started_at DESC);
 CREATE INDEX IF NOT EXISTS run_log_by_job ON run_log(job_name,started_at DESC);
 CREATE INDEX IF NOT EXISTS run_log_by_parent ON run_log(parent_run_id) WHERE parent_run_id IS NOT NULL;
@@ -40,10 +50,18 @@ CREATE TABLE IF NOT EXISTS run_links (
  PRIMARY KEY(run_id,ref_type,ref_id,role)
 );
 CREATE INDEX IF NOT EXISTS run_links_by_ref ON run_links(ref_type,ref_id);
+CREATE TABLE IF NOT EXISTS job_overrides (
+ job_or_chain TEXT PRIMARY KEY, paused_until TIMESTAMPTZ, reason TEXT,
+ set_by TEXT, set_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS launcher_heartbeat (
+ id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1), at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ queue_depths JSONB NOT NULL DEFAULT '{}'
+);
 """
 
-TRIGGER_TYPES = ("schedule", "queue", "http", "manual")
-STATUSES = ("running", "success", "failure")
+TRIGGER_TYPES = ("chain", "event", "cli", "mcp", "schedule", "queue", "http", "manual")
+STATUSES = ("queued", "skipped", "cancelled", "timeout", "running", "success", "failure")
 REF_TYPES = ("raw_signal", "rumor_signal", "llm_session", "activity_action")
 ROLES = ("input", "output")
 RUN_ID_HEADER = "X-Run-Id"
@@ -59,6 +77,9 @@ def trigger_from_env():
     """Scheduled vs manual comes from the Job name: a CronJob names its Jobs
     `<cronjob>-<minutes>`, while `kubectl create job --from=cronjob/...` picks any name.
     """
+    explicit = os.getenv("RUN_TRIGGER")
+    if explicit:
+        return explicit, {}
     cronjob = os.getenv("RUN_CRONJOB")
     k8s_job = os.getenv("RUN_K8S_JOB") or os.getenv("HOSTNAME")
     if cronjob:
@@ -193,17 +214,32 @@ def start_run(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     return identity
 
 
-def finish_run(identity, status, error=None, summary=None):
+def adopt_run(identity, job_name, trigger_type, trigger, parent_run_id=None):
+    """Attach this process to the launcher-created run row."""
+    try:
+        with get_db_cursor() as c:
+            c.execute(
+                """UPDATE run_log SET status='running', job_name=%s, trigger_type=%s,
+                parent_run_id=COALESCE(parent_run_id,%s), started_at=now(), finished_at=NULL,
+                error=NULL WHERE id=%s""",
+                (job_name, trigger_type, parent_run_id, identity),
+            )
+    except Exception:
+        logger.exception("Run %s could not be adopted", identity)
+
+
+def finish_run(identity, status, error=None, summary=None, end_reason=None):
     if not identity:
         return
     try:
         with get_db_cursor() as c:
             c.execute(
-                """UPDATE run_log SET status=%s, finished_at=now(), error=%s,
+                """UPDATE run_log SET status=%s, finished_at=now(), error=%s, end_reason=%s,
                 summary=summary || %s::jsonb WHERE id=%s""",
                 (
                     status,
                     redact(error)[:4000] if error else None,
+                    end_reason,
                     json.dumps(redact(summary or {}), default=str),
                     identity,
                 ),
@@ -218,10 +254,21 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     failed and propagates; `run.summary` is saved on exit. Nested scopes become children.
     """
     parent = current_run.get()
+    previous_parent_id = os.environ.get("RUN_PARENT_ID")
+    adopted_id = os.environ.pop("RUN_ID", None) if parent is None else None
     parent_run_id = (
         parent_run_id or (parent.id if parent else None) or os.getenv("RUN_PARENT_ID")
     )
-    run = Run(start_run(job_name, trigger_type, trigger, parent_run_id))
+    if trigger_type is None:
+        trigger_type, env_trigger = trigger_from_env()
+        trigger = {**env_trigger, **(trigger or {})}
+    run = Run(adopted_id or start_run(job_name, trigger_type, trigger, parent_run_id))
+    if adopted_id:
+        adopt_run(adopted_id, job_name, trigger_type, trigger or {}, parent_run_id)
+    # Only a launcher-adopted run exports its id for subprocesses: that pod runs one job, so
+    # the shared process environment is safe there, unlike the API where requests overlap.
+    if adopted_id:
+        os.environ["RUN_PARENT_ID"] = adopted_id
     token = current_run.set(run)
     capture = _RunLogCapture(run)
     logging.getLogger().addHandler(capture)
@@ -247,6 +294,11 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     finally:
         logging.getLogger().removeHandler(capture)
         current_run.reset(token)
+        if adopted_id:
+            if previous_parent_id is None:
+                os.environ.pop("RUN_PARENT_ID", None)
+            else:
+                os.environ["RUN_PARENT_ID"] = previous_parent_id
 
 
 @contextmanager
@@ -299,7 +351,8 @@ def _rows(c):
 
 
 RUN_COLUMNS = """r.id,r.job_name,r.trigger_type,r.trigger,r.parent_run_id,r.status,r.started_at,
- r.finished_at,r.error,r.summary,r.trace_id,
+ r.finished_at,r.error,r.summary,r.trace_id,r.dedupe_key,r.scheduled_for,r.attempt,
+ r.requested_by,r.chain_root_id,r.event_id,r.end_reason,
  (SELECT count(*) FROM run_links l WHERE l.run_id=r.id AND l.role='input') AS input_count,
  (SELECT count(*) FROM run_links l WHERE l.run_id=r.id AND l.role='output' AND l.ref_type<>'llm_session') AS output_count,
  (SELECT count(*) FROM run_links l WHERE l.run_id=r.id AND l.ref_type='llm_session') AS llm_count"""
