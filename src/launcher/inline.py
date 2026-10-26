@@ -60,7 +60,9 @@ class InlineRunner:
         self._process = None
         self._current_run_id = None
         self._cancelled = set()
-        self._thread = threading.Thread(target=self._loop, name="inline-runner", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="inline-runner", daemon=True
+        )
 
     @property
     def busy(self):
@@ -72,8 +74,9 @@ class InlineRunner:
     def submit(self, run):
         """Called only when not busy; busy is set here, before the hand-off, so the consumer
         never admits a second inline run while this one waits to start."""
-        self._busy.set()
-        self._queue.put(run)
+        with self._lock:
+            self._busy.set()
+            self._queue.put(run)
 
     def is_running(self, run_id):
         with self._lock:
@@ -83,6 +86,8 @@ class InlineRunner:
         """Stop the selected inline process group and record cancellation in its run thread."""
         with self._lock:
             if self._current_run_id != run_id:
+                if self.store.status(run_id) == "cancelled":
+                    self._cancelled.add(run_id)
                 return False
             self._cancelled.add(run_id)
             process = self._process
@@ -120,11 +125,15 @@ class InlineRunner:
                     self._current_run_id = run.run_id
                 self._execute(run)
             except Exception:
-                logger.exception("Inline run %s of %s could not be completed", run.run_id, run.job)
+                logger.exception(
+                    "Inline run %s of %s could not be completed", run.run_id, run.job
+                )
                 try:
                     self.store.finish_running(run.run_id, "failure", "runner_error")
                 except Exception:
-                    logger.exception("Inline run %s outcome could not be recorded", run.run_id)
+                    logger.exception(
+                        "Inline run %s outcome could not be recorded", run.run_id
+                    )
             finally:
                 with self._lock:
                     self._current_run_id = None
@@ -144,7 +153,9 @@ class InlineRunner:
                     run.run_id, "cancelled", "cancelled", force=True
                 )
                 return
-            process = self._process = subprocess.Popen(argv, env=env, start_new_session=True)
+            process = self._process = subprocess.Popen(
+                argv, env=env, start_new_session=True
+            )
         try:
             try:
                 code = process.wait(timeout=run.deadline_seconds)
@@ -159,7 +170,9 @@ class InlineRunner:
                     return
                 logger.error(
                     "Inline run run_id=%s job=%s exceeded its %ss deadline",
-                    run.run_id, run.job, run.deadline_seconds,
+                    run.run_id,
+                    run.job,
+                    run.deadline_seconds,
                 )
                 self.store.finish_running(
                     run.run_id,
@@ -181,7 +194,9 @@ class InlineRunner:
                     run.run_id, "cancelled", "cancelled", force=True
                 )
                 return
-            logger.info("Inline run run_id=%s job=%s exited with %s", run.run_id, run.job, code)
+            logger.info(
+                "Inline run run_id=%s job=%s exited with %s", run.run_id, run.job, code
+            )
             self.store.finish_running(
                 run.run_id,
                 "success" if code == 0 else "failure",

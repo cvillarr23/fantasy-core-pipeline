@@ -21,8 +21,14 @@ class FakeStore:
         self.bodies = []
         self.fail = False
 
-    def add(self, run_id, job, status="queued", executor=None):
-        self.rows[run_id] = {"job": job, "status": status, "executor": executor, "end_reason": None}
+    def add(self, run_id, job, status="queued", executor=None, attempt=1):
+        self.rows[run_id] = {
+            "job": job,
+            "status": status,
+            "executor": executor,
+            "attempt": attempt,
+            "end_reason": None,
+        }
 
     @contextmanager
     def admission(self):
@@ -34,6 +40,16 @@ class FakeStore:
         row = self.rows.get(run_id)
         return row["status"] if row else None
 
+    def run_state(self, run_id):
+        if self.fail:
+            raise RuntimeError("database unavailable")
+        row = self.rows.get(run_id)
+        return (row["status"], row["attempt"]) if row else (None, None)
+
+    def attempt(self, run_id):
+        row = self.rows.get(run_id)
+        return row["attempt"] if row else None
+
     def job_running(self, job, run_id):
         return any(
             r["job"] == job and r["status"] == "running" and i != run_id
@@ -41,7 +57,10 @@ class FakeStore:
         )
 
     def running_pods(self):
-        return sum(r["status"] == "running" and r["executor"] == "pod" for r in self.rows.values())
+        return sum(
+            r["status"] == "running" and r["executor"] == "pod"
+            for r in self.rows.values()
+        )
 
     def claim(self, run_id, executor, k8s_job=None):
         row = self.rows[run_id]
@@ -186,12 +205,35 @@ def test_full_cap_expires_the_run_at_its_queue_ttl(store, clock, consumer, launc
     launch_pod.assert_not_called()
 
 
-def test_retry_attempt_is_not_rejected_by_the_original_queue_expiry(store, consumer, launch_pod):
-    store.add("r2", "rumor-syncer")
+def test_retry_attempt_is_not_rejected_by_the_original_queue_expiry(
+    store, consumer, launch_pod
+):
+    store.add("r2", "rumor-syncer", attempt=2)
     assert consumer.admit(body("r2", ttl=timedelta(minutes=-1), attempt=2))
     assert consumer.drain() == ["r2"]
     assert store.rows["r2"]["status"] == "running"
     launch_pod.assert_called_once()
+
+
+def test_old_delivery_is_dropped_when_run_log_has_a_newer_attempt(store, consumer):
+    store.add("r2", "rumor-syncer", attempt=2)
+    assert not consumer.admit(body("r2", attempt=1))
+    assert consumer.pending == {}
+
+
+def test_old_duplicate_does_not_replace_newer_pending_attempt(store, consumer):
+    store.add("r2", "rumor-syncer", attempt=2)
+    assert consumer.admit(body("r2", attempt=2))
+    assert not consumer.admit(body("r2", attempt=1))
+    assert consumer.pending["r2"].attempt == 2
+
+
+def test_new_retry_delivery_replaces_an_older_pending_attempt(store, consumer):
+    store.add("r2", "rumor-syncer")
+    assert consumer.admit(body("r2", attempt=1))
+    store.rows["r2"].update(status="queued", attempt=2)
+    assert consumer.admit(body("r2", attempt=2))
+    assert consumer.pending["r2"].attempt == 2
 
 
 def test_waiting_run_does_not_block_other_jobs(store, clock, runner, launch_pod):
@@ -205,7 +247,9 @@ def test_waiting_run_does_not_block_other_jobs(store, clock, runner, launch_pod)
     assert list(consumer.pending) == ["waits"]
 
 
-def test_inline_runs_skip_the_pod_cap_and_wait_for_the_runner(store, clock, runner, launch_pod):
+def test_inline_runs_skip_the_pod_cap_and_wait_for_the_runner(
+    store, clock, runner, launch_pod
+):
     catalog = CATALOG.model_copy(deep=True)
     catalog.jobs["rumor-syncer"].executor = "inline"
     consumer = make_consumer(store, clock, runner, launch_pod, catalog)
@@ -241,7 +285,9 @@ def test_cancelled_while_pending_is_dropped(store, consumer, launch_pod):
     launch_pod.assert_not_called()
 
 
-def test_launch_failure_fails_the_run_once_the_job_is_known_absent(store, consumer, launch_pod, monkeypatch):
+def test_launch_failure_fails_the_run_once_the_job_is_known_absent(
+    store, consumer, launch_pod, monkeypatch
+):
     monkeypatch.setattr(consumer_module.k8s, "job_exists", lambda name: False)
     launch_pod.side_effect = RuntimeError("apiserver down")
     queue_run(store, consumer, "r1")
@@ -252,7 +298,9 @@ def test_launch_failure_fails_the_run_once_the_job_is_known_absent(store, consum
 
 
 @pytest.mark.parametrize("exists", [True, None])
-def test_timed_out_create_keeps_a_job_that_may_exist_running(store, consumer, launch_pod, monkeypatch, exists):
+def test_timed_out_create_keeps_a_job_that_may_exist_running(
+    store, consumer, launch_pod, monkeypatch, exists
+):
     monkeypatch.setattr(consumer_module.k8s, "job_exists", lambda name: exists)
     launch_pod.side_effect = TimeoutError("read timed out")
     queue_run(store, consumer, "r1")
@@ -261,7 +309,9 @@ def test_timed_out_create_keeps_a_job_that_may_exist_running(store, consumer, la
     assert store.rows["r1"]["end_reason"] is None
 
 
-def test_refused_create_fails_without_a_lookup(store, consumer, launch_pod, monkeypatch):
+def test_refused_create_fails_without_a_lookup(
+    store, consumer, launch_pod, monkeypatch
+):
     lookup = MagicMock()
     monkeypatch.setattr(consumer_module.k8s, "job_exists", lookup)
     launch_pod.side_effect = ApiException(status=422)
@@ -271,7 +321,9 @@ def test_refused_create_fails_without_a_lookup(store, consumer, launch_pod, monk
     lookup.assert_not_called()
 
 
-def test_unrecordable_launch_failure_does_not_stop_the_pass(store, consumer, launch_pod, monkeypatch):
+def test_unrecordable_launch_failure_does_not_stop_the_pass(
+    store, consumer, launch_pod, monkeypatch
+):
     monkeypatch.setattr(consumer_module.k8s, "job_exists", lambda name: False)
     launch_pod.side_effect = [RuntimeError("apiserver down"), None]
     store.finish_running = MagicMock(side_effect=RuntimeError("database down"))
@@ -281,7 +333,9 @@ def test_unrecordable_launch_failure_does_not_stop_the_pass(store, consumer, lau
     assert launch_pod.call_count == 2
 
 
-def test_missing_launcher_config_fails_before_claiming(store, consumer, launch_pod, monkeypatch):
+def test_missing_launcher_config_fails_before_claiming(
+    store, consumer, launch_pod, monkeypatch
+):
     monkeypatch.delenv("CORE_IMAGE")
     queue_run(store, consumer, "r1")
     consumer.drain()
@@ -301,11 +355,22 @@ def test_unknown_job_or_bad_params_fail_the_run(store, consumer, launch_pod):
 
 
 def test_params_become_cli_flags(store, consumer, launch_pod):
-    queue_run(store, consumer, "r1", job="lineup-optimizer", params={"week": 7, "dry_run": True})
+    queue_run(
+        store,
+        consumer,
+        "r1",
+        job="lineup-optimizer",
+        params={"week": 7, "dry_run": True},
+    )
     consumer.drain()
     container = launch_pod.call_args.args[0].spec.template.spec.containers[0]
     assert container.command == [
-        "python", "-m", "src.optimization.lineup_solver", "--week", "7", "--dry-run",
+        "python",
+        "-m",
+        "src.optimization.lineup_solver",
+        "--week",
+        "7",
+        "--dry-run",
     ]
 
 
@@ -317,7 +382,9 @@ def test_admit_drops_invalid_and_no_longer_queued_commands(store, consumer):
     assert consumer.pending == {}
 
 
-def test_recover_rebuilds_pending_and_ignores_the_later_delivery(store, consumer, launch_pod):
+def test_recover_rebuilds_pending_and_ignores_the_later_delivery(
+    store, consumer, launch_pod
+):
     store.add("r1", "rumor-syncer")
     store.add("r2", "trade-scan", status="cancelled")
     store.bodies = [body("r1"), body("r2", job="trade-scan")]
@@ -333,7 +400,9 @@ def test_delivery_is_acked_once_admitted(store, consumer):
     store.add("r2", "rumor-syncer")
     channel = MagicMock()
     for tag, run_id in enumerate(("r1", "r2")):
-        consumer._on_message(channel, MagicMock(delivery_tag=tag), None, json.dumps(body(run_id)))
+        consumer._on_message(
+            channel, MagicMock(delivery_tag=tag), None, json.dumps(body(run_id))
+        )
     assert [c.args for c in channel.basic_ack.call_args_list] == [(0,), (1,)]
     assert list(consumer.pending) == ["r2"]
 
@@ -345,11 +414,15 @@ def test_non_json_delivery_is_acked_and_dropped(consumer):
     channel.basic_nack.assert_not_called()
 
 
-def test_unreadable_run_log_returns_the_delivery_and_drops_the_connection(store, consumer):
+def test_unreadable_run_log_returns_the_delivery_and_drops_the_connection(
+    store, consumer
+):
     store.fail = True
     channel = MagicMock()
     with pytest.raises(consumer_module.RunLogUnavailable):
-        consumer._on_message(channel, MagicMock(delivery_tag=3), None, json.dumps(body("r1")))
+        consumer._on_message(
+            channel, MagicMock(delivery_tag=3), None, json.dumps(body("r1"))
+        )
     channel.basic_nack.assert_called_once_with(3, requeue=True)
     channel.basic_ack.assert_not_called()
 

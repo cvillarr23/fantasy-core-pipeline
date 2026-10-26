@@ -306,7 +306,8 @@ components:
       title: RunCommand
       summary: Start one run of a catalog job. Consumed only by the job launcher (python -m src.launcher),
         not the browser worker. The queued run_log row with this run_id is written first; the launcher
-        skips a command whose run is no longer queued, and expires it as skipped after expires_at.
+        skips a command whose run is no longer queued or whose attempt is stale. expires_at applies
+        to the initial attempt; retries of an attempt that started keep their retry budget.
       contentType: application/json
       payload:
         $ref: '#/components/schemas/RunCommand'

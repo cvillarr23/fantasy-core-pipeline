@@ -25,6 +25,11 @@ class Admission:
         row = self.c.fetchone()
         return row[0] if row else None
 
+    def run_state(self, run_id):
+        self.c.execute("SELECT status,attempt FROM run_log WHERE id=%s", (run_id,))
+        row = self.c.fetchone()
+        return row if row else (None, None)
+
     def job_running(self, job, run_id):
         """Whether another run of this catalog job is running. Launcher runs keep their
         catalog job_name, so CronJob-era rows (entrypoint names) never match."""
@@ -72,6 +77,10 @@ class RunStore:
         with get_db_cursor() as c:
             return Admission(c).status(run_id)
 
+    def run_state(self, run_id):
+        with get_db_cursor() as c:
+            return Admission(c).run_state(run_id)
+
     def queued_commands(self):
         """Run command bodies still queued, oldest first, for recovery after a restart."""
         with get_db_cursor() as c:
@@ -84,27 +93,44 @@ class RunStore:
                 for (body,) in c.fetchall()
             ]
 
-    def finish_running(self, run_id, status, end_reason, error=None, force=False):
+    def finish_running(
+        self, run_id, status, end_reason, error=None, force=False, expected_attempt=None
+    ):
         """Ends a launched run. Without `force` it only fills in a row the process itself
-        left `running` (it crashed or never adopted RUN_ID), keeping what run_scope wrote."""
+        left `running` (it crashed or never adopted RUN_ID), keeping what run_scope wrote.
+        """
         with get_db_cursor() as c:
-            guard = " AND status<>'cancelled'" if force else " AND status='running'"
+            if expected_attempt is not None:
+                guard = " AND status IN ('running','success','failure','timeout') AND attempt=%s"
+                params = (status, end_reason, error, run_id, expected_attempt)
+            else:
+                guard = " AND status<>'cancelled'" if force else " AND status='running'"
+                params = (status, end_reason, error, run_id)
             c.execute(
                 """UPDATE run_log SET status=%s, end_reason=%s,
-                error=COALESCE(%s,error), finished_at=now() WHERE id=%s""" + guard,
-                (status, end_reason, error, run_id),
+                error=COALESCE(%s,error), finished_at=now() WHERE id=%s"""
+                + guard,
+                params,
             )
 
-    def watched_runs(self):
-        """Launched rows the watcher must reconcile, including API-cancelled rows whose
-        external process or Job still needs to be stopped. Chain roots have no executor.
+    def watched_runs(self, job_run_ids=(), max_attempts=None):
+        """Return active/cancelled runs, current Job rows, and inline outcomes still retryable.
+
+        Terminal pod rows are selected only while their Job is visible, keeping old run_log
+        history out of every watcher tick.
         """
         with get_db_cursor() as c:
             c.execute(
                 """SELECT id,job_name,status,attempt,started_at,chain_root_id,trigger
-                FROM run_log WHERE status IN ('running','success','failure','timeout','cancelled')
-                AND trigger ? 'executor'
-                AND (chain_root_id IS NULL OR chain_root_id<>id) ORDER BY started_at"""
+                FROM run_log WHERE trigger ? 'executor'
+                AND (chain_root_id IS NULL OR chain_root_id<>id)
+                AND (status='running'
+                  OR (status='cancelled' AND NOT (trigger ? 'cancel_reconciled'))
+                  OR id=ANY(%s)
+                  OR (trigger->>'executor'='inline' AND status IN ('failure','timeout')
+                      AND attempt<COALESCE((%s::jsonb->>job_name)::int,attempt)))
+                ORDER BY started_at""",
+                (list(job_run_ids), json.dumps(max_attempts or {})),
             )
             rows = c.fetchall()
         result = []
@@ -126,7 +152,16 @@ class RunStore:
             )
         return result
 
-    def retry_running(self, run_id, attempt):
+    def mark_cancel_reconciled(self, run_id):
+        """Avoid revisiting a cancelled run after its external workload was stopped."""
+        with get_db_cursor() as c:
+            c.execute(
+                """UPDATE run_log SET trigger=trigger || '{"cancel_reconciled":true}'::jsonb
+                WHERE id=%s AND status='cancelled'""",
+                (run_id,),
+            )
+
+    def retry_running(self, run_id, attempt, expected_attempt=None):
         """Queues another attempt on the same run and resets its durable outbox command."""
         with get_db_cursor() as c:
             c.execute(
@@ -140,11 +175,17 @@ class RunStore:
             if isinstance(body, str):
                 body = json.loads(body)
             body["attempt"] = attempt
+            attempt_guard = " AND attempt=%s" if expected_attempt is not None else ""
+            params = (attempt, run_id)
+            if expected_attempt is not None:
+                params += (expected_attempt,)
             c.execute(
                 """UPDATE run_log SET status='queued',attempt=%s,started_at=now(),
                 finished_at=NULL,end_reason=NULL,error=NULL
-                WHERE id=%s AND status IN ('running','failure','timeout') RETURNING id""",
-                (attempt, run_id),
+                WHERE id=%s AND status IN ('running','failure','timeout')"""
+                + attempt_guard
+                + " RETURNING id",
+                params,
             )
             if c.fetchone() is None:
                 return False
