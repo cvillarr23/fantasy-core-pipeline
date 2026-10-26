@@ -16,7 +16,9 @@ class Recorder:
     def status(self, run_id):
         return self.statuses.get(run_id)
 
-    def finish_running(self, run_id, status, end_reason, error=None, force=False):
+    def finish_running(
+        self, run_id, status, end_reason, error=None, force=False, expected_attempt=None
+    ):
         self.finished.append((run_id, status, end_reason, force))
 
 
@@ -173,7 +175,9 @@ def test_stop_kills_a_child_that_ignores_sigterm(store, monkeypatch, tmp_path):
 def test_runner_survives_an_unrecordable_outcome(store, monkeypatch):
     calls = []
 
-    def flaky(run_id, status, end_reason, error=None, force=False):
+    def flaky(
+        run_id, status, end_reason, error=None, force=False, expected_attempt=None
+    ):
         calls.append(status)
         if len(calls) <= 2:
             raise RuntimeError("database down")

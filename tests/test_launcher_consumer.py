@@ -77,7 +77,9 @@ class FakeStore:
     def queued_commands(self):
         return [b for b in self.bodies if self.rows[b["run_id"]]["status"] == "queued"]
 
-    def finish_running(self, run_id, status, end_reason, error=None, force=False):
+    def finish_running(
+        self, run_id, status, end_reason, error=None, force=False, expected_attempt=None
+    ):
         row = self.rows[run_id]
         if force or row["status"] == "running":
             row.update(status=status, end_reason=end_reason, error=error)
@@ -266,6 +268,7 @@ def test_inline_runs_skip_the_pod_cap_and_wait_for_the_runner(
     assert run.deadline_seconds == 25 * 60
     assert run.env == {
         "RUN_ID": "r1",
+        "RUN_ATTEMPT": "1",
         "RUN_TRIGGER": "manual",
         "JOB_NAME": "rumor-syncer@r1",
         "RUN_PARENT_ID": "parent",

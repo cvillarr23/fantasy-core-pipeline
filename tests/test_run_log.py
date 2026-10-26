@@ -25,11 +25,12 @@ def recorded():
         calls["start"].append((job_name, trigger_type, trigger, parent_run_id))
         return f"run-{len(calls['start'])}"
 
+    def finish(*args, **kwargs):
+        calls["finish"].append(args + (kwargs.get("expected_attempt"),))
+
     with (
         patch.object(run_log, "start_run", side_effect=start),
-        patch.object(
-            run_log, "finish_run", side_effect=lambda *a: calls["finish"].append(a)
-        ),
+        patch.object(run_log, "finish_run", side_effect=finish),
         patch.object(
             run_log, "_insert_links", side_effect=lambda *a: calls["links"].append(a)
         ),
@@ -71,19 +72,23 @@ def test_explicit_trigger_env_takes_precedence(monkeypatch, trigger):
 
 def test_outer_scope_adopts_launcher_run_id_once(recorded, monkeypatch):
     monkeypatch.setenv("RUN_ID", "launcher-run")
+    monkeypatch.setenv("RUN_ATTEMPT", "2")
     monkeypatch.setenv("RUN_TRIGGER", "schedule")
     monkeypatch.delenv("RUN_PARENT_ID", raising=False)
     adopted = []
-    with patch.object(run_log, "adopt_run", side_effect=lambda *args: adopted.append(args)):
+    with patch.object(
+        run_log, "adopt_run", side_effect=lambda *args: adopted.append(args)
+    ):
         with run_log.run_scope("sync_rumors") as outer:
             assert outer.id == "launcher-run"
             assert os.getenv("RUN_ID") is None
             assert os.getenv("RUN_PARENT_ID") == "launcher-run"
             with run_log.run_scope("child") as child:
                 assert child.id == "run-1"
-    assert adopted == [("launcher-run", "sync_rumors", "schedule", {}, None)]
+    assert adopted == [("launcher-run", "sync_rumors", "schedule", {}, None, 2)]
     assert recorded["start"][0][0] == "child"
     assert recorded["start"][0][3] == "launcher-run"
+    assert recorded["finish"][1][4] == 2
     assert os.getenv("RUN_PARENT_ID") is None
 
 

@@ -27,7 +27,8 @@ LauncherTrigger = Literal["schedule", "chain", "event", "manual", "cli", "mcp"]
 
 class RunCommand(BaseModel):
     """The `job_runs` message body: ADR 0001's run command, plus when it stops being worth
-    starting (`expires_at`): manual queue TTL, a schedule's catch_up, or a chain's latest."""
+    starting (`expires_at`): manual queue TTL, a schedule's catch_up, or a chain's latest.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -48,7 +49,8 @@ class RunCommand(BaseModel):
 
     def job_name_env(self) -> str:
         """`<job>@<dedupe>` for JOB_NAME, which scopes the lineup/rumor idempotency keys to this
-        run. Schedule and chain keys already start with `<job>@`, so they're used as is."""
+        run. Schedule and chain keys already start with `<job>@`, so they're used as is.
+        """
         if self.dedupe_key.startswith(f"{self.job}@"):
             return self.dedupe_key
         return f"{self.job}@{self.dedupe_key}"
@@ -57,6 +59,7 @@ class RunCommand(BaseModel):
         """The run identity a launched process adopts through run_log_service.run_scope."""
         env = {
             "RUN_ID": self.run_id,
+            "RUN_ATTEMPT": str(self.attempt),
             "RUN_TRIGGER": self.trigger,
             "JOB_NAME": self.job_name_env(),
         }
@@ -136,7 +139,9 @@ def publish_run(
             ),
         )
         if c.fetchone() is None:
-            c.execute("SELECT id FROM run_log WHERE dedupe_key=%s", (command.dedupe_key,))
+            c.execute(
+                "SELECT id FROM run_log WHERE dedupe_key=%s", (command.dedupe_key,)
+            )
             return {"run_id": c.fetchone()[0], "status": "duplicate"}
         c.execute(
             "INSERT INTO job_run_outbox(run_id,body) VALUES (%s,%s)",

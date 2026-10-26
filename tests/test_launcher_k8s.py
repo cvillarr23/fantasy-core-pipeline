@@ -30,7 +30,7 @@ LAUNCHER_ENV = {
 
 # CronJob run-identity env the launcher replaces with RUN_ID/RUN_TRIGGER/JOB_NAME.
 REPLACED_ENV = {"RUN_CRONJOB", "RUN_K8S_JOB", "JOB_NAME"}
-RUN_IDENTITY_ENV = {"RUN_ID", "RUN_TRIGGER", "JOB_NAME"}
+RUN_IDENTITY_ENV = {"RUN_ID", "RUN_ATTEMPT", "RUN_TRIGGER", "JOB_NAME"}
 
 # Env and envFrom a profile adds beyond what that job's CronJob carried. Kept as exact sets,
 # so a new difference in either direction fails here instead of slipping into a cutover.
@@ -100,7 +100,9 @@ def test_built_job_matches_cronjob_pod_spec(job):
     built_pod = build(job)["spec"]["template"]["spec"]
     (built_container,) = built_pod["containers"]
 
-    cron_env = {e["name"]: e for e in cron_container["env"] if e["name"] not in REPLACED_ENV}
+    cron_env = {
+        e["name"]: e for e in cron_container["env"] if e["name"] not in REPLACED_ENV
+    }
     built_env = {e["name"]: e for e in built_container["env"]}
     for name, entry in cron_env.items():
         assert built_env.get(name) == entry, name
@@ -140,6 +142,7 @@ def test_job_carries_run_identity_limits_and_labels():
     assert container["image"] == LAUNCHER_ENV["WORKER_IMAGE"]
     env = {e["name"]: e.get("value") for e in container["env"]}
     assert env["RUN_ID"] == run.run_id
+    assert env["RUN_ATTEMPT"] == "2"
     assert env["RUN_TRIGGER"] == "schedule"
     assert env["RUN_PARENT_ID"] == "parent-run"
     # A schedule key already names the job, so it isn't prefixed twice.
@@ -147,7 +150,9 @@ def test_job_carries_run_identity_limits_and_labels():
 
 
 def test_manual_run_job_name_prefixes_the_job_and_params_become_flags():
-    run = command(trigger="manual", dedupe_key="0b5f", params={"week": 7, "dry_run": True})
+    run = command(
+        trigger="manual", dedupe_key="0b5f", params={"week": 7, "dry_run": True}
+    )
     job = build("lineup-optimizer", run, {"week": 7, "dry_run": True})
     container = job["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in container["env"]}
@@ -163,7 +168,10 @@ def test_job_name_stays_within_label_limit():
 
 
 def test_otel_service_name_follows_the_module():
-    env = {e.name: e.value for e in k8s._otel_env(["python", "-m", "src.ops.sweep_stale_draft_jobs"])}
+    env = {
+        e.name: e.value
+        for e in k8s._otel_env(["python", "-m", "src.ops.sweep_stale_draft_jobs"])
+    }
     assert env["OTEL_SERVICE_NAME"] == "ops-sweep-stale-draft-jobs"
     assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
 
@@ -181,7 +189,9 @@ def test_missing_inherited_value_fails_the_build(monkeypatch):
 
 def test_validate_catalog_reports_missing_inherited_env(monkeypatch):
     monkeypatch.delenv("REDIS_PORT")
-    with pytest.raises(k8s.LaunchConfigError, match="secrets.redis: REDIS_PORT is not set"):
+    with pytest.raises(
+        k8s.LaunchConfigError, match="secrets.redis: REDIS_PORT is not set"
+    ):
         k8s.validate_catalog(CATALOG)
 
 
@@ -226,5 +236,8 @@ def test_create_job_raises_other_api_errors():
     api = MagicMock()
     api.create_namespaced_job.side_effect = ApiException(status=403)
     job = k8s.build_job(command(), CATALOG.resolve("lineup-optimizer"), ["python"])
-    with patch.object(k8s, "batch_v1_api", return_value=api), pytest.raises(ApiException):
+    with (
+        patch.object(k8s, "batch_v1_api", return_value=api),
+        pytest.raises(ApiException),
+    ):
         k8s.create_job(job)

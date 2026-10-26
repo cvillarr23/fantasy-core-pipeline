@@ -137,6 +137,21 @@ def test_cancelled_run_cannot_be_adopted_or_finalized_by_the_process(postgres):
     ) == [("true",)]
 
 
+def test_old_process_cannot_adopt_or_finish_a_requeued_attempt(postgres):
+    identity = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
+    store = RunStore()
+    with store.admission() as admission:
+        assert admission.claim(identity, "pod", "lineup-optimizer-r1-a1")
+    assert store.retry_running(identity, 2, expected_attempt=1)
+
+    run_log.adopt_run(identity, "sync_rumors", "manual", {}, expected_attempt=1)
+    run_log.finish_run(identity, "failure", "late old process", expected_attempt=1)
+
+    assert rows(
+        postgres, "SELECT status,attempt,error FROM run_log WHERE id=%s", (identity,)
+    ) == [("queued", 2, None)]
+
+
 def test_retry_requeues_the_same_run_and_updates_its_outbox_attempt(postgres):
     identity = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
     store = RunStore()

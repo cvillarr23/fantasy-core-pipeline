@@ -237,6 +237,7 @@ class Consumer:
                             argv=argv,
                             env=command.launch_env(),
                             deadline_seconds=resolved.deadline.total_seconds(),
+                            attempt=command.attempt,
                         )
                     )
                 else:
@@ -286,6 +287,7 @@ class Consumer:
                 "failure",
                 "launch_failed",
                 f"{type(exc).__name__}: {exc}",
+                expected_attempt=command.attempt,
             )
         except Exception:
             logger.exception(

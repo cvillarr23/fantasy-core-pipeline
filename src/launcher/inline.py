@@ -48,6 +48,7 @@ class InlineRun:
     argv: list
     env: dict
     deadline_seconds: float
+    attempt: int = 1
 
 
 class InlineRunner:
@@ -129,7 +130,12 @@ class InlineRunner:
                     "Inline run %s of %s could not be completed", run.run_id, run.job
                 )
                 try:
-                    self.store.finish_running(run.run_id, "failure", "runner_error")
+                    self.store.finish_running(
+                        run.run_id,
+                        "failure",
+                        "runner_error",
+                        expected_attempt=run.attempt,
+                    )
                 except Exception:
                     logger.exception(
                         "Inline run %s outcome could not be recorded", run.run_id
@@ -146,11 +152,20 @@ class InlineRunner:
         logger.info("Starting inline run run_id=%s job=%s", run.run_id, run.job)
         with self._lock:
             if self._stopping.is_set():
-                self.store.finish_running(run.run_id, "failure", "launcher_shutdown")
+                self.store.finish_running(
+                    run.run_id,
+                    "failure",
+                    "launcher_shutdown",
+                    expected_attempt=run.attempt,
+                )
                 return
             if run.run_id in self._cancelled:
                 self.store.finish_running(
-                    run.run_id, "cancelled", "cancelled", force=True
+                    run.run_id,
+                    "cancelled",
+                    "cancelled",
+                    force=True,
+                    expected_attempt=run.attempt,
                 )
                 return
             process = self._process = subprocess.Popen(
@@ -165,7 +180,11 @@ class InlineRunner:
                     cancelled = run.run_id in self._cancelled
                 if cancelled:
                     self.store.finish_running(
-                        run.run_id, "cancelled", "cancelled", force=True
+                        run.run_id,
+                        "cancelled",
+                        "cancelled",
+                        force=True,
+                        expected_attempt=run.attempt,
                     )
                     return
                 logger.error(
@@ -180,18 +199,28 @@ class InlineRunner:
                     "deadline",
                     f"deadline of {run.deadline_seconds}s exceeded",
                     force=True,
+                    expected_attempt=run.attempt,
                 )
                 return
             if self._stopping.is_set() and code != 0:
                 # stop() sent SIGTERM; give it the grace period, then make sure it's gone.
                 _terminate(process)
-                self.store.finish_running(run.run_id, "failure", "launcher_shutdown")
+                self.store.finish_running(
+                    run.run_id,
+                    "failure",
+                    "launcher_shutdown",
+                    expected_attempt=run.attempt,
+                )
                 return
             with self._lock:
                 cancelled = run.run_id in self._cancelled
             if cancelled:
                 self.store.finish_running(
-                    run.run_id, "cancelled", "cancelled", force=True
+                    run.run_id,
+                    "cancelled",
+                    "cancelled",
+                    force=True,
+                    expected_attempt=run.attempt,
                 )
                 return
             logger.info(
@@ -202,6 +231,7 @@ class InlineRunner:
                 "success" if code == 0 else "failure",
                 "exit_code",
                 None if code == 0 else f"exit code {code}",
+                expected_attempt=run.attempt,
             )
         finally:
             with self._lock:
