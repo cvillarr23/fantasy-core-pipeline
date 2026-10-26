@@ -113,6 +113,7 @@ erDiagram
 ```mermaid
 erDiagram
     run_log ||--o{ run_links : "run_id"
+    run_log ||--o| job_run_outbox : "run_id"
     run_log ||--o{ run_log : "parent_run_id"
     run_links }o--o| raw_signals : "ref_type=raw_signal"
     run_links }o--o| rumor_signals : "ref_type=rumor_signal"
@@ -122,7 +123,7 @@ erDiagram
         text id PK
         text job_name
         text trigger_type "chain | event | cli | mcp (plus cutover legacy values)"
-        jsonb trigger "cronjob + k8s_job, or queue + tracking_id"
+        jsonb trigger "cronjob + k8s_job, queue + tracking_id, or launcher params + executor"
         text status "queued | skipped | cancelled | timeout | running | success | failure"
         text dedupe_key UK "nullable"
         timestamptz scheduled_for
@@ -139,6 +140,14 @@ erDiagram
         text set_by
         timestamptz set_at
     }
+    job_run_outbox {
+        text run_id PK "FK run_log.id, cascade"
+        jsonb body "RunCommand"
+        timestamptz published_at
+        int attempts
+        timestamptz next_attempt_at
+        text last_error
+    }
     launcher_heartbeat {
         smallint id PK "always 1"
         timestamptz at
@@ -146,7 +155,7 @@ erDiagram
     }
 ```
 
-A worker run's `trigger.tracking_id` is the `activity_actions.id` it executed, which links it to the run that queued that action. Only `run_links.run_id` is a foreign key.
+A worker run's `trigger.tracking_id` is the `activity_actions.id` it executed, which links it to the run that queued that action. Only `run_links.run_id` and `job_run_outbox.run_id` are foreign keys.
 
 ### Score history
 
@@ -199,6 +208,7 @@ erDiagram
 | `rumor_action_checkpoints` | Per-team watermark and in-flight state for rumor actions. | `rumor_action_service` |
 | `run_log` | One row per launcher or bot run: trigger, lifecycle status, dedupe and chain identity, error and a `summary`. The outermost `run_scope` adopts `RUN_ID`; child processes receive it as `RUN_PARENT_ID`. Purged after `RUN_LOG_RETENTION_DAYS` (90). | Launcher and `run_log_service.run_scope` in core entrypoints; the worker's `db/run_log.js`. |
 | `run_links` | What each run read (`input`) and wrote (`output`): raw signals, rumor signals, LLM sessions, queued actions. | Same as `run_log`, plus the `/v1/trigger/*` handlers via `X-Run-Id`. |
+| `job_run_outbox` | A launcher run command (`RunCommand`) waiting to be published to `job_runs`, with retry state. Deleted with its `run_log` row. | `launcher.publish.publish_run`; delivered by the activity runner and the launcher. |
 | `job_overrides` | Pause window and audit details for a job or chain. | Unified job launcher. |
 | `launcher_heartbeat` | The launcher's last heartbeat and a JSON object of queue depths; the singleton row has `id=1`. | Unified job launcher. |
 | `trade_candidate_runs` | The latest trade-candidate run per league, season and week: `run_id` (the `run_log` id), `computed_at`, horizon and `counts`. A missing row means the job never ran for that week. | `python -m src.jobs.trade_candidates` |

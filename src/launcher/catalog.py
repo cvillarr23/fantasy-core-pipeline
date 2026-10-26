@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -258,6 +260,25 @@ def _reject_reserved(value: Any, path: str = "catalog") -> None:
             _reject_reserved(child, f"{path}[{index}]")
 
 
+class UnknownJobError(ValueError):
+    """The catalog has no job by that name."""
+
+
+@dataclass(frozen=True)
+class ResolvedJob:
+    """A catalog job with `defaults` applied and its profile attached."""
+
+    name: str
+    job: Job
+    profile: Profile
+    executor: str
+    overlap: str
+    max_attempts: int
+    deadline: timedelta
+    alert: str
+    resources: Resources
+
+
 class Catalog(CatalogModel):
     version: Literal[1]
     global_settings: GlobalSettings = Field(alias="global")
@@ -322,10 +343,86 @@ class Catalog(CatalogModel):
                 visit(step_name)
         return self
 
+    def resolve(self, name: str) -> ResolvedJob:
+        job = self.jobs.get(name)
+        if job is None:
+            raise UnknownJobError(f"unknown job {name!r}")
+        defaults = self.defaults
+        return ResolvedJob(
+            name=name,
+            job=job,
+            profile=self.profiles[job.profile],
+            executor=job.executor or defaults.executor,
+            overlap=job.overlap or defaults.overlap,
+            max_attempts=job.max_attempts or defaults.max_attempts,
+            deadline=job.deadline or defaults.deadline,
+            alert=job.alert or defaults.alert,
+            resources=job.resources or defaults.resources,
+        )
+
     def _validate_schedule_seasons(self, schedule: Schedule, path: str) -> None:
         for season in schedule.seasons:
             if season not in self.seasons:
                 raise ValueError(f"{path}.seasons references unknown season {season!r}")
+
+
+def _coerce_param(name: str, base: str, value: Any) -> Any:
+    if base in ("bool", "boolean"):
+        if isinstance(value, bool):
+            return value
+    elif base in ("int", "integer"):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    elif base in ("float", "number"):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    elif isinstance(value, str):
+        return value
+    raise ValueError(f"param {name!r} must be {base}, got {value!r}")
+
+
+def validate_run_params(job: Job, params: dict[str, Any] | None) -> dict[str, Any]:
+    """Checks on-demand run params against the job's allowlist and returns them typed, with
+    omitted or null optional params dropped. Raises ValueError for anything else."""
+    params = params or {}
+    unknown = sorted(set(params) - set(job.params))
+    if unknown:
+        raise ValueError(f"unknown params: {', '.join(unknown)}")
+    checked = {}
+    for name, type_name in job.params.items():
+        optional = type_name.endswith("?")
+        base = type_name.rstrip("?")
+        value = params.get(name)
+        if value is None:
+            if not optional:
+                raise ValueError(f"param {name!r} is required")
+            continue
+        checked[name] = _coerce_param(name, base, value)
+    return checked
+
+
+def params_to_args(params: dict[str, Any]) -> list[str]:
+    """`{"week": 7, "dry_run": True}` -> `["--week", "7", "--dry-run"]`; a false flag is omitted.
+
+    `$` is escaped as `$$` because Kubernetes (and the inline runner) expands `$(VAR)` in a
+    container command: a caller's `$(DB_PASSWORD)` must stay literal text, unlike the
+    catalog's own `$(CURRENT_YEAR)`."""
+    args = []
+    for name, value in params.items():
+        flag = "--" + name.replace("_", "-")
+        if value is True:
+            args.append(flag)
+        elif value is not False and value is not None:
+            args.extend([flag, str(value).replace("$", "$$")])
+    return args
+
+
+# Where fantasy-infra mounts the `fantasy-job-catalog` ConfigMap in the launcher pod.
+DEFAULT_CATALOG_PATH = "/etc/fantasy-job-catalog/catalog.yaml"
+
+
+def load_catalog_from_env() -> Catalog:
+    return load_catalog(os.getenv("JOB_CATALOG_PATH", DEFAULT_CATALOG_PATH))
 
 
 def load_catalog(path: str | Path) -> Catalog:

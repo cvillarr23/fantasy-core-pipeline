@@ -10,8 +10,37 @@ import pika
 from src.database import get_db_cursor
 from src.services.activity_service import action_detail, dependency_failure_reason, record_event
 from src.services import run_log_service
+from src.queue_contracts import AMQP_URL, JOB_RUNS
 
 logger = logging.getLogger(__name__)
+
+
+def _broker_connection(amqp_url):
+    params = pika.URLParameters(amqp_url)
+    params.socket_timeout = 5
+    params.blocked_connection_timeout = 5
+    return pika.BlockingConnection(params)
+
+
+def _confirmed_channel(connection, queue):
+    """The queue is the broker's to declare (with its DLQ policy), so it's only checked."""
+    channel = connection.channel()
+    channel.confirm_delivery()
+    channel.queue_declare(queue=queue, passive=True)
+    return channel
+
+
+def _publish_confirmed(channel, queue, body):
+    channel.basic_publish(
+        exchange="",
+        routing_key=queue,
+        body=json.dumps(body),
+        mandatory=True,
+        properties=pika.BasicProperties(
+            delivery_mode=2, content_type="application/json",
+            headers={"traceparent": body["traceparent"]} if body.get("traceparent") else {}
+        ),
+    )
 
 
 def publish_one(identity=None):
@@ -33,15 +62,10 @@ def publish_one(identity=None):
             action_id, queue, body, depends_on = row
             if isinstance(body, str):
                 body = json.loads(body)
-            from src.api.routes import AMQP_URL, _pick_slot_already_filled
+            from src.api.routes import _pick_slot_already_filled
 
-            params = pika.URLParameters(AMQP_URL)
-            params.socket_timeout = 5
-            params.blocked_connection_timeout = 5
-            connection = pika.BlockingConnection(params)
-            channel = connection.channel()
-            channel.confirm_delivery()
-            channel.queue_declare(queue=queue, passive=True)
+            connection = _broker_connection(AMQP_URL)
+            channel = _confirmed_channel(connection, queue)
             expired = queue == "draft_targets" and (
                 (
                     body.get("expires_at") is not None
@@ -61,16 +85,7 @@ def publish_one(identity=None):
                     (action_id,),
                 )
             else:
-                channel.basic_publish(
-                    exchange="",
-                    routing_key=queue,
-                    body=json.dumps(body),
-                    mandatory=True,
-                    properties=pika.BasicProperties(
-                        delivery_mode=2, content_type="application/json",
-                        headers={"traceparent": body["traceparent"]} if body.get("traceparent") else {}
-                    ),
-                )
+                _publish_confirmed(channel, queue, body)
                 c.execute("UPDATE activity_actions SET execution='delivered',updated_at=now() WHERE id=%s AND execution='queued'", (action_id,))
                 c.execute(
                     "INSERT INTO activity_events(action_id,stage) VALUES (%s,'delivered_to_worker_queue')",
@@ -100,6 +115,60 @@ def publish_one(identity=None):
                 connection.close()
             except Exception:
                 logger.warning("Could not close outbox connection")
+
+
+def publish_job_run(run_id=None):
+    """Delivers one due launcher run command from job_run_outbox (the given run, else the
+    oldest due). Same contract as publish_one: confirmed delivery inside the row's
+    transaction, backoff accounting in a new one on failure. Returns whether one was sent."""
+    connection = None
+    claimed = None
+    try:
+        with get_db_cursor() as c:
+            c.execute(
+                """SELECT run_id,body FROM job_run_outbox
+              WHERE published_at IS NULL AND (%s IS NOT NULL OR next_attempt_at<=now()) AND (%s IS NULL OR run_id=%s)
+              ORDER BY next_attempt_at,run_id LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                (run_id, run_id, run_id),
+            )
+            row = c.fetchone()
+            if not row:
+                return False
+            claimed, body = row
+            if isinstance(body, str):
+                body = json.loads(body)
+            connection = _broker_connection(AMQP_URL)
+            _publish_confirmed(_confirmed_channel(connection, JOB_RUNS), JOB_RUNS, body)
+            c.execute(
+                "UPDATE job_run_outbox SET published_at=now(),attempts=attempts+1 WHERE run_id=%s",
+                (claimed,),
+            )
+        return True
+    except Exception as exc:
+        if claimed:
+            with get_db_cursor() as c:
+                c.execute("""UPDATE job_run_outbox SET attempts=attempts+1,
+                    next_attempt_at=now()+least(300, 5*power(2,least(attempts,6))) * interval '1 second',
+                    last_error=%s WHERE run_id=%s AND published_at IS NULL""", (type(exc).__name__, claimed))
+        raise
+    finally:
+        if connection:
+            try:
+                connection.close()
+            except Exception:
+                logger.warning("Could not close job run outbox connection")
+
+
+def drain_job_runs(limit=25):
+    """Delivers due run commands; the API's tick and the launcher loop both call this."""
+    for _ in range(limit):
+        try:
+            if not publish_job_run():
+                break
+        except Exception:
+            logger.exception("Job run delivery deferred")
+            # A broker outage fails every row the same way; the backoff retries them later.
+            break
 
 
 def settle_held_actions():
@@ -287,6 +356,7 @@ def tick():
         except Exception:
             logger.exception("Outbox delivery deferred")
             continue
+    drain_job_runs()
     with get_db_cursor() as c:
         c.execute(
             """WITH due AS (

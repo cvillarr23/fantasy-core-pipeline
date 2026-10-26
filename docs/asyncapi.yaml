@@ -93,6 +93,20 @@ channels:
           exclusive: false
           autoDelete: false
         bindingVersion: 0.3.0
+  job_runs:
+    address: job_runs
+    messages:
+      RunCommand:
+        $ref: '#/components/messages/RunCommand'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: job_runs
+          durable: true
+          exclusive: false
+          autoDelete: false
+        bindingVersion: 0.3.0
 operations:
   publish_lineup_updates:
     action: send
@@ -131,6 +145,12 @@ operations:
       $ref: '#/channels/trade_negotiations'
     messages:
     - $ref: '#/channels/trade_negotiations/messages/TradeNegotiation'
+  publish_job_runs:
+    action: send
+    channel:
+      $ref: '#/channels/job_runs'
+    messages:
+    - $ref: '#/channels/job_runs/messages/RunCommand'
 components:
   messages:
     LineupUpdate:
@@ -281,6 +301,32 @@ components:
           - example-sleeper-outgoing
           related_transaction_id: example-transaction
           thread_root_id: example-thread
+    RunCommand:
+      name: RunCommand
+      title: RunCommand
+      summary: Start one run of a catalog job. Consumed only by the job launcher (python -m src.launcher),
+        not the browser worker. The queued run_log row with this run_id is written first; the launcher
+        skips a command whose run is no longer queued, and expires it as skipped after expires_at.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RunCommand'
+      examples:
+      - name: scheduled slot
+        payload:
+          run_id: 00000000-0000-4000-8000-000000000001
+          job: rumor-syncer
+          params: {}
+          trigger: schedule
+          requested_by: null
+          dedupe_key: rumor-syncer@2030-10-01T19:30:00-05:00
+          parent_run_id: null
+          chain_root_id: null
+          event_id: null
+          downstream: false
+          scheduled_for: '2030-10-02T00:30:00Z'
+          attempt: 1
+          traceparent: null
+          expires_at: '2030-10-02T00:30:00Z'
   schemas:
     LineupUpdate:
       type: object
@@ -628,3 +674,72 @@ components:
       - outgoing_player_ids
       - related_transaction_id
       - thread_root_id
+    RunCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        run_id:
+          type: string
+        job:
+          type: string
+        params:
+          type: object
+        trigger:
+          type: string
+          enum:
+          - schedule
+          - chain
+          - event
+          - manual
+          - cli
+          - mcp
+        requested_by:
+          type:
+          - string
+          - 'null'
+        dedupe_key:
+          type: string
+        parent_run_id:
+          type:
+          - string
+          - 'null'
+        chain_root_id:
+          type:
+          - string
+          - 'null'
+        event_id:
+          type:
+          - string
+          - 'null'
+        downstream:
+          type: boolean
+        scheduled_for:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        attempt:
+          type: integer
+          minimum: 1
+        traceparent:
+          type:
+          - string
+          - 'null'
+        expires_at:
+          type: string
+          format: date-time
+      required:
+      - run_id
+      - job
+      - params
+      - trigger
+      - requested_by
+      - dedupe_key
+      - parent_run_id
+      - chain_root_id
+      - event_id
+      - downstream
+      - scheduled_for
+      - attempt
+      - traceparent
+      - expires_at

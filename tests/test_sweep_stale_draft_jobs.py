@@ -6,11 +6,11 @@ from src.ops.sweep_stale_draft_jobs import sweep
 
 
 def _k8s_patches():
-    """Same pattern as tests/test_draft_routes.py's helper - sweep_stale_draft_jobs imports
-    _batch_v1_api from src.api.draft, so the config functions to patch live there too."""
+    """Same pattern as tests/test_draft_routes.py's helper: both reach the cluster through
+    src.k8s_client, so its config functions are the ones to patch."""
     return (
-        patch("src.api.draft.config.load_incluster_config", side_effect=ConfigException("no cluster")),
-        patch("src.api.draft.config.load_kube_config"),
+        patch("src.k8s_client.config.load_incluster_config", side_effect=ConfigException("no cluster")),
+        patch("src.k8s_client.config.load_kube_config"),
     )
 
 
@@ -29,7 +29,7 @@ def test_no_practice_jobs_is_a_noop():
         MagicMock(items=[]),
     ]
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         sweep()
@@ -48,7 +48,7 @@ def test_live_heartbeat_is_left_alone():
         MagicMock(items=[]),
     ]
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 1  # key present, not expired
@@ -65,7 +65,7 @@ def test_expired_heartbeat_triggers_teardown():
         MagicMock(items=[]),
     ]
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 0  # key absent - TTL expired
@@ -87,7 +87,7 @@ def test_a_race_that_already_ended_the_run_is_not_an_error():
         MagicMock(items=[]),
     ]
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 0
@@ -109,7 +109,7 @@ def test_a_stale_leftover_alongside_a_healthy_session_is_not_torn_down():
         MagicMock(items=[]),
     ]
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         # league 12345 is a stale leftover (no heartbeat); 999 is the healthy, currently-active
@@ -131,7 +131,7 @@ def test_listener_only_job_with_expired_heartbeat_also_triggers_teardown():
         MagicMock(items=[_job("draft-sync-practice-L1-1", "999")]),
     ]
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.ops.sweep_stale_draft_jobs.get_redis_client") as mock_redis_cls, \
          patch("src.ops.sweep_stale_draft_jobs.requests.delete") as mock_delete:
         mock_redis_cls.return_value.exists.return_value = 0

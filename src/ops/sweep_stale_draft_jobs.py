@@ -27,12 +27,9 @@ import os
 import redis
 import requests
 
-from src.api.draft import (
-    K8S_NAMESPACE,
-    K8S_REQUEST_TIMEOUT_SECONDS,
-    PRACTICE_SYNC_APP_LABEL,
-    _batch_v1_api,
-)
+from src.api.draft import PRACTICE_SYNC_APP_LABEL
+from src.k8s_client import K8S_NAMESPACE, K8S_REQUEST_TIMEOUT_SECONDS
+from src.k8s_client import batch_v1_api as _batch_v1_api
 from src.database import get_redis_client
 from src.services import run_log_service
 

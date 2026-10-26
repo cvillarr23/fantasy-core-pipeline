@@ -1,0 +1,123 @@
+# Vendored from cvillarr23/fantasy-infra base/core-pipeline/lineup-optimizer-cronjob.yaml @ 7ae2af9 for the launcher's
+# Job snapshot test (tests/test_launcher_k8s.py). Delete once the CronJob is cut over.
+# Target-week projections and VORP must be refreshed before lineup decisions.
+# Tuesday's 18:00 Central refresher follows historical metrics ingestion;
+# the 19:15 slot leaves room for its one-hour Job deadline and startup.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fantasy-lineup-optimizer
+  namespace: default
+spec:
+  schedule: "15 19 * * 2" # 19:15 Central Tuesday, after the refresher's one-hour deadline.
+  timeZone: "America/Chicago"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # Finished Jobs (and their pods' logs) are removed after 7 days, so failures from
+      # weeks ago stop cluttering `kubectl get jobs`; the run audit log keeps the history.
+      ttlSecondsAfterFinished: 604800
+      # Counts Pending time too: a pod that can't schedule (e.g. node CPU requests full) fails
+      # the Job instead of sitting Pending forever, which under concurrencyPolicy: Forbid
+      # silently skips every later run. 3600s is far above its normal runtime.
+      activeDeadlineSeconds: 3600
+      # fantasy-infra#110: each retry is a fresh pod (restartPolicy: Never below). Under
+      # OnFailure, container restarts count toward backoffLimit, so backoffLimit: 1 failed the
+      # Job - and killed the pod - on its first restart, even when that retry succeeded
+      # (fantasy-lineup-optimizer-manual-202609301623). Never also keeps failed pods, and
+      # their logs, until history cleanup. Retrying the whole optimizer is only safe because
+      # /v1/trigger/lineup dedupes on an idempotency key scoped to JOB_NAME
+      # (fantasy-core-pipeline#189). An insufficient-input exit (#178) just fails the same way
+      # 3 times, a minute or so later.
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: fantasy-core-pipeline
+            component: lineup-optimizer
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: ghcr-pull-secret
+          containers:
+            - name: lineup-optimizer
+              image: ghcr.io/cvillarr23/fantasy-core-pipeline:e3536eea5cedb1f0c646db1b38e008aa7d630940
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.optimization.lineup_solver"]
+              envFrom:
+                - configMapRef:
+                    name: fantasy-league-config
+              env:
+                # Run audit log: which CronJob and Job this run belongs to (scheduled vs manual).
+                - name: RUN_CRONJOB
+                  value: "fantasy-lineup-optimizer"
+                - name: RUN_K8S_JOB
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+                # Scopes lineup_solver's idempotency key to this Job: pod retries within it
+                # dedupe, and every new scheduled or manual Job still publishes.
+                - name: JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+                - name: DB_HOST
+                  value: "fantasy-db.default.svc.cluster.local"
+                - name: DB_NAME
+                  value: "fantasy_football"
+                - name: DB_USER
+                  value: "bot_admin"
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: database-credentials
+                      key: postgres-password
+                # Real in-cluster service DNS -- lineup_solver.py's own CORE_API_BASE_URL default
+                # is stale (wrong namespace), so this must be set explicitly rather than relying
+                # on the code default.
+                - name: CORE_API_BASE_URL
+                  value: "http://fantasy-core-pipeline.default.svc.cluster.local:8000"
+                # Guards /v1/trigger/*, called in-cluster and bypassing oauth2-proxy.
+                - name: TRIGGER_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: trigger-api-key
+                      key: trigger-api-key
+                # OTLP export target for homelab-deployment's shared Tempo instance
+                # (homelab-deployment#5/#6) -- endpoint + service name only, actual
+                # span emission is CORE-12.
+                - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                  value: "http://tempo.default.svc.cluster.local:4318"
+                - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                  value: "http/protobuf"
+                - name: OTEL_SERVICE_NAME
+                  value: "optimization-lineup-solver"
+                - name: ESPN_S2
+                  valueFrom:
+                    secretKeyRef:
+                      name: espn-session-secrets
+                      key: espn_s2
+                - name: ESPN_SWID
+                  valueFrom:
+                    secretKeyRef:
+                      name: espn-session-secrets
+                      key: swid
+                - name: ESPN_LEAGUE_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: espn-session-secrets
+                      key: ESPN_LEAGUE_ID
+                - name: ESPN_TEAM_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: espn-session-secrets
+                      key: ESPN_TEAM_ID
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

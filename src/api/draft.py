@@ -49,11 +49,17 @@ import redis
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from kubernetes import client, config
-from kubernetes.config.config_exception import ConfigException
+from kubernetes import client
 from pydantic import BaseModel, Field, field_validator
 
 from src.database import get_db_cursor, get_redis_client
+from src.k8s_client import (
+    K8S_NAMESPACE,
+    K8S_REQUEST_TIMEOUT_SECONDS,
+    batch_v1_api as _batch_v1_api,
+    core_v1_api as _core_v1_api,
+    dns1123_slug as _dns1123_slug,
+)
 from src.ingestion.sync_kicker_dst import ESPN_TO_INTERNAL_TEAM
 from src.optimization.draft_matrix import (
     _set_auto_publish_enabled,
@@ -69,7 +75,6 @@ draft_router = APIRouter()
 
 REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "default")
 DRAFT_SYNC_IMAGE = os.getenv("DRAFT_SYNC_IMAGE")
 # Names of the k8s Secret/ConfigMap supplying the draft-sync Job's ESPN session and league
 # config. These intentionally do NOT carry the database/cache connection settings - those
@@ -142,15 +147,6 @@ PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
 # instead of needing its own POST endpoint the way practice does.
 LIVE_SYNC_APP_LABEL = "live-draft-sync"
 
-# Every Kubernetes call in this module is made from a synchronous FastAPI endpoint, which runs
-# on a bounded threadpool. The kubernetes client applies no timeout of its own, so a control
-# plane that accepts the TCP connection but never answers - the exact failure mode of an
-# overloaded apiserver - parks a thread indefinitely. Enough parked threads and every sync
-# endpoint stops responding, the liveness probe starts failing, and a degraded control plane
-# becomes a hard outage of the whole API. Bounded so those calls fail fast and the endpoint can
-# report "unknown" instead of hanging.
-K8S_REQUEST_TIMEOUT_SECONDS = 10
-
 # GET /logs (#68) caps how much pod log a client can pull in one request - a crash traceback
 # is a handful of lines, not a reason to let a browser tab request an unbounded log dump.
 DRAFT_LOGS_DEFAULT_TAIL_LINES = 200
@@ -195,33 +191,6 @@ def _draft_sync_env(mode: str = "live") -> list:
         if value:
             env.append(client.V1EnvVar(name=name, value=value))
     return env
-
-
-def _dns1123_slug(value: str) -> str:
-    """Job `metadata.name` must be a lowercase RFC 1123 DNS subdomain - league_id itself
-    doesn't have to be (it's an opaque ESPN identifier, and practice-room IDs aren't under
-    our control), so this only sanitizes the Job *name*, never the `league-id` label value
-    (labels allow uppercase/mixed case) or the CLI arg passed to draft_matrix.py."""
-    slug = re.sub(r"[^a-z0-9-]", "-", value.lower()).strip("-")
-    return slug or "league"
-
-
-def _batch_v1_api() -> client.BatchV1Api:
-    """in-cluster config in a deployed pod, falls back to local kubeconfig for dev."""
-    try:
-        config.load_incluster_config()
-    except ConfigException:
-        config.load_kube_config()
-    return client.BatchV1Api()
-
-
-def _core_v1_api() -> client.CoreV1Api:
-    """Same in-cluster/kubeconfig fallback as _batch_v1_api, for pod (not Job) reads."""
-    try:
-        config.load_incluster_config()
-    except ConfigException:
-        config.load_kube_config()
-    return client.CoreV1Api()
 
 
 # ------------------------------------------------------------------------------
