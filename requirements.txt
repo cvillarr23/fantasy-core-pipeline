@@ -22,4 +22,5 @@ pytest==8.2.2
 black==24.4.2
 mypy==2.4.0
 PyYAML==6.0.3
+croniter==6.2.4
 jsonschema==4.26.0

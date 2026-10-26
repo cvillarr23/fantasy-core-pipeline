@@ -441,6 +441,28 @@
   since each new schedule supersedes the last (see above), so only the most recent one ever
   publishes. Tracking real turn order is unimplemented, not a bug to work around.
 
+## Launcher scheduler
+
+- `src/launcher/scheduler.py` decides what to publish and when. It never touches RabbitMQ:
+  `Scheduler(catalog, state, publish)` takes the run-command `publish` callable (the run_log +
+  outbox helper from the launcher consumer work) and keeps no state outside `run_log` and
+  `job_overrides`, so `tick()` is safe to rerun after a restart. Tests use an in-memory state
+  and a frozen `now`; `tests/test_launcher_scheduler_postgres.py` checks the SQL.
+- A slot fires only while `now - slot <= max(catch_up, SLOT_GRACE)`, and only the latest due
+  slot does; older missed slots never fire. Dedupe keys are `job@<slot in UTC>` and
+  `job@<chain root id>`. A fixed-hour slot fires once in the repeated fall-back hour.
+- `seasons` windows use nflverse game dates: 7 days before the start week's first game through
+  2 days after the end week's last game, so the Tuesday after week 18 still ingests. An
+  unreadable schedule fails open (logs WARNING).
+- Chains: an `on: success` parent that doesn't succeed skips only that branch
+  (`dependency_failed`). A skipped step still satisfies `on: finish`, so Tuesday's acting
+  steps run even if ingestion fails. A failure with attempts left counts as pending, since the
+  watcher retries the same row. Past `max_duration`, the steps not yet started are skipped and
+  the root ends `timeout`. A job's own slot is skipped (`chain_step`) on a day a chain run
+  covers it.
+- `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
+  it gets no `chain_root_id`, so it never starts downstream steps.
+
 ## CORE-12: OpenTelemetry tracing
 
 - `src/telemetry.py`'s `configure_tracing()` is a true no-op (no span processor attached

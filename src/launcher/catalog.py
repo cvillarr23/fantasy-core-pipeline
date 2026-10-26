@@ -109,6 +109,19 @@ class GlobalSettings(CatalogModel):
         return _duration(value)
 
 
+class Season(CatalogModel):
+    """A window of NFL regular-season weeks; the scheduler maps it to game dates."""
+
+    start: int = Field(ge=1, le=22)
+    end: int = Field(ge=1, le=22)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "Season":
+        if self.start > self.end:
+            raise ValueError("season start must not be after its end")
+        return self
+
+
 class Profile(CatalogModel):
     image: str
     secrets: list[str] = Field(default_factory=list)
@@ -282,7 +295,7 @@ class ResolvedJob:
 class Catalog(CatalogModel):
     version: Literal[1]
     global_settings: GlobalSettings = Field(alias="global")
-    seasons: dict[str, Any] = Field(default_factory=dict)
+    seasons: dict[str, Season] = Field(default_factory=dict)
     profiles: dict[str, Profile]
     defaults: Defaults = Field(default_factory=Defaults)
     jobs: dict[str, Job]

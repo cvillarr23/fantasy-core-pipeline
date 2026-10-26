@@ -247,3 +247,14 @@ def test_params_to_args():
 def test_load_catalog_from_env(monkeypatch):
     monkeypatch.setenv("JOB_CATALOG_PATH", FIXTURE)
     assert "lineup-optimizer" in load_catalog_from_env().jobs
+
+
+def test_season_window_must_be_ordered_weeks():
+    raw = catalog_data()
+    raw["seasons"] = {"regular": {"start": 18, "end": 1}}
+    with pytest.raises(ValidationError, match="start must not be after its end"):
+        Catalog.model_validate(raw)
+
+    raw["seasons"] = {"regular": {"start": 1, "end": 18, "extra": True}}
+    with pytest.raises(ValidationError, match="extra"):
+        Catalog.model_validate(raw)

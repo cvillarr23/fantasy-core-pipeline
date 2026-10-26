@@ -43,6 +43,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS run_log_dedupe_key ON run_log(dedupe_key) WHER
 CREATE INDEX IF NOT EXISTS run_log_recent ON run_log(started_at DESC);
 CREATE INDEX IF NOT EXISTS run_log_by_job ON run_log(job_name,started_at DESC);
 CREATE INDEX IF NOT EXISTS run_log_by_parent ON run_log(parent_run_id) WHERE parent_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS run_log_by_chain ON run_log(chain_root_id) WHERE chain_root_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS run_log_by_tracking ON run_log((trigger->>'tracking_id')) WHERE trigger ? 'tracking_id';
 CREATE TABLE IF NOT EXISTS run_links (
  run_id TEXT NOT NULL REFERENCES run_log(id) ON DELETE CASCADE, ref_type TEXT NOT NULL,
