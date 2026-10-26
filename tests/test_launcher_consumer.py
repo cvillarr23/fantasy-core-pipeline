@@ -186,6 +186,14 @@ def test_full_cap_expires_the_run_at_its_queue_ttl(store, clock, consumer, launc
     launch_pod.assert_not_called()
 
 
+def test_retry_attempt_is_not_rejected_by_the_original_queue_expiry(store, consumer, launch_pod):
+    store.add("r2", "rumor-syncer")
+    assert consumer.admit(body("r2", ttl=timedelta(minutes=-1), attempt=2))
+    assert consumer.drain() == ["r2"]
+    assert store.rows["r2"]["status"] == "running"
+    launch_pod.assert_called_once()
+
+
 def test_waiting_run_does_not_block_other_jobs(store, clock, runner, launch_pod):
     catalog = CATALOG.model_copy(deep=True)
     catalog.jobs["rumor-syncer"].overlap = "queue"

@@ -17,6 +17,7 @@ from src.launcher.catalog import load_catalog_from_env
 from src.launcher.consumer import Consumer
 from src.launcher.inline import InlineRunner
 from src.launcher.scheduler import PostgresSchedulerState, Scheduler
+from src.launcher.watcher import Watcher
 from src.telemetry import configure_tracing
 
 logger = logging.getLogger("JobLauncher")
@@ -43,6 +44,12 @@ def main() -> int:
     scheduler = Scheduler(catalog, PostgresSchedulerState())
     threading.Thread(
         target=scheduler.run, args=(stop,), name="launcher-scheduler", daemon=True
+    ).start()
+    threading.Thread(
+        target=Watcher(catalog, inline_runner=inline_runner).run,
+        args=(stop,),
+        name="launcher-watcher",
+        daemon=True,
     ).start()
     logger.info("Launcher started with %d jobs", len(catalog.jobs))
     try:

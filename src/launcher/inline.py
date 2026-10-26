@@ -58,6 +58,8 @@ class InlineRunner:
         self._stopping = threading.Event()
         self._lock = threading.Lock()
         self._process = None
+        self._current_run_id = None
+        self._cancelled = set()
         self._thread = threading.Thread(target=self._loop, name="inline-runner", daemon=True)
 
     @property
@@ -72,6 +74,21 @@ class InlineRunner:
         never admits a second inline run while this one waits to start."""
         self._busy.set()
         self._queue.put(run)
+
+    def is_running(self, run_id):
+        with self._lock:
+            return self._current_run_id == run_id
+
+    def cancel(self, run_id):
+        """Stop the selected inline process group and record cancellation in its run thread."""
+        with self._lock:
+            if self._current_run_id != run_id:
+                return False
+            self._cancelled.add(run_id)
+            process = self._process
+        if process is not None:
+            _terminate(process)
+        return True
 
     def stop(self, grace=KILL_GRACE_SECONDS):
         """SIGTERM a running child, SIGKILL it if it outlives `grace`, and wait for the
@@ -99,6 +116,8 @@ class InlineRunner:
             # Nothing may end this loop but stop(): a dead runner thread would leave `busy`
             # set by the next submit() forever, and no inline run would start again.
             try:
+                with self._lock:
+                    self._current_run_id = run.run_id
                 self._execute(run)
             except Exception:
                 logger.exception("Inline run %s of %s could not be completed", run.run_id, run.job)
@@ -107,6 +126,9 @@ class InlineRunner:
                 except Exception:
                     logger.exception("Inline run %s outcome could not be recorded", run.run_id)
             finally:
+                with self._lock:
+                    self._current_run_id = None
+                    self._cancelled.discard(run.run_id)
                 self._busy.clear()
 
     def _execute(self, run):
@@ -117,12 +139,24 @@ class InlineRunner:
             if self._stopping.is_set():
                 self.store.finish_running(run.run_id, "failure", "launcher_shutdown")
                 return
+            if run.run_id in self._cancelled:
+                self.store.finish_running(
+                    run.run_id, "cancelled", "cancelled", force=True
+                )
+                return
             process = self._process = subprocess.Popen(argv, env=env, start_new_session=True)
         try:
             try:
                 code = process.wait(timeout=run.deadline_seconds)
             except subprocess.TimeoutExpired:
                 _terminate(process)
+                with self._lock:
+                    cancelled = run.run_id in self._cancelled
+                if cancelled:
+                    self.store.finish_running(
+                        run.run_id, "cancelled", "cancelled", force=True
+                    )
+                    return
                 logger.error(
                     "Inline run run_id=%s job=%s exceeded its %ss deadline",
                     run.run_id, run.job, run.deadline_seconds,
@@ -139,6 +173,13 @@ class InlineRunner:
                 # stop() sent SIGTERM; give it the grace period, then make sure it's gone.
                 _terminate(process)
                 self.store.finish_running(run.run_id, "failure", "launcher_shutdown")
+                return
+            with self._lock:
+                cancelled = run.run_id in self._cancelled
+            if cancelled:
+                self.store.finish_running(
+                    run.run_id, "cancelled", "cancelled", force=True
+                )
                 return
             logger.info("Inline run run_id=%s job=%s exited with %s", run.run_id, run.job, code)
             self.store.finish_running(

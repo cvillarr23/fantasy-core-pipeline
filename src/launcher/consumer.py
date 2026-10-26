@@ -139,7 +139,10 @@ class Consumer:
             if status != "queued":
                 logger.info("Dropping run %s of %s: run is %s", command.run_id, command.job, status)
                 return None
-            if self.clock() >= command.expires_at:
+            # `expires_at` decides whether the original request is still worth starting.
+            # Once an attempt has run, its configured retries must not inherit that stale
+            # queue deadline or the first late failure would silently suppress them.
+            if command.attempt == 1 and self.clock() >= command.expires_at:
                 admission.end_queued(command.run_id, "skipped", "expired")
                 logger.warning("Run %s of %s expired while queued", command.run_id, command.job)
                 return None

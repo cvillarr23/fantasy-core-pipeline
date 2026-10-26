@@ -38,6 +38,7 @@ def postgres():
     with (
         patch.object(publish, "get_db_cursor", cursor_context),
         patch.object(store_module, "get_db_cursor", cursor_context),
+        patch.object(run_log, "get_db_cursor", cursor_context),
         patch("src.services.activity_runner.publish_job_run"),
     ):
         try:
@@ -96,3 +97,32 @@ def test_admission_sql(postgres):
         (a, "success", "exit_code"),
         (c, "timeout", "deadline"),
     ]
+
+
+def test_cancelled_run_cannot_be_adopted_or_finalized_by_the_process(postgres):
+    identity = publish_run(CATALOG, "rumor-syncer", trigger="manual")["run_id"]
+    with RunStore().admission() as admission:
+        assert admission.claim(identity, "pod", "rumor-syncer-r1-a1")
+    with postgres, postgres.cursor() as cursor:
+        cursor.execute(
+            "UPDATE run_log SET status='cancelled',end_reason='cancelled' WHERE id=%s",
+            (identity,),
+        )
+    run_log.adopt_run(identity, "sync_rumors", "manual", {})
+    run_log.finish_run(identity, "failure", "cancelled pod stopped")
+    assert rows(postgres, "SELECT status,end_reason FROM run_log WHERE id=%s", (identity,)) == [("cancelled", "cancelled")]
+
+
+def test_retry_requeues_the_same_run_and_updates_its_outbox_attempt(postgres):
+    identity = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
+    store = RunStore()
+    with store.admission() as admission:
+        assert admission.claim(identity, "pod", "lineup-optimizer-r1-a1")
+    assert store.retry_running(identity, 2)
+    assert rows(postgres, "SELECT status,attempt FROM run_log WHERE id=%s", (identity,)) == [
+        ("queued", 2)
+    ]
+    commands = store.queued_commands()
+    assert len(commands) == 1
+    assert commands[0]["run_id"] == identity
+    assert commands[0]["attempt"] == 2

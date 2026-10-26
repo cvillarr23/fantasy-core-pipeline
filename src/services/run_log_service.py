@@ -231,7 +231,7 @@ def adopt_run(identity, job_name, trigger_type, trigger, parent_run_id=None):
                 """UPDATE run_log SET status='running', trigger_type=%s,
                 summary=summary || jsonb_build_object('entrypoint', %s::text),
                 parent_run_id=COALESCE(parent_run_id,%s), started_at=now(), finished_at=NULL,
-                error=NULL WHERE id=%s""",
+                error=NULL WHERE id=%s AND status='running'""",
                 (trigger_type, job_name, parent_run_id, identity),
             )
     except Exception:
@@ -245,7 +245,7 @@ def finish_run(identity, status, error=None, summary=None, end_reason=None):
         with get_db_cursor() as c:
             c.execute(
                 """UPDATE run_log SET status=%s, finished_at=now(), error=%s, end_reason=%s,
-                summary=summary || %s::jsonb WHERE id=%s""",
+                summary=summary || %s::jsonb WHERE id=%s AND status<>'cancelled'""",
                 (
                     status,
                     redact(error)[:4000] if error else None,

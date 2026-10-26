@@ -88,8 +88,69 @@ class RunStore:
         """Ends a launched run. Without `force` it only fills in a row the process itself
         left `running` (it crashed or never adopted RUN_ID), keeping what run_scope wrote."""
         with get_db_cursor() as c:
+            guard = " AND status<>'cancelled'" if force else " AND status='running'"
             c.execute(
-                f"""UPDATE run_log SET status=%s, end_reason=%s, error=%s, finished_at=now()
-                WHERE id=%s{"" if force else " AND status='running'"}""",
+                """UPDATE run_log SET status=%s, end_reason=%s,
+                error=COALESCE(%s,error), finished_at=now() WHERE id=%s""" + guard,
                 (status, end_reason, error, run_id),
             )
+
+    def watched_runs(self):
+        """Launched rows the watcher must reconcile, including API-cancelled rows whose
+        external process or Job still needs to be stopped. Chain roots have no executor.
+        """
+        with get_db_cursor() as c:
+            c.execute(
+                """SELECT id,job_name,status,attempt,started_at,chain_root_id,trigger
+                FROM run_log WHERE status IN ('running','success','failure','timeout','cancelled')
+                AND trigger ? 'executor'
+                AND (chain_root_id IS NULL OR chain_root_id<>id) ORDER BY started_at"""
+            )
+            rows = c.fetchall()
+        result = []
+        for identity, job, status, attempt, started_at, chain_root_id, trigger in rows:
+            if isinstance(trigger, str):
+                trigger = json.loads(trigger)
+            trigger = trigger or {}
+            result.append(
+                {
+                    "run_id": identity,
+                    "job_name": job,
+                    "status": status,
+                    "attempt": attempt,
+                    "started_at": started_at,
+                    "chain_root_id": chain_root_id,
+                    "executor": trigger.get("executor"),
+                    "k8s_job": trigger.get("k8s_job"),
+                }
+            )
+        return result
+
+    def retry_running(self, run_id, attempt):
+        """Queues another attempt on the same run and resets its durable outbox command."""
+        with get_db_cursor() as c:
+            c.execute(
+                """SELECT body FROM job_run_outbox WHERE run_id=%s FOR UPDATE""",
+                (run_id,),
+            )
+            row = c.fetchone()
+            if row is None:
+                return False
+            body = row[0]
+            if isinstance(body, str):
+                body = json.loads(body)
+            body["attempt"] = attempt
+            c.execute(
+                """UPDATE run_log SET status='queued',attempt=%s,started_at=now(),
+                finished_at=NULL,end_reason=NULL,error=NULL
+                WHERE id=%s AND status IN ('running','failure','timeout') RETURNING id""",
+                (attempt, run_id),
+            )
+            if c.fetchone() is None:
+                return False
+            c.execute(
+                """UPDATE job_run_outbox SET body=%s,published_at=NULL,next_attempt_at=now(),
+                last_error=NULL WHERE run_id=%s""",
+                (json.dumps(body), run_id),
+            )
+            return True

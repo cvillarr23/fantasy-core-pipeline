@@ -114,6 +114,18 @@ def test_stop_terminates_the_running_child(store):
     assert store.finished == [("r1", "failure", "launcher_shutdown", False)]
 
 
+def test_cancel_terminates_only_the_matching_inline_run(runner, store):
+    runner.submit(python("import time; time.sleep(60)"))
+    deadline = time.monotonic() + 5
+    while not runner.is_running("r1"):
+        assert time.monotonic() < deadline, "inline run did not start"
+        time.sleep(0.01)
+    assert runner.cancel("other-run") is False
+    assert runner.cancel("r1") is True
+    wait_idle(runner)
+    assert store.finished == [("r1", "cancelled", "cancelled", True)]
+
+
 def test_stop_kills_a_child_that_ignores_sigterm(store, monkeypatch, tmp_path):
     monkeypatch.setattr(inline, "KILL_GRACE_SECONDS", 0.5)
     runner = InlineRunner(store=store)
