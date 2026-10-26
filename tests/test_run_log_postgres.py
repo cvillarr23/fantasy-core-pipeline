@@ -223,7 +223,7 @@ def test_subprocess_run_is_child_of_adopted_run(postgres, monkeypatch):
     with postgres, postgres.cursor() as c:
         c.execute(
             """INSERT INTO run_log(id,job_name,trigger_type,status,dedupe_key,requested_by)
-            VALUES (%s,'projections-refresh','chain','queued','daily-prep','launcher')""",
+            VALUES (%s,'projections-refresh','chain','running','daily-prep','launcher')""",
             (launcher_id,),
         )
     monkeypatch.setenv("RUN_ID", launcher_id)
