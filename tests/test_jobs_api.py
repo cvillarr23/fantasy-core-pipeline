@@ -352,3 +352,27 @@ def test_launcher_health_is_unavailable_before_first_heartbeat(monkeypatch):
         jobs_api.get_launcher_health()
 
     assert response.value.status_code == 503
+
+
+def test_launcher_health_counts_only_runs_with_executor_trigger(monkeypatch):
+    class HealthCursor:
+        queries = []
+        reads = 0
+
+        def execute(self, query, params=None):
+            self.queries.append(query)
+
+        def fetchone(self):
+            self.reads += 1
+            if self.reads == 1:
+                return (datetime.now(timezone.utc), {"job_runs": 0, "job_runs.dlq": 0})
+            return (1, 2)
+
+    cursor = HealthCursor()
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
+
+    health = jobs_service.launcher_health()
+
+    assert health.running_count == 1
+    assert health.queued_count == 2
+    assert "status='running' AND trigger ? 'executor'" in cursor.queries[1]

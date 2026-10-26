@@ -573,23 +573,23 @@ def _window(schedule: Schedule) -> timedelta:
 
 
 _ROW_COLUMNS = "id,job_name,status,attempt,scheduled_for,chain_root_id,trigger"
-HEARTBEAT_QUEUES = ("job_runs", "job_runs.dlq")
 BROKER_TIMEOUT_SECONDS = 5
 
 
 def read_queue_depths() -> dict[str, int | None]:
     """Read broker queue depths without creating queues or consuming messages."""
     import pika
-    from src.api.routes import AMQP_URL
+    from src.queue_contracts import AMQP_URL, JOB_RUNS
 
     connection = None
-    depths: dict[str, int | None] = {queue: None for queue in HEARTBEAT_QUEUES}
+    queues = (JOB_RUNS, f"{JOB_RUNS}.dlq")
+    depths: dict[str, int | None] = {queue: None for queue in queues}
     try:
         params = pika.URLParameters(AMQP_URL)
         params.socket_timeout = BROKER_TIMEOUT_SECONDS
         params.blocked_connection_timeout = BROKER_TIMEOUT_SECONDS
         connection = pika.BlockingConnection(params)
-        for queue in HEARTBEAT_QUEUES:
+        for queue in queues:
             channel = connection.channel()
             try:
                 result = channel.queue_declare(queue=queue, passive=True)

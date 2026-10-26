@@ -126,7 +126,7 @@ def launcher_health() -> LauncherHealthResponse:
         if heartbeat is None:
             raise LauncherHealthUnavailableError("Launcher heartbeat is unavailable")
         cursor.execute(
-            """SELECT count(*) FILTER (WHERE status='running'),
+            """SELECT count(*) FILTER (WHERE status='running' AND trigger ? 'executor'),
             count(*) FILTER (WHERE status='queued') FROM run_log"""
         )
         running_count, queued_count = cursor.fetchone()
