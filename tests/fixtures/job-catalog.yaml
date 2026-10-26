@@ -1,0 +1,134 @@
+# Mirrors the 16 production CronJobs in fantasy-infra (base/core-pipeline, base/browser-worker):
+# same commands, schedules, deadlines and resources. weekly-ingestor's initContainer split becomes
+# the sync-league -> metrics-extractor chain steps; the reconcile and prescan CronJobs become
+# second schedules on their jobs; the Tuesday clock offsets become the tuesday-weekly chain.
+version: 1
+global:
+  max_concurrent_pods: 2
+  max_deadline: 2h
+  start_timeout: 10m
+  manual_queue_ttl: 30m
+seasons:
+  regular: {start: 1, end: 18}
+profiles:
+  core: {image: CORE_IMAGE, secrets: [db, espn, redis, trigger-api]}
+  worker: {image: WORKER_IMAGE, serviceAccount: fantasy-browser-worker, volumes: [espn-session-state]}
+defaults:
+  executor: pod
+  overlap: forbid
+  max_attempts: 1
+  deadline: 1h
+  alert: warning
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 500m, memory: 512Mi}}
+jobs:
+  sync-league:
+    profile: core
+    command: [python, -m, src.ingestion.sync_league, --season, $(CURRENT_YEAR)]
+    max_attempts: 2
+  metrics-extractor:
+    profile: core
+    command: [python, -m, src.ingestion.metrics_extractor]
+    max_attempts: 2
+  sync-actual-scores:
+    profile: core
+    command: [python, -m, src.ingestion.sync_actual_scores, --season, $(CURRENT_YEAR)]
+    deadline: 30m
+    max_attempts: 2
+    schedules:
+      - {cron: '0 10 * * 5', tz: America/Chicago, catch_up: 2h}
+  projections-refresh:
+    profile: core
+    command: [python, -m, src.jobs.draft_prep_refresh]
+    schedules:
+      - {cron: '0 18 * * *', tz: America/Chicago, catch_up: 1h}
+  lineup-optimizer:
+    profile: core
+    command: [python, -m, src.optimization.lineup_solver]
+    params: {week: 'int?', dry_run: 'bool?'}
+    max_attempts: 3
+    alert: critical
+    acts: true
+  waiver-trigger:
+    profile: core
+    command: [python, -m, src.optimization.waiver_evaluator]
+    params: {week: 'int?'}
+    max_attempts: 3
+    alert: critical
+    acts: true
+  rumor-action-trigger:
+    profile: core
+    command: [python, -m, src.services.rumor_action_service, --team-id, $(ESPN_TEAM_ID), --season, $(CURRENT_YEAR)]
+    max_attempts: 3
+    acts: true
+    schedules:
+      - {cron: '45 21 * * *', tz: America/Chicago, catch_up: 1h}
+    on_event:
+      - {key: rumor.signal_created, debounce: 30m}
+  rumor-syncer:
+    profile: core
+    command: [python, -m, src.ingestion.sync_rumors]
+    deadline: 25m
+    max_attempts: 2
+    schedules:
+      - {cron: '*/30 * * * *', tz: America/Chicago, catch_up: 0}
+  rapid-status-syncer:
+    profile: core
+    command: [python, -m, src.ingestion.sync_players]
+    deadline: 9m
+    max_attempts: 2
+    schedules:
+      - {cron: '*/10 * * * 4,0,1', tz: America/Chicago, catch_up: 0}
+  stale-draft-job-sweeper:
+    profile: core
+    command: [python, -m, src.ops.sweep_stale_draft_jobs]
+    deadline: 14m
+    max_attempts: 2
+    schedules:
+      - {cron: '*/15 * * * *', tz: America/Chicago, catch_up: 0}
+  trade-candidates:
+    profile: core
+    command: [python, -m, src.jobs.trade_candidates]
+    deadline: 25m
+    schedules:
+      - {cron: '0 7 * * *', tz: America/Chicago, catch_up: 2m}
+      - {cron: '30 12 * * 3,5', tz: America/Chicago, catch_up: 2m}
+  espn-session-healthcheck:
+    profile: worker
+    command: [node, src/bots/check_espn_session.js]
+    max_attempts: 2
+    resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1200Mi}}
+    schedules:
+      - {cron: '0 6 * * 1', tz: UTC, catch_up: 2h}
+  rumor-digest-bot:
+    profile: worker
+    command: [node, src/bots/rumor_digest_bot.js]
+    max_attempts: 2
+    resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+    schedules:
+      - {cron: '0 11 * * *', tz: America/Chicago, catch_up: 2h}
+  trade-inbox:
+    profile: worker
+    command: [node, src/bots/trade_inbox.js, --refresh]
+    deadline: 11m
+    resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1200Mi}}
+    schedules:
+      - {cron: '0 8-22/2 * * *', tz: America/Chicago, catch_up: 30m}
+  trade-scan:
+    profile: worker
+    command: [node, src/bots/trade_scan.js, --stage]
+    deadline: 16m
+    resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1200Mi}}
+    schedules:
+      - {cron: '0 13 * * 3,5', tz: America/Chicago, catch_up: 30m}
+chains:
+  tuesday-weekly:
+    schedule: {cron: '0 16 * * 2', tz: America/Chicago, catch_up: 2h, seasons: [regular]}
+    max_duration: 8h
+    steps:
+      sync-league: {}
+      metrics-extractor: {after: [{step: sync-league, on: success}]}
+      sync-actual-scores: {after: [{step: metrics-extractor, on: success}]}
+      projections-refresh: {after: [{step: sync-actual-scores, on: finish}]}
+      lineup-optimizer: {after: [{step: projections-refresh, on: finish}], latest: '19:15'}
+      waiver-trigger: {after: [{step: lineup-optimizer, on: finish}], latest: '20:30'}
+      rumor-action-trigger: {after: [{step: waiver-trigger, on: finish}], latest: '21:45'}
