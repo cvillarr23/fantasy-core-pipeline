@@ -196,11 +196,12 @@ def test_launcher_columns_preserve_existing_rows_and_enforce_dedupe(postgres):
         c.execute(
             "INSERT INTO run_log(id,job_name,trigger_type,dedupe_key) VALUES ('new','new_job','chain','once')"
         )
-        with pytest.raises(psycopg2.errors.UniqueViolation):
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        with postgres, postgres.cursor() as c:
             c.execute(
                 "INSERT INTO run_log(id,job_name,trigger_type,dedupe_key) VALUES ('duplicate','new_job','chain','once')"
             )
-        postgres.rollback()
+    with postgres, postgres.cursor() as c:
         c.execute(
             "SELECT dedupe_key,attempt,scheduled_for,requested_by,chain_root_id,event_id,end_reason FROM run_log WHERE id='legacy'"
         )
@@ -237,8 +238,8 @@ def test_subprocess_run_is_child_of_adopted_run(postgres, monkeypatch):
             check=True,
             env=os.environ.copy(),
         )
-        with postgres, postgres.cursor() as c:
-            c.execute("SELECT parent_run_id FROM run_log WHERE job_name='draft_prep_child'")
-            assert c.fetchone() == (parent.id,)
-            c.execute("SELECT count(*),status,dedupe_key,requested_by FROM run_log WHERE id=%s GROUP BY status,dedupe_key,requested_by", (launcher_id,))
-            assert c.fetchone() == (1, "success", "daily-prep", "launcher")
+    with postgres, postgres.cursor() as c:
+        c.execute("SELECT parent_run_id FROM run_log WHERE job_name='draft_prep_child'")
+        assert c.fetchone() == (parent.id,)
+        c.execute("SELECT count(*),status,dedupe_key,requested_by FROM run_log WHERE id=%s GROUP BY status,dedupe_key,requested_by", (launcher_id,))
+        assert c.fetchone() == (1, "success", "daily-prep", "launcher")

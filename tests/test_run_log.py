@@ -71,6 +71,7 @@ def test_explicit_trigger_env_takes_precedence(monkeypatch, trigger):
 
 def test_outer_scope_adopts_launcher_run_id_once(recorded, monkeypatch):
     monkeypatch.setenv("RUN_ID", "launcher-run")
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
     monkeypatch.delenv("RUN_PARENT_ID", raising=False)
     adopted = []
     with patch.object(run_log, "adopt_run", side_effect=lambda *args: adopted.append(args)):
@@ -80,10 +81,21 @@ def test_outer_scope_adopts_launcher_run_id_once(recorded, monkeypatch):
             assert os.getenv("RUN_PARENT_ID") == "launcher-run"
             with run_log.run_scope("child") as child:
                 assert child.id == "run-1"
-    assert adopted == [("launcher-run", "sync_rumors", "manual", {}, None)]
+    assert adopted == [("launcher-run", "sync_rumors", "schedule", {}, None)]
     assert recorded["start"][0][0] == "child"
     assert recorded["start"][0][3] == "launcher-run"
     assert os.getenv("RUN_PARENT_ID") is None
+
+
+def test_scope_without_launcher_run_leaves_process_env_alone(recorded, monkeypatch):
+    """The API runs overlapping scopes in one process, so only adopted runs may export an id."""
+    monkeypatch.delenv("RUN_ID", raising=False)
+    monkeypatch.delenv("RUN_PARENT_ID", raising=False)
+    with run_log.run_scope("http_job", "http"):
+        assert os.getenv("RUN_PARENT_ID") is None
+        with run_log.run_scope("http_child", "http"):
+            assert os.getenv("RUN_PARENT_ID") is None
+    assert recorded["start"][1][3] == "run-1"
 
 
 def test_subprocess_in_run_scope_inherits_parent_run_id(recorded, monkeypatch):

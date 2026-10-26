@@ -265,8 +265,10 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     run = Run(adopted_id or start_run(job_name, trigger_type, trigger, parent_run_id))
     if adopted_id:
         adopt_run(adopted_id, job_name, trigger_type, trigger or {}, parent_run_id)
-    if run.id:
-        os.environ["RUN_PARENT_ID"] = run.id
+    # Only a launcher-adopted run exports its id for subprocesses: that pod runs one job, so
+    # the shared process environment is safe there, unlike the API where requests overlap.
+    if adopted_id:
+        os.environ["RUN_PARENT_ID"] = adopted_id
     token = current_run.set(run)
     capture = _RunLogCapture(run)
     logging.getLogger().addHandler(capture)
@@ -292,10 +294,11 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     finally:
         logging.getLogger().removeHandler(capture)
         current_run.reset(token)
-        if previous_parent_id is None:
-            os.environ.pop("RUN_PARENT_ID", None)
-        else:
-            os.environ["RUN_PARENT_ID"] = previous_parent_id
+        if adopted_id:
+            if previous_parent_id is None:
+                os.environ.pop("RUN_PARENT_ID", None)
+            else:
+                os.environ["RUN_PARENT_ID"] = previous_parent_id
 
 
 @contextmanager
