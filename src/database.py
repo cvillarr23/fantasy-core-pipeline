@@ -1,10 +1,11 @@
 import os
 from contextlib import contextmanager
 import logging
+from src.telemetry import configure_trace_logging
 import redis
 from psycopg2.pool import ThreadedConnectionPool
 
-logging.basicConfig(level=logging.INFO)
+configure_trace_logging()
 logger = logging.getLogger("DatabaseEngine")
 
 # Load cluster boundaries from environment secrets

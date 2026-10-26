@@ -1,4 +1,5 @@
 import logging
+import json
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,23 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.util._once import Once
 
 import src.telemetry as telemetry
+
+
+def test_logfmt_formatter_includes_extra_fields_and_quotes_values():
+    record = logging.LogRecord("test.logger", logging.INFO, "", 0, "event happened", (), None)
+    record.trace_id = "abc123"
+    record.status = "partial failure: \"retry\""
+    record.duration_ms = 42
+    record.details = {"attempt": 2}
+
+    formatted = telemetry.LogfmtFormatter().format(record)
+
+    assert formatted.startswith(
+        'level=INFO logger=test.logger trace_id=abc123 msg="event happened" '
+        'status="partial failure: \\"retry\\"" duration_ms=42 '
+    )
+    encoded_details = json.dumps(json.dumps({"attempt": 2}))
+    assert formatted.endswith(f"details={encoded_details}")
 
 
 @pytest.fixture(autouse=True)

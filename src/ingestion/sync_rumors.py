@@ -28,7 +28,9 @@ from rapidfuzz import fuzz, process
 from src.database import get_db_connection, get_redis_client
 from src.services import run_log_service
 
-logging.basicConfig(level=logging.INFO)
+from src.telemetry import configure_trace_logging
+
+configure_trace_logging()
 logger = logging.getLogger("RumorSignalSync")
 
 ROTOWIRE_NEWS_RSS_URL = "https://www.rotowire.com/rss/news.php?sport=NFL"

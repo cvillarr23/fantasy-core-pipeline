@@ -15,7 +15,9 @@ import polars as pl
 from src.database import get_db_connection
 from src.services import run_log_service
 
-logging.basicConfig(level=logging.INFO)
+from src.telemetry import configure_trace_logging
+
+configure_trace_logging()
 logger = logging.getLogger("IDCrosswalkSync")
 
 CROSSWALK_COLUMNS = ["sleeper_id", "espn_id", "gsis_id"]

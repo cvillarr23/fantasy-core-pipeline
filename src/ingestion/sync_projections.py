@@ -12,7 +12,9 @@ import requests
 from src.database import get_db_connection
 from src.services import run_log_service
 
-logging.basicConfig(level=logging.INFO)
+from src.telemetry import configure_trace_logging
+
+configure_trace_logging()
 logger = logging.getLogger("ProjectionsSync")
 
 SLEEPER_PROJECTIONS_URL = "https://api.sleeper.com/projections/nfl/{season}/{week}"

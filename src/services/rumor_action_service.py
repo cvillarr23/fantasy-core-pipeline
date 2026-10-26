@@ -778,14 +778,12 @@ def _record_execution(
 ) -> None:
     # Keep a searchable fallback even if PostgreSQL cannot record the outcome.
     logger.info(
-        "rumor_action_outcome %s",
-        json.dumps(
-            dict(
-                status=status,
-                duration_ms=duration_ms,
-                error_message=error_message,
-                **(outcome_details or {}),
-            )
+        "rumor_action_outcome",
+        extra=dict(
+            status=status,
+            duration_ms=duration_ms,
+            error_message=error_message,
+            **(outcome_details or {}),
         ),
     )
     try:
@@ -837,5 +835,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    from src.telemetry import configure_trace_logging
+
+    configure_trace_logging()
     sys.exit(run_log_service.run_main("rumor_action_trigger", main))

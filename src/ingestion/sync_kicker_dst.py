@@ -33,7 +33,9 @@ from src.ingestion.sync_league import build_league
 from src.nfl_byes import bye_week_for, bye_weeks_or_empty
 from src.services import run_log_service
 
-logging.basicConfig(level=logging.INFO)
+from src.telemetry import configure_trace_logging
+
+configure_trace_logging()
 logger = logging.getLogger("KickerDSTSync")
 
 # ESPN's PRO_TEAM_MAP spells Washington "WSH"; Sleeper - and therefore players.team and

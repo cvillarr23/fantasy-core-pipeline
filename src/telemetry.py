@@ -77,10 +77,25 @@ class LogfmtFormatter(logging.Formatter):
         if record.stack_info:
             message += "\n" + self.formatStack(record.stack_info)
         trace_id = getattr(record, "trace_id", "-")
-        return (
-            f"level={record.levelname} logger={record.name} "
-            f"trace_id={trace_id} msg={json.dumps(message)}"
+        standard_fields = set(logging.makeLogRecord({}).__dict__) | {"trace_id"}
+        fields = [
+            f"level={record.levelname}",
+            f"logger={record.name}",
+            f"trace_id={trace_id}",
+            f"msg={json.dumps(message)}",
+        ]
+
+        def format_extra(value):
+            if not isinstance(value, (str, int, float, bool)) and value is not None:
+                value = json.dumps(value, default=str)
+            return json.dumps(value, default=str)
+
+        fields.extend(
+            f"{key}={format_extra(value)}"
+            for key, value in record.__dict__.items()
+            if key not in standard_fields
         )
+        return " ".join(fields)
 
 
 class HealthCheckAccessFilter(logging.Filter):
@@ -106,14 +121,8 @@ def configure_trace_logging() -> None:
     up duplicate TraceIdLogFilter instances that each redundantly recompute the same
     current-span lookup per log record.
 
-    Every entrypoint in this repo imports src.database at some point, which itself calls
-    logging.basicConfig() with no format at import time - since basicConfig() is a no-op
-    once the root logger already has a handler, whichever module imports src.database
-    first silently wins the format string, regardless of what a later basicConfig() call
-    elsewhere tries to set. Rather than relying on import-order basicConfig races, this
-    explicitly (re)configures whatever handler(s) the root logger already has - or adds
-    one if none exist - so the trace_id field reliably shows up no matter which module
-    happens to trigger logging setup first.
+    This explicitly configures whatever handler(s) the root logger already has - or adds
+    one if none exist - so the trace_id field reliably shows up regardless of import order.
 
     The filter is attached per-handler, not via root.addFilter(): a Logger-level filter
     only runs for records that logger itself originates, not for records propagated up
