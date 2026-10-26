@@ -260,3 +260,41 @@ def test_response_retry(client, boundary, worker_responses):
     sent = boundary[1].return_value.channel.return_value.basic_publish.call_args.kwargs
     assert sent["routing_key"] == "trade_responses"
     validate("TradeResponse", json.loads(sent["body"]))
+
+
+def test_job_run_command():
+    from datetime import datetime, timezone
+
+    from src.launcher import publish
+    from tests.test_launcher_k8s import CATALOG
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("run",)
+    with patch.object(publish, "get_db_cursor") as db, patch.object(activity_runner, "publish_job_run"):
+        db.return_value.__enter__.return_value = cursor
+        publish.publish_run(
+            CATALOG,
+            "lineup-optimizer",
+            trigger="chain",
+            params={"week": 7, "dry_run": True},
+            requested_by="example-user",
+            dedupe_key="lineup-optimizer@root",
+            parent_run_id="parent",
+            chain_root_id="root",
+            event_id="event",
+            downstream=True,
+            scheduled_for=datetime(2030, 10, 1, tzinfo=timezone.utc),
+        )
+    insert = next(c for c in cursor.execute.call_args_list if "INSERT INTO job_run_outbox" in c.args[0])
+    stored = json.loads(insert.args[1][1])
+    cursor.fetchone.return_value = ("run", stored)
+    connection = MagicMock()
+    with patch.object(activity_runner, "get_db_cursor") as db, patch.object(
+        activity_runner.pika, "BlockingConnection", return_value=connection
+    ):
+        db.return_value.__enter__.return_value = cursor
+        assert activity_runner.publish_job_run("run")
+    send = connection.channel.return_value.basic_publish.call_args.kwargs
+    assert send["routing_key"] == "job_runs"
+    body = json.loads(send["body"])
+    validate("RunCommand", body)

@@ -20,8 +20,8 @@ def _fake_db_cursor(cursor=None):
 def _k8s_patches():
     """Common patch set so no real kubeconfig/in-cluster config is ever touched."""
     return (
-        patch("src.api.draft.config.load_incluster_config", side_effect=ConfigException("no cluster")),
-        patch("src.api.draft.config.load_kube_config"),
+        patch("src.k8s_client.config.load_incluster_config", side_effect=ConfigException("no cluster")),
+        patch("src.k8s_client.config.load_kube_config"),
     )
 
 
@@ -183,7 +183,7 @@ def test_start_draft_sync_creates_job(client):
          patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -233,7 +233,7 @@ def test_start_draft_sync_job_gets_db_and_connection_env(client):
          patch.dict(os.environ, inherited, clear=False), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -264,7 +264,7 @@ def test_start_draft_sync_job_omits_unset_inherited_env(client):
          patch.dict(os.environ, {}, clear=True), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -291,7 +291,7 @@ def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
          patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -331,7 +331,7 @@ def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
          patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -358,7 +358,7 @@ def test_start_draft_sync_with_publisher_creates_live_connector_job(client):
          patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start", params={"with_publisher": True})
 
     assert response.status_code == 202
@@ -419,7 +419,7 @@ def test_start_draft_sync_with_publisher_skips_duplicate_when_already_active(cli
          patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start", params={"with_publisher": True})
 
     assert response.status_code == 202
@@ -443,7 +443,7 @@ def test_start_draft_sync_with_publisher_surfaces_publisher_creation_failure(cli
          patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start", params={"with_publisher": True})
 
     assert response.status_code == 500
@@ -462,7 +462,7 @@ def test_start_draft_sync_selector_picks_named_league(client):
          patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start", params={"league_id": "MOCK123"})
 
     assert response.status_code == 202
@@ -483,7 +483,7 @@ def test_start_draft_sync_no_selector_falls_back_to_most_recent(client):
          patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -578,7 +578,7 @@ def test_start_draft_sync_reclaims_stale_practice_listener(client):
          patch("src.api.draft._delete_practice_listener_jobs", return_value=["draft-sync-L2"]) as mock_delete, \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -619,7 +619,7 @@ def test_start_draft_sync_clears_the_previous_runs_stale_board(client):
          patch("src.api.draft._clear_league_draft_state") as mock_clear, \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 202
@@ -658,7 +658,7 @@ def test_start_draft_sync_k8s_failure(client):
          patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 500
@@ -686,7 +686,7 @@ def test_stop_draft_deletes_job_and_clears_redis(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.time.sleep"):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
@@ -731,7 +731,7 @@ def test_stop_draft_confirm_publisher_stopped_clears_pick_stream(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.post(
             "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
@@ -760,7 +760,7 @@ def test_stop_draft_confirm_publisher_stopped_redis_failure_returns_500(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.post(
             "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
@@ -779,7 +779,7 @@ def test_stop_draft_no_job_still_clears_redis_and_returns_200(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
 
@@ -802,7 +802,7 @@ def test_stop_draft_times_out_waiting_for_termination(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.time.sleep"):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
@@ -817,7 +817,7 @@ def test_stop_draft_k8s_failure_returns_500(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
 
     assert response.status_code == 500
@@ -829,7 +829,7 @@ def test_stop_draft_redis_failure_returns_500(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
 
@@ -847,7 +847,7 @@ def test_stop_draft_does_not_touch_draft_config(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.get_db_cursor", _raising_db_cursor):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
@@ -878,7 +878,7 @@ def test_stop_draft_confirmed_live_publisher_gone_clears_pick_stream_automatical
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.time.sleep"):
         response = client.post("/v1/draft/stop", params={"league_id": "L1"})
@@ -917,7 +917,7 @@ def test_stop_draft_live_publisher_timeout_leaves_redis_untouched(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.time.sleep"):
         response = client.post(
@@ -2391,7 +2391,7 @@ def test_start_practice_sync_job_creates_job(client):
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft?leagueId=123"})
 
     assert response.status_code == 202
@@ -2429,7 +2429,7 @@ def test_start_practice_sync_job_omits_league_label_when_missing(client):
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 202
@@ -2470,7 +2470,7 @@ def test_start_practice_sync_job_force_tears_down_the_existing_run_first(client)
          patch("src.api.draft._practice_sync_job_state", return_value="Active") as mock_state, \
          patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": ["draft-listener-1"], "connector_gone": True}) as mock_teardown, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 202
@@ -2491,7 +2491,7 @@ def test_start_practice_sync_job_force_surfaces_a_failed_teardown(client):
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          patch("src.api.draft._teardown_practice_run", side_effect=Exception("apiserver unreachable")), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=MagicMock()) as mock_api:
+         patch("src.k8s_client.client.BatchV1Api", return_value=MagicMock()) as mock_api:
         response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 500
@@ -2509,7 +2509,7 @@ def test_start_practice_sync_job_force_refuses_when_the_old_connector_is_still_a
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": [], "connector_gone": False}), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 409
@@ -2535,7 +2535,7 @@ def test_start_practice_sync_job_force_refuses_when_redis_cleanup_fails(client):
 
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[connector]), MagicMock(items=[])]
@@ -2600,7 +2600,7 @@ def test_start_practice_sync_job_proceeds_when_the_lock_is_unavailable(client):
          patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
          patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 202
@@ -2690,7 +2690,7 @@ def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(clien
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         result = _teardown_practice_run()
@@ -2724,7 +2724,7 @@ def test_teardown_practice_run_reports_not_gone_if_an_older_connector_survives(c
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft.STOP_JOB_TERMINATION_MAX_POLLS", 1), \
          patch("src.api.draft.STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS", 0), \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
          patch("src.api.draft._redis_client", return_value=mock_redis):
         mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[older])]
@@ -2745,7 +2745,7 @@ def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api), \
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
          patch("src.api.draft._redis_client", return_value=MagicMock()):
         result = _teardown_practice_run()
 
@@ -2791,7 +2791,7 @@ def test_start_practice_sync_job_k8s_failure(client):
     with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
          patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
 
     assert response.status_code == 500
@@ -2890,7 +2890,7 @@ def test_end_practice_sync_job_deletes_latest(client):
 
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -2918,7 +2918,7 @@ def test_end_practice_sync_job_clears_the_pick_stream_once_the_connector_is_gone
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]) as mock_delete, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -2941,7 +2941,7 @@ def test_end_practice_sync_job_clears_the_connectors_league_even_with_no_listene
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
          patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -2962,7 +2962,7 @@ def test_end_practice_sync_job_leaves_the_connectors_league_alone_if_it_wont_die
          patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]), \
          patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -2997,7 +2997,7 @@ def test_end_practice_sync_job_keeps_the_pick_stream_if_the_connector_wont_die(c
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
          patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]) as mock_delete, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -3021,7 +3021,7 @@ def test_end_practice_sync_job_also_deletes_the_listener(client):
 
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -3052,7 +3052,7 @@ def test_end_practice_sync_job_forces_a_short_connector_grace_period(client):
 
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -3073,7 +3073,7 @@ def test_delete_practice_listener_jobs_never_touches_live_listeners(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         _delete_practice_listener_jobs()
 
     assert mock_batch_api.list_namespaced_job.call_args.kwargs["label_selector"] == "app=draft-sync,mode=practice"
@@ -3085,7 +3085,7 @@ def test_end_practice_sync_job_no_job_exists(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 404
@@ -3097,7 +3097,7 @@ def test_end_practice_sync_job_k8s_failure(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 500
@@ -3173,7 +3173,7 @@ def test_delete_practice_listener_jobs_propagates_delete_failure(client):
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         with pytest.raises(Exception, match="apiserver unreachable"):
             _delete_practice_listener_jobs()
 
@@ -3191,7 +3191,7 @@ def test_start_draft_sync_aborts_when_stale_listener_cannot_be_reclaimed(client)
          patch("src.api.draft._delete_practice_listener_jobs", side_effect=Exception("apiserver unreachable")), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 500
@@ -3223,7 +3223,7 @@ def test_end_practice_sync_job_cleans_listener_after_connector_is_gc_d(client):
 
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.delete("/v1/draft/practice/sync-job")
 
     assert response.status_code == 200
@@ -3243,7 +3243,7 @@ def test_delete_practice_listener_jobs_waits_for_the_pod_to_actually_go():
 
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True) as mock_wait, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         _delete_practice_listener_jobs()
 
     assert mock_batch_api.delete_namespaced_job.call_args.kwargs["propagation_policy"] == "Foreground"
@@ -3264,7 +3264,7 @@ def test_delete_practice_listener_jobs_clears_the_board_of_every_league_it_retir
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
          patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         _delete_practice_listener_jobs()
 
     assert [c.args[0] for c in mock_clear.call_args_list] == ["L2", "L3"]
@@ -3282,7 +3282,7 @@ def test_delete_practice_listener_jobs_raises_if_the_pod_never_terminates():
 
     with incluster_patch, kubeconfig_patch, \
          patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         with pytest.raises(RuntimeError, match="did not terminate"):
             _delete_practice_listener_jobs()
 
@@ -3297,7 +3297,7 @@ def test_active_listeners_query_fails_closed_on_a_kubernetes_error():
     incluster_patch, kubeconfig_patch = _k8s_patches()
 
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         with pytest.raises(Exception, match="apiserver unreachable"):
             _active_listeners_on_other_leagues("L1")
 
@@ -3314,7 +3314,7 @@ def test_start_draft_sync_refuses_to_start_when_listener_state_is_unreadable(cli
          patch("src.api.draft._active_listeners_on_other_leagues", side_effect=Exception("apiserver unreachable")), \
          image_patch, secret_patch, configmap_patch, \
          incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.BatchV1Api", return_value=mock_batch_api):
+         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
         response = client.post("/v1/draft/start")
 
     assert response.status_code == 500
@@ -3358,7 +3358,7 @@ def test_get_draft_logs_for_listener(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
 
     assert response.status_code == 200
@@ -3383,7 +3383,7 @@ def test_get_draft_logs_for_room_sync_ignores_league_id_in_selector(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "room-sync"})
 
     assert response.status_code == 200
@@ -3400,7 +3400,7 @@ def test_get_draft_logs_picks_the_most_recent_pod(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
 
     assert response.json()["pod_name"] == "draft-sync-l1-2"
@@ -3416,7 +3416,7 @@ def test_get_draft_logs_surfaces_terminated_container_state(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
 
     body = response.json()
@@ -3433,7 +3433,7 @@ def test_get_draft_logs_no_pod_found_is_404(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
 
     assert response.status_code == 404
@@ -3445,7 +3445,7 @@ def test_get_draft_logs_k8s_list_failure_is_500(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
 
     assert response.status_code == 500
@@ -3459,7 +3459,7 @@ def test_get_draft_logs_tail_is_clamped_to_the_max(client):
 
     incluster_patch, kubeconfig_patch = _k8s_patches()
     with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.client.CoreV1Api", return_value=mock_core_api):
+         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
         response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener", "tail": 999999})
 
     assert response.status_code == 200

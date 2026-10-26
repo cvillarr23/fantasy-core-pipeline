@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS job_overrides (
  job_or_chain TEXT PRIMARY KEY, paused_until TIMESTAMPTZ, reason TEXT,
  set_by TEXT, set_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS job_run_outbox (
+ run_id TEXT PRIMARY KEY REFERENCES run_log(id) ON DELETE CASCADE, body JSONB NOT NULL,
+ published_at TIMESTAMPTZ, attempts INT NOT NULL DEFAULT 0,
+ next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS job_run_outbox_due ON job_run_outbox(next_attempt_at) WHERE published_at IS NULL;
 CREATE TABLE IF NOT EXISTS launcher_heartbeat (
  id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1), at TIMESTAMPTZ NOT NULL DEFAULT now(),
  queue_depths JSONB NOT NULL DEFAULT '{}'
@@ -215,14 +221,17 @@ def start_run(job_name, trigger_type=None, trigger=None, parent_run_id=None):
 
 
 def adopt_run(identity, job_name, trigger_type, trigger, parent_run_id=None):
-    """Attach this process to the launcher-created run row."""
+    """Attach this process to the launcher-created run row. The row keeps the launcher's
+    catalog job name (`lineup-optimizer`), which overlap, the pod cap and run_log alerts key
+    on; the entrypoint's own name (`lineup_optimizer`) is kept as `summary.entrypoint`."""
     try:
         with get_db_cursor() as c:
             c.execute(
-                """UPDATE run_log SET status='running', job_name=%s, trigger_type=%s,
+                """UPDATE run_log SET status='running', trigger_type=%s,
+                summary=summary || jsonb_build_object('entrypoint', %s::text),
                 parent_run_id=COALESCE(parent_run_id,%s), started_at=now(), finished_at=NULL,
                 error=NULL WHERE id=%s""",
-                (job_name, trigger_type, parent_run_id, identity),
+                (trigger_type, job_name, parent_run_id, identity),
             )
     except Exception:
         logger.exception("Run %s could not be adopted", identity)

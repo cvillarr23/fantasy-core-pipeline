@@ -11,7 +11,7 @@ from typing import Annotated, List, Literal, Optional, Union
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from opentelemetry import propagate, trace
 from pydantic import BaseModel, Discriminator, Field, Tag, model_validator
-from src.queue_contracts import LINEUP_UPDATES, WAIVER_ACTIONS, DRAFT_TARGETS
+from src.queue_contracts import AMQP_URL, LINEUP_UPDATES, WAIVER_ACTIONS, DRAFT_TARGETS
 from src.api.draft import _redis_client
 from src.database import get_db_cursor
 from src.services import waiver_service
@@ -39,13 +39,6 @@ WAIVER_TRIGGER_CLAIM_TTL_SECONDS = 600
 # Ceiling on any single broker operation for a deadline-carrying request.
 BROKER_SOCKET_TIMEOUT_SECONDS = 10.0
 
-# Load AMQP broker settings securely injected into environment variables
-# Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
-# parses as vhost "" (empty string) in pika, not "/", and RabbitMQ then rejects the
-# connection with "vhost  not found" instead of connecting to the default vhost.
-AMQP_URL = os.getenv(
-    "AMQP_URL", "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672/%2f"
-)
 
 # Guards /v1/trigger/*, which bypass oauth2-proxy when called in-cluster. No default -
 # OpenBao-injected in deployed environments, same convention as DB_PASSWORD.

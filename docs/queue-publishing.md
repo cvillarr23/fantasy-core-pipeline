@@ -4,7 +4,7 @@ description: The RabbitMQ queues core publishes to, what each message contains, 
 sidebar_position: 6
 ---
 
-Core publishes to six RabbitMQ queues, all consumed by `fantasy-browser-worker`. The API sends all six, and `sync_players` also publishes straight to `waiver_actions`. Every message is durable JSON on the default exchange, with the queue name as the routing key.
+Core publishes to seven RabbitMQ queues. Six are consumed by `fantasy-browser-worker`: the API sends all six, and `sync_players` also publishes straight to `waiver_actions`. The seventh, `job_runs`, carries run commands to core's own job launcher. Every message is durable JSON on the default exchange, with the queue name as the routing key.
 
 :::tip[Accepted is not done]
 A `202` or `queued` status means the message left core, not that ESPN changed. The worker confirms results into `execution_log`, and the activity runner verifies them. See [Activity submissions](./activity-api.md).
@@ -45,8 +45,9 @@ The trade queues skip the outbox. They claim the offer in `execution_log` first,
 | `trade_responses` | Direct from API | `POST /v1/trade/incoming/{id}/decision` and `.../decision/retry` | `decision_key` |
 | `trade_negotiations` | Direct from API | `POST /v1/trade/incoming/{id}/counter` | Publication key in `outcome_details` |
 | `waiver_actions` (alerts) | Ingestor | `sync_players` | None |
+| `job_runs` | Run outbox | `launcher.publish.publish_run` (Jobs API, scheduler) | `run_log.dedupe_key` |
 
-The outbox publishes with a passive queue declaration, so `lineup_updates`, `waiver_actions` and `draft_targets` must already exist on the broker. The trade queues are declared durable on publish.
+The outboxes publish with a passive queue declaration, so `lineup_updates`, `waiver_actions`, `draft_targets` and `job_runs` must already exist on the broker. The trade queues are declared durable on publish.
 
 :::note
 `POST /v1/trigger/rumor-action` has no queue of its own. It evaluates rumor signals and sends the resulting moves through the lineup and waiver triggers.
@@ -120,6 +121,21 @@ stateDiagram-v2
 | Failure | A cancelled claim is marked `skipped` and its key is released, so a fresh IR move can queue a new claim. |
 | Transient parent failure | The claim stays held. |
 | Unreadable parent | The route returns 503 and queues nothing. |
+
+## How do run commands reach the launcher?
+
+`src/launcher/publish.publish_run` validates the job and its params against the catalog, then writes the `queued` `run_log` row and a `job_run_outbox` row in one transaction and publishes a `RunCommand` to `job_runs`. A failed publish is retried by `activity_runner.drain_job_runs`, which both the API's background tick and the launcher loop call.
+
+| Trigger | `dedupe_key` |
+|---|---|
+| `schedule` | `job@slot` |
+| `chain` | `job@chain_root` |
+| `event` | `job@key@debounce_window` |
+| `manual`, `cli`, `mcp` | A fresh UUID (the run id) |
+
+A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. A run past `expires_at` ends as `skipped (expired)`, and a run refused by `overlap: forbid` ends as `skipped (overlap)`.
+
+The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedupe_key>`. Its outermost `run_scope` adopts the row and keeps the catalog job name.
 
 ## Related
 

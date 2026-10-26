@@ -7,7 +7,14 @@ from datetime import timedelta
 import pytest
 from pydantic import ValidationError
 
-from src.launcher.catalog import Catalog, load_catalog
+from src.launcher.catalog import (
+    Catalog,
+    UnknownJobError,
+    load_catalog,
+    load_catalog_from_env,
+    params_to_args,
+    validate_run_params,
+)
 
 
 FIXTURE = "tests/fixtures/job-catalog.yaml"
@@ -191,3 +198,52 @@ def test_json_schema_and_check_cli():
     )
     assert checked.returncode == 0, checked.stderr
     assert "catalog valid" in checked.stdout
+
+
+def test_resolve_applies_defaults_and_attaches_the_profile():
+    catalog = load_catalog(FIXTURE)
+    lineup = catalog.resolve("lineup-optimizer")
+    assert (lineup.executor, lineup.overlap, lineup.max_attempts) == ("pod", "forbid", 3)
+    assert lineup.deadline == timedelta(hours=1)
+    assert lineup.alert == "critical"
+    assert lineup.resources.limits.memory == "512Mi"
+    assert lineup.profile.image == "CORE_IMAGE"
+    scan = catalog.resolve("trade-scan")
+    assert scan.deadline == timedelta(minutes=16)
+    assert scan.resources.limits.memory == "1200Mi"
+    assert scan.profile.serviceAccount == "fantasy-browser-worker"
+    with pytest.raises(UnknownJobError):
+        catalog.resolve("missing")
+
+
+def test_validate_run_params_types_and_optionality():
+    raw = catalog_data()
+    raw["jobs"]["one"]["params"] = {"week": "int?", "ratio": "float", "dry_run": "bool?", "team": "str?"}
+    job = Catalog.model_validate(raw).jobs["one"]
+    assert validate_run_params(job, {"ratio": 1, "week": None, "dry_run": False}) == {
+        "ratio": 1.0,
+        "dry_run": False,
+    }
+    with pytest.raises(ValueError, match="'ratio' is required"):
+        validate_run_params(job, {})
+    with pytest.raises(ValueError, match="unknown params: season"):
+        validate_run_params(job, {"ratio": 1, "season": 2026})
+    with pytest.raises(ValueError, match="'week' must be int"):
+        validate_run_params(job, {"ratio": 1, "week": True})
+    with pytest.raises(ValueError, match="'team' must be str"):
+        validate_run_params(job, {"ratio": 1, "team": 7})
+
+
+def test_params_cannot_expand_environment_references():
+    assert params_to_args({"team": "$(DB_PASSWORD)"}) == ["--team", "$$(DB_PASSWORD)"]
+
+
+def test_params_to_args():
+    assert params_to_args({"week": 7, "dry_run": True, "verbose": False, "team_id": "3"}) == [
+        "--week", "7", "--dry-run", "--team-id", "3",
+    ]
+
+
+def test_load_catalog_from_env(monkeypatch):
+    monkeypatch.setenv("JOB_CATALOG_PATH", FIXTURE)
+    assert "lineup-optimizer" in load_catalog_from_env().jobs

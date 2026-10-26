@@ -474,3 +474,29 @@
 - Wiring `OTEL_EXPORTER_OTLP_ENDPOINT` into actual k8s Deployment/CronJob manifests is
   `fantasy-infra`'s job (INFRA-10, already closed on their end) — not fixed in this repo,
   same follow-up pattern as the `CORE_API_BASE_URL` stale-default note above.
+
+## Unified job launcher (ADR 0001, fantasy-infra)
+
+- `python -m src.launcher` consumes `job_runs` and starts each run as a k8s Job
+  (`src/launcher/k8s.py`) or an `executor: inline` subprocess (`src/launcher/inline.py`, one
+  at a time). The Jobs API and the scheduler request runs only through
+  `src/launcher/publish.publish_run`, which writes the `queued` run_log row and its
+  `job_run_outbox` row in one transaction. `activity_runner.drain_job_runs` (API tick and
+  launcher loop) retries delivery. A used `dedupe_key` returns the existing run as `duplicate`.
+- The consumer acks a command once the run is admitted to its in-memory pending list, never
+  when it launches: a run can wait for the pod cap longer than RabbitMQ's 30-minute
+  `consumer_timeout`. On restart it rebuilds the list from queued run_log rows, so don't
+  "fix" this by acking after launch.
+- Overlap and `max_concurrent_pods` are counts of `running` run_log rows (pods counted by
+  `trigger->>'executor'='pod'`), decided under a `pg_advisory_xact_lock`. A crashed pod's row
+  holds its slot until the watcher (#344) marks it orphaned.
+- `run_log_service.adopt_run` keeps the launcher's catalog `job_name` (`lineup-optimizer`).
+  The entrypoint's own name goes to `summary.entrypoint`. Overlap, the cap and run_log alerts
+  key on catalog names.
+- Catalog profile `secrets`/`volumes` name `k8s.BUNDLES`/`k8s.VOLUMES`. Those hold
+  fantasy-infra's Secret, ConfigMap and key names, and change only with its manifests.
+  Non-secret values (DB_HOST, REDIS_HOST, CORE_API_BASE_URL, OTLP endpoints) and the
+  `CORE_IMAGE`/`WORKER_IMAGE` image refs come from the launcher's own env. `validate_catalog`
+  rejects unknown names at startup. `tests/test_launcher_k8s.py` snapshots the built Jobs
+  against CronJob specs vendored in `tests/fixtures/cronjobs/`. Its allowlist of extra env is
+  exact, so update it deliberately.

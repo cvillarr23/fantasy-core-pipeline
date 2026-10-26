@@ -1,0 +1,76 @@
+# Vendored from cvillarr23/fantasy-infra base/core-pipeline/fantasy-rumor-syncer-cronjob.yaml @ 7ae2af9 for the launcher's
+# Job snapshot test (tests/test_launcher_k8s.py). Delete once the CronJob is cut over.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fantasy-rumor-syncer
+  namespace: default
+spec:
+  schedule: "*/30 * * * *" # every 30 minutes (America/Chicago local time below) - default; override per-overlay with a JSON6902 patch if a different cadence is ever needed
+  timeZone: "America/Chicago"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # Finished Jobs (and their pods' logs) are removed after 7 days, so failures from
+      # weeks ago stop cluttering `kubectl get jobs`; the run audit log keeps the history.
+      ttlSecondsAfterFinished: 604800
+      # Counts Pending time too: a pod that can't schedule (e.g. node CPU requests full) fails
+      # the Job instead of sitting Pending forever, which under concurrencyPolicy: Forbid
+      # silently skips every later run. 1500s is just under the schedule interval.
+      activeDeadlineSeconds: 1500
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: fantasy-core-pipeline
+            component: rumor-syncer
+        spec:
+          restartPolicy: OnFailure
+          imagePullSecrets:
+            - name: ghcr-pull-secret
+          containers:
+            - name: ingestor
+              image: ghcr.io/cvillarr23/fantasy-core-pipeline:e3536eea5cedb1f0c646db1b38e008aa7d630940
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.ingestion.sync_rumors"]
+              env:
+                # Run audit log: which CronJob and Job this run belongs to (scheduled vs manual).
+                - name: RUN_CRONJOB
+                  value: "fantasy-rumor-syncer"
+                - name: RUN_K8S_JOB
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+                - name: DB_HOST
+                  value: "fantasy-db.default.svc.cluster.local"
+                - name: DB_NAME
+                  value: "fantasy_football"
+                - name: DB_USER
+                  value: "bot_admin"
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: database-credentials
+                      key: postgres-password
+                - name: REDIS_HOST
+                  value: "fantasy-cache.default.svc.cluster.local"
+                - name: REDIS_PORT
+                  value: "6379"
+                # OTLP export target for homelab-deployment's shared Tempo instance
+                # (homelab-deployment#5/#6) -- endpoint + service name only, actual
+                # span emission is CORE-12.
+                - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                  value: "http://tempo.default.svc.cluster.local:4318"
+                - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                  value: "http/protobuf"
+                - name: OTEL_SERVICE_NAME
+                  value: "ingestion-sync-rumors"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

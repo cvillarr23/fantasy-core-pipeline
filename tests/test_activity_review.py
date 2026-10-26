@@ -72,10 +72,11 @@ def test_ir_entry_not_yet_applied_is_only_status_checked():
 
 def test_tick_continues_past_poison_row_and_leases_reconciliation():
     c=MagicMock();c.fetchall.return_value=[]
-    with patch.object(runner,'settle_held_actions'),patch.object(runner,'publish_one',side_effect=[RuntimeError('missing queue'),True,False]) as publish,patch.object(runner,'get_db_cursor') as db:
+    with patch.object(runner,'settle_held_actions'),patch.object(runner,'drain_job_runs') as drain,patch.object(runner,'publish_one',side_effect=[RuntimeError('missing queue'),True,False]) as publish,patch.object(runner,'get_db_cursor') as db:
         db.return_value.__enter__.return_value=c
         runner.tick()
     assert publish.call_count==3
+    drain.assert_called_once_with()
     assert 'FOR UPDATE SKIP LOCKED' in c.execute.call_args_list[0].args[0]
     assert 'historical' in c.execute.call_args_list[0].args[0]
 

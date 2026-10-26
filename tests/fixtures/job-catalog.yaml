@@ -2,6 +2,9 @@
 # same commands, schedules, deadlines and resources. weekly-ingestor's initContainer split becomes
 # the sync-league -> metrics-extractor chain steps; the reconcile and prescan CronJobs become
 # second schedules on their jobs; the Tuesday clock offsets become the tuesday-weekly chain.
+# Profile secrets/volumes name src/launcher/k8s.py's BUNDLES/VOLUMES. A profile covers every
+# CronJob it replaces, so some jobs get env they don't read; core-ops adds the broker URL and the
+# fantasy-core-pipeline service account for the injury syncer and the draft Job sweeper.
 version: 1
 global:
   max_concurrent_pods: 2
@@ -11,8 +14,9 @@ global:
 seasons:
   regular: {start: 1, end: 18}
 profiles:
-  core: {image: CORE_IMAGE, secrets: [db, espn, redis, trigger-api]}
-  worker: {image: WORKER_IMAGE, serviceAccount: fantasy-browser-worker, volumes: [espn-session-state]}
+  core: {image: CORE_IMAGE, secrets: [db, espn, redis, trigger-api, league-config]}
+  core-ops: {image: CORE_IMAGE, serviceAccount: fantasy-core-pipeline, secrets: [db, espn, redis, trigger-api, league-config, amqp]}
+  worker: {image: WORKER_IMAGE, serviceAccount: fantasy-browser-worker, secrets: [db, espn, llm, notify, league-config], volumes: [espn-session-state]}
 defaults:
   executor: pod
   overlap: forbid
@@ -72,14 +76,14 @@ jobs:
     schedules:
       - {cron: '*/30 * * * *', tz: America/Chicago, catch_up: 0}
   rapid-status-syncer:
-    profile: core
+    profile: core-ops
     command: [python, -m, src.ingestion.sync_players]
     deadline: 9m
     max_attempts: 2
     schedules:
       - {cron: '*/10 * * * 4,0,1', tz: America/Chicago, catch_up: 0}
   stale-draft-job-sweeper:
-    profile: core
+    profile: core-ops
     command: [python, -m, src.ops.sweep_stale_draft_jobs]
     deadline: 14m
     max_attempts: 2

@@ -1,0 +1,123 @@
+# Vendored from cvillarr23/fantasy-infra base/browser-worker/trade-scan-cronjob.yaml @ 7ae2af9 for the launcher's
+# Job snapshot test (tests/test_launcher_k8s.py). Delete once the CronJob is cut over.
+# Twice-weekly outgoing proposals for human review; deploy only after the #94 worker image.
+# Direct runner: deliberately no RabbitMQ producer or trade_proposals KEDA trigger.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trade-scan
+  namespace: default
+spec:
+  schedule: "0 13 * * 3,5"
+  timeZone: America/Chicago
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # Finished Jobs (and their pods' logs) are removed after 7 days, so failures from
+      # weeks ago stop cluttering `kubectl get jobs`; the run audit log keeps the history.
+      ttlSecondsAfterFinished: 604800
+      activeDeadlineSeconds: 960
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: fantasy-browser-worker
+            component: trade-scan
+        spec:
+          restartPolicy: Never
+          serviceAccountName: fantasy-browser-worker
+          imagePullSecrets:
+          - name: ghcr-pull-secret
+          volumes:
+          - name: espn-session-state
+            secret:
+              secretName: espn-session-state
+              optional: true
+          containers:
+          - name: trade-scan
+            image: ghcr.io/cvillarr23/fantasy-browser-worker:929083b992e3d2f95e74ee421ebcd75306f6ee31
+            imagePullPolicy: IfNotPresent
+            envFrom:
+            - configMapRef:
+                name: fantasy-league-config
+            - configMapRef:
+                name: fantasy-notify-config
+            # NTFY_TOKEN for failure pushes; optional so the Job still runs before it exists.
+            - secretRef:
+                name: ntfy-credentials
+                optional: true
+            env:
+            # Run audit log: which CronJob and Job this run belongs to (scheduled vs manual).
+            - name: RUN_CRONJOB
+              value: "trade-scan"
+            - name: RUN_K8S_JOB
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+            - name: DB_HOST
+              value: fantasy-db.default.svc.cluster.local
+            - name: DB_NAME
+              value: fantasy_football
+            - name: DB_USER
+              value: bot_admin
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: postgres-password
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: groq-api-key
+                  key: groq_api_key
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gemini-api-key
+                  key: gemini_api_key
+            - name: ESPN_S2
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: espn_s2
+            - name: SWID
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: swid
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://tempo.default.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+            - name: OTEL_SERVICE_NAME
+              value: browser-worker
+            - name: ESPN_SESSION_STATE_FILE
+              value: /var/run/espn-session/state.json
+            - name: ESPN_LEAGUE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: ESPN_LEAGUE_ID
+            - name: ESPN_TEAM_ID
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: ESPN_TEAM_ID
+            volumeMounts:
+            - name: espn-session-state
+              mountPath: /var/run/espn-session
+              readOnly: true
+            resources:
+              requests:
+                memory: 256Mi
+                cpu: 50m
+              limits:
+                memory: 1200Mi
+                cpu: 1000m
+            command:
+            - node
+            - src/bots/trade_scan.js
+            - --stage
