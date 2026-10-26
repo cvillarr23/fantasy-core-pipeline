@@ -3,6 +3,8 @@
 from contextlib import contextmanager
 import json
 import os
+import subprocess
+import sys
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -184,3 +186,59 @@ def test_purge_cascades_links(postgres):
             "SELECT (SELECT count(*) FROM run_log), (SELECT count(*) FROM run_links)"
         )
         assert c.fetchone() == (0, 0)
+
+
+def test_launcher_columns_preserve_existing_rows_and_enforce_dedupe(postgres):
+    with postgres, postgres.cursor() as c:
+        c.execute(
+            "INSERT INTO run_log(id,job_name,trigger_type) VALUES ('legacy','old_job','manual')"
+        )
+        c.execute(
+            "INSERT INTO run_log(id,job_name,trigger_type,dedupe_key) VALUES ('new','new_job','chain','once')"
+        )
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            c.execute(
+                "INSERT INTO run_log(id,job_name,trigger_type,dedupe_key) VALUES ('duplicate','new_job','chain','once')"
+            )
+        postgres.rollback()
+        c.execute(
+            "SELECT dedupe_key,attempt,scheduled_for,requested_by,chain_root_id,event_id,end_reason FROM run_log WHERE id='legacy'"
+        )
+        assert c.fetchone() == (None, 1, None, None, None, None, None)
+
+
+def test_subprocess_run_is_child_of_adopted_run(postgres, monkeypatch):
+    dsn = os.environ["ACTIVITY_TEST_DSN"]
+    conn_info = psycopg2.extensions.parse_dsn(dsn)
+    with postgres, postgres.cursor() as c:
+        c.execute("SELECT current_schema()")
+        schema = c.fetchone()[0]
+    monkeypatch.setenv("DB_HOST", conn_info["host"])
+    monkeypatch.setenv("DB_NAME", conn_info["dbname"])
+    monkeypatch.setenv("DB_USER", conn_info["user"])
+    monkeypatch.setenv("DB_PASSWORD", conn_info["password"])
+    monkeypatch.setenv("PGOPTIONS", f"-c search_path={schema}")
+    launcher_id = str(uuid4())
+    with postgres, postgres.cursor() as c:
+        c.execute(
+            """INSERT INTO run_log(id,job_name,trigger_type,status,dedupe_key,requested_by)
+            VALUES (%s,'draft_prep_refresher','chain','queued','daily-prep','launcher')""",
+            (launcher_id,),
+        )
+    monkeypatch.setenv("RUN_ID", launcher_id)
+    with run_log.run_scope("draft_prep_refresher") as parent:
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from src.services.run_log_service import run_scope; "
+                "exec(\"with run_scope('draft_prep_child'): pass\")",
+            ],
+            check=True,
+            env=os.environ.copy(),
+        )
+        with postgres, postgres.cursor() as c:
+            c.execute("SELECT parent_run_id FROM run_log WHERE job_name='draft_prep_child'")
+            assert c.fetchone() == (parent.id,)
+            c.execute("SELECT count(*),status,dedupe_key,requested_by FROM run_log WHERE id=%s GROUP BY status,dedupe_key,requested_by", (launcher_id,))
+            assert c.fetchone() == (1, "success", "daily-prep", "launcher")

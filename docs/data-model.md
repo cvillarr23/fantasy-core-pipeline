@@ -121,9 +121,28 @@ erDiagram
     run_log {
         text id PK
         text job_name
-        text trigger_type "schedule | queue | http | manual"
+        text trigger_type "chain | event | cli | mcp (plus cutover legacy values)"
         jsonb trigger "cronjob + k8s_job, or queue + tracking_id"
-        text status "running | success | failure"
+        text status "queued | skipped | cancelled | timeout | running | success | failure"
+        text dedupe_key UK "nullable"
+        timestamptz scheduled_for
+        int attempt
+        text requested_by
+        text chain_root_id
+        text event_id
+        text end_reason
+    }
+    job_overrides {
+        text job_or_chain PK
+        timestamptz paused_until
+        text reason
+        text set_by
+        timestamptz set_at
+    }
+    launcher_heartbeat {
+        smallint id PK "always 1"
+        timestamptz at
+        jsonb queue_depths
     }
 ```
 
@@ -178,8 +197,10 @@ erDiagram
 | `activity_sessions` | LLM chat session transcripts. The runner clears old content. | `llm_history` and the activity runner. |
 | `activity_reads` | Which user has read which activity item. | Core API (`POST /v1/activity/read/{identity}`). |
 | `rumor_action_checkpoints` | Per-team watermark and in-flight state for rumor actions. | `rumor_action_service` |
-| `run_log` | One row per job or bot run: what triggered it, status, error and a `summary`. Purged after `RUN_LOG_RETENTION_DAYS` (90). | `run_log_service.run_scope` in core entrypoints; the worker's `db/run_log.js`. |
+| `run_log` | One row per launcher or bot run: trigger, lifecycle status, dedupe and chain identity, error and a `summary`. The outermost `run_scope` adopts `RUN_ID`; child processes receive it as `RUN_PARENT_ID`. Purged after `RUN_LOG_RETENTION_DAYS` (90). | Launcher and `run_log_service.run_scope` in core entrypoints; the worker's `db/run_log.js`. |
 | `run_links` | What each run read (`input`) and wrote (`output`): raw signals, rumor signals, LLM sessions, queued actions. | Same as `run_log`, plus the `/v1/trigger/*` handlers via `X-Run-Id`. |
+| `job_overrides` | Pause window and audit details for a job or chain. | Unified job launcher. |
+| `launcher_heartbeat` | The launcher's last heartbeat and a JSON object of queue depths; the singleton row has `id=1`. | Unified job launcher. |
 | `trade_candidate_runs` | The latest trade-candidate run per league, season and week: `run_id` (the `run_log` id), `computed_at`, horizon and `counts`. A missing row means the job never ran for that week. | `python -m src.jobs.trade_candidates` |
 | `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
 
@@ -310,7 +331,7 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 | `rumor_action_checkpoints.state` | `{watermark, signals, actions, failed_jobs}`. |
 | `trade_candidate_runs.counts` | `{enumerated, prefiltered, scored, proposable, needs_drop, one_sided, teams: [{team_id, name, proposable, needs_drop, one_sided}]}`. |
 | `trade_candidates.score` | The `POST /v1/trade/score` response for the package, as scored at `computed_at`. `send_players` / `receive_players` hold `{espn_id, player_id, name, position, nfl_team, vorp, nfl_bye_week}`. |
-| `run_log.trigger` | Scheduled or manual Jobs: `{cronjob, k8s_job}`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
+| `run_log.trigger` | Explicit launcher triggers use `chain`, `event`, `cli` or `mcp`; while schedules are cut over, the `RUN_CRONJOB` name heuristic remains available. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
 | `run_log.summary` | Always: `log_tail` (the run's last 50 INFO+ log lines, library noise excluded), `warnings`, `errors` and `last_message`. Jobs add their own counters and an optional one-line `headline`, such as the rumor syncer's `fetched`/`new`/`per_source` or the rumor action trigger's `RunOutcome` details. |
 
 ## Related
