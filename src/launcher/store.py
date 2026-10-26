@@ -100,12 +100,15 @@ class RunStore:
         left `running` (it crashed or never adopted RUN_ID), keeping what run_scope wrote.
         """
         with get_db_cursor() as c:
+            guard = (
+                " AND status IN ('running','success','failure','timeout')"
+                if force
+                else " AND status='running'"
+            )
+            params = (status, end_reason, error, run_id)
             if expected_attempt is not None:
-                guard = " AND status IN ('running','success','failure','timeout') AND attempt=%s"
-                params = (status, end_reason, error, run_id, expected_attempt)
-            else:
-                guard = " AND status<>'cancelled'" if force else " AND status='running'"
-                params = (status, end_reason, error, run_id)
+                guard += " AND attempt=%s"
+                params += (expected_attempt,)
             c.execute(
                 """UPDATE run_log SET status=%s, end_reason=%s,
                 error=COALESCE(%s,error), finished_at=now() WHERE id=%s"""

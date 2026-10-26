@@ -152,6 +152,25 @@ def test_old_process_cannot_adopt_or_finish_a_requeued_attempt(postgres):
     ) == [("queued", 2, None)]
 
 
+def test_process_exit_fallback_preserves_run_scope_outcome(postgres):
+    identity = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
+    store = RunStore()
+    with store.admission() as admission:
+        assert admission.claim(identity, "inline")
+    run_log.finish_run(identity, "failure", "worker error", end_reason="exit_code")
+
+    store.finish_running(
+        identity,
+        "success",
+        "exit_code",
+        expected_attempt=1,
+    )
+
+    assert rows(
+        postgres, "SELECT status,end_reason,error FROM run_log WHERE id=%s", (identity,)
+    ) == [("failure", "exit_code", "worker error")]
+
+
 def test_retry_requeues_the_same_run_and_updates_its_outbox_attempt(postgres):
     identity = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
     store = RunStore()
