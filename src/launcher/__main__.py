@@ -1,7 +1,8 @@
 """`python -m src.launcher`: the unified job launcher (one replica, Recreate strategy).
 
 Loads the catalog from JOB_CATALOG_PATH, checks every profile can be turned into a pod spec,
-then consumes `job_runs` until SIGTERM. Shutdown stops consuming and gives a running inline
+then consumes `job_runs` until SIGTERM. The scheduler ticks on its own thread, so a slow
+season lookup never delays admitting runs. Shutdown stops consuming and gives a running inline
 job KILL_GRACE_SECONDS to exit, so the Deployment's terminationGracePeriodSeconds should
 exceed that.
 """
@@ -15,6 +16,7 @@ from src.launcher import k8s
 from src.launcher.catalog import load_catalog_from_env
 from src.launcher.consumer import Consumer
 from src.launcher.inline import InlineRunner
+from src.launcher.scheduler import PostgresSchedulerState, Scheduler
 from src.telemetry import configure_tracing
 
 logger = logging.getLogger("JobLauncher")
@@ -38,6 +40,10 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     inline_runner = InlineRunner()
     inline_runner.start()
+    scheduler = Scheduler(catalog, PostgresSchedulerState())
+    threading.Thread(
+        target=scheduler.run, args=(stop,), name="launcher-scheduler", daemon=True
+    ).start()
     logger.info("Launcher started with %d jobs", len(catalog.jobs))
     try:
         Consumer(catalog, inline_runner).run(stop)

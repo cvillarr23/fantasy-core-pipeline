@@ -122,7 +122,7 @@ erDiagram
     run_log {
         text id PK
         text job_name
-        text trigger_type "chain | event | cli | mcp (plus cutover legacy values)"
+        text trigger_type "schedule | chain | event | cli | mcp (plus cutover legacy values)"
         jsonb trigger "cronjob + k8s_job, queue + tracking_id, or launcher params + executor"
         text status "queued | skipped | cancelled | timeout | running | success | failure"
         text dedupe_key UK "nullable"
@@ -209,7 +209,7 @@ erDiagram
 | `run_log` | One row per launcher or bot run: trigger, lifecycle status, dedupe and chain identity, error and a `summary`. The outermost `run_scope` adopts `RUN_ID`; child processes receive it as `RUN_PARENT_ID`. Purged after `RUN_LOG_RETENTION_DAYS` (90). | Launcher and `run_log_service.run_scope` in core entrypoints; the worker's `db/run_log.js`. |
 | `run_links` | What each run read (`input`) and wrote (`output`): raw signals, rumor signals, LLM sessions, queued actions. | Same as `run_log`, plus the `/v1/trigger/*` handlers via `X-Run-Id`. |
 | `job_run_outbox` | A launcher run command (`RunCommand`) waiting to be published to `job_runs`, with retry state. Deleted with its `run_log` row. | `launcher.publish.publish_run`; delivered by the activity runner and the launcher. |
-| `job_overrides` | Pause window and audit details for a job or chain. | Unified job launcher. |
+| `job_overrides` | Pause window and audit details for a job or chain. A NULL `paused_until` pauses until the row is deleted. | Unified job launcher. |
 | `launcher_heartbeat` | The launcher's last heartbeat and a JSON object of queue depths; the singleton row has `id=1`. | Unified job launcher. |
 | `trade_candidate_runs` | The latest trade-candidate run per league, season and week: `run_id` (the `run_log` id), `computed_at`, horizon and `counts`. A missing row means the job never ran for that week. | `python -m src.jobs.trade_candidates` |
 | `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
@@ -341,7 +341,8 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 | `rumor_action_checkpoints.state` | `{watermark, signals, actions, failed_jobs}`. |
 | `trade_candidate_runs.counts` | `{enumerated, prefiltered, scored, proposable, needs_drop, one_sided, teams: [{team_id, name, proposable, needs_drop, one_sided}]}`. |
 | `trade_candidates.score` | The `POST /v1/trade/score` response for the package, as scored at `computed_at`. `send_players` / `receive_players` hold `{espn_id, player_id, name, position, nfl_team, vorp, nfl_bye_week}`. |
-| `run_log.trigger` | Explicit launcher triggers use `chain`, `event`, `cli` or `mcp`; while schedules are cut over, the `RUN_CRONJOB` name heuristic remains available. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
+| `run_log.trigger` | Explicit launcher triggers use `chain`, `event`, `cli` or `mcp`; while schedules are cut over, the `RUN_CRONJOB` name heuristic remains available. A chain root (`job_name` = the chain, `chain_root_id` = its own id) stores `{chain, from_step}`; `from_step` is set for a manual run with `downstream`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
+| `run_log.end_reason` | Why a run ended without running or early. Scheduler values: `paused` (a slot or chain step while its job or chain is paused), `chain_step` (a standalone slot on a day a chain run covers that job), `dependency_failed` (a chain step whose `on: success` parent didn't succeed), `max_duration` (chain steps not started in time, and the chain root's `timeout`), `publish_failed` and `unknown_chain` (chain roots). |
 | `run_log.summary` | Always: `log_tail` (the run's last 50 INFO+ log lines, library noise excluded), `warnings`, `errors` and `last_message`. Jobs add their own counters and an optional one-line `headline`, such as the rumor syncer's `fetched`/`new`/`per_source` or the rumor action trigger's `RunOutcome` details. |
 
 ## Related
