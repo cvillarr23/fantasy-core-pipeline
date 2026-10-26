@@ -4,7 +4,6 @@ import logging
 import redis
 from psycopg2.pool import ThreadedConnectionPool
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DatabaseEngine")
 
 # Load cluster boundaries from environment secrets

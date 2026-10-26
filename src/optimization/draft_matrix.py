@@ -34,7 +34,7 @@ import requests
 from opentelemetry import context, trace
 
 from src.database import REDIS_CONNECT_TIMEOUT_SECONDS, REDIS_HOST, REDIS_PORT, get_db_connection
-from src.telemetry import configure_tracing, configure_trace_logging
+from src.telemetry import configure_tracing
 from src.optimization.vorp_matrix import (
     VORP_POSITIONS,
     FLEX_DEFAULT_WEIGHTS,
@@ -52,7 +52,6 @@ from src.optimization.vorp_matrix import (
 )
 from src.trigger_client import post_trigger
 
-configure_trace_logging()
 logger = logging.getLogger("DraftMatrix")
 tracer = trace.get_tracer("draft_matrix")
 

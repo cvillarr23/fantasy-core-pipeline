@@ -14,13 +14,12 @@ from collections import defaultdict
 import polars as pl
 
 from src.database import get_db_connection
-from src.telemetry import configure_tracing, configure_trace_logging
+from src.telemetry import configure_tracing
 from src.services import run_log_service
 from opentelemetry import trace
 
 tracer = trace.get_tracer("vorp_matrix")
 
-configure_trace_logging()
 logger = logging.getLogger("VORPMatrix")
 
 W_MARKET = 0.06

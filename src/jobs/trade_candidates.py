@@ -22,9 +22,8 @@ from src.services.trade_candidate_service import (
     store_run,
 )
 from src.services.trade_context_service import TradeContextUnavailable
-from src.telemetry import configure_trace_logging, configure_tracing
+from src.telemetry import configure_tracing
 
-configure_trace_logging()
 logger = logging.getLogger("TradeCandidatesJob")
 
 

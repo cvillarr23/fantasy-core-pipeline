@@ -22,7 +22,6 @@ from src.database import get_db_connection
 from src.ingestion.metrics_extractor import normalize_team
 from src.services import run_log_service
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DefenseStrengthSync")
 
 # No meaningful "points allowed" signal for K/D-ST facing a defense - mirrors

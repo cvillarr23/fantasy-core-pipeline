@@ -17,7 +17,6 @@ from espn_api.football.constant import POSITION_MAP
 
 from src.ingestion.espn_client import TimedEspnFantasyRequests
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LeagueSync")
 
 BENCH_AND_IR_SLOT_IDS = {20, 21}

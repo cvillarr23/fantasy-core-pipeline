@@ -45,11 +45,10 @@ from src.ingestion import sync_league
 from src.ir_eligibility import load_ineligible_ir_occupants, load_open_ir_slots
 from src.nfl_byes import bye_weeks_or_empty
 from src.optimization import lineup_solver
-from src.telemetry import configure_tracing, configure_trace_logging
+from src.telemetry import configure_tracing
 from src.trigger_client import CORE_API_BASE_URL, post_trigger, post_trigger_idempotent, response_status
 from src.services import run_log_service
 
-configure_trace_logging()
 logger = logging.getLogger("WaiverEvaluator")
 tracer = trace.get_tracer("waiver_evaluator")
 
