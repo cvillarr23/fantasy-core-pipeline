@@ -441,28 +441,6 @@
   since each new schedule supersedes the last (see above), so only the most recent one ever
   publishes. Tracking real turn order is unimplemented, not a bug to work around.
 
-## Launcher scheduler
-
-- `src/launcher/scheduler.py` decides what to publish and when. It never touches RabbitMQ:
-  `Scheduler(catalog, state, publish)` takes the run-command `publish` callable (the run_log +
-  outbox helper from the launcher consumer work) and keeps no state outside `run_log` and
-  `job_overrides`, so `tick()` is safe to rerun after a restart. Tests use an in-memory state
-  and a frozen `now`; `tests/test_launcher_scheduler_postgres.py` checks the SQL.
-- A slot fires only while `now - slot <= max(catch_up, SLOT_GRACE)`, and only the latest due
-  slot does; older missed slots never fire. Dedupe keys are `job@<slot in UTC>` and
-  `job@<chain root id>`. A fixed-hour slot fires once in the repeated fall-back hour.
-- `seasons` windows use nflverse game dates: 7 days before the start week's first game through
-  2 days after the end week's last game, so the Tuesday after week 18 still ingests. An
-  unreadable schedule fails open (logs WARNING).
-- Chains: an `on: success` parent that doesn't succeed skips only that branch
-  (`dependency_failed`). A skipped step still satisfies `on: finish`, so Tuesday's acting
-  steps run even if ingestion fails. A failure with attempts left counts as pending, since the
-  watcher retries the same row. Past `max_duration`, the steps not yet started are skipped and
-  the root ends `timeout`. A job's own slot is skipped (`chain_step`) on a day a chain run
-  covers it.
-- `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
-  it gets no `chain_root_id`, so it never starts downstream steps.
-
 ## CORE-12: OpenTelemetry tracing
 
 - `src/telemetry.py`'s `configure_tracing()` is a true no-op (no span processor attached
@@ -522,3 +500,24 @@
   rejects unknown names at startup. `tests/test_launcher_k8s.py` snapshots the built Jobs
   against CronJob specs vendored in `tests/fixtures/cronjobs/`. Its allowlist of extra env is
   exact, so update it deliberately.
+- `src/launcher/scheduler.py` decides what to run and when. `python -m src.launcher` runs
+  `Scheduler.run` on its own thread with `PostgresSchedulerState`. It requests runs only through
+  `publish_run` and sets each `expires_at`: slot + `max(catch_up, SLOT_GRACE)`; a chain step's
+  `latest` + 30m, else the chain's `scheduled_for + max_duration`; `publish_run`'s manual TTL for
+  `start_chain`. It keeps no state outside `run_log` and `job_overrides`, so ticks are safe to
+  rerun. A failed nflverse read is cached for 5 minutes. Tests use an in-memory state and a
+  frozen `now`; `tests/test_launcher_scheduler_postgres.py` checks the SQL.
+- Chain roots are `running` run_log rows with no k8s Job or process (`chain_root_id = id`,
+  `job_name` = the chain). The watcher's (#344) orphan sweep must skip them; the scheduler
+  ends them itself (`max_duration` -> `timeout`).
+- `seasons` windows use nflverse game dates: 7 days before the start week's first game through
+  2 days after the end week's last game, so the Tuesday after week 18 still ingests. An
+  unreadable schedule fails open (logs WARNING).
+- Chains: an `on: success` parent that doesn't succeed skips only that branch
+  (`dependency_failed`). A skipped step still satisfies `on: finish`, so Tuesday's acting
+  steps run even if ingestion fails. A failure with attempts left counts as pending, since the
+  watcher retries the same row. Past `max_duration`, the steps not yet started are skipped and
+  the root ends `timeout`. A job's own slot is skipped (`chain_step`) on a day a chain run
+  covers it.
+- `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
+  it gets no `chain_root_id`, so it never starts downstream steps.

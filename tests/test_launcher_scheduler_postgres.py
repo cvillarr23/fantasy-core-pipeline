@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import os
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -10,8 +11,9 @@ from psycopg2 import sql
 import pytest
 
 from src.launcher.catalog import load_catalog
+from src.launcher import publish
 from src.launcher.scheduler import PostgresSchedulerState, Scheduler
-from src.services import run_log_service as run_log
+from src.services import activity_service as activity, run_log_service as run_log
 
 UTC = timezone.utc
 TUESDAY = datetime(2026, 10, 27, 21, 0, 30, tzinfo=UTC)  # 16:00:30 America/Chicago
@@ -33,6 +35,7 @@ def conn():
     with conn, conn.cursor() as cursor:
         cursor.execute(sql.SQL("CREATE SCHEMA {};").format(sql.Identifier(schema)))
         cursor.execute(sql.SQL("SET search_path TO {};").format(sql.Identifier(schema)))
+        cursor.execute(activity.SCHEMA)
         cursor.execute(run_log.SCHEMA)
     try:
         yield conn
@@ -52,34 +55,12 @@ def state(conn):
         with conn, conn.cursor() as cursor:
             yield cursor
 
-    return PostgresSchedulerState(cursor_context)
-
-
-def publish_into(conn, published):
-    """The queued run_log row the launcher's publish helper writes."""
-
-    def publish(command):
-        with conn, conn.cursor() as c:
-            c.execute(
-                """INSERT INTO run_log(id,job_name,trigger_type,status,dedupe_key,scheduled_for,
-                parent_run_id,chain_root_id) VALUES (%s,%s,%s,'queued',%s,%s,%s,%s)
-                ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id""",
-                (
-                    command["run_id"],
-                    command["job"],
-                    command["trigger"],
-                    command["dedupe_key"],
-                    command["scheduled_for"],
-                    command["parent_run_id"],
-                    command["chain_root_id"],
-                ),
-            )
-            inserted = c.fetchone() is not None
-        if inserted:
-            published.append(command)
-        return inserted
-
-    return publish
+    # The real publish_run writes the queued rows; only the broker delivery is stubbed.
+    with (
+        patch.object(publish, "get_db_cursor", cursor_context),
+        patch("src.services.activity_runner.publish_job_run"),
+    ):
+        yield PostgresSchedulerState(cursor_context)
 
 
 def rows(conn, where="TRUE", params=()):
@@ -129,18 +110,19 @@ def test_pause_window(conn, state):
 
 
 def test_chain_progresses_and_finalizes_through_run_log(conn, state):
-    published: list[dict] = []
     scheduler = Scheduler(
-        load_catalog("tests/fixtures/job-catalog.yaml"),
-        state,
-        publish_into(conn, published),
-        seasons=AlwaysInSeason(),
+        load_catalog("tests/fixtures/job-catalog.yaml"), state, seasons=AlwaysInSeason()
     )
     scheduler.tick(TUESDAY)
     scheduler.tick(TUESDAY)
     (chain_root,) = state.active_chain_roots()
     assert chain_root.trigger == {"chain": "tuesday-weekly", "from_step": None}
-    assert [c["job"] for c in published if c["trigger"] == "chain"] == ["sync-league"]
+    with conn, conn.cursor() as c:
+        c.execute(
+            """SELECT l.job_name,l.status,o.body->>'expires_at' FROM run_log l
+            JOIN job_run_outbox o ON o.run_id=l.id WHERE l.trigger_type='chain'"""
+        )
+        assert c.fetchall() == [("sync-league", "queued", "2026-10-28T05:00:00Z")]
 
     set_status(conn, "sync-league", "success")
     set_status(conn, "metrics-extractor", "success")  # not started yet: a no-op

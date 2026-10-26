@@ -31,14 +31,18 @@ nothing:
   scoped to that step and its descendants. A manual run without ``downstream`` has no
   ``chain_root_id``, so no edges are ever evaluated for it.
 
-The scheduler doesn't touch RabbitMQ. ``publish`` takes the ADR run command and returns
-False when its dedupe key already exists; the launcher wires in the run_log + outbox helper.
+Runs are requested through ``launcher.publish.publish_run`` (injectable for tests), which
+writes the queued run_log row and outbox row; a used dedupe key comes back as ``duplicate``.
+Each command's ``expires_at`` is set here, the only place that knows it: a slot's catch-up
+window, a chain step's ``latest`` plus ``LATEST_GRACE``, or else its chain's
+``max_duration``. ``python -m src.launcher`` runs ``Scheduler.run`` on its own thread.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -57,10 +61,15 @@ SLOT_GRACE = timedelta(minutes=2)
 SEASON_LEAD = timedelta(days=7)
 SEASON_TAIL = timedelta(days=2)
 SEASON_CACHE_TTL = timedelta(hours=24)
+# A failed nflverse read is cached briefly so ticks every few seconds don't each refetch.
+SEASON_FAILURE_TTL = timedelta(minutes=5)
+LATEST_GRACE = timedelta(minutes=30)
+POLL_SECONDS = 15
 FINAL_STATUSES = frozenset({"success", "failure", "timeout", "skipped", "cancelled"})
 RETRYABLE_STATUSES = frozenset({"failure", "timeout"})
 
-Publisher = Callable[[dict[str, Any]], bool]
+# publish_run's signature: (catalog, job, *, trigger, dedupe_key, ...) -> {run_id, status}.
+Publisher = Callable[..., dict[str, str]]
 
 
 @dataclass
@@ -139,6 +148,7 @@ class NflSeasonCalendar:
         self._load = load or _load_schedule_once
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._cache: dict[int, tuple[datetime, pl.DataFrame]] = {}
+        self._failures: dict[int, tuple[datetime, Exception]] = {}
 
     def in_season(self, season: Season, day: date) -> bool:
         # A season runs September to early February, so January belongs to the prior year.
@@ -159,9 +169,23 @@ class NflSeasonCalendar:
         cached = self._cache.get(year)
         if cached and now - cached[0] < SEASON_CACHE_TTL:
             return cached[1]
-        schedule = self._load(year)
+        failed = self._failures.get(year)
+        if failed and now - failed[0] < SEASON_FAILURE_TTL:
+            raise failed[1]
+        try:
+            schedule = self._load(year)
+        except Exception as exc:
+            self._failures[year] = (now, exc)
+            raise
+        self._failures.pop(year, None)
         self._cache[year] = (now, schedule)
         return schedule
+
+
+def _publish_run(catalog: Catalog, job: str, **kwargs: Any) -> dict[str, str]:
+    from src.launcher.publish import publish_run
+
+    return publish_run(catalog, job, **kwargs)
 
 
 def _load_schedule_once(season: int) -> pl.DataFrame:
@@ -176,13 +200,13 @@ class Scheduler:
         self,
         catalog: Catalog,
         state: SchedulerState,
-        publish: Publisher,
+        publish: Publisher | None = None,
         seasons: NflSeasonCalendar | None = None,
         clock: Callable[[], datetime] | None = None,
     ):
         self.catalog = catalog
         self.state = state
-        self.publish = publish
+        self.publish = publish or _publish_run
         self.seasons = seasons or NflSeasonCalendar()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._order = {
@@ -212,6 +236,15 @@ class Scheduler:
         for name, job in self.catalog.jobs.items():
             for schedule in job.schedules:
                 self._guard(f"job {name} slot", self._job_slot, name, schedule, now)
+
+    def run(self, stop: threading.Event, poll_seconds: float = POLL_SECONDS) -> None:
+        """Ticks until ``stop`` is set; a failed tick (database away) is retried next poll."""
+        while not stop.is_set():
+            try:
+                self.tick()
+            except Exception:
+                logger.exception("Scheduler tick failed")
+            stop.wait(poll_seconds)
 
     def chain_for_step(self, job: str) -> str:
         """The one chain containing ``job``, for a manual run with ``downstream: true``."""
@@ -259,6 +292,8 @@ class Scheduler:
                 params=params,
                 requested_by=requested_by,
                 downstream=True,
+                # A manual request: publish_run applies the catalog's manual_queue_ttl.
+                expires_at=None,
             )
         except Exception:
             self.state.finish_chain_root(root.id, "failure", "publish_failed")
@@ -276,7 +311,7 @@ class Scheduler:
         self, name: str, schedule: Schedule, now: datetime
     ) -> tuple[datetime, str] | None:
         slot = latest_slot(schedule, now)
-        if now - slot > max(schedule.catch_up or timedelta(0), SLOT_GRACE):
+        if now - slot > _window(schedule):
             return None
         key = slot_key(name, slot)
         if self.state.run_exists(key) or not self._in_season(schedule, slot):
@@ -325,7 +360,13 @@ class Scheduler:
         elif self._chain_covers(name, schedule, slot):
             self._skip(name, "schedule", key, slot, "chain_step")
         else:
-            self._publish(name, trigger="schedule", dedupe_key=key, scheduled_for=slot)
+            self._publish(
+                name,
+                trigger="schedule",
+                dedupe_key=key,
+                scheduled_for=slot,
+                expires_at=slot + _window(schedule),
+            )
 
     def _chain_covers(self, job: str, schedule: Schedule, slot: datetime) -> bool:
         tz = ZoneInfo(schedule.tz)
@@ -369,7 +410,7 @@ class Scheduler:
         return "finished"
 
     def _max_attempts(self, job: str) -> int:
-        return self.catalog.jobs[job].max_attempts or self.catalog.defaults.max_attempts
+        return self.catalog.resolve(job).max_attempts
 
     def _advance(self, root: RunRow, now: datetime) -> None:
         name = root.trigger.get("chain") or root.job_name
@@ -409,8 +450,8 @@ class Scheduler:
                 outcome == "success" or (on == "finish" and outcome == "finished")
                 for on, outcome in edges
             )
+            latest = self._latest_at(chain, step, root.scheduled_for)
             if not ready:
-                latest = self._latest_at(chain, step, root.scheduled_for)
                 if latest is None or now < latest:
                     continue
                 logger.info(
@@ -428,6 +469,11 @@ class Scheduler:
                 dedupe_key=key,
                 scheduled_for=now,
                 chain_root_id=root.id,
+                expires_at=(
+                    latest + LATEST_GRACE
+                    if latest
+                    else root.scheduled_for + chain.max_duration
+                ),
             )
             runs[step_name] = RunRow(run_id, step_name, "queued", chain_root_id=root.id)
         if expired:
@@ -493,27 +539,31 @@ class Scheduler:
         params: dict[str, Any] | None = None,
         requested_by: str | None = None,
         downstream: bool = False,
+        expires_at: datetime | None,
     ) -> str:
-        run_id = str(uuid.uuid4())
-        command = {
-            "run_id": run_id,
-            "job": job,
-            "params": params or {},
-            "trigger": trigger,
-            "requested_by": requested_by,
-            "dedupe_key": dedupe_key,
-            "parent_run_id": chain_root_id,
-            "chain_root_id": chain_root_id,
-            "event_id": None,
-            "downstream": downstream,
-            "scheduled_for": scheduled_for.astimezone(timezone.utc).isoformat(),
-            "attempt": 1,
-        }
-        if self.publish(command):
-            logger.info("Published %s run %s (%s)", job, run_id, dedupe_key)
-        else:
+        result = self.publish(
+            self.catalog,
+            job,
+            trigger=trigger,
+            params=params,
+            requested_by=requested_by,
+            dedupe_key=dedupe_key,
+            parent_run_id=chain_root_id,
+            chain_root_id=chain_root_id,
+            downstream=downstream,
+            scheduled_for=scheduled_for,
+            expires_at=expires_at,
+        )
+        if result["status"] == "duplicate":
             logger.info("Run %s already exists; not published again", dedupe_key)
-        return run_id
+        else:
+            logger.info("Published %s run %s (%s)", job, result["run_id"], dedupe_key)
+        return result["run_id"]
+
+
+def _window(schedule: Schedule) -> timedelta:
+    """How long after its slot a missed run still fires, and its queue expiry."""
+    return max(schedule.catch_up or timedelta(0), SLOT_GRACE)
 
 
 _ROW_COLUMNS = "id,job_name,status,attempt,scheduled_for,chain_root_id,trigger"

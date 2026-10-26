@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -138,24 +139,34 @@ def commands():
     return []
 
 
+def fake_publish_run(state, commands):
+    """Stands in for publish_run: the queued row is what chains read back."""
+
+    def publish(catalog, job, **kwargs):
+        existing = state.by_key(kwargs["dedupe_key"])
+        if existing:
+            return {"run_id": existing.id, "status": "duplicate"}
+        command = {"run_id": str(uuid.uuid4()), "job": job, **kwargs}
+        row = RunRow(
+            command["run_id"], job, "queued", chain_root_id=kwargs["chain_root_id"]
+        )
+        state.insert(
+            row, dedupe_key=kwargs["dedupe_key"], trigger_type=kwargs["trigger"]
+        )
+        commands.append(command)
+        return {"run_id": command["run_id"], "status": "queued"}
+
+    return publish
+
+
 @pytest.fixture
 def scheduler(state, commands):
-    # Stands in for the run_log + outbox helper: the queued row is what chains read back.
-    def publish(command):
-        row = RunRow(
-            command["run_id"],
-            command["job"],
-            "queued",
-            chain_root_id=command["chain_root_id"],
-        )
-        if not state.insert(
-            row, dedupe_key=command["dedupe_key"], trigger_type=command["trigger"]
-        ):
-            return False
-        commands.append(command)
-        return True
-
-    return Scheduler(load_catalog(FIXTURE), state, publish, seasons=AlwaysInSeason())
+    return Scheduler(
+        load_catalog(FIXTURE),
+        state,
+        fake_publish_run(state, commands),
+        seasons=AlwaysInSeason(),
+    )
 
 
 def jobs(commands, job=None, trigger=None):
@@ -194,7 +205,8 @@ def test_catch_up_slot_inside_window_fires_once(scheduler, commands):
     (command,) = jobs(commands, "rumor-action-trigger")
     assert command["trigger"] == "schedule"
     assert command["dedupe_key"] == "rumor-action-trigger@2026-10-29T02:45:00Z"
-    assert command["scheduled_for"] == "2026-10-29T02:45:00+00:00"
+    assert command["scheduled_for"] == datetime(2026, 10, 29, 2, 45, tzinfo=UTC)
+    assert command["expires_at"] == datetime(2026, 10, 29, 3, 45, tzinfo=UTC)
 
     scheduler.tick(ct(2026, 10, 28, 22, 31))
     assert len(jobs(commands, "rumor-action-trigger")) == 1
@@ -215,6 +227,39 @@ def test_zero_catch_up_fires_on_time_slot_only(scheduler, commands):
     # 29 minutes after the 10:30 slot: past the grace, so a catch_up 0 job waits for 11:00.
     scheduler.tick(ct(2026, 10, 28, 11, 29))
     assert jobs(commands, "rumor-syncer") == []
+
+
+def test_slot_expires_at_the_end_of_its_window(scheduler, commands):
+    scheduler.tick(ct(2026, 10, 28, 10, 30, 30))
+    (command,) = jobs(commands, "rumor-syncer")
+    assert command["expires_at"] == ct(2026, 10, 28, 10, 32)  # catch_up 0 -> SLOT_GRACE
+
+
+def test_duplicate_publish_returns_the_existing_run(scheduler, commands):
+    kwargs = dict(
+        trigger="schedule",
+        dedupe_key="rumor-syncer@x",
+        scheduled_for=ct(2026, 10, 28, 10, 30),
+        expires_at=None,
+    )
+    first = scheduler._publish("rumor-syncer", **kwargs)
+    assert scheduler._publish("rumor-syncer", **kwargs) == first
+    assert len(commands) == 1
+
+
+def test_run_ticks_until_stopped_and_survives_a_failed_tick(scheduler):
+    stop = threading.Event()
+    calls = []
+
+    def tick():
+        calls.append(1)
+        if len(calls) == 2:
+            stop.set()
+        raise RuntimeError("database away")
+
+    scheduler.tick = tick
+    scheduler.run(stop, poll_seconds=0)
+    assert len(calls) == 2
 
 
 def test_long_outage_fires_only_latest_slot(scheduler, commands):
@@ -297,11 +342,32 @@ def test_season_window_covers_tuesday_before_week_one_and_after_end_week():
     assert not calendar.in_season(regular, date(2027, 3, 2))
 
 
+def test_failed_nfl_schedule_read_is_cached_briefly():
+    now = [datetime(2026, 10, 27, tzinfo=UTC)]
+    loads = []
+
+    def broken(season):
+        loads.append(season)
+        raise RuntimeError("404")
+
+    calendar = NflSeasonCalendar(load=broken, clock=lambda: now[0])
+    regular = Season(start=1, end=18)
+    for minutes in (0, 1, 4):
+        now[0] = datetime(2026, 10, 27, tzinfo=UTC) + timedelta(minutes=minutes)
+        with pytest.raises(RuntimeError):
+            calendar.in_season(regular, date(2026, 10, 27))
+    assert loads == [2026]
+    now[0] += timedelta(minutes=2)
+    with pytest.raises(RuntimeError):
+        calendar.in_season(regular, date(2026, 10, 27))
+    assert loads == [2026, 2026]
+
+
 def test_chain_outside_season_does_nothing(state, commands):
     scheduler = Scheduler(
         load_catalog(FIXTURE),
         state,
-        lambda c: commands.append(c) or True,
+        fake_publish_run(state, commands),
         seasons=NflSeasonCalendar(load=nfl_schedule_2026),
     )
     scheduler.tick(ct(2027, 3, 2, 16, 1))
@@ -315,7 +381,7 @@ def test_unreadable_nfl_schedule_fails_open(state, commands, caplog):
     scheduler = Scheduler(
         load_catalog(FIXTURE),
         state,
-        lambda c: commands.append(c) or True,
+        fake_publish_run(state, commands),
         seasons=NflSeasonCalendar(load=broken),
     )
     with caplog.at_level(logging.WARNING, logger="LauncherScheduler"):
@@ -362,6 +428,8 @@ def tuesday(scheduler, state, commands):
     command = jobs(commands, "sync-league")[0]
     assert command["dedupe_key"] == f"sync-league@{chain_root.id}"
     assert command["chain_root_id"] == command["parent_run_id"] == chain_root.id
+    # No `latest`: the step is worth starting for as long as the chain may run.
+    assert command["expires_at"] == chain_root.scheduled_for + timedelta(hours=8)
     return chain_root
 
 
@@ -406,7 +474,8 @@ def test_latest_starts_step_while_parent_hangs(scheduler, state, commands, tuesd
     scheduler.tick(ct(2026, 10, 27, 19, 14))
     assert jobs(commands, "lineup-optimizer") == []
     scheduler.tick(ct(2026, 10, 27, 19, 15))
-    assert len(jobs(commands, "lineup-optimizer", trigger="chain")) == 1
+    (lineup,) = jobs(commands, "lineup-optimizer", trigger="chain")
+    assert lineup["expires_at"] == ct(2026, 10, 27, 19, 45)
 
 
 def test_max_duration_skips_remaining_steps(scheduler, state, commands, tuesday):
@@ -479,6 +548,7 @@ def test_manual_step_with_downstream_runs_its_descendants(scheduler, state, comm
     assert command["run_id"] == run_id
     assert command["params"] == {"dry_run": True}
     assert command["downstream"] is True
+    assert command["expires_at"] is None  # publish_run applies manual_queue_ttl
     assert command["chain_root_id"] == root_id
 
     state.runs[run_id].status = "success"
