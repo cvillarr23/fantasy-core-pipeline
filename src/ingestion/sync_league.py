@@ -17,9 +17,6 @@ from espn_api.football.constant import POSITION_MAP
 
 from src.ingestion.espn_client import TimedEspnFantasyRequests
 
-from src.telemetry import configure_trace_logging
-
-configure_trace_logging()
 logger = logging.getLogger("LeagueSync")
 
 BENCH_AND_IR_SLOT_IDS = {20, 21}

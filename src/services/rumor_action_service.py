@@ -835,7 +835,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    from src.telemetry import configure_trace_logging
-
-    configure_trace_logging()
     sys.exit(run_log_service.run_main("rumor_action_trigger", main))

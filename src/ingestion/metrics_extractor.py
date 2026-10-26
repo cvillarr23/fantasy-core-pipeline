@@ -10,9 +10,6 @@ from src.database import get_db_connection
 from src.nfl_schedule import last_completed_week, load_schedule
 from src.services import run_log_service
 
-from src.telemetry import configure_trace_logging
-
-configure_trace_logging()
 logger = logging.getLogger("NFLVerseIngestor")
 
 RELEVANT_PLAY_TYPES = ["pass", "run"]

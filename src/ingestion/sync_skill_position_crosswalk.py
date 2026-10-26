@@ -29,9 +29,6 @@ from src.database import get_db_connection
 from src.ingestion.sync_league import build_league
 from src.services import run_log_service
 
-from src.telemetry import configure_trace_logging
-
-configure_trace_logging()
 logger = logging.getLogger("SkillPositionCrosswalkSync")
 
 SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]

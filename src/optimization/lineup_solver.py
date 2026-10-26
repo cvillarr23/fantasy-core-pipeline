@@ -31,11 +31,10 @@ from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion.metrics_extractor import normalize_team
 from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
-from src.telemetry import configure_tracing, configure_trace_logging
+from src.telemetry import configure_tracing
 from src.trigger_client import post_trigger_idempotent
 from src.services import run_log_service
 
-configure_trace_logging()
 logger = logging.getLogger("LineupSolver")
 tracer = trace.get_tracer("lineup_solver")
 

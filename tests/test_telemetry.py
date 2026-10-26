@@ -1,5 +1,7 @@
 import logging
 import json
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +14,24 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.util._once import Once
 
 import src.telemetry as telemetry
+
+
+def test_importing_src_configures_logfmt_logging():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import logging; import src; from src.telemetry import LogfmtFormatter, TraceIdLogFilter; "
+            "root = logging.getLogger(); assert root.handlers; "
+            "assert all(isinstance(handler.formatter, LogfmtFormatter) for handler in root.handlers); "
+            "assert all(any(isinstance(f, TraceIdLogFilter) for f in handler.filters) for handler in root.handlers)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_logfmt_formatter_includes_extra_fields_and_quotes_values():

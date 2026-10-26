@@ -22,10 +22,9 @@ from src.api.trade import trade_router
 from src.api.chat import chat_router
 from src.api.rumor_action import rumor_action_router
 from src.api.mcp_server import mcp, mcp_asgi_app
-from src.telemetry import configure_tracing, configure_trace_logging
+from src.telemetry import configure_tracing
 
 configure_tracing("fantasy-core-api")
-configure_trace_logging()
 
 logger = logging.getLogger("GatewayEngine")
 

@@ -13,9 +13,6 @@ from src.queue_contracts import WAIVER_ACTIONS as WAIVER_ACTIONS_QUEUE
 from src.database import get_db_connection, get_redis_client
 from src.services import run_log_service
 
-from src.telemetry import configure_trace_logging
-
-configure_trace_logging()
 logger = logging.getLogger("SleeperPlayerSync")
 
 # Default vhost must be the percent-encoded "%2f", not a bare trailing "/" - a bare "//"
