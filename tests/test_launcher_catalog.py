@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -26,9 +27,74 @@ def catalog_data() -> dict:
     }
 
 
-def test_current_catalog_fixture_loads_with_sixteen_jobs():
+# Every production CronJob schedule (fantasy-infra base/) and the job that now owns it.
+CRONJOB_SCHEDULES = {
+    ("rumor-syncer", "*/30 * * * *"),
+    ("rapid-status-syncer", "*/10 * * * 4,0,1"),
+    ("stale-draft-job-sweeper", "*/15 * * * *"),
+    ("projections-refresh", "0 18 * * *"),
+    ("rumor-action-trigger", "45 21 * * *"),
+    ("sync-actual-scores", "0 10 * * 5"),
+    ("trade-candidates", "0 7 * * *"),
+    ("trade-candidates", "30 12 * * 3,5"),
+    ("espn-session-healthcheck", "0 6 * * 1"),
+    ("rumor-digest-bot", "0 11 * * *"),
+    ("trade-inbox", "0 8-22/2 * * *"),
+    ("trade-scan", "0 13 * * 3,5"),
+}
+# weekly-ingestor, sync-actual-scores (Tuesday), lineup-optimizer and weekly-waiver-trigger
+# ran at clock offsets; the chain now orders them.
+TUESDAY_STEPS = [
+    "sync-league",
+    "metrics-extractor",
+    "sync-actual-scores",
+    "projections-refresh",
+    "lineup-optimizer",
+    "waiver-trigger",
+    "rumor-action-trigger",
+]
+
+
+def test_fixture_mirrors_every_production_cronjob():
     catalog = load_catalog(FIXTURE)
-    assert len(catalog.jobs) == 16
+    scheduled = {
+        (name, schedule.cron)
+        for name, job in catalog.jobs.items()
+        for schedule in job.schedules
+    }
+    assert scheduled == CRONJOB_SCHEDULES
+    tuesday = catalog.chains["tuesday-weekly"]
+    assert tuesday.schedule.cron == "0 16 * * 2"
+    assert list(tuesday.steps) == TUESDAY_STEPS
+    assert catalog.jobs["trade-scan"].max_attempts is None  # defaults to 1: never auto-retry
+    assert catalog.jobs["trade-inbox"].resources.limits.memory == "1200Mi"
+
+
+def test_catch_up_zero_means_never_fire_a_missed_slot():
+    catalog = load_catalog(FIXTURE)
+    assert catalog.jobs["rumor-syncer"].schedules[0].catch_up == timedelta(0)
+    raw = catalog_data()
+    raw["jobs"]["one"]["schedules"] = [
+        {"cron": "* * * * *", "tz": "UTC", "catch_up": "-1m"}
+    ]
+    with pytest.raises(ValidationError):
+        Catalog.model_validate(raw)
+
+
+def test_resources_default_to_the_core_cronjob_pod_spec():
+    defaults = Catalog.model_validate(catalog_data()).defaults.resources
+    assert (defaults.requests.cpu, defaults.requests.memory) == ("100m", "256Mi")
+    assert (defaults.limits.cpu, defaults.limits.memory) == ("500m", "512Mi")
+
+
+@pytest.mark.parametrize("latest", ["7:15", "24:00", "19:60", "evening"])
+def test_chain_latest_must_be_hh_mm(latest):
+    raw = catalog_data()
+    raw["chains"] = {
+        "c": {"max_duration": "1h", "steps": {"one": {"latest": latest}}}
+    }
+    with pytest.raises(ValidationError, match="HH:MM"):
+        Catalog.model_validate(raw)
 
 
 @pytest.mark.parametrize(

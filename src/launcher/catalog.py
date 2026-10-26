@@ -43,9 +43,9 @@ class CatalogModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _duration(value: str | int | float) -> timedelta:
+def _duration(value: str | int | float, allow_zero: bool = False) -> timedelta:
     if isinstance(value, (int, float)):
-        if value <= 0:
+        if value < 0 or (value == 0 and not allow_zero):
             raise ValueError("duration must be positive")
         return timedelta(seconds=value)
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)\s*", value)
@@ -54,7 +54,7 @@ def _duration(value: str | int | float) -> timedelta:
             "duration must use seconds, minutes, hours, or days (for example '30m')"
         )
     amount = float(match.group(1))
-    if amount <= 0:
+    if amount == 0 and not allow_zero:
         raise ValueError("duration must be positive")
     return timedelta(
         seconds=amount * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
@@ -114,12 +114,28 @@ class Profile(CatalogModel):
     volumes: list[str] = Field(default_factory=list)
 
 
+class ResourceSpec(CatalogModel):
+    cpu: str
+    memory: str
+
+
+class Resources(CatalogModel):
+    """Kubernetes container requests and limits for a job's pod."""
+
+    requests: ResourceSpec
+    limits: ResourceSpec
+
+
 class Defaults(CatalogModel):
     executor: Literal["pod", "inline"] = "pod"
     overlap: Literal["forbid", "queue"] = "forbid"
     max_attempts: int = Field(default=1, ge=1)
     deadline: timedelta = timedelta(hours=1)
     alert: Literal["none", "warning", "critical"] = "warning"
+    resources: Resources = Resources(
+        requests=ResourceSpec(cpu="100m", memory="256Mi"),
+        limits=ResourceSpec(cpu="500m", memory="512Mi"),
+    )
 
     @field_validator("deadline", mode="before")
     @classmethod
@@ -150,7 +166,8 @@ class Schedule(CatalogModel):
     @field_validator("catch_up", mode="before")
     @classmethod
     def parse_catch_up(cls, value: Any) -> timedelta | None:
-        return None if value is None else _duration(value)
+        # 0 means "never fire a missed slot", which the frequent syncers use.
+        return None if value is None else _duration(value, allow_zero=True)
 
 
 class EventSubscription(CatalogModel):
@@ -183,6 +200,7 @@ class Job(CatalogModel):
     max_attempts: int | None = Field(default=None, ge=1)
     deadline: timedelta | None = None
     alert: Literal["none", "warning", "critical"] | None = None
+    resources: Resources | None = None
     acts: bool = False
     schedules: list[Schedule] = Field(default_factory=list)
     on_event: list[EventSubscription] = Field(default_factory=list)
@@ -206,6 +224,13 @@ class Dependency(CatalogModel):
 class ChainStep(CatalogModel):
     after: list[Dependency] = Field(default_factory=list)
     latest: str | None = None
+
+    @field_validator("latest")
+    @classmethod
+    def validate_latest(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError(f"latest must be HH:MM in the chain's timezone: {value!r}")
+        return value
 
 
 class Chain(CatalogModel):
