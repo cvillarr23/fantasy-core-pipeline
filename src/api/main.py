@@ -21,7 +21,7 @@ from src.api.stats import stats_router
 from src.api.trade import trade_router
 from src.api.chat import chat_router
 from src.api.rumor_action import rumor_action_router
-from src.launcher.jobs_api import jobs_router
+from src.api.jobs import jobs_router
 from src.api.mcp_server import mcp, mcp_asgi_app
 from src.telemetry import configure_tracing
 

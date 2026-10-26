@@ -110,7 +110,7 @@ DESCRIPTIONS = {
     "GET /v1/jobs": "List catalog jobs and chains, including overrides and latest runs.",
     "POST /v1/jobs/{name}/runs": "Queue a catalog job run for the launcher.",
     "POST /v1/runs/{identity}/cancel": "Cancel a queued or running launcher run.",
-    "PUT /v1/jobs/{name}/pause": "Pause a catalog job or chain until a specified time.",
+    "PUT /v1/jobs/{name}/pause": "Pause a catalog job or chain until a time, or indefinitely.",
     "DELETE /v1/jobs/{name}/pause": "Remove a job or chain pause.",
     "GET /v1/runs/{identity}": "Show one launcher run and its linked activity.",
     "GET /v1/roster/deficits": "Show per-position roster deficits.",

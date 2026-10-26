@@ -1,13 +1,15 @@
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import pytest
 from fastapi import HTTPException, Request
 
-from src.launcher import jobs_api
+from src.api import jobs as jobs_api
 from src.launcher.catalog import Catalog
-from src.launcher.publish import publish_run as actual_publish_run
+from src.schemas.jobs import PauseRequest, StartRunRequest
+from src.services import jobs_service
 
 
 @pytest.fixture
@@ -89,22 +91,21 @@ def db_cursor(cursor):
 
 
 def test_start_run_maps_unknown_bad_and_missing_params(catalog, monkeypatch):
-    monkeypatch.setattr(jobs_api, "load_catalog_from_env", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
     overlap = Mock(return_value=False)
     publish = Mock(return_value={"run_id": "x", "status": "queued"})
-    monkeypatch.setattr(jobs_api, "overlap_refuses", overlap)
-    monkeypatch.setattr(jobs_api, "publish_run", publish)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", overlap)
+    monkeypatch.setattr(jobs_service, "publish_run", publish)
 
     with pytest.raises(HTTPException) as unknown:
-        jobs_api.start_job("missing", jobs_api.StartRunRequest(), request())
-    monkeypatch.setattr(jobs_api, "publish_run", actual_publish_run)
+        jobs_api.start_job("missing", StartRunRequest(), request())
     with pytest.raises(HTTPException) as bad:
         jobs_api.start_job(
-            "sample-job", jobs_api.StartRunRequest(params={"other": 3}), request()
+            "sample-job", StartRunRequest(params={"other": 3}), request()
         )
     with pytest.raises(HTTPException) as missing:
         jobs_api.start_job(
-            "sample-job", jobs_api.StartRunRequest(params={"dry_run": True}), request()
+            "sample-job", StartRunRequest(params={"dry_run": True}), request()
         )
 
     assert unknown.value.status_code == 404
@@ -114,43 +115,34 @@ def test_start_run_maps_unknown_bad_and_missing_params(catalog, monkeypatch):
     overlap.assert_not_called()
 
 
-def test_start_run_refuses_overlap_and_rejects_downstream(catalog, monkeypatch):
-    monkeypatch.setattr(jobs_api, "load_catalog_from_env", lambda: catalog)
+def test_start_run_refuses_overlap(catalog, monkeypatch):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
     publish = Mock(return_value={"run_id": "x", "status": "queued"})
-    monkeypatch.setattr(jobs_api, "publish_run", publish)
-    monkeypatch.setattr(jobs_api, "overlap_refuses", lambda *_: True)
-    with pytest.raises(HTTPException) as overlap:
+    monkeypatch.setattr(jobs_service, "publish_run", publish)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: True)
+    with pytest.raises(HTTPException) as response:
         jobs_api.start_job(
-            "sample-job", jobs_api.StartRunRequest(params={"count": 4}), request()
+            "sample-job", StartRunRequest(params={"count": 4}), request()
         )
-    assert overlap.value.status_code == 409
-
-    monkeypatch.setattr(jobs_api, "overlap_refuses", lambda *_: False)
-    with pytest.raises(HTTPException) as downstream:
-        jobs_api.start_job(
-            "sample-job",
-            jobs_api.StartRunRequest(params={"count": 4}, downstream=True),
-            request(),
-        )
-    assert downstream.value.status_code == 422
+    assert response.value.status_code == 409
     publish.assert_not_called()
 
 
 def test_start_run_persists_queued_row_and_outbox(catalog, monkeypatch):
     cursor = Cursor()
-    monkeypatch.setattr(jobs_api, "load_catalog_from_env", lambda: catalog)
-    monkeypatch.setattr(jobs_api, "overlap_refuses", lambda *_: False)
-    monkeypatch.setattr(jobs_api, "get_db_cursor", lambda: db_cursor(cursor))
-    monkeypatch.setattr(
-        "src.launcher.publish.get_db_cursor", lambda: db_cursor(cursor)
-    )
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
+    monkeypatch.setattr("src.launcher.publish.get_db_cursor", lambda: db_cursor(cursor))
     with patch("src.services.activity_runner.publish_job_run"):
         result = jobs_api.start_job(
-            "sample-job", jobs_api.StartRunRequest(params={"count": 4}), request()
+            "sample-job", StartRunRequest(params={"count": 4}), request()
         )
 
     assert result["status"] == "queued"
-    assert any("INSERT INTO run_log" in query and "'queued'" in query for query in cursor.sql)
+    assert any(
+        "INSERT INTO run_log" in query and "'queued'" in query for query in cursor.sql
+    )
     outbox = next(
         params
         for query, params in zip(cursor.sql, cursor.params)
@@ -161,6 +153,67 @@ def test_start_run_persists_queued_row_and_outbox(catalog, monkeypatch):
     assert command["job"] == "sample-job"
     assert command["params"] == {"count": 4}
     assert command["requested_by"] == "operator"
+    assert command["downstream"] is False
+
+
+def test_downstream_start_returns_chain_root_and_run_id(catalog, monkeypatch):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
+
+    class FakeScheduler:
+        def __init__(self, *_):
+            pass
+
+        def start_chain(self, name, *, params, requested_by):
+            assert name == "sample-job"
+            assert params == {"count": 2}
+            assert requested_by == "operator"
+            return "chain-root", "run-456"
+
+    monkeypatch.setattr(jobs_service, "_scheduler", lambda _catalog: FakeScheduler())
+    result = jobs_api.start_job(
+        "sample-job",
+        StartRunRequest(params={"count": 2}, downstream=True),
+        request(),
+    )
+    assert result == {
+        "run_id": "run-456",
+        "chain_root_id": "chain-root",
+        "status": "queued",
+    }
+
+
+def test_downstream_start_maps_overlap_and_chain_ambiguity(catalog, monkeypatch):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "_scheduler", Mock())
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: True)
+    with pytest.raises(HTTPException) as overlap:
+        jobs_api.start_job(
+            "sample-job",
+            StartRunRequest(params={"count": 2}, downstream=True),
+            request(),
+        )
+    assert overlap.value.status_code == 409
+
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
+
+    class AmbiguousScheduler:
+        def __init__(self, *_):
+            pass
+
+        def start_chain(self, *_args, **_kwargs):
+            raise ValueError("step belongs to several chains")
+
+    monkeypatch.setattr(
+        jobs_service, "_scheduler", lambda _catalog: AmbiguousScheduler()
+    )
+    with pytest.raises(HTTPException) as ambiguous:
+        jobs_api.start_job(
+            "sample-job",
+            StartRunRequest(params={"count": 2}, downstream=True),
+            request(),
+        )
+    assert ambiguous.value.status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -168,7 +221,7 @@ def test_start_run_persists_queued_row_and_outbox(catalog, monkeypatch):
 )
 def test_cancel_run_statuses(monkeypatch, state, expected):
     cursor = Cursor(update_status=state, select_status=state)
-    monkeypatch.setattr(jobs_api, "get_db_cursor", lambda: db_cursor(cursor))
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     if expected == 200:
         assert jobs_api.cancel_run("run-123") == {
             "run_id": "run-123",
@@ -182,25 +235,25 @@ def test_cancel_run_statuses(monkeypatch, state, expected):
 
 def test_pause_validates_and_upserts_indefinite_pause(catalog, monkeypatch):
     cursor = Cursor()
-    monkeypatch.setattr(jobs_api, "load_catalog_from_env", lambda: catalog)
-    monkeypatch.setattr(jobs_api, "get_db_cursor", lambda: db_cursor(cursor))
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     with pytest.raises(HTTPException) as naive:
         jobs_api.pause_job(
             "sample-job",
-            jobs_api.PauseRequest(until="2030-01-01T00:00:00", reason="ops"),
+            PauseRequest(until="2030-01-01T00:00:00", reason="ops"),
             request(),
         )
     with pytest.raises(HTTPException) as past:
         jobs_api.pause_job(
             "sample-job",
-            jobs_api.PauseRequest(until="2000-01-01T00:00:00Z", reason="ops"),
+            PauseRequest(until="2000-01-01T00:00:00Z", reason="ops"),
             request(),
         )
     assert naive.value.status_code == 422
     assert past.value.status_code == 422
 
     response = jobs_api.pause_job(
-        "sample-job", jobs_api.PauseRequest(reason="maintenance"), request()
+        "sample-job", PauseRequest(reason="maintenance"), request()
     )
     assert response["paused_until"] is None
     assert any("ON CONFLICT(job_or_chain) DO UPDATE" in query for query in cursor.sql)
@@ -208,7 +261,7 @@ def test_pause_validates_and_upserts_indefinite_pause(catalog, monkeypatch):
 
 def test_unpause_missing_pause_returns_404(monkeypatch):
     cursor = Cursor()
-    monkeypatch.setattr(jobs_api, "get_db_cursor", lambda: db_cursor(cursor))
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     with pytest.raises(HTTPException) as response:
         jobs_api.unpause_job("sample-job")
     assert response.value.status_code == 404
@@ -216,7 +269,7 @@ def test_unpause_missing_pause_returns_404(monkeypatch):
 
 def test_unpause_existing_pause_deletes_override(monkeypatch):
     cursor = Cursor(select_status="paused")
-    monkeypatch.setattr(jobs_api, "get_db_cursor", lambda: db_cursor(cursor))
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     assert jobs_api.unpause_job("sample-job") == {
         "name": "sample-job",
         "status": "resumed",
@@ -227,26 +280,27 @@ def test_unpause_existing_pause_deletes_override(monkeypatch):
 def test_list_jobs_returns_jobs_chains_and_reuses_last_run_map(
     catalog, monkeypatch
 ):
-    cursor = Cursor(rows=[("sample-job", "run-1", "success", "started", "finished", "manual")])
-    monkeypatch.setattr(jobs_api, "load_catalog_from_env", lambda: catalog)
-    monkeypatch.setattr(jobs_api, "get_db_cursor", lambda: db_cursor(cursor))
+    run = ("sample-job", "run-1", "success", datetime.now(timezone.utc), None, "manual")
+    cursor = Cursor(rows=[run])
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     payload = jobs_api.get_jobs()
-    assert payload["jobs"][0]["name"] == "sample-job"
-    assert payload["jobs"][0]["last_run"]["id"] == "run-1"
-    step = payload["chains"][0]["steps"]["sample-job"]
-    assert step["after"] == []
-    assert step["last_run"]["id"] == "run-1"
+    assert payload.jobs[0].name == "sample-job"
+    assert payload.jobs[0].last_run.id == "run-1"
+    step = payload.chains[0].steps["sample-job"]
+    assert step.after == []
+    assert step.last_run.id == "run-1"
     assert sum("DISTINCT ON (job_name)" in query for query in cursor.sql) == 1
 
 
 def test_missing_catalog_returns_empty_jobs_and_503_for_write(monkeypatch):
     def missing_catalog():
-        raise FileNotFoundError("catalog is not mounted")
+        raise jobs_service.CatalogUnavailableError("catalog is not mounted")
 
-    monkeypatch.setattr(jobs_api, "load_catalog_from_env", missing_catalog)
-    assert jobs_api.get_jobs() == {"jobs": [], "chains": []}
+    monkeypatch.setattr(jobs_service, "_catalog", missing_catalog)
+    assert jobs_api.get_jobs().jobs == []
     with pytest.raises(HTTPException) as response:
-        jobs_api.start_job("sample-job", jobs_api.StartRunRequest(), request())
+        jobs_api.start_job("sample-job", StartRunRequest(), request())
     assert response.value.status_code == 503
 
 
