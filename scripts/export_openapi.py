@@ -37,6 +37,7 @@ AREAS = [
     ("Trade", "Trade", ("/v1/trade",)),
     ("Draft", "Draft day", ("/v1/draft",)),
     ("Activity", "Activity", ("/v1/activity",)),
+    ("Jobs", "Jobs", ("/v1/jobs", "/v1/runs")),
     ("Roster and waivers", "Roster and waivers", ("/v1/roster", "/v1/waiver")),
     (
         "League and matchup",
@@ -59,6 +60,7 @@ QUEUES = {
     "POST /v1/trade/incoming/{espn_transaction_id}/decision/retry": "trade_responses",
     "POST /v1/trade/incoming/{espn_transaction_id}/counter": "trade_negotiations",
     "POST /v1/trigger/rumor-action": "lineup_updates, waiver_actions",
+    "POST /v1/jobs/{name}/runs": "job_runs",
 }
 
 DESCRIPTIONS = {
@@ -105,6 +107,12 @@ DESCRIPTIONS = {
     "GET /v1/activity/runs/{identity}": "Show one run with its trigger, inputs, outputs and child runs.",
     "GET /v1/activity/jobs": "Latest run and recent failure count per job, plus dead-letter queue depths.",
     "GET /v1/activity/trace": "Trace an article, rumor evaluation or move through the rumor pipeline.",
+    "GET /v1/jobs": "List catalog jobs and chains, including overrides and latest runs.",
+    "POST /v1/jobs/{name}/runs": "Queue a catalog job run for the launcher.",
+    "POST /v1/runs/{identity}/cancel": "Cancel a queued or running launcher run.",
+    "PUT /v1/jobs/{name}/pause": "Pause a catalog job or chain until a time, or indefinitely.",
+    "DELETE /v1/jobs/{name}/pause": "Remove a job or chain pause.",
+    "GET /v1/runs/{identity}": "Show one launcher run and its linked activity.",
     "GET /v1/roster/deficits": "Show per-position roster deficits.",
     "GET /v1/roster/bye-outlook": "Show which upcoming weeks NFL byes leave the lineup short.",
     "POST /v1/roster/move-preview": "Preview the effect of a roster move.",

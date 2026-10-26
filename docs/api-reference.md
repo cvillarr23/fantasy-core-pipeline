@@ -99,6 +99,17 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `GET` | `/v1/activity/sessions/{identity}` | Show one bot session. | No |  |
 | `GET` | `/v1/activity/trace` | Trace an article, rumor evaluation or move through the rumor pipeline. | No |  |
 
+### Jobs
+
+| Method | Path | Purpose | `X-API-Key` | Publishes to |
+|---|---|---|---|---|
+| `GET` | `/v1/jobs` | List catalog jobs and chains, including overrides and latest runs. | No |  |
+| `DELETE` | `/v1/jobs/{name}/pause` | Remove a job or chain pause. | Yes |  |
+| `PUT` | `/v1/jobs/{name}/pause` | Pause a catalog job or chain until a time, or indefinitely. | Yes |  |
+| `POST` | `/v1/jobs/{name}/runs` | Queue a catalog job run for the launcher. | Yes | `job_runs` |
+| `GET` | `/v1/runs/{identity}` | Show one launcher run and its linked activity. | No |  |
+| `POST` | `/v1/runs/{identity}/cancel` | Cancel a queued or running launcher run. | Yes |  |
+
 ### Roster and waivers
 
 | Method | Path | Purpose | `X-API-Key` | Publishes to |

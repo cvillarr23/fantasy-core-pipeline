@@ -21,6 +21,7 @@ from src.api.stats import stats_router
 from src.api.trade import trade_router
 from src.api.chat import chat_router
 from src.api.rumor_action import rumor_action_router
+from src.api.jobs import jobs_router
 from src.api.mcp_server import mcp, mcp_asgi_app
 from src.telemetry import configure_tracing
 
@@ -106,6 +107,7 @@ app.include_router(stats_router, prefix="/v1/stats")
 app.include_router(trade_router, prefix="/v1/trade")
 app.include_router(chat_router, prefix="/v1/chat")
 app.include_router(rumor_action_router, prefix="/v1")
+app.include_router(jobs_router, prefix="/v1")
 
 # Mount the MCP (Model Context Protocol) server (CORE-07) - its own routes already carry
 # absolute paths (/mcp, /.well-known/oauth-protected-resource/mcp), so it's mounted at

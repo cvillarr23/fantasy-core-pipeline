@@ -408,6 +408,24 @@
         "title": "ByeOutlookWeek",
         "type": "object"
       },
+      "CancelRunResponse": {
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "title": "CancelRunResponse",
+        "type": "object"
+      },
       "CandidatePlayer": {
         "properties": {
           "espn_id": {
@@ -491,6 +509,92 @@
           "nfl_bye_week"
         ],
         "title": "CandidatePlayer",
+        "type": "object"
+      },
+      "ChainInfo": {
+        "properties": {
+          "max_duration_seconds": {
+            "title": "Max Duration Seconds",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PauseInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule"
+          },
+          "steps": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ChainStepInfo"
+            },
+            "title": "Steps",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "max_duration_seconds",
+          "steps"
+        ],
+        "title": "ChainInfo",
+        "type": "object"
+      },
+      "ChainStepInfo": {
+        "properties": {
+          "after": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "After",
+            "type": "array"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest"
+          }
+        },
+        "required": [
+          "after"
+        ],
+        "title": "ChainStepInfo",
         "type": "object"
       },
       "ChatGrounding": {
@@ -2817,6 +2921,178 @@
         "title": "JobHealthList",
         "type": "object"
       },
+      "JobInfo": {
+        "properties": {
+          "acts": {
+            "title": "Acts",
+            "type": "boolean"
+          },
+          "alert": {
+            "title": "Alert",
+            "type": "string"
+          },
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Command",
+            "type": "array"
+          },
+          "deadline_seconds": {
+            "title": "Deadline Seconds",
+            "type": "integer"
+          },
+          "executor": {
+            "title": "Executor",
+            "type": "string"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_attempts": {
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "on_event": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "On Event",
+            "type": "array"
+          },
+          "overlap": {
+            "title": "Overlap",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Params",
+            "type": "object"
+          },
+          "pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PauseInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "schedules": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Schedules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "executor",
+          "overlap",
+          "max_attempts",
+          "deadline_seconds",
+          "alert",
+          "acts",
+          "params",
+          "profile",
+          "command",
+          "schedules",
+          "on_event"
+        ],
+        "title": "JobInfo",
+        "type": "object"
+      },
+      "JobsResponse": {
+        "properties": {
+          "chains": {
+            "items": {
+              "$ref": "#/components/schemas/ChainInfo"
+            },
+            "title": "Chains",
+            "type": "array"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobInfo"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs",
+          "chains"
+        ],
+        "title": "JobsResponse",
+        "type": "object"
+      },
+      "LastRun": {
+        "properties": {
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_name": {
+            "title": "Job Name",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger_type": {
+            "title": "Trigger Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_name",
+          "id",
+          "status",
+          "started_at",
+          "trigger_type"
+        ],
+        "title": "LastRun",
+        "type": "object"
+      },
       "LeagueTradeContext": {
         "properties": {
           "as_of_week": {
@@ -3545,6 +3821,119 @@
           "receive_players"
         ],
         "title": "OurCounter",
+        "type": "object"
+      },
+      "PauseInfo": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "paused_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused Until"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "set_at": {
+            "format": "date-time",
+            "title": "Set At",
+            "type": "string"
+          },
+          "set_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Set By"
+          }
+        },
+        "required": [
+          "name",
+          "paused_until",
+          "set_at"
+        ],
+        "title": "PauseInfo",
+        "type": "object"
+      },
+      "PauseRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "PauseRequest",
+        "type": "object"
+      },
+      "PauseResponse": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "paused_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused Until"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "paused_until",
+          "reason"
+        ],
+        "title": "PauseResponse",
         "type": "object"
       },
       "PitchEvidence": {
@@ -4848,6 +5237,35 @@
         "title": "RunList",
         "type": "object"
       },
+      "RunStartResponse": {
+        "properties": {
+          "chain_root_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Root Id"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "title": "RunStartResponse",
+        "type": "object"
+      },
       "RunSummary": {
         "properties": {
           "attempt": {
@@ -5535,6 +5953,23 @@
           "slot"
         ],
         "title": "SlotMoveInstruction",
+        "type": "object"
+      },
+      "StartRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "downstream": {
+            "default": false,
+            "title": "Downstream",
+            "type": "boolean"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "title": "StartRunRequest",
         "type": "object"
       },
       "Starter": {
@@ -7308,6 +7743,24 @@
           "by"
         ],
         "title": "TriageRequest",
+        "type": "object"
+      },
+      "UnpauseResponse": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ],
+        "title": "UnpauseResponse",
         "type": "object"
       },
       "UnscoredWeek": {
@@ -9096,6 +9549,186 @@
         "summary": "Health Check"
       }
     },
+    "/v1/jobs": {
+      "get": {
+        "operationId": "get_jobs_v1_jobs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Jobs"
+      }
+    },
+    "/v1/jobs/{name}/pause": {
+      "delete": {
+        "operationId": "unpause_job_v1_jobs__name__pause_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnpauseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unpause Job"
+      },
+      "put": {
+        "operationId": "pause_job_v1_jobs__name__pause_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pause Job"
+      }
+    },
+    "/v1/jobs/{name}/runs": {
+      "post": {
+        "operationId": "start_job_v1_jobs__name__runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Job"
+      }
+    },
     "/v1/league/current-week": {
       "get": {
         "operationId": "get_current_week_v1_league_current_week_get",
@@ -9757,6 +10390,94 @@
           }
         },
         "summary": "Preview"
+      }
+    },
+    "/v1/runs/{identity}": {
+      "get": {
+        "operationId": "get_run_v1_runs__identity__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "title": "Identity",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run"
+      }
+    },
+    "/v1/runs/{identity}/cancel": {
+      "post": {
+        "description": "The watcher deletes the k8s Job or stops the inline process for a cancelled row.",
+        "operationId": "cancel_run_v1_runs__identity__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "title": "Identity",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Run"
       }
     },
     "/v1/scoreboard": {
