@@ -153,7 +153,7 @@ def test_retry_requeues_the_same_run_and_updates_its_outbox_attempt(postgres):
     assert commands[0]["attempt"] == 2
 
 
-def test_watcher_query_limits_terminal_pod_rows_to_visible_jobs(postgres):
+def test_watcher_query_limits_terminal_rows_to_retryable_jobs(postgres):
     store = RunStore()
     active_pod = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
     failed_pod = publish_run(CATALOG, "lineup-optimizer", trigger="manual")["run_id"]
@@ -168,7 +168,7 @@ def test_watcher_query_limits_terminal_pod_rows_to_visible_jobs(postgres):
         "lineup-optimizer": CATALOG.resolve("lineup-optimizer").max_attempts
     }
     watched = {row["run_id"] for row in store.watched_runs([], max_attempts)}
-    assert watched == {active_pod, failed_inline}
+    assert watched == {active_pod, failed_pod, failed_inline}
     with_visible_job = {
         row["run_id"] for row in store.watched_runs([failed_pod], max_attempts)
     }

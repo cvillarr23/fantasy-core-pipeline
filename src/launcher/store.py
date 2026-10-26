@@ -114,10 +114,10 @@ class RunStore:
             )
 
     def watched_runs(self, job_run_ids=(), max_attempts=None):
-        """Return active/cancelled runs, current Job rows, and inline outcomes still retryable.
+        """Return active/cancelled runs, current Job rows, and retryable outcomes.
 
-        Terminal pod rows are selected only while their Job is visible, keeping old run_log
-        history out of every watcher tick.
+        Terminal outcomes are selected only while retryable, keeping old run_log history out
+        of every watcher tick. Pod failures can happen before a Kubernetes Job is created.
         """
         with get_db_cursor() as c:
             c.execute(
@@ -127,7 +127,8 @@ class RunStore:
                 AND (status='running'
                   OR (status='cancelled' AND NOT (trigger ? 'cancel_reconciled'))
                   OR id=ANY(%s)
-                  OR (trigger->>'executor'='inline' AND status IN ('failure','timeout')
+                  OR (trigger->>'executor' IN ('inline','pod')
+                      AND status IN ('failure','timeout')
                       AND attempt<COALESCE((%s::jsonb->>job_name)::int,attempt)))
                 ORDER BY started_at""",
                 (list(job_run_ids), json.dumps(max_attempts or {})),
