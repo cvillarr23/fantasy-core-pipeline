@@ -1,0 +1,37 @@
+version: 1
+global:
+  max_concurrent_pods: 2
+  max_deadline: 2h
+  start_timeout: 10m
+  manual_queue_ttl: 30m
+seasons:
+  regular: {start: 1, end: 18}
+  playoffs: {start: 19, end: 22}
+profiles:
+  core: {image: CORE_IMAGE, secrets: [db, espn, redis, trigger-api]}
+  worker: {image: WORKER_IMAGE, serviceAccount: fantasy-browser-worker, volumes: [espn-session-state]}
+defaults: {executor: pod, overlap: forbid, max_attempts: 1, deadline: 1h, alert: warning}
+jobs:
+  rapid-status-syncer: {profile: core, command: [python, -m, src.ingestion.sync_players]}
+  weekly-ingestor: {profile: core, command: [python, -m, src.ingestion.sync_league]}
+  actual-scores: {profile: core, command: [python, -m, src.ingestion.sync_actual_scores]}
+  actual-scores-reconcile: {profile: core, command: [python, -m, src.ingestion.sync_actual_scores]}
+  draft-prep-refresher: {profile: core, command: [python, -m, src.optimization.vorp_matrix]}
+  lineup-optimizer: {profile: core, command: [python, -m, src.optimization.lineup_solver], params: {week: 'int?', dry_run: 'bool?'}, max_attempts: 3, alert: critical, acts: true}
+  weekly-waiver-trigger: {profile: core, command: [python, -m, src.optimization.waiver_evaluator]}
+  rumor-syncer: {profile: core, command: [python, -m, src.ingestion.sync_rumors]}
+  rumor-action-trigger: {profile: core, command: [python, -m, src.services.rumor_action_service], schedules: [{cron: '45 21 * * *', tz: America/Chicago, catch_up: 1h}], on_event: [{key: rumor.signal_created, debounce: 30m}]}
+  stale-draft-job-sweeper: {profile: core, command: [python, -m, src.ops.sweep_stale_draft_jobs]}
+  espn-session-healthcheck: {profile: worker, command: [node, healthcheck.js]}
+  rumor-digest-bot: {profile: worker, command: [node, digest.js]}
+  trade-candidates: {profile: core, command: [python, -m, src.jobs.trade_candidates]}
+  trade-candidates-reconcile: {profile: core, command: [python, -m, src.jobs.trade_candidates]}
+  trade-scan: {profile: core, command: [python, -m, src.api.trade]}
+  trade-inbox: {profile: core, command: [python, -m, src.api.trade]}
+chains:
+  tuesday-weekly:
+    schedule: {cron: '0 16 * * 2', tz: America/Chicago, catch_up: 2h, seasons: [regular, playoffs]}
+    max_duration: 8h
+    steps:
+      weekly-ingestor: {}
+      lineup-optimizer: {after: [{step: weekly-ingestor, on: 'success'}], latest: '19:15'}
