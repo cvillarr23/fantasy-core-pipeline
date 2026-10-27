@@ -17,6 +17,11 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            if (context.payload.pull_request.user.login === "dependabot[bot]") {
+              core.notice("Dependabot PRs are exempt from the linked-issue requirement.");
+              return;
+            }
+
             let result;
             try {
               result = await github.graphql(`
@@ -29,7 +34,7 @@ jobs:
                 }
               `, { owner: context.repo.owner, repo: context.repo.repo, number: context.issue.number });
             } catch (error) {
-              core.setFailed("Unable to read closing issue references with this PR token. A maintainer must verify the closing issue link; fork and Dependabot PRs use read-only tokens. " + error.message);
+              core.setFailed("Unable to read closing issue references with this PR token. A maintainer must verify the closing issue link; fork PRs use read-only tokens. " + error.message);
               return;
             }
 
@@ -38,10 +43,10 @@ jobs:
             const body = context.payload.pull_request.body || "";
             const trackerReference = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:https:\/\/github\.com\/cvillarr23\/fantasy-project\/issues\/|cvillarr23\/fantasy-project#)[1-9]\d*\b/i.test(body);
             const linked = result.repository.pullRequest.closingIssuesReferences.totalCount > 0 || trackerReference;
-            const readOnly = context.payload.pull_request.head.repo.full_name !== context.payload.pull_request.base.repo.full_name || context.actor === "dependabot[bot]";
+            const readOnly = context.payload.pull_request.head.repo.full_name !== context.payload.pull_request.base.repo.full_name;
             if (readOnly) {
               if (!linked) {
-                core.setFailed("PR has no linked closing issue. Add Fixes #N or Closes owner/repo#N to the PR description. Labels and comments are skipped because fork and Dependabot PRs use read-only tokens.");
+                core.setFailed("PR has no linked closing issue. Add Fixes #N or Closes owner/repo#N to the PR description. Labels and comments are skipped because fork PRs use read-only tokens.");
               }
               return;
             }
