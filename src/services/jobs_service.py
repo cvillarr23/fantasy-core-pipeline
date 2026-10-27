@@ -79,26 +79,30 @@ def list_jobs() -> JobsResponse:
         keys = ("name", "paused_until", "reason", "set_by", "set_at")
         overrides = {row[0]: dict(zip(keys, row)) for row in cursor.fetchall()}
 
-    defaults = catalog.defaults
-    jobs = [
-        {
-            "name": name,
-            "executor": job.executor or defaults.executor,
-            "overlap": job.overlap or defaults.overlap,
-            "max_attempts": job.max_attempts or defaults.max_attempts,
-            "deadline_seconds": int((job.deadline or defaults.deadline).total_seconds()),
-            "alert": job.alert or defaults.alert,
-            "acts": job.acts,
-            "params": job.params,
-            "profile": job.profile,
-            "command": job.command,
-            "schedules": [schedule.model_dump(mode="json") for schedule in job.schedules],
-            "on_event": [event.model_dump(mode="json") for event in job.on_event],
-            "last_run": last_runs.get(name),
-            "pause": overrides.get(name),
-        }
-        for name, job in catalog.jobs.items()
-    ]
+    jobs = []
+    for name in catalog.jobs:
+        resolved = catalog.resolve(name)
+        job = resolved.job
+        jobs.append(
+            {
+                "name": name,
+                "executor": resolved.executor,
+                "overlap": resolved.overlap,
+                "max_attempts": resolved.max_attempts,
+                "deadline_seconds": int(resolved.deadline.total_seconds()),
+                "alert": resolved.alert,
+                "acts": job.acts,
+                "params": job.params,
+                "profile": job.profile,
+                "command": job.command,
+                "schedules": [
+                    schedule.model_dump(mode="json") for schedule in job.schedules
+                ],
+                "on_event": [event.model_dump(mode="json") for event in job.on_event],
+                "last_run": last_runs.get(name),
+                "pause": overrides.get(name),
+            }
+        )
     chains = [
         {
             "name": name,
@@ -173,27 +177,37 @@ def start_run(
             "status": "queued",
         }
 
-    try:
-        return publish_run(
-            catalog,
-            name,
-            trigger="manual",
-            params=params,
-            requested_by=requested_by,
-            downstream=False,
-        )
-    except UnknownJobError as exc:
-        raise JobNotFoundError(str(exc)) from exc
+    return publish_run(
+        catalog,
+        name,
+        trigger="manual",
+        params=params,
+        requested_by=requested_by,
+        downstream=False,
+    )
 
 
 def cancel_run(identity: str) -> dict[str, str]:
+    """Cancels a queued or running run; the watcher then stops its k8s Job or process.
+
+    Cancelling a chain root also cancels the chain's queued and running steps in the same
+    transaction. The scheduler only advances `running` roots, so no further step starts.
+    """
     with get_db_cursor() as cursor:
         cursor.execute(
             """UPDATE run_log SET status='cancelled',finished_at=now(),end_reason='cancelled'
-            WHERE id=%s AND status IN ('queued','running') RETURNING status""",
+            WHERE id=%s AND status IN ('queued','running') RETURNING chain_root_id""",
             (identity,),
         )
-        if cursor.fetchone():
+        cancelled = cursor.fetchone()
+        if cancelled:
+            if cancelled[0] == identity:
+                cursor.execute(
+                    """UPDATE run_log SET status='cancelled',finished_at=now(),
+                    end_reason='cancelled' WHERE chain_root_id=%s AND id<>%s
+                    AND status IN ('queued','running')""",
+                    (identity, identity),
+                )
             return {"run_id": identity, "status": "cancelled"}
         cursor.execute("SELECT status FROM run_log WHERE id=%s", (identity,))
         row = cursor.fetchone()

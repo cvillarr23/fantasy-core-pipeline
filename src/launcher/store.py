@@ -6,12 +6,28 @@ final status written by a pod's run_scope, the inline runner or the watcher free
 
 import json
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 
 from src.database import get_db_cursor
 
 # pg_advisory_xact_lock key serializing admission decisions, so a second launcher briefly
 # alive during a Recreate rollout can't admit past the cap or a forbid overlap.
 ADMISSION_LOCK_KEY = 343_001
+
+
+@dataclass(frozen=True)
+class WatchedRun:
+    """A run_log row the watcher reconciles, with its launch details from `trigger`."""
+
+    run_id: str
+    job_name: str
+    status: str
+    attempt: int
+    started_at: datetime
+    chain_root_id: str | None
+    executor: str | None
+    k8s_job: str | None
 
 
 class Admission:
@@ -116,11 +132,11 @@ class RunStore:
                 params,
             )
 
-    def watched_runs(self, job_run_ids=(), max_attempts=None):
-        """Return active/cancelled runs, current Job rows, and retryable outcomes.
+    def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
+        """Return active/cancelled runs, runs with a live k8s Job, and retryable outcomes.
 
         Terminal outcomes are selected only while retryable, keeping old run_log history out
-        of every watcher tick. Pod failures can happen before a Kubernetes Job is created.
+        of every watcher tick. Pod failures can happen before a k8s Job is created.
         """
         with get_db_cursor() as c:
             c.execute(
@@ -134,7 +150,7 @@ class RunStore:
                       AND status IN ('failure','timeout')
                       AND attempt<COALESCE((%s::jsonb->>job_name)::int,attempt)))
                 ORDER BY started_at""",
-                (list(job_run_ids), json.dumps(max_attempts or {})),
+                (list(run_ids_with_k8s_job), json.dumps(max_attempts or {})),
             )
             rows = c.fetchall()
         result = []
@@ -143,16 +159,16 @@ class RunStore:
                 trigger = json.loads(trigger)
             trigger = trigger or {}
             result.append(
-                {
-                    "run_id": identity,
-                    "job_name": job,
-                    "status": status,
-                    "attempt": attempt,
-                    "started_at": started_at,
-                    "chain_root_id": chain_root_id,
-                    "executor": trigger.get("executor"),
-                    "k8s_job": trigger.get("k8s_job"),
-                }
+                WatchedRun(
+                    run_id=identity,
+                    job_name=job,
+                    status=status,
+                    attempt=attempt,
+                    started_at=started_at,
+                    chain_root_id=chain_root_id,
+                    executor=trigger.get("executor"),
+                    k8s_job=trigger.get("k8s_job"),
+                )
             )
         return result
 
@@ -165,7 +181,7 @@ class RunStore:
                 (run_id,),
             )
 
-    def retry_running(self, run_id, attempt, expected_attempt=None):
+    def requeue_attempt(self, run_id, attempt, expected_attempt=None):
         """Queues another attempt on the same run and resets its durable outbox command."""
         with get_db_cursor() as c:
             c.execute(

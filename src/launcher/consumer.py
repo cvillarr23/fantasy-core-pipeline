@@ -80,16 +80,10 @@ class Consumer:
             logger.error("Dropping invalid run command: %s", exc)
             return False
         pending = self.pending.get(command.run_id)
-        if pending is not None:
-            if pending.attempt == command.attempt:
-                return True
-            if command.attempt < pending.attempt:
-                return False
-            status, attempt = self.store.run_state(command.run_id)
-            if status == "queued" and command.attempt == attempt:
-                self.pending[command.run_id] = command
-                return True
-            return False
+        if pending is not None and pending.attempt == command.attempt:
+            return True
+        # A delivery at another attempt than the pending one replaces it only when run_log
+        # says it is the current attempt; attempts only grow, so an older one never is.
         status, attempt = self.store.run_state(command.run_id)
         if status != "queued":
             logger.info(
@@ -196,7 +190,7 @@ class Consumer:
             if resolved.executor == "inline":
                 if self.inline_runner.busy:
                     return "wait"
-                job = None
+                k8s_job = None
             else:
                 if (
                     admission.running_pods()
@@ -204,7 +198,7 @@ class Consumer:
                 ):
                     return "wait"
                 try:
-                    job = k8s.build_job(command, resolved, argv)
+                    k8s_job = k8s.build_job(command, resolved, argv)
                 except k8s.LaunchConfigError as exc:
                     admission.end_queued(
                         command.run_id, "failure", "launch_failed", str(exc)
@@ -214,12 +208,14 @@ class Consumer:
                     )
                     return None
             if not admission.claim(
-                command.run_id, resolved.executor, job.metadata.name if job else None
+                command.run_id,
+                resolved.executor,
+                k8s_job.metadata.name if k8s_job else None,
             ):
                 return None
-        return resolved, argv, job
+        return resolved, argv, k8s_job
 
-    def _launch(self, command, resolved, argv, job):
+    def _launch(self, command, resolved, argv, k8s_job):
         context = propagate.extract(
             {"traceparent": command.traceparent} if command.traceparent else {}
         )
@@ -229,7 +225,7 @@ class Consumer:
             attributes={"fantasy.job": command.job, "fantasy.run_id": command.run_id},
         ):
             try:
-                if job is None:
+                if k8s_job is None:
                     self.inline_runner.submit(
                         InlineRun(
                             run_id=command.run_id,
@@ -241,12 +237,12 @@ class Consumer:
                         )
                     )
                 else:
-                    self.launch_pod(job)
+                    self.launch_pod(k8s_job)
             except Exception as exc:
                 logger.exception(
                     "Run %s of %s could not be launched", command.run_id, command.job
                 )
-                if not self._launch_failed(command, job, exc):
+                if not self._launch_failed(command, k8s_job, exc):
                     return
         logger.info(
             "Launched run run_id=%s job=%s executor=%s attempt=%s",
@@ -256,21 +252,21 @@ class Consumer:
             command.attempt,
         )
 
-    def _launch_failed(self, command, job, exc):
-        """Settles a launch that raised. Returns True when the Job turned out to exist.
+    def _launch_failed(self, command, k8s_job, exc):
+        """Settles a launch that raised. Returns True when the k8s Job turned out to exist.
 
-        A timeout or 5xx doesn't say whether the apiserver created the Job, and failing a
+        A timeout or 5xx doesn't say whether the apiserver created the k8s Job, and failing a
         run whose pod then starts would free its overlap slot while it acts. So unless the
-        apiserver refused outright (4xx), the Job is looked up first; if that can't be
+        apiserver refused outright (4xx), the k8s Job is looked up first; if that can't be
         answered either, the run stays `running` for the watcher's start timeout to settle.
         """
         refused = isinstance(exc, ApiException) and 400 <= (exc.status or 0) < 500
-        if job is not None and not refused:
-            exists = k8s.job_exists(job.metadata.name)
+        if k8s_job is not None and not refused:
+            exists = k8s.job_exists(k8s_job.metadata.name)
             if exists:
                 logger.warning(
                     "k8s Job %s exists despite the error; run launched",
-                    job.metadata.name,
+                    k8s_job.metadata.name,
                 )
                 return True
             if exists is None:
@@ -278,7 +274,7 @@ class Consumer:
                     "Run %s of %s: k8s Job %s may exist; leaving the run for the watcher",
                     command.run_id,
                     command.job,
-                    job.metadata.name,
+                    k8s_job.metadata.name,
                 )
                 return False
         try:

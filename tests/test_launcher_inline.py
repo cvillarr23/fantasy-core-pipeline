@@ -137,7 +137,8 @@ def test_cancel_terminates_only_the_matching_inline_run(runner, store):
     assert runner.cancel("other-run") is False
     assert runner.cancel("r1") is True
     wait_idle(runner)
-    assert store.finished == [("r1", "cancelled", "cancelled", True)]
+    # The row is already `cancelled`; the killed process's exit code must not replace it.
+    assert store.finished == []
 
 
 def test_cancel_before_inline_submit_prevents_the_process_from_starting(
@@ -149,7 +150,7 @@ def test_cancel_before_inline_submit_prevents_the_process_from_starting(
     runner.submit(python(f"import pathlib; pathlib.Path({str(ran)!r}).touch()"))
     wait_idle(runner)
     assert not ran.exists()
-    assert store.finished == [("r1", "cancelled", "cancelled", True)]
+    assert store.finished == []
 
 
 def test_stop_kills_a_child_that_ignores_sigterm(store, monkeypatch, tmp_path):

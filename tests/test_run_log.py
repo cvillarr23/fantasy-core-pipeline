@@ -85,7 +85,7 @@ def test_outer_scope_adopts_launcher_run_id_once(recorded, monkeypatch):
             assert os.getenv("RUN_PARENT_ID") == "launcher-run"
             with run_log.run_scope("child") as child:
                 assert child.id == "run-1"
-    assert adopted == [("launcher-run", "sync_rumors", "schedule", {}, None, 2)]
+    assert adopted == [("launcher-run", "sync_rumors", "schedule", None, 2)]
     assert recorded["start"][0][0] == "child"
     assert recorded["start"][0][3] == "launcher-run"
     assert recorded["finish"][1][4] == 2

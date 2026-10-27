@@ -1,9 +1,11 @@
 """Run audit log: one row per job/bot run, plus links to what each run read and wrote.
 
-A run is a scheduled CronJob, a queue-consumed worker bot, an HTTP-triggered evaluation or
-a manual invocation. `run_links` records the rows a run consumed (`input`) and produced
-(`output`) - raw_signals, rumor_signals, llm sessions, activity_actions - so the web UI can
-show which article led to which LLM evaluation and which roster move.
+A run is a launcher run (a catalog job that `python -m src.launcher` starts as a k8s Job or
+an inline process, which adopts the row the launcher wrote through `run_scope`), a
+queue-consumed worker bot, an HTTP-triggered evaluation or a manual invocation. `run_links`
+records the rows a run consumed (`input`) and produced (`output`) - raw_signals,
+rumor_signals, llm sessions, activity_actions - so the web UI can show which article led to
+which LLM evaluation and which roster move.
 
 Recording is best effort: a run_log write failure is logged and never fails the job itself.
 """
@@ -230,7 +232,7 @@ def start_run(job_name, trigger_type=None, trigger=None, parent_run_id=None):
 
 
 def adopt_run(
-    identity, job_name, trigger_type, trigger, parent_run_id=None, expected_attempt=None
+    identity, job_name, trigger_type, parent_run_id=None, expected_attempt=None
 ):
     """Attach this process to the launcher-created run row. The row keeps the launcher's
     catalog job name (`lineup-optimizer`), which overlap, the pod cap and run_log alerts key
@@ -239,7 +241,7 @@ def adopt_run(
     try:
         with get_db_cursor() as c:
             c.execute(
-                """UPDATE run_log SET status='running', trigger_type=%s,
+                """UPDATE run_log SET trigger_type=%s,
                 summary=summary || jsonb_build_object('entrypoint', %s::text),
                 parent_run_id=COALESCE(parent_run_id,%s), started_at=now(), finished_at=NULL,
                 error=NULL WHERE id=%s AND status='running'
@@ -306,7 +308,6 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
             adopted_id,
             job_name,
             trigger_type,
-            trigger or {},
             parent_run_id,
             adopted_attempt,
         )

@@ -84,7 +84,8 @@ class InlineRunner:
             return self._current_run_id == run_id
 
     def cancel(self, run_id):
-        """Stop the selected inline process group and record cancellation in its run thread."""
+        """Stop the selected inline process group. Its row is already `cancelled`, so the
+        run thread only has to end without recording an outcome."""
         with self._lock:
             if self._current_run_id != run_id:
                 if self.store.status(run_id) == "cancelled":
@@ -159,14 +160,7 @@ class InlineRunner:
                     expected_attempt=run.attempt,
                 )
                 return
-            if run.run_id in self._cancelled:
-                self.store.finish_running(
-                    run.run_id,
-                    "cancelled",
-                    "cancelled",
-                    force=True,
-                    expected_attempt=run.attempt,
-                )
+            if self._was_cancelled(run):
                 return
             process = self._process = subprocess.Popen(
                 argv, env=env, start_new_session=True
@@ -177,15 +171,8 @@ class InlineRunner:
             except subprocess.TimeoutExpired:
                 _terminate(process)
                 with self._lock:
-                    cancelled = run.run_id in self._cancelled
+                    cancelled = self._was_cancelled(run)
                 if cancelled:
-                    self.store.finish_running(
-                        run.run_id,
-                        "cancelled",
-                        "cancelled",
-                        force=True,
-                        expected_attempt=run.attempt,
-                    )
                     return
                 logger.error(
                     "Inline run run_id=%s job=%s exceeded its %ss deadline",
@@ -213,15 +200,8 @@ class InlineRunner:
                 )
                 return
             with self._lock:
-                cancelled = run.run_id in self._cancelled
+                cancelled = self._was_cancelled(run)
             if cancelled:
-                self.store.finish_running(
-                    run.run_id,
-                    "cancelled",
-                    "cancelled",
-                    force=True,
-                    expected_attempt=run.attempt,
-                )
                 return
             logger.info(
                 "Inline run run_id=%s job=%s exited with %s", run.run_id, run.job, code
@@ -236,6 +216,15 @@ class InlineRunner:
         finally:
             with self._lock:
                 self._process = None
+
+    def _was_cancelled(self, run):
+        """Whether `run` was cancelled; call with `_lock` held. The API wrote `cancelled`
+        before the watcher called cancel(), so there is nothing left to record, and the run
+        must end without writing an exit code or timeout over that row."""
+        if run.run_id not in self._cancelled:
+            return False
+        logger.info("Inline run run_id=%s job=%s was cancelled", run.run_id, run.job)
+        return True
 
 
 def _signal_group(process, sig):

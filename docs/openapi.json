@@ -9717,7 +9717,7 @@
     },
     "/v1/jobs/{name}/runs": {
       "post": {
-        "operationId": "start_job_v1_jobs__name__runs_post",
+        "operationId": "start_run_endpoint_v1_jobs__name__runs_post",
         "parameters": [
           {
             "in": "path",
@@ -9770,7 +9770,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Start Job"
+        "summary": "Start Run Endpoint"
       }
     },
     "/v1/launcher/health": {

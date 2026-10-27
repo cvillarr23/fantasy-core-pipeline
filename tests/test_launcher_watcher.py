@@ -60,7 +60,7 @@ class Store:
         self.retry_result = retry_result
         self.cancelled_reconciled = []
 
-    def watched_runs(self, job_run_ids=(), max_attempts=None):
+    def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
         return self.runs
 
     def finish_running(
@@ -68,7 +68,7 @@ class Store:
     ):
         self.finished.append((run_id, status, end_reason, error, expected_attempt))
 
-    def retry_running(self, run_id, attempt, expected_attempt=None):
+    def requeue_attempt(self, run_id, attempt, expected_attempt=None):
         self.retried.append((run_id, attempt, expected_attempt))
         return self.retry_result
 
