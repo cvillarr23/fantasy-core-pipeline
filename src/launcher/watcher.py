@@ -164,7 +164,13 @@ class Watcher:
                 run.run_id, outcome, reason, force=True, expected_attempt=run.attempt
             )
             return
-        if outcome in {"failure", "timeout"} and run.attempt < job.max_attempts:
+        retryable = outcome in {"failure", "timeout"} and run.attempt < job.max_attempts
+        if retryable and not run.chain_running:
+            # The chain was cancelled or ran past max_duration: this outcome is final.
+            logger.info("Not retrying run %s: its chain has ended", run.run_id)
+        elif retryable:
+            # A refusal means another writer moved the row on, or the chain ended since it
+            # was read; either way the next tick sees the row's new state.
             if self.store.requeue_attempt(
                 run.run_id, run.attempt + 1, expected_attempt=run.attempt
             ):
@@ -184,7 +190,7 @@ class Watcher:
             job = self.catalog.resolve(run.job_name)
         except UnknownJobError:
             return False
-        return run.attempt < job.max_attempts
+        return run.chain_running and run.attempt < job.max_attempts
 
     def _orphan(self, run):
         try:

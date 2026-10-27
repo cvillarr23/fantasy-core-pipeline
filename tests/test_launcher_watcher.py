@@ -21,6 +21,7 @@ def run(**overrides):
         "chain_root_id": None,
         "executor": "pod",
         "k8s_job": "job-r1-a1",
+        "chain_running": True,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -199,3 +200,34 @@ def test_cancelled_pod_deletes_job_and_inline_cancellation_kills_process():
     watcher.reconcile([k8s_job()])
     api.delete_namespaced_job.assert_called_once()
     inline.cancel.assert_called_once_with("inline")
+
+
+def test_failed_step_of_an_ended_chain_finalizes_without_a_retry():
+    step = run(chain_root_id="root", chain_running=False)
+    watcher, store, api, _ = make_watcher([step], api=MagicMock())
+    watcher.reconcile([k8s_job(active=0, failed=1)])
+    assert store.retried == []
+    assert store.finished == [("r1", "failure", "job_failed", None, 1)]
+    api.delete_namespaced_job.assert_called_once()
+
+
+def test_recorded_failure_of_an_ended_chain_step_is_left_final():
+    step = run(
+        status="failure",
+        executor="inline",
+        k8s_job=None,
+        chain_root_id="root",
+        chain_running=False,
+    )
+    watcher, store, _, _ = make_watcher([step], api=MagicMock())
+    watcher.reconcile([])
+    assert store.retried == []
+    assert store.finished == []
+
+
+def test_failed_step_of_a_running_chain_still_retries():
+    step = run(chain_root_id="root", chain_running=True)
+    watcher, store, _, _ = make_watcher([step], api=MagicMock())
+    watcher.reconcile([k8s_job(active=0, failed=1)])
+    assert store.retried == [("r1", 2, 1)]
+    assert store.finished == []

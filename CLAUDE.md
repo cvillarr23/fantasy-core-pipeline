@@ -499,7 +499,9 @@
   which records nothing over the row. It reaps finished k8s Jobs.
 - Cancelling a chain root (`POST /v1/runs/{root}/cancel`) also cancels that chain's queued
   and running steps in the same transaction; the scheduler advances only `running` roots, so
-  no further step starts.
+  no further step starts. Once a root is no longer `running` (cancelled or `max_duration`),
+  the watcher never retries its steps (a failure is final, and `requeue_attempt` refuses),
+  and the consumer skips a still-queued step as `chain_ended` instead of starting it.
 - `src/launcher/heartbeat.py` writes `launcher_heartbeat` (time plus `job_runs` and its DLQ
   depths) every 15s on its own thread, for `GET /v1/launcher/health`.
 - `run_log_service.adopt_run` keeps the launcher's catalog `job_name` (`lineup-optimizer`).

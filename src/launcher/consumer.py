@@ -10,6 +10,8 @@ Each pass over the pending list, oldest first, decides every run on its own, so 
 waiting for its job's previous run doesn't hold up other jobs:
 
 - no longer `queued` (cancelled, or already handled) -> dropped
+- a chain step whose root is no longer `running` (cancelled, or past max_duration) ->
+  `skipped (chain_ended)`
 - past `expires_at` -> `skipped (expired)`
 - another run of the job is running -> `skipped (overlap)` under `forbid`, waits under `queue`
 - pod cap full, or the inline runner busy -> waits
@@ -166,6 +168,21 @@ class Consumer:
                     command.run_id,
                     command.attempt,
                     attempt,
+                )
+                return None
+            # A step published by a scheduler tick that raced its root's cancel, or left
+            # queued when its root hit max_duration, must not start an ended chain.
+            if (
+                command.chain_root_id
+                and command.chain_root_id != command.run_id
+                and not admission.chain_running(command.chain_root_id)
+            ):
+                admission.end_queued(command.run_id, "skipped", "chain_ended")
+                logger.info(
+                    "Skipped run %s of %s: chain run %s has ended",
+                    command.run_id,
+                    command.job,
+                    command.chain_root_id,
                 )
                 return None
             # `expires_at` decides whether the original request is still worth starting.

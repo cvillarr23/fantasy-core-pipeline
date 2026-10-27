@@ -25,6 +25,8 @@ nothing:
   is still pending, since the watcher retries the same row. ``latest`` starts a step at
   that local time on the root's date even if a parent is still running. Past
   ``max_duration`` every step not yet started is skipped and the root ends ``timeout``.
+  Once a root has ended (``timeout`` or cancelled), the consumer skips a step still queued
+  (``chain_ended``) and the watcher retries none of its steps.
 - **Standalone slots.** A job's own slot is skipped (``chain_step``) on a day when a chain
   run already covers it: the step has a non-skipped run, or the chain is still running.
 - **Manual runs.** ``start_chain`` runs one step with ``downstream`` semantics: a root

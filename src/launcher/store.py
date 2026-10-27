@@ -28,6 +28,9 @@ class WatchedRun:
     chain_root_id: str | None
     executor: str | None
     k8s_job: str | None
+    # False for a chain step whose root is no longer `running` (cancelled, or past its
+    # max_duration): its failure is final, since a retry must not restart an ended chain.
+    chain_running: bool = True
 
 
 class Admission:
@@ -54,6 +57,10 @@ class Admission:
             (job, run_id),
         )
         return self.c.fetchone() is not None
+
+    def chain_running(self, chain_root_id):
+        """Whether a chain root is still `running`, so its steps may start."""
+        return self.status(chain_root_id) == "running"
 
     def running_pods(self):
         self.c.execute(
@@ -135,26 +142,39 @@ class RunStore:
     def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
         """Return active/cancelled runs, runs with a live k8s Job, and retryable outcomes.
 
-        Terminal outcomes are selected only while retryable, keeping old run_log history out
-        of every watcher tick. Pod failures can happen before a k8s Job is created.
+        Terminal outcomes are selected only while retryable (attempts left, and a chain step's
+        root still running), keeping old run_log history out of every watcher tick. Pod
+        failures can happen before a k8s Job is created.
         """
         with get_db_cursor() as c:
             c.execute(
-                """SELECT id,job_name,status,attempt,started_at,chain_root_id,trigger
-                FROM run_log WHERE trigger ? 'executor'
-                AND (chain_root_id IS NULL OR chain_root_id<>id)
-                AND (status='running'
-                  OR (status='cancelled' AND NOT (trigger ? 'cancel_reconciled'))
-                  OR id=ANY(%s)
-                  OR (trigger->>'executor' IN ('inline','pod')
-                      AND status IN ('failure','timeout')
-                      AND attempt<COALESCE((%s::jsonb->>job_name)::int,attempt)))
-                ORDER BY started_at""",
+                """SELECT r.id,r.job_name,r.status,r.attempt,r.started_at,r.chain_root_id,
+                r.trigger,COALESCE(r.chain_root_id IS NULL OR root.status='running',false)
+                FROM run_log r LEFT JOIN run_log root ON root.id=r.chain_root_id
+                WHERE r.trigger ? 'executor'
+                AND (r.chain_root_id IS NULL OR r.chain_root_id<>r.id)
+                AND (r.status='running'
+                  OR (r.status='cancelled' AND NOT (r.trigger ? 'cancel_reconciled'))
+                  OR r.id=ANY(%s)
+                  OR (r.trigger->>'executor' IN ('inline','pod')
+                      AND r.status IN ('failure','timeout')
+                      AND r.attempt<COALESCE((%s::jsonb->>r.job_name)::int,r.attempt)
+                      AND (r.chain_root_id IS NULL OR root.status='running')))
+                ORDER BY r.started_at""",
                 (list(run_ids_with_k8s_job), json.dumps(max_attempts or {})),
             )
             rows = c.fetchall()
         result = []
-        for identity, job, status, attempt, started_at, chain_root_id, trigger in rows:
+        for (
+            identity,
+            job,
+            status,
+            attempt,
+            started_at,
+            chain_root_id,
+            trigger,
+            chain_running,
+        ) in rows:
             if isinstance(trigger, str):
                 trigger = json.loads(trigger)
             trigger = trigger or {}
@@ -168,6 +188,7 @@ class RunStore:
                     chain_root_id=chain_root_id,
                     executor=trigger.get("executor"),
                     k8s_job=trigger.get("k8s_job"),
+                    chain_running=chain_running,
                 )
             )
         return result
@@ -182,7 +203,11 @@ class RunStore:
             )
 
     def requeue_attempt(self, run_id, attempt, expected_attempt=None):
-        """Queues another attempt on the same run and resets its durable outbox command."""
+        """Queues another attempt on the same run and resets its durable outbox command.
+
+        A chain step is requeued only while its root is `running`, so a retry can't restart
+        a chain that was cancelled or ran past its max_duration.
+        """
         with get_db_cursor() as c:
             c.execute(
                 """SELECT body FROM job_run_outbox WHERE run_id=%s FOR UPDATE""",
@@ -202,7 +227,10 @@ class RunStore:
             c.execute(
                 """UPDATE run_log SET status='queued',attempt=%s,started_at=now(),
                 finished_at=NULL,end_reason=NULL,error=NULL
-                WHERE id=%s AND status IN ('running','failure','timeout')"""
+                WHERE id=%s AND status IN ('running','failure','timeout')
+                AND (chain_root_id IS NULL OR chain_root_id=id OR EXISTS (
+                  SELECT 1 FROM run_log root
+                  WHERE root.id=run_log.chain_root_id AND root.status='running'))"""
                 + attempt_guard
                 + " RETURNING id",
                 params,
