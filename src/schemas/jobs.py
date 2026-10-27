@@ -93,3 +93,11 @@ class ChainInfo(BaseModel):
 class JobsResponse(BaseModel):
     jobs: list[JobInfo]
     chains: list[ChainInfo]
+
+
+class LauncherHealthResponse(BaseModel):
+    heartbeat_at: datetime
+    heartbeat_age_seconds: float
+    queue_depths: dict[str, int | None]
+    running_count: int
+    queued_count: int

@@ -6,6 +6,7 @@ from src.api.routes import require_trigger_api_key
 from src.schemas.jobs import (
     CancelRunResponse,
     JobsResponse,
+    LauncherHealthResponse,
     PauseRequest,
     PauseResponse,
     RunStartResponse,
@@ -19,6 +20,8 @@ jobs_router = APIRouter()
 
 
 def _raise_http(error: Exception):
+    if isinstance(error, jobs_service.LauncherHealthUnavailableError):
+        raise HTTPException(503, str(error)) from error
     if isinstance(error, jobs_service.CatalogUnavailableError):
         raise HTTPException(503, str(error)) from error
     if isinstance(
@@ -48,6 +51,14 @@ def _user(request: Request) -> str:
 @jobs_router.get("/jobs", response_model=JobsResponse)
 def get_jobs():
     return jobs_service.list_jobs()
+
+
+@jobs_router.get("/launcher/health", response_model=LauncherHealthResponse)
+def get_launcher_health():
+    try:
+        return jobs_service.launcher_health()
+    except Exception as error:
+        _raise_http(error)
 
 
 @jobs_router.post(

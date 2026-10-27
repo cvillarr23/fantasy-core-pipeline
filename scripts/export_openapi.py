@@ -37,7 +37,7 @@ AREAS = [
     ("Trade", "Trade", ("/v1/trade",)),
     ("Draft", "Draft day", ("/v1/draft",)),
     ("Activity", "Activity", ("/v1/activity",)),
-    ("Jobs", "Jobs", ("/v1/jobs", "/v1/runs")),
+    ("Jobs", "Jobs", ("/v1/jobs", "/v1/runs", "/v1/launcher")),
     ("Roster and waivers", "Roster and waivers", ("/v1/roster", "/v1/waiver")),
     (
         "League and matchup",
@@ -108,6 +108,7 @@ DESCRIPTIONS = {
     "GET /v1/activity/jobs": "Latest run and recent failure count per job, plus dead-letter queue depths.",
     "GET /v1/activity/trace": "Trace an article, rumor evaluation or move through the rumor pipeline.",
     "GET /v1/jobs": "List catalog jobs and chains, including overrides and latest runs.",
+    "GET /v1/launcher/health": "Show launcher heartbeat age, queue depths and run counts.",
     "POST /v1/jobs/{name}/runs": "Queue a catalog job run for the launcher.",
     "POST /v1/runs/{identity}/cancel": "Cancel a queued or running launcher run.",
     "PUT /v1/jobs/{name}/pause": "Pause a catalog job or chain until a time, or indefinitely.",

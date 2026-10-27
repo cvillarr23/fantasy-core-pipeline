@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request
 
 from src.api import jobs as jobs_api
 from src.launcher.catalog import Catalog
-from src.schemas.jobs import PauseRequest, StartRunRequest
+from src.schemas.jobs import LauncherHealthResponse, PauseRequest, StartRunRequest
 from src.services import jobs_service
 
 
@@ -321,3 +321,58 @@ def test_mutating_routes_require_api_key_dependency():
         )
     }
     assert protected_paths <= protected
+
+
+def test_launcher_health_returns_heartbeat_and_run_counts(monkeypatch):
+    health = {
+        "heartbeat_at": datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc),
+        "heartbeat_age_seconds": 12.5,
+        "queue_depths": {"job_runs": 3, "job_runs.dlq": 1},
+        "running_count": 2,
+        "queued_count": 4,
+    }
+    monkeypatch.setattr(
+        jobs_service,
+        "launcher_health",
+        lambda: LauncherHealthResponse(**health),
+    )
+
+    response = jobs_api.get_launcher_health()
+
+    assert response.model_dump() == health
+
+
+def test_launcher_health_is_unavailable_before_first_heartbeat(monkeypatch):
+    def unavailable():
+        raise jobs_service.LauncherHealthUnavailableError("no heartbeat")
+
+    monkeypatch.setattr(jobs_service, "launcher_health", unavailable)
+
+    with pytest.raises(HTTPException) as response:
+        jobs_api.get_launcher_health()
+
+    assert response.value.status_code == 503
+
+
+def test_launcher_health_counts_only_runs_with_executor_trigger(monkeypatch):
+    class HealthCursor:
+        queries = []
+        reads = 0
+
+        def execute(self, query, params=None):
+            self.queries.append(query)
+
+        def fetchone(self):
+            self.reads += 1
+            if self.reads == 1:
+                return (datetime.now(timezone.utc), {"job_runs": 0, "job_runs.dlq": 0})
+            return (1, 2)
+
+    cursor = HealthCursor()
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
+
+    health = jobs_service.launcher_health()
+
+    assert health.running_count == 1
+    assert health.queued_count == 2
+    assert "status='running' AND trigger ? 'executor'" in cursor.queries[1]
