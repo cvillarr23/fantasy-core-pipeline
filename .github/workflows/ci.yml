@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   lint-test:
-    runs-on: fantasy-runners
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16
@@ -55,7 +55,7 @@ jobs:
   build-and-push:
     needs: lint-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: fantasy-runners
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
