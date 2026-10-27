@@ -485,16 +485,18 @@
   launcher loop) retries delivery. A used `dedupe_key` returns the existing run as `duplicate`.
 - `src/launcher/runs.py` owns every launcher-side `run_log` transition and its guards: `Runs`
   (bound to one cursor, so callers pick the transaction), `RunStore` (a cursor per call, plus
-  the admission lock), and the shared status sets (`RETRYABLE_STATUSES` and the rest) and
-  `LAUNCHER_TRIGGERS`. `publish_run`, the consumer, inline runner, watcher, the scheduler's
+  the admission lock), and the shared status sets (`RETRYABLE_STATUSES` and the rest).
+  The trigger types (`LauncherTrigger`) live in `run_log_service`, which the launcher imports and
+  never the reverse. `publish_run`, the consumer, inline runner, watcher, the scheduler's
   `PostgresSchedulerState` and `jobs_service` call into it instead of writing SQL. The run's own
   process still finishes through `run_log_service.adopt_run`/`finish_run`, which the browser
   worker's `db/run_log.js` mirrors: don't change their columns or statuses here.
 - Launch details are `run_log` columns, not `trigger` keys: `executor`, `k8s_job`, `expires_at`,
   `cancel_reconciled_at`. A launcher run is a row with an `executor` (`LAUNCHER_RUN`), which `claim`
   sets. `trigger` keeps what asked for the run (`params`, `downstream`, chain `{chain, from_step}`).
-  `run_log_service.SCHEMA` moves the old keys out of `trigger` at startup (idempotent), so an
-  older row still reconciles. `tests/test_launcher_runs_postgres.py` checks each transition and
+  `run_log_service.SCHEMA` moves the old keys out of launcher rows' `trigger` at startup
+  (idempotent; it never touches a CronJob or worker row, whose `trigger.k8s_job` is the Job that
+  triggered it), so an older row still reconciles. `tests/test_launcher_runs_postgres.py` checks each transition and
   the backfill against a local Postgres when `ACTIVITY_TEST_DSN` is set.
 - The consumer acks a command once the run is admitted to its in-memory pending list, never
   when it launches: a run can wait for the pod cap longer than RabbitMQ's 30-minute

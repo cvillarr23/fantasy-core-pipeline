@@ -20,6 +20,9 @@ class RunSummary(BaseModel):
     chain_root_id: Optional[str] = None
     event_id: Optional[str] = None
     end_reason: Optional[str] = None
+    executor: Optional[str] = None
+    k8s_job: Optional[str] = None
+    expires_at: Optional[datetime] = None
 
 
 class Run(RunSummary):

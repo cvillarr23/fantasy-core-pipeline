@@ -20,16 +20,12 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, get_args
 
 from src.database import get_db_cursor
 
 # pg_advisory_xact_lock key serializing admission decisions, so a second launcher briefly
 # alive during a Recreate rollout can't admit past the cap or a forbid overlap.
 ADMISSION_LOCK_KEY = 343_001
-
-LauncherTrigger = Literal["schedule", "chain", "event", "manual", "cli", "mcp"]
-LAUNCHER_TRIGGERS = get_args(LauncherTrigger)
 
 ACTIVE_STATUSES = ("queued", "running")
 CANCELLABLE_STATUSES = ACTIVE_STATUSES
@@ -355,10 +351,6 @@ class Runs:
         )
 
 
-# Admission reads and claims through the same transitions.
-Admission = Runs
-
-
 class RunStore:
     """`Runs` with a cursor per call, plus the admission transaction."""
 
@@ -368,13 +360,16 @@ class RunStore:
             c.execute("SELECT pg_advisory_xact_lock(%s)", (ADMISSION_LOCK_KEY,))
             yield Runs(c)
 
-    def status(self, run_id):
+    def _with_runs(self, call):
+        """Runs `call(runs)` on a fresh cursor, in its own transaction."""
         with get_db_cursor() as c:
-            return Runs(c).status(run_id)
+            return call(Runs(c))
+
+    def status(self, run_id):
+        return self._with_runs(lambda runs: runs.status(run_id))
 
     def run_state(self, run_id):
-        with get_db_cursor() as c:
-            return Runs(c).run_state(run_id)
+        return self._with_runs(lambda runs: runs.run_state(run_id))
 
     def queued_commands(self):
         """Run command bodies still queued, oldest first, for recovery after a restart."""
@@ -388,21 +383,27 @@ class RunStore:
                 for (body,) in c.fetchall()
             ]
 
-    def finish_running(self, *args, **kwargs):
-        with get_db_cursor() as c:
-            Runs(c).finish_running(*args, **kwargs)
+    def finish_running(
+        self, run_id, status, end_reason, error=None, force=False, expected_attempt=None
+    ):
+        self._with_runs(
+            lambda runs: runs.finish_running(
+                run_id, status, end_reason, error, force, expected_attempt
+            )
+        )
 
     def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
-        with get_db_cursor() as c:
-            return Runs(c).watched_runs(run_ids_with_k8s_job, max_attempts)
+        return self._with_runs(
+            lambda runs: runs.watched_runs(run_ids_with_k8s_job, max_attempts)
+        )
 
     def mark_cancel_reconciled(self, run_id):
-        with get_db_cursor() as c:
-            Runs(c).mark_cancel_reconciled(run_id)
+        self._with_runs(lambda runs: runs.mark_cancel_reconciled(run_id))
 
     def requeue_attempt(self, run_id, attempt, expected_attempt=None):
-        with get_db_cursor() as c:
-            return Runs(c).requeue_attempt(run_id, attempt, expected_attempt)
+        return self._with_runs(
+            lambda runs: runs.requeue_attempt(run_id, attempt, expected_attempt)
+        )
 
 
 def _in(statuses):

@@ -18,8 +18,9 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from src.database import get_db_cursor
 from src.launcher.catalog import Catalog, validate_run_params
-from src.launcher.runs import LauncherTrigger, Runs
+from src.launcher.runs import Runs
 from src.services import run_log_service
+from src.services.run_log_service import LauncherTrigger
 
 logger = logging.getLogger(__name__)
 

@@ -18,14 +18,20 @@ import uuid
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Literal, get_args
 
 from src.database import get_db_cursor
-from src.launcher.runs import LAUNCHER_TRIGGERS
 from src.queue_contracts import DRAFT_TARGETS, LINEUP_UPDATES, WAIVER_ACTIONS
 from src.services.activity_service import league_id, redact
 
 logger = logging.getLogger(__name__)
 
+# The backfill UPDATE in SCHEMA runs on every boot, as a scan of run_log (purged after 90
+# days). Drop it once no run_log row predates the launch-detail columns. It matches launcher
+# rows only: a CronJob or worker run keeps `trigger.k8s_job`, the Job that triggered it.
+#
+# The partial indexes below repeat `launcher.runs`' RETRYABLE_STATUSES and `watched_runs`'
+# predicates in SQL; tests/test_launcher_runs.py fails if they drift apart.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_log (
  id TEXT PRIMARY KEY, job_name TEXT NOT NULL, trigger_type TEXT NOT NULL,
@@ -46,11 +52,13 @@ ALTER TABLE run_log ADD COLUMN IF NOT EXISTS executor TEXT;
 ALTER TABLE run_log ADD COLUMN IF NOT EXISTS k8s_job TEXT;
 ALTER TABLE run_log ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 ALTER TABLE run_log ADD COLUMN IF NOT EXISTS cancel_reconciled_at TIMESTAMPTZ;
-UPDATE run_log SET executor=trigger->>'executor', k8s_job=trigger->>'k8s_job',
- expires_at=(trigger->>'expires_at')::timestamptz,
- cancel_reconciled_at=CASE WHEN trigger ? 'cancel_reconciled' THEN COALESCE(finished_at,now()) END,
+UPDATE run_log SET executor=COALESCE(trigger->>'executor', executor),
+ k8s_job=COALESCE(trigger->>'k8s_job', k8s_job),
+ expires_at=COALESCE((trigger->>'expires_at')::timestamptz, expires_at),
+ cancel_reconciled_at=CASE WHEN trigger ? 'cancel_reconciled'
+  THEN COALESCE(cancel_reconciled_at, finished_at, now()) ELSE cancel_reconciled_at END,
  trigger=trigger - 'executor' - 'k8s_job' - 'expires_at' - 'cancel_reconciled'
- WHERE trigger ?| array['executor','k8s_job','expires_at','cancel_reconciled'];
+ WHERE trigger ?| array['executor','expires_at','cancel_reconciled'];
 CREATE INDEX IF NOT EXISTS run_log_running_executor ON run_log(executor, started_at) WHERE status='running';
 CREATE INDEX IF NOT EXISTS run_log_cancel_unreconciled ON run_log(id) WHERE status='cancelled' AND executor IS NOT NULL AND cancel_reconciled_at IS NULL;
 CREATE INDEX IF NOT EXISTS run_log_retryable ON run_log(job_name) WHERE status IN ('failure','timeout') AND executor IS NOT NULL;
@@ -82,7 +90,10 @@ CREATE TABLE IF NOT EXISTS launcher_heartbeat (
 );
 """
 
-# The launcher's trigger types, plus the cutover-era ones its entrypoints still record.
+# The launcher's trigger types, defined here so the launcher can import them without every
+# job's run_scope importing the launcher. TRIGGER_TYPES adds the ones other writers record.
+LauncherTrigger = Literal["schedule", "chain", "event", "manual", "cli", "mcp"]
+LAUNCHER_TRIGGERS = get_args(LauncherTrigger)
 TRIGGER_TYPES = (*LAUNCHER_TRIGGERS, "queue", "http")
 STATUSES = (
     "queued",
@@ -431,7 +442,7 @@ def _rows(c):
 
 RUN_COLUMNS = """r.id,r.job_name,r.trigger_type,r.trigger,r.parent_run_id,r.status,r.started_at,
  r.finished_at,r.error,r.summary,r.trace_id,r.dedupe_key,r.scheduled_for,r.attempt,
- r.requested_by,r.chain_root_id,r.event_id,r.end_reason,
+ r.requested_by,r.chain_root_id,r.event_id,r.end_reason,r.executor,r.k8s_job,r.expires_at,
  (SELECT count(*) FROM run_links l WHERE l.run_id=r.id AND l.role='input') AS input_count,
  (SELECT count(*) FROM run_links l WHERE l.run_id=r.id AND l.role='output' AND l.ref_type<>'llm_session') AS output_count,
  (SELECT count(*) FROM run_links l WHERE l.run_id=r.id AND l.ref_type='llm_session') AS llm_count"""

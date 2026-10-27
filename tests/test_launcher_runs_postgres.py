@@ -3,10 +3,12 @@ disposable local Postgres (see `tests/test_launcher_postgres.py` for the fixture
 
 import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from src.launcher import runs as runs_module
 from src.launcher.publish import publish_run
 from src.launcher.runs import RunStore, Runs
+from src.migrations import run_migrations
 from src.services import run_log_service as run_log
 from tests.test_launcher_k8s import CATALOG
 from tests.test_launcher_postgres import postgres, rows  # noqa: F401 (fixture)
@@ -229,3 +231,39 @@ def test_migration_is_idempotent_and_keeps_the_watcher_selection(postgres):
     migrate(postgres)
     assert row(postgres, "live", "executor,trigger") == ("inline", {"params": {}})
     assert [r.run_id for r in RunStore().watched_runs()] == ["live"]
+
+
+CRONJOB = {"cronjob": "lineup-optimizer", "k8s_job": "lineup-optimizer-29012345"}
+
+
+def test_run_migrations_leaves_cronjob_and_worker_triggers_alone(postgres):
+    worker = {"queue": "lineup", "tracking_id": "t-1", "k8s_job": "worker-abc"}
+    legacy_row(postgres, "cron", "success", CRONJOB)
+    legacy_row(postgres, "worker", "success", worker)
+    legacy_row(postgres, "launcher", "running", LEGACY)
+    with patch("src.migrations.get_db_cursor", runs_module.get_db_cursor):
+        run_migrations()
+        run_migrations()
+    assert row(postgres, "cron", "trigger,executor,k8s_job") == (CRONJOB, None, None)
+    assert row(postgres, "worker", "trigger,executor,k8s_job") == (worker, None, None)
+    assert row(postgres, "launcher", "trigger,executor,k8s_job") == (
+        {"params": {"week": 3}, "downstream": False},
+        "pod",
+        "rumor-syncer-x-a1",
+    )
+
+
+def test_migration_never_nulls_a_column_a_newer_writer_set(postgres):
+    identity = claimed(k8s_job="job-new")
+    with postgres, postgres.cursor() as c:
+        c.execute(
+            "UPDATE run_log SET trigger=trigger || %s::jsonb WHERE id=%s",
+            (json.dumps({"expires_at": "2026-10-27T12:00:00+00:00"}), identity),
+        )
+    migrate(postgres)
+    executor, k8s_job, expires_at, trigger = row(
+        postgres, identity, "executor,k8s_job,expires_at,trigger"
+    )
+    assert (executor, k8s_job) == ("pod", "job-new")
+    assert expires_at == datetime(2026, 10, 27, 12, tzinfo=timezone.utc)
+    assert "expires_at" not in trigger

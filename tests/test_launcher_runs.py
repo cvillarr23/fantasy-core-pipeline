@@ -24,9 +24,46 @@ class Cursor:
         return self.results.pop(0)
 
 
-def test_trigger_types_are_defined_once():
-    assert set(runs.LAUNCHER_TRIGGERS) <= set(run_log_service.TRIGGER_TYPES)
-    assert {"queue", "http"} <= set(run_log_service.TRIGGER_TYPES)
+def test_trigger_types_keep_every_value_writers_record():
+    assert set(run_log_service.LAUNCHER_TRIGGERS) == {
+        "schedule",
+        "chain",
+        "event",
+        "manual",
+        "cli",
+        "mcp",
+    }
+    assert set(run_log_service.TRIGGER_TYPES) == {
+        "chain",
+        "event",
+        "cli",
+        "mcp",
+        "schedule",
+        "queue",
+        "http",
+        "manual",
+    }
+
+
+def test_partial_indexes_match_the_watcher_predicates():
+    retryable = runs._in(runs.RETRYABLE_STATUSES)
+    index = next(
+        line
+        for line in run_log_service.SCHEMA.splitlines()
+        if "run_log_retryable" in line
+    )
+    assert f"status IN {retryable}" in index and runs.LAUNCHER_RUN in index
+    cursor = Cursor([])
+    Runs(cursor).watched_runs()
+    query = cursor.queries[0][0]
+    assert f"r.status IN {retryable}" in query
+    assert "r.cancel_reconciled_at IS NULL" in query
+    cancel_index = next(
+        line
+        for line in run_log_service.SCHEMA.splitlines()
+        if "run_log_cancel_unreconciled" in line
+    )
+    assert "cancel_reconciled_at IS NULL" in cancel_index
 
 
 def test_status_sets_agree_with_the_run_log_statuses():
