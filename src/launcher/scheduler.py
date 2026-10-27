@@ -56,6 +56,7 @@ import polars as pl
 from croniter import croniter
 
 from src.launcher.catalog import Catalog, Chain, ChainStep, Schedule, Season
+from src.launcher.runs import Runs
 
 logger = logging.getLogger("LauncherScheduler")
 
@@ -668,23 +669,14 @@ class PostgresSchedulerState:
         chain_root_id: str | None = None,
     ) -> bool:
         with self._cursor() as c:
-            c.execute(
-                """INSERT INTO run_log(id,job_name,trigger_type,parent_run_id,status,finished_at,
-                dedupe_key,scheduled_for,chain_root_id,end_reason)
-                VALUES (%s,%s,%s,%s,'skipped',now(),%s,%s,%s,%s)
-                ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id""",
-                (
-                    str(uuid.uuid4()),
-                    job_name,
-                    trigger_type,
-                    chain_root_id,
-                    dedupe_key,
-                    scheduled_for,
-                    chain_root_id,
-                    end_reason,
-                ),
+            return Runs(c).insert_skipped(
+                job=job_name,
+                trigger_type=trigger_type,
+                dedupe_key=dedupe_key,
+                scheduled_for=scheduled_for,
+                end_reason=end_reason,
+                chain_root_id=chain_root_id,
             )
-            return c.fetchone() is not None
 
     def create_chain_root(
         self,
@@ -695,26 +687,15 @@ class PostgresSchedulerState:
         from_step: str | None = None,
         requested_by: str | None = None,
     ) -> RunRow | None:
-        identity = str(uuid.uuid4())
-        trigger = {"chain": chain, "from_step": from_step}
         with self._cursor() as c:
-            c.execute(
-                f"""INSERT INTO run_log(id,job_name,trigger_type,trigger,status,dedupe_key,
-                scheduled_for,requested_by,chain_root_id)
-                VALUES (%s,%s,'chain',%s,'running',%s,%s,%s,%s)
-                ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
-                RETURNING {_ROW_COLUMNS}""",
-                (
-                    identity,
-                    chain,
-                    json.dumps(trigger),
-                    dedupe_key,
-                    scheduled_for,
-                    requested_by,
-                    identity,
-                ),
+            values = Runs(c).insert_chain_root(
+                chain=chain,
+                trigger={"chain": chain, "from_step": from_step},
+                dedupe_key=dedupe_key,
+                scheduled_for=scheduled_for,
+                requested_by=requested_by,
+                columns=_ROW_COLUMNS,
             )
-            values = c.fetchone()
         return _row(values) if values else None
 
     def active_chain_roots(self) -> list[RunRow]:
@@ -750,8 +731,4 @@ class PostgresSchedulerState:
         self, root_id: str, status: str, end_reason: str | None
     ) -> None:
         with self._cursor() as c:
-            c.execute(
-                """UPDATE run_log SET status=%s, end_reason=%s, finished_at=now()
-                WHERE id=%s AND status='running'""",
-                (status, end_reason, root_id),
-            )
+            Runs(c).finish_chain_root(root_id, status, end_reason)

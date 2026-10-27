@@ -9,11 +9,11 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
-from src.launcher import heartbeat, publish, store as store_module
+from src.launcher import heartbeat, publish, runs as store_module
 from src.launcher.consumer import Consumer
 from src.launcher.publish import publish_run
 from src.launcher.scheduler import PostgresSchedulerState
-from src.launcher.store import RunStore
+from src.launcher.runs import RunStore
 from src.services import (
     activity_service as activity,
     jobs_service,
@@ -103,7 +103,7 @@ def test_admission_sql(postgres):
         admission.end_queued(a, "skipped", "overlap")
     assert rows(
         postgres,
-        "SELECT status,end_reason,trigger->>'k8s_job' FROM run_log WHERE id=%s",
+        "SELECT status,end_reason,k8s_job FROM run_log WHERE id=%s",
         (a,),
     ) == [("running", None, "rumor-syncer-x-a1")]
     assert rows(
@@ -140,9 +140,9 @@ def test_cancelled_run_cannot_be_adopted_or_finalized_by_the_process(postgres):
     ) == [("cancelled", "cancelled")]
     assert rows(
         postgres,
-        "SELECT trigger->>'cancel_reconciled' FROM run_log WHERE id=%s",
+        "SELECT cancel_reconciled_at IS NOT NULL FROM run_log WHERE id=%s",
         (identity,),
-    ) == [("true",)]
+    ) == [(True,)]
 
 
 def test_old_process_cannot_adopt_or_finish_a_requeued_attempt(postgres):

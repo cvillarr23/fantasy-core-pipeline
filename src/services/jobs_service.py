@@ -15,6 +15,7 @@ from src.launcher.catalog import (
 )
 from src.launcher.consumer import overlap_refuses
 from src.launcher.publish import publish_run
+from src.launcher.runs import Runs
 from src.schemas.jobs import JobsResponse, LauncherHealthResponse
 from src.services import run_log_service
 
@@ -155,11 +156,7 @@ def launcher_health() -> LauncherHealthResponse:
         heartbeat = cursor.fetchone()
         if heartbeat is None:
             raise LauncherHealthUnavailableError("Launcher heartbeat is unavailable")
-        cursor.execute(
-            """SELECT count(*) FILTER (WHERE status='running' AND trigger ? 'executor'),
-            count(*) FILTER (WHERE status='queued') FROM run_log"""
-        )
-        running_count, queued_count = cursor.fetchone()
+        running_count, queued_count = Runs(cursor).launcher_counts()
 
     heartbeat_at, queue_depths = heartbeat
     if isinstance(queue_depths, str):
@@ -220,30 +217,12 @@ def cancel_run(identity: str) -> dict[str, str]:
     transaction. The scheduler only advances `running` roots, so no further step starts.
     """
     with get_db_cursor() as cursor:
-        cursor.execute(
-            """UPDATE run_log SET status='cancelled',finished_at=now(),end_reason='cancelled'
-            WHERE id=%s AND status IN ('queued','running') RETURNING chain_root_id""",
-            (identity,),
-        )
-        cancelled = cursor.fetchone()
-        if cancelled:
-            if cancelled[0] == identity:
-                _cancel_chain_steps(cursor, identity)
-            return {"run_id": identity, "status": "cancelled"}
-        cursor.execute("SELECT status FROM run_log WHERE id=%s", (identity,))
-        row = cursor.fetchone()
-        if row is None:
-            raise RunNotFoundError(identity)
-        raise RunNotCancellableError(row[0])
-
-
-def _cancel_chain_steps(cursor, root_id: str) -> None:
-    """Cancels a chain root's queued and running steps, in the caller's transaction."""
-    cursor.execute(
-        """UPDATE run_log SET status='cancelled',finished_at=now(),end_reason='cancelled'
-        WHERE chain_root_id=%s AND id<>%s AND status IN ('queued','running')""",
-        (root_id, root_id),
-    )
+        outcome = Runs(cursor).cancel(identity)
+    if outcome is True:
+        return {"run_id": identity, "status": "cancelled"}
+    if outcome is None:
+        raise RunNotFoundError(identity)
+    raise RunNotCancellableError(outcome)
 
 
 def pause_job(

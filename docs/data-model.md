@@ -123,7 +123,7 @@ erDiagram
         text id PK
         text job_name
         text trigger_type "schedule | chain | event | cli | mcp (plus cutover legacy values)"
-        jsonb trigger "cronjob + k8s_job, queue + tracking_id, or launcher params + executor"
+        jsonb trigger "what asked for the run: launcher params + downstream, cronjob, queue + tracking_id"
         text status "queued | skipped | cancelled | timeout | running | success | failure"
         text dedupe_key UK "nullable"
         timestamptz scheduled_for
@@ -132,6 +132,10 @@ erDiagram
         text chain_root_id
         text event_id
         text end_reason
+        text executor "pod | inline, set when the launcher claims the run"
+        text k8s_job "the pod's Job name, for the current attempt"
+        timestamptz expires_at "when a queued run stops being worth starting"
+        timestamptz cancel_reconciled_at "the watcher stopped a cancelled run's workload"
     }
     job_overrides {
         text job_or_chain PK
@@ -341,7 +345,8 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 | `rumor_action_checkpoints.state` | `{watermark, signals, actions, failed_jobs}`. |
 | `trade_candidate_runs.counts` | `{enumerated, prefiltered, scored, proposable, needs_drop, one_sided, teams: [{team_id, name, proposable, needs_drop, one_sided}]}`. |
 | `trade_candidates.score` | The `POST /v1/trade/score` response for the package, as scored at `computed_at`. `send_players` / `receive_players` hold `{espn_id, player_id, name, position, nfl_team, vorp, nfl_bye_week}`. |
-| `run_log.trigger` | Explicit launcher triggers use `chain`, `event`, `cli` or `mcp`; while schedules are cut over, the `RUN_CRONJOB` name heuristic remains available. A chain root (`job_name` = the chain, `chain_root_id` = its own id) stores `{chain, from_step}`; `from_step` is set for a manual run with `downstream`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. |
+| `run_log.trigger` | Explicit launcher triggers use `chain`, `event`, `cli` or `mcp`; while schedules are cut over, the `RUN_CRONJOB` name heuristic remains available. A chain root (`job_name` = the chain, `chain_root_id` = its own id) stores `{chain, from_step}`; `from_step` is set for a manual run with `downstream`. A launcher run stores `{params, downstream}`. Worker runs: `{queue, tracking_id}`. HTTP: `{route}`. Launch details are not here: see the next row. |
+| `run_log.executor`, `k8s_job`, `expires_at`, `cancel_reconciled_at` | Launch details, written only by `src/launcher/runs.py`. A row with an `executor` is a launcher run (a queued row and the browser worker's rows have none). `claim` sets `executor` and `k8s_job` (a retry overwrites both); `expires_at` is the run command's expiry; `cancel_reconciled_at` is set once the watcher has stopped a cancelled run's workload. Startup moves these out of `trigger` for older rows and removes the keys; partial indexes serve the pod cap and the watcher's selection. |
 | `run_log.end_reason` | Why a run ended without running or early. Scheduler values: `paused` (a slot or chain step while its job or chain is paused), `chain_step` (a standalone slot on a day a chain run covers that job), `dependency_failed` (a chain step whose `on: success` parent didn't succeed), `max_duration` (chain steps not started in time, and the chain root's `timeout`), `publish_failed` and `unknown_chain` (chain roots). Launcher admission: `chain_ended` (a queued chain step whose root is no longer `running`, cancelled or past `max_duration`). |
 | `run_log.summary` | Always: `log_tail` (the run's last 50 INFO+ log lines, library noise excluded), `warnings`, `errors` and `last_message`. Jobs add their own counters and an optional one-line `headline`, such as the rumor syncer's `fetched`/`new`/`per_source` or the rumor action trigger's `RunOutcome` details. |
 

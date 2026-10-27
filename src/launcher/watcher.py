@@ -18,7 +18,7 @@ from src.k8s_client import (
     core_v1_api,
 )
 from src.launcher.catalog import UnknownJobError
-from src.launcher.store import RunStore
+from src.launcher.runs import RETRYABLE_STATUSES, RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ class Watcher:
     def _should_retry(run, outcome, job):
         """Whether a failure or timeout gets another attempt. A step of a chain that was
         cancelled or ran past max_duration doesn't: its outcome is final."""
-        if outcome not in {"failure", "timeout"} or run.attempt >= job.max_attempts:
+        if outcome not in RETRYABLE_STATUSES or run.attempt >= job.max_attempts:
             return False
         if not run.chain_running:
             logger.info("Not retrying run %s: its chain has ended", run.run_id)

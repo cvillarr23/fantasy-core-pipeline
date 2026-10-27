@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from src.database import get_db_cursor
+from src.launcher.runs import LAUNCHER_TRIGGERS
 from src.queue_contracts import DRAFT_TARGETS, LINEUP_UPDATES, WAIVER_ACTIONS
 from src.services.activity_service import league_id, redact
 
@@ -41,6 +42,18 @@ ALTER TABLE run_log ADD COLUMN IF NOT EXISTS requested_by TEXT;
 ALTER TABLE run_log ADD COLUMN IF NOT EXISTS chain_root_id TEXT;
 ALTER TABLE run_log ADD COLUMN IF NOT EXISTS event_id TEXT;
 ALTER TABLE run_log ADD COLUMN IF NOT EXISTS end_reason TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS executor TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS k8s_job TEXT;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE run_log ADD COLUMN IF NOT EXISTS cancel_reconciled_at TIMESTAMPTZ;
+UPDATE run_log SET executor=trigger->>'executor', k8s_job=trigger->>'k8s_job',
+ expires_at=(trigger->>'expires_at')::timestamptz,
+ cancel_reconciled_at=CASE WHEN trigger ? 'cancel_reconciled' THEN COALESCE(finished_at,now()) END,
+ trigger=trigger - 'executor' - 'k8s_job' - 'expires_at' - 'cancel_reconciled'
+ WHERE trigger ?| array['executor','k8s_job','expires_at','cancel_reconciled'];
+CREATE INDEX IF NOT EXISTS run_log_running_executor ON run_log(executor, started_at) WHERE status='running';
+CREATE INDEX IF NOT EXISTS run_log_cancel_unreconciled ON run_log(id) WHERE status='cancelled' AND executor IS NOT NULL AND cancel_reconciled_at IS NULL;
+CREATE INDEX IF NOT EXISTS run_log_retryable ON run_log(job_name) WHERE status IN ('failure','timeout') AND executor IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS run_log_dedupe_key ON run_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS run_log_recent ON run_log(started_at DESC);
 CREATE INDEX IF NOT EXISTS run_log_by_job ON run_log(job_name,started_at DESC);
@@ -69,7 +82,8 @@ CREATE TABLE IF NOT EXISTS launcher_heartbeat (
 );
 """
 
-TRIGGER_TYPES = ("chain", "event", "cli", "mcp", "schedule", "queue", "http", "manual")
+# The launcher's trigger types, plus the cutover-era ones its entrypoints still record.
+TRIGGER_TYPES = (*LAUNCHER_TRIGGERS, "queue", "http")
 STATUSES = (
     "queued",
     "skipped",
