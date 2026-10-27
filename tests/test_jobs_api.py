@@ -408,4 +408,4 @@ def test_launcher_health_counts_only_runs_with_executor_trigger(monkeypatch):
 
     assert health.running_count == 1
     assert health.queued_count == 2
-    assert "status='running' AND trigger ? 'executor'" in cursor.queries[1]
+    assert "status='running' AND executor IS NOT NULL" in cursor.queries[1]

@@ -483,12 +483,27 @@
   `src/launcher/publish.publish_run`, which writes the `queued` run_log row and its
   `job_run_outbox` row in one transaction. `activity_runner.drain_job_runs` (API tick and
   launcher loop) retries delivery. A used `dedupe_key` returns the existing run as `duplicate`.
+- `src/launcher/runs.py` owns every launcher-side `run_log` transition and its guards: `Runs`
+  (bound to one cursor, so callers pick the transaction), `RunStore` (a cursor per call, plus
+  the admission lock), and the shared status sets (`RETRYABLE_STATUSES` and the rest).
+  The trigger types (`LauncherTrigger`) live in `run_log_service`, which the launcher imports and
+  never the reverse. `publish_run`, the consumer, inline runner, watcher, the scheduler's
+  `PostgresSchedulerState` and `jobs_service` call into it instead of writing SQL. The run's own
+  process still finishes through `run_log_service.adopt_run`/`finish_run`, which the browser
+  worker's `db/run_log.js` mirrors: don't change their columns or statuses here.
+- Launch details are `run_log` columns, not `trigger` keys: `executor`, `k8s_job`, `expires_at`,
+  `cancel_reconciled_at`. A launcher run is a row with an `executor` (`LAUNCHER_RUN`), which `claim`
+  sets. `trigger` keeps what asked for the run (`params`, `downstream`, chain `{chain, from_step}`).
+  `run_log_service.SCHEMA` moves the old keys out of launcher rows' `trigger` at startup
+  (idempotent; it never touches a CronJob or worker row, whose `trigger.k8s_job` is the Job that
+  triggered it), so an older row still reconciles. `tests/test_launcher_runs_postgres.py` checks each transition and
+  the backfill against a local Postgres when `ACTIVITY_TEST_DSN` is set.
 - The consumer acks a command once the run is admitted to its in-memory pending list, never
   when it launches: a run can wait for the pod cap longer than RabbitMQ's 30-minute
   `consumer_timeout`. On restart it rebuilds the list from queued run_log rows, so don't
   "fix" this by acking after launch.
 - Overlap and `max_concurrent_pods` are counts of `running` run_log rows (pods counted by
-  `trigger->>'executor'='pod'`), decided under a `pg_advisory_xact_lock`. A crashed pod's row
+  `executor='pod'`), decided under a `pg_advisory_xact_lock`. A crashed pod's row
   holds its slot until the watcher times it out as orphaned.
 - `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s. A
   failure or timeout with attempts left requeues the same row at the next attempt

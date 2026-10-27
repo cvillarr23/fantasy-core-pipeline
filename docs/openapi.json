@@ -2770,6 +2770,29 @@
             ],
             "title": "Event Id"
           },
+          "executor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executor"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -2794,6 +2817,17 @@
           "job_name": {
             "title": "Job Name",
             "type": "string"
+          },
+          "k8s_job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8S Job"
           },
           "llm_count": {
             "default": 0,
@@ -4936,6 +4970,29 @@
             ],
             "title": "Event Id"
           },
+          "executor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executor"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -4960,6 +5017,17 @@
           "job_name": {
             "title": "Job Name",
             "type": "string"
+          },
+          "k8s_job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8S Job"
           },
           "llm_count": {
             "default": 0,
@@ -5122,6 +5190,29 @@
             ],
             "title": "Event Id"
           },
+          "executor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executor"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -5146,6 +5237,17 @@
           "job_name": {
             "title": "Job Name",
             "type": "string"
+          },
+          "k8s_job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8S Job"
           },
           "links": {
             "additionalProperties": {
@@ -5361,6 +5463,29 @@
             ],
             "title": "Event Id"
           },
+          "executor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executor"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -5380,6 +5505,17 @@
           "job_name": {
             "title": "Job Name",
             "type": "string"
+          },
+          "k8s_job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8S Job"
           },
           "requested_by": {
             "anyOf": [

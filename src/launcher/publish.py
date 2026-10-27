@@ -11,18 +11,18 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from opentelemetry import propagate
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from src.database import get_db_cursor
 from src.launcher.catalog import Catalog, validate_run_params
+from src.launcher.runs import Runs
 from src.services import run_log_service
+from src.services.run_log_service import LauncherTrigger
 
 logger = logging.getLogger(__name__)
-
-LauncherTrigger = Literal["schedule", "chain", "event", "manual", "cli", "mcp"]
 
 
 class RunCommand(BaseModel):
@@ -112,37 +112,26 @@ def publish_run(
         expires_at=expires_at or now + catalog.global_settings.manual_queue_ttl,
     )
     body = command.model_dump(mode="json")
-    run_trigger = {
-        "params": body["params"],
-        "downstream": downstream,
-        "expires_at": body["expires_at"],
-    }
     with get_db_cursor() as c:
-        c.execute(
-            """INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,status,trace_id,
-              dedupe_key,scheduled_for,attempt,requested_by,chain_root_id,event_id)
-            VALUES (%s,%s,%s,%s,%s,'queued',%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id""",
-            (
-                run_id,
-                job,
-                trigger,
-                json.dumps(run_trigger),
-                parent_run_id,
-                run_log_service._trace_id(),
-                command.dedupe_key,
-                scheduled_for,
-                command.attempt,
-                requested_by,
-                chain_root_id,
-                event_id,
-            ),
+        runs = Runs(c)
+        inserted = runs.insert_queued(
+            run_id=run_id,
+            job=job,
+            trigger_type=trigger,
+            trigger={"params": body["params"], "downstream": downstream},
+            parent_run_id=parent_run_id,
+            trace_id=run_log_service._trace_id(),
+            dedupe_key=command.dedupe_key,
+            scheduled_for=scheduled_for,
+            attempt=command.attempt,
+            requested_by=requested_by,
+            chain_root_id=chain_root_id,
+            event_id=event_id,
+            expires_at=command.expires_at,
         )
-        if c.fetchone() is None:
-            c.execute(
-                "SELECT id FROM run_log WHERE dedupe_key=%s", (command.dedupe_key,)
-            )
-            return {"run_id": c.fetchone()[0], "status": "duplicate"}
+        if not inserted:
+            existing = runs.run_id_for_dedupe_key(command.dedupe_key)
+            return {"run_id": existing, "status": "duplicate"}
         c.execute(
             "INSERT INTO job_run_outbox(run_id,body) VALUES (%s,%s)",
             (run_id, json.dumps(body)),

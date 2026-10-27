@@ -17,7 +17,7 @@ import sys
 import threading
 from dataclasses import dataclass
 
-from src.launcher.store import RunStore
+from src.launcher.runs import RunStore
 
 logger = logging.getLogger(__name__)
 

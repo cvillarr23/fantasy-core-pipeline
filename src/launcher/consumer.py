@@ -37,7 +37,7 @@ from src.launcher import k8s
 from src.launcher.catalog import UnknownJobError, params_to_args, validate_run_params
 from src.launcher.inline import InlineRun
 from src.launcher.publish import RunCommand
-from src.launcher.store import RunStore
+from src.launcher.runs import RunStore
 from src.queue_contracts import AMQP_URL, JOB_RUNS
 
 logger = logging.getLogger(__name__)
