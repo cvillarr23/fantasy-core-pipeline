@@ -133,7 +133,7 @@ stateDiagram-v2
 | `event` | `job@key@debounce_window` |
 | `manual`, `cli`, `mcp` | A fresh UUID (the run id) |
 
-A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. A run past `expires_at` ends as `skipped (expired)`, and a run refused by `overlap: forbid` ends as `skipped (overlap)`.
+A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` at the command's current `attempt` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. The initial attempt past `expires_at` ends as `skipped (expired)`; retries of an attempt that already started keep their retry budget. A run refused by `overlap: forbid` ends as `skipped (overlap)`.
 
 The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedupe_key>`. Its outermost `run_scope` adopts the row and keeps the catalog job name.
 

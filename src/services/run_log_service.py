@@ -68,7 +68,15 @@ CREATE TABLE IF NOT EXISTS launcher_heartbeat (
 """
 
 TRIGGER_TYPES = ("chain", "event", "cli", "mcp", "schedule", "queue", "http", "manual")
-STATUSES = ("queued", "skipped", "cancelled", "timeout", "running", "success", "failure")
+STATUSES = (
+    "queued",
+    "skipped",
+    "cancelled",
+    "timeout",
+    "running",
+    "success",
+    "failure",
+)
 REF_TYPES = ("raw_signal", "rumor_signal", "llm_session", "activity_action")
 ROLES = ("input", "output")
 RUN_ID_HEADER = "X-Run-Id"
@@ -221,37 +229,52 @@ def start_run(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     return identity
 
 
-def adopt_run(identity, job_name, trigger_type, trigger, parent_run_id=None):
+def adopt_run(
+    identity, job_name, trigger_type, trigger, parent_run_id=None, expected_attempt=None
+):
     """Attach this process to the launcher-created run row. The row keeps the launcher's
     catalog job name (`lineup-optimizer`), which overlap, the pod cap and run_log alerts key
-    on; the entrypoint's own name (`lineup_optimizer`) is kept as `summary.entrypoint`."""
+    on; the entrypoint's own name (`lineup_optimizer`) is kept as `summary.entrypoint`.
+    """
     try:
         with get_db_cursor() as c:
             c.execute(
                 """UPDATE run_log SET status='running', trigger_type=%s,
                 summary=summary || jsonb_build_object('entrypoint', %s::text),
                 parent_run_id=COALESCE(parent_run_id,%s), started_at=now(), finished_at=NULL,
-                error=NULL WHERE id=%s""",
-                (trigger_type, job_name, parent_run_id, identity),
+                error=NULL WHERE id=%s AND status='running'
+                AND attempt=COALESCE(%s,attempt)""",
+                (
+                    trigger_type,
+                    job_name,
+                    parent_run_id,
+                    identity,
+                    expected_attempt,
+                ),
             )
+            return c.rowcount == 1
     except Exception:
         logger.exception("Run %s could not be adopted", identity)
 
 
-def finish_run(identity, status, error=None, summary=None, end_reason=None):
+def finish_run(
+    identity, status, error=None, summary=None, end_reason=None, expected_attempt=None
+):
     if not identity:
         return
     try:
         with get_db_cursor() as c:
             c.execute(
                 """UPDATE run_log SET status=%s, finished_at=now(), error=%s, end_reason=%s,
-                summary=summary || %s::jsonb WHERE id=%s""",
+                summary=summary || %s::jsonb WHERE id=%s AND status<>'cancelled'
+                AND attempt=COALESCE(%s,attempt)""",
                 (
                     status,
                     redact(error)[:4000] if error else None,
                     end_reason,
                     json.dumps(redact(summary or {}), default=str),
                     identity,
+                    expected_attempt,
                 ),
             )
     except Exception:
@@ -266,6 +289,11 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     parent = current_run.get()
     previous_parent_id = os.environ.get("RUN_PARENT_ID")
     adopted_id = os.environ.pop("RUN_ID", None) if parent is None else None
+    adopted_attempt = (
+        int(os.environ["RUN_ATTEMPT"])
+        if adopted_id and os.environ.get("RUN_ATTEMPT")
+        else None
+    )
     parent_run_id = (
         parent_run_id or (parent.id if parent else None) or os.getenv("RUN_PARENT_ID")
     )
@@ -274,7 +302,18 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
         trigger = {**env_trigger, **(trigger or {})}
     run = Run(adopted_id or start_run(job_name, trigger_type, trigger, parent_run_id))
     if adopted_id:
-        adopt_run(adopted_id, job_name, trigger_type, trigger or {}, parent_run_id)
+        adopted = adopt_run(
+            adopted_id,
+            job_name,
+            trigger_type,
+            trigger or {},
+            parent_run_id,
+            adopted_attempt,
+        )
+        if adopted is False:
+            raise RuntimeError(
+                f"Run {adopted_id} attempt {adopted_attempt} is no longer current"
+            )
     # Only a launcher-adopted run exports its id for subprocesses: that pod runs one job, so
     # the shared process environment is safe there, unlike the API where requests overlap.
     if adopted_id:
@@ -285,7 +324,13 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
 
     def finish(status, error=None):
         logging.getLogger().removeHandler(capture)
-        finish_run(run.id, status, error, {**capture.summary(), **run.summary})
+        finish_run(
+            run.id,
+            status,
+            error,
+            {**capture.summary(), **run.summary},
+            expected_attempt=adopted_attempt,
+        )
 
     try:
         yield run

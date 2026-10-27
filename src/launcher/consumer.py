@@ -72,19 +72,39 @@ class Consumer:
 
     def admit(self, body):
         """Adds a delivered command to the pending list. Returns False for one to drop (not
-        a valid command, or its run is no longer queued); raises when run_log is unreadable."""
+        a valid command, or its run is no longer queued); raises when run_log is unreadable.
+        """
         try:
             command = RunCommand.model_validate(body)
         except ValidationError as exc:
             logger.error("Dropping invalid run command: %s", exc)
             return False
-        if command.run_id in self.pending:
-            return True
-        status = self.store.status(command.run_id)
+        pending = self.pending.get(command.run_id)
+        if pending is not None:
+            if pending.attempt == command.attempt:
+                return True
+            if command.attempt < pending.attempt:
+                return False
+            status, attempt = self.store.run_state(command.run_id)
+            if status == "queued" and command.attempt == attempt:
+                self.pending[command.run_id] = command
+                return True
+            return False
+        status, attempt = self.store.run_state(command.run_id)
         if status != "queued":
             logger.info(
                 "Ignoring run command run_id=%s job=%s: run is %s",
-                command.run_id, command.job, status or "missing",
+                command.run_id,
+                command.job,
+                status or "missing",
+            )
+            return False
+        if command.attempt != attempt:
+            logger.info(
+                "Ignoring stale run command run_id=%s attempt=%s; current attempt is %s",
+                command.run_id,
+                command.attempt,
+                attempt,
             )
             return False
         self.pending[command.run_id] = command
@@ -130,25 +150,46 @@ class Consumer:
             params = validate_run_params(resolved.job, command.params)
         except (UnknownJobError, ValueError) as exc:
             with self.store.admission() as admission:
-                admission.end_queued(command.run_id, "failure", "invalid_command", str(exc))
+                admission.end_queued(
+                    command.run_id, "failure", "invalid_command", str(exc)
+                )
             logger.error("Run %s of %s failed: %s", command.run_id, command.job, exc)
             return None
         argv = [*resolved.job.command, *params_to_args(params)]
         with self.store.admission() as admission:
-            status = admission.status(command.run_id)
+            status, attempt = admission.run_state(command.run_id)
             if status != "queued":
-                logger.info("Dropping run %s of %s: run is %s", command.run_id, command.job, status)
+                logger.info(
+                    "Dropping run %s of %s: run is %s",
+                    command.run_id,
+                    command.job,
+                    status,
+                )
                 return None
-            if self.clock() >= command.expires_at:
+            if command.attempt != attempt:
+                logger.info(
+                    "Dropping stale run %s attempt %s; current attempt is %s",
+                    command.run_id,
+                    command.attempt,
+                    attempt,
+                )
+                return None
+            # `expires_at` decides whether the original request is still worth starting.
+            # Once an attempt has run, its configured retries must not inherit that stale
+            # queue deadline or the first late failure would silently suppress them.
+            if command.attempt == 1 and self.clock() >= command.expires_at:
                 admission.end_queued(command.run_id, "skipped", "expired")
-                logger.warning("Run %s of %s expired while queued", command.run_id, command.job)
+                logger.warning(
+                    "Run %s of %s expired while queued", command.run_id, command.job
+                )
                 return None
             if admission.job_running(command.job, command.run_id):
                 if resolved.overlap == "forbid":
                     admission.end_queued(command.run_id, "skipped", "overlap")
                     logger.info(
                         "Skipped run %s of %s: another run is still running",
-                        command.run_id, command.job,
+                        command.run_id,
+                        command.job,
                     )
                     return None
                 return "wait"
@@ -157,13 +198,20 @@ class Consumer:
                     return "wait"
                 job = None
             else:
-                if admission.running_pods() >= self.catalog.global_settings.max_concurrent_pods:
+                if (
+                    admission.running_pods()
+                    >= self.catalog.global_settings.max_concurrent_pods
+                ):
                     return "wait"
                 try:
                     job = k8s.build_job(command, resolved, argv)
                 except k8s.LaunchConfigError as exc:
-                    admission.end_queued(command.run_id, "failure", "launch_failed", str(exc))
-                    logger.error("Run %s of %s failed: %s", command.run_id, command.job, exc)
+                    admission.end_queued(
+                        command.run_id, "failure", "launch_failed", str(exc)
+                    )
+                    logger.error(
+                        "Run %s of %s failed: %s", command.run_id, command.job, exc
+                    )
                     return None
             if not admission.claim(
                 command.run_id, resolved.executor, job.metadata.name if job else None
@@ -189,17 +237,23 @@ class Consumer:
                             argv=argv,
                             env=command.launch_env(),
                             deadline_seconds=resolved.deadline.total_seconds(),
+                            attempt=command.attempt,
                         )
                     )
                 else:
                     self.launch_pod(job)
             except Exception as exc:
-                logger.exception("Run %s of %s could not be launched", command.run_id, command.job)
+                logger.exception(
+                    "Run %s of %s could not be launched", command.run_id, command.job
+                )
                 if not self._launch_failed(command, job, exc):
                     return
         logger.info(
             "Launched run run_id=%s job=%s executor=%s attempt=%s",
-            command.run_id, command.job, resolved.executor, command.attempt,
+            command.run_id,
+            command.job,
+            resolved.executor,
+            command.attempt,
         )
 
     def _launch_failed(self, command, job, exc):
@@ -214,20 +268,31 @@ class Consumer:
         if job is not None and not refused:
             exists = k8s.job_exists(job.metadata.name)
             if exists:
-                logger.warning("k8s Job %s exists despite the error; run launched", job.metadata.name)
+                logger.warning(
+                    "k8s Job %s exists despite the error; run launched",
+                    job.metadata.name,
+                )
                 return True
             if exists is None:
                 logger.error(
                     "Run %s of %s: k8s Job %s may exist; leaving the run for the watcher",
-                    command.run_id, command.job, job.metadata.name,
+                    command.run_id,
+                    command.job,
+                    job.metadata.name,
                 )
                 return False
         try:
             self.store.finish_running(
-                command.run_id, "failure", "launch_failed", f"{type(exc).__name__}: {exc}"
+                command.run_id,
+                "failure",
+                "launch_failed",
+                f"{type(exc).__name__}: {exc}",
+                expected_attempt=command.attempt,
             )
         except Exception:
-            logger.exception("Run %s launch failure could not be recorded", command.run_id)
+            logger.exception(
+                "Run %s launch failure could not be recorded", command.run_id
+            )
         return False
 
     # ---- broker -----------------------------------------------------------------------
@@ -245,7 +310,9 @@ class Consumer:
             channel.basic_nack(method.delivery_tag, requeue=True)
             # Every prefetched delivery would fail the same way, so drop the connection
             # (returning them to the queue) and let run() back off before consuming again.
-            raise RunLogUnavailable("run command not admitted; returned to the queue") from exc
+            raise RunLogUnavailable(
+                "run command not admitted; returned to the queue"
+            ) from exc
         channel.basic_ack(method.delivery_tag)
 
     def _tick(self):
@@ -277,16 +344,22 @@ class Consumer:
                 channel = connection.channel()
                 channel.basic_qos(prefetch_count=PREFETCH_COUNT)
                 channel.queue_declare(queue=JOB_RUNS, passive=True)
-                channel.basic_consume(queue=JOB_RUNS, on_message_callback=self._on_message)
+                channel.basic_consume(
+                    queue=JOB_RUNS, on_message_callback=self._on_message
+                )
                 logger.info("Consuming %s", JOB_RUNS)
                 failures = 0
                 while not stop.is_set():
                     connection.process_data_events(time_limit=POLL_SECONDS)
                     self._tick()
             except Exception:
-                delay = RECONNECT_BACKOFF_SECONDS[min(failures, len(RECONNECT_BACKOFF_SECONDS) - 1)]
+                delay = RECONNECT_BACKOFF_SECONDS[
+                    min(failures, len(RECONNECT_BACKOFF_SECONDS) - 1)
+                ]
                 failures += 1
-                logger.exception("Consuming %s interrupted; reconnecting in %ss", JOB_RUNS, delay)
+                logger.exception(
+                    "Consuming %s interrupted; reconnecting in %ss", JOB_RUNS, delay
+                )
                 deadline = time.monotonic() + delay
                 while not stop.is_set() and time.monotonic() < deadline:
                     self._tick()
