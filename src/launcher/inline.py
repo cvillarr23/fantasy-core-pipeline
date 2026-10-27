@@ -84,7 +84,8 @@ class InlineRunner:
             return self._current_run_id == run_id
 
     def cancel(self, run_id):
-        """Stop the selected inline process group and record cancellation in its run thread."""
+        """Stop the selected inline process group. Its row is already `cancelled`, so the
+        run thread only has to end without recording an outcome."""
         with self._lock:
             if self._current_run_id != run_id:
                 if self.store.status(run_id) == "cancelled":
@@ -150,92 +151,90 @@ class InlineRunner:
         env = {**os.environ, **run.env}
         argv = expand_command(run.argv, env)
         logger.info("Starting inline run run_id=%s job=%s", run.run_id, run.job)
-        with self._lock:
-            if self._stopping.is_set():
-                self.store.finish_running(
-                    run.run_id,
-                    "failure",
-                    "launcher_shutdown",
-                    expected_attempt=run.attempt,
-                )
-                return
-            if run.run_id in self._cancelled:
-                self.store.finish_running(
-                    run.run_id,
-                    "cancelled",
-                    "cancelled",
-                    force=True,
-                    expected_attempt=run.attempt,
-                )
-                return
-            process = self._process = subprocess.Popen(
-                argv, env=env, start_new_session=True
-            )
+        process = self._start_process(run, argv, env)
+        if process is None:
+            return
         try:
             try:
                 code = process.wait(timeout=run.deadline_seconds)
             except subprocess.TimeoutExpired:
-                _terminate(process)
-                with self._lock:
-                    cancelled = run.run_id in self._cancelled
-                if cancelled:
-                    self.store.finish_running(
-                        run.run_id,
-                        "cancelled",
-                        "cancelled",
-                        force=True,
-                        expected_attempt=run.attempt,
-                    )
-                    return
-                logger.error(
-                    "Inline run run_id=%s job=%s exceeded its %ss deadline",
-                    run.run_id,
-                    run.job,
-                    run.deadline_seconds,
-                )
-                self.store.finish_running(
-                    run.run_id,
-                    "timeout",
-                    "deadline",
-                    f"deadline of {run.deadline_seconds}s exceeded",
-                    force=True,
-                    expected_attempt=run.attempt,
-                )
+                self._end_timed_out(run, process)
                 return
-            if self._stopping.is_set() and code != 0:
-                # stop() sent SIGTERM; give it the grace period, then make sure it's gone.
-                _terminate(process)
-                self.store.finish_running(
-                    run.run_id,
-                    "failure",
-                    "launcher_shutdown",
-                    expected_attempt=run.attempt,
-                )
-                return
-            with self._lock:
-                cancelled = run.run_id in self._cancelled
-            if cancelled:
-                self.store.finish_running(
-                    run.run_id,
-                    "cancelled",
-                    "cancelled",
-                    force=True,
-                    expected_attempt=run.attempt,
-                )
-                return
-            logger.info(
-                "Inline run run_id=%s job=%s exited with %s", run.run_id, run.job, code
-            )
-            self.store.finish_running(
-                run.run_id,
-                "success" if code == 0 else "failure",
-                "exit_code",
-                None if code == 0 else f"exit code {code}",
-                expected_attempt=run.attempt,
-            )
+            self._end_exited(run, process, code)
         finally:
             with self._lock:
                 self._process = None
+
+    def _start_process(self, run, argv, env):
+        """Starts the run's process, or returns None when the launcher is stopping or the
+        run was cancelled before it started. Checked under the lock so a cancel() can't
+        slip in between the check and the start."""
+        with self._lock:
+            if self._stopping.is_set():
+                self._record_shutdown(run)
+                return None
+            if self._was_cancelled(run):
+                return None
+            process = self._process = subprocess.Popen(
+                argv, env=env, start_new_session=True
+            )
+            return process
+
+    def _end_timed_out(self, run, process):
+        _terminate(process)
+        if self._cancelled_since_start(run):
+            return
+        logger.error(
+            "Inline run run_id=%s job=%s exceeded its %ss deadline",
+            run.run_id,
+            run.job,
+            run.deadline_seconds,
+        )
+        self.store.finish_running(
+            run.run_id,
+            "timeout",
+            "deadline",
+            f"deadline of {run.deadline_seconds}s exceeded",
+            force=True,
+            expected_attempt=run.attempt,
+        )
+
+    def _end_exited(self, run, process, code):
+        if self._stopping.is_set() and code != 0:
+            # stop() sent SIGTERM; give it the grace period, then make sure it's gone.
+            _terminate(process)
+            self._record_shutdown(run)
+            return
+        if self._cancelled_since_start(run):
+            return
+        logger.info(
+            "Inline run run_id=%s job=%s exited with %s", run.run_id, run.job, code
+        )
+        self.store.finish_running(
+            run.run_id,
+            "success" if code == 0 else "failure",
+            "exit_code",
+            None if code == 0 else f"exit code {code}",
+            expected_attempt=run.attempt,
+        )
+
+    def _record_shutdown(self, run):
+        self.store.finish_running(
+            run.run_id, "failure", "launcher_shutdown", expected_attempt=run.attempt
+        )
+
+    def _cancelled_since_start(self, run):
+        with self._lock:
+            return self._was_cancelled(run)
+
+    def _was_cancelled(self, run):
+        """Whether `run` was cancelled; call with `_lock` held. The API wrote `cancelled`
+        before the watcher called cancel(), so there is nothing left to record, and the run
+        must end without writing an exit code or timeout over that row."""
+        if run.run_id not in self._cancelled:
+            return False
+        logger.info("Inline run run_id=%s job=%s was cancelled", run.run_id, run.job)
+        return True
 
 
 def _signal_group(process, sig):

@@ -67,7 +67,7 @@ def get_launcher_health():
     status_code=202,
     dependencies=[Depends(require_trigger_api_key)],
 )
-def start_job(name: str, payload: StartRunRequest, request: Request):
+def start_run_endpoint(name: str, payload: StartRunRequest, request: Request):
     try:
         return jobs_service.start_run(
             name,

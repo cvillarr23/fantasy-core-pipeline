@@ -56,6 +56,9 @@ class FakeStore:
             for i, r in self.rows.items()
         )
 
+    def chain_running(self, chain_root_id):
+        return self.status(chain_root_id) == "running"
+
     def running_pods(self):
         return sum(
             r["status"] == "running" and r["executor"] == "pod"
@@ -274,6 +277,26 @@ def test_inline_runs_skip_the_pod_cap_and_wait_for_the_runner(
         "RUN_PARENT_ID": "parent",
     }
     assert store.rows["r1"]["executor"] == "inline"
+
+
+@pytest.mark.parametrize("root_status", ["cancelled", "timeout"])
+def test_step_of_an_ended_chain_is_skipped_at_admission(
+    store, consumer, launch_pod, root_status
+):
+    store.add("root", "tuesday-weekly", status=root_status)
+    assert queue_run(store, consumer, "step", chain_root_id="root")
+    assert consumer.drain() == []
+    assert store.rows["step"]["status"] == "skipped"
+    assert store.rows["step"]["end_reason"] == "chain_ended"
+    launch_pod.assert_not_called()
+
+
+def test_step_of_a_running_chain_launches(store, consumer, launch_pod):
+    store.add("root", "tuesday-weekly", status="running")
+    assert queue_run(store, consumer, "step", chain_root_id="root")
+    assert consumer.drain() == ["step"]
+    assert store.rows["step"]["status"] == "running"
+    launch_pod.assert_called_once()
 
 
 def test_cancelled_while_pending_is_dropped(store, consumer, launch_pod):

@@ -21,6 +21,7 @@ def run(**overrides):
         "chain_root_id": None,
         "executor": "pod",
         "k8s_job": "job-r1-a1",
+        "chain_running": True,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -60,7 +61,7 @@ class Store:
         self.retry_result = retry_result
         self.cancelled_reconciled = []
 
-    def watched_runs(self, job_run_ids=(), max_attempts=None):
+    def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
         return self.runs
 
     def finish_running(
@@ -68,7 +69,7 @@ class Store:
     ):
         self.finished.append((run_id, status, end_reason, error, expected_attempt))
 
-    def retry_running(self, run_id, attempt, expected_attempt=None):
+    def requeue_attempt(self, run_id, attempt, expected_attempt=None):
         self.retried.append((run_id, attempt, expected_attempt))
         return self.retry_result
 
@@ -199,3 +200,34 @@ def test_cancelled_pod_deletes_job_and_inline_cancellation_kills_process():
     watcher.reconcile([k8s_job()])
     api.delete_namespaced_job.assert_called_once()
     inline.cancel.assert_called_once_with("inline")
+
+
+def test_failed_step_of_an_ended_chain_finalizes_without_a_retry():
+    step = run(chain_root_id="root", chain_running=False)
+    watcher, store, api, _ = make_watcher([step], api=MagicMock())
+    watcher.reconcile([k8s_job(active=0, failed=1)])
+    assert store.retried == []
+    assert store.finished == [("r1", "failure", "job_failed", None, 1)]
+    api.delete_namespaced_job.assert_called_once()
+
+
+def test_recorded_failure_of_an_ended_chain_step_is_left_final():
+    step = run(
+        status="failure",
+        executor="inline",
+        k8s_job=None,
+        chain_root_id="root",
+        chain_running=False,
+    )
+    watcher, store, _, _ = make_watcher([step], api=MagicMock())
+    watcher.reconcile([])
+    assert store.retried == []
+    assert store.finished == []
+
+
+def test_failed_step_of_a_running_chain_still_retries():
+    step = run(chain_root_id="root", chain_running=True)
+    watcher, store, _, _ = make_watcher([step], api=MagicMock())
+    watcher.reconcile([k8s_job(active=0, failed=1)])
+    assert store.retried == [("r1", 2, 1)]
+    assert store.finished == []

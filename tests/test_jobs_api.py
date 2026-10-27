@@ -51,9 +51,12 @@ def request():
 
 
 class Cursor:
-    def __init__(self, update_status=None, select_status=None, rows=()):
+    def __init__(
+        self, update_status=None, select_status=None, rows=(), chain_root_id=None
+    ):
         self.update_status = update_status
         self.select_status = select_status
+        self.chain_root_id = chain_root_id
         self.rows = list(rows)
         self.sql = []
         self.params = []
@@ -65,11 +68,10 @@ class Cursor:
         self.last_query = query
 
     def fetchone(self):
-        if "RETURNING status" in self.last_query:
+        if "RETURNING chain_root_id" in self.last_query:
             if self.update_status in ("queued", "running"):
-                old = self.update_status
                 self.update_status = "cancelled"
-                return (old,)
+                return (self.chain_root_id,)
             return None
         if "SELECT status FROM run_log" in self.last_query:
             return (self.select_status,) if self.select_status is not None else None
@@ -98,13 +100,13 @@ def test_start_run_maps_unknown_bad_and_missing_params(catalog, monkeypatch):
     monkeypatch.setattr(jobs_service, "publish_run", publish)
 
     with pytest.raises(HTTPException) as unknown:
-        jobs_api.start_job("missing", StartRunRequest(), request())
+        jobs_api.start_run_endpoint("missing", StartRunRequest(), request())
     with pytest.raises(HTTPException) as bad:
-        jobs_api.start_job(
+        jobs_api.start_run_endpoint(
             "sample-job", StartRunRequest(params={"other": 3}), request()
         )
     with pytest.raises(HTTPException) as missing:
-        jobs_api.start_job(
+        jobs_api.start_run_endpoint(
             "sample-job", StartRunRequest(params={"dry_run": True}), request()
         )
 
@@ -121,7 +123,7 @@ def test_start_run_refuses_overlap(catalog, monkeypatch):
     monkeypatch.setattr(jobs_service, "publish_run", publish)
     monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: True)
     with pytest.raises(HTTPException) as response:
-        jobs_api.start_job(
+        jobs_api.start_run_endpoint(
             "sample-job", StartRunRequest(params={"count": 4}), request()
         )
     assert response.value.status_code == 409
@@ -135,7 +137,7 @@ def test_start_run_persists_queued_row_and_outbox(catalog, monkeypatch):
     monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     monkeypatch.setattr("src.launcher.publish.get_db_cursor", lambda: db_cursor(cursor))
     with patch("src.services.activity_runner.publish_job_run"):
-        result = jobs_api.start_job(
+        result = jobs_api.start_run_endpoint(
             "sample-job", StartRunRequest(params={"count": 4}), request()
         )
 
@@ -171,7 +173,7 @@ def test_downstream_start_returns_chain_root_and_run_id(catalog, monkeypatch):
             return "chain-root", "run-456"
 
     monkeypatch.setattr(jobs_service, "_scheduler", lambda _catalog: FakeScheduler())
-    result = jobs_api.start_job(
+    result = jobs_api.start_run_endpoint(
         "sample-job",
         StartRunRequest(params={"count": 2}, downstream=True),
         request(),
@@ -188,7 +190,7 @@ def test_downstream_start_maps_overlap_and_chain_ambiguity(catalog, monkeypatch)
     monkeypatch.setattr(jobs_service, "_scheduler", Mock())
     monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: True)
     with pytest.raises(HTTPException) as overlap:
-        jobs_api.start_job(
+        jobs_api.start_run_endpoint(
             "sample-job",
             StartRunRequest(params={"count": 2}, downstream=True),
             request(),
@@ -208,7 +210,7 @@ def test_downstream_start_maps_overlap_and_chain_ambiguity(catalog, monkeypatch)
         jobs_service, "_scheduler", lambda _catalog: AmbiguousScheduler()
     )
     with pytest.raises(HTTPException) as ambiguous:
-        jobs_api.start_job(
+        jobs_api.start_run_endpoint(
             "sample-job",
             StartRunRequest(params={"count": 2}, downstream=True),
             request(),
@@ -231,6 +233,27 @@ def test_cancel_run_statuses(monkeypatch, state, expected):
         with pytest.raises(HTTPException) as response:
             jobs_api.cancel_run("run-123")
         assert response.value.status_code == expected
+
+
+@pytest.mark.parametrize(
+    ("chain_root_id", "cancels_steps"),
+    [("run-123", True), ("other-root", False), (None, False)],
+)
+def test_cancel_run_cancels_steps_only_for_a_chain_root(
+    monkeypatch, chain_root_id, cancels_steps
+):
+    cursor = Cursor(update_status="running", chain_root_id=chain_root_id)
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
+    assert jobs_api.cancel_run("run-123") == {
+        "run_id": "run-123",
+        "status": "cancelled",
+    }
+    steps = [
+        params
+        for query, params in zip(cursor.sql, cursor.params)
+        if "WHERE chain_root_id=%s AND id<>%s" in query
+    ]
+    assert steps == ([("run-123", "run-123")] if cancels_steps else [])
 
 
 def test_pause_validates_and_upserts_indefinite_pause(catalog, monkeypatch):
@@ -286,6 +309,16 @@ def test_list_jobs_returns_jobs_chains_and_reuses_last_run_map(
     monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(cursor))
     payload = jobs_api.get_jobs()
     assert payload.jobs[0].name == "sample-job"
+    resolved = catalog.resolve("sample-job")
+    assert (
+        payload.jobs[0].executor,
+        payload.jobs[0].max_attempts,
+        payload.jobs[0].deadline_seconds,
+    ) == (
+        resolved.executor,
+        resolved.max_attempts,
+        int(resolved.deadline.total_seconds()),
+    )
     assert payload.jobs[0].last_run.id == "run-1"
     step = payload.chains[0].steps["sample-job"]
     assert step.after == []
@@ -300,7 +333,7 @@ def test_missing_catalog_returns_empty_jobs_and_503_for_write(monkeypatch):
     monkeypatch.setattr(jobs_service, "_catalog", missing_catalog)
     assert jobs_api.get_jobs().jobs == []
     with pytest.raises(HTTPException) as response:
-        jobs_api.start_job("sample-job", StartRunRequest(), request())
+        jobs_api.start_run_endpoint("sample-job", StartRunRequest(), request())
     assert response.value.status_code == 503
 
 

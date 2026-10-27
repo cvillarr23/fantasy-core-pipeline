@@ -489,7 +489,21 @@
   "fix" this by acking after launch.
 - Overlap and `max_concurrent_pods` are counts of `running` run_log rows (pods counted by
   `trigger->>'executor'='pod'`), decided under a `pg_advisory_xact_lock`. A crashed pod's row
-  holds its slot until the watcher (#344) marks it orphaned.
+  holds its slot until the watcher times it out as orphaned.
+- `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s. A
+  failure or timeout with attempts left requeues the same row at the next attempt
+  (`RunStore.requeue_attempt`), and each attempt only ever acts on its own k8s Job. A run
+  whose pod hasn't started within `start_timeout` fails (`start_timeout`); one still
+  `running` with no k8s Job or inline process past its deadline plus 10 minutes times out
+  (`orphaned`). For a `cancelled` row it deletes the k8s Job or stops the inline process,
+  which records nothing over the row. It reaps finished k8s Jobs.
+- Cancelling a chain root (`POST /v1/runs/{root}/cancel`) also cancels that chain's queued
+  and running steps in the same transaction; the scheduler advances only `running` roots, so
+  no further step starts. Once a root is no longer `running` (cancelled or `max_duration`),
+  the watcher never retries its steps (a failure is final, and `requeue_attempt` refuses),
+  and the consumer skips a still-queued step as `chain_ended` instead of starting it.
+- `src/launcher/heartbeat.py` writes `launcher_heartbeat` (time plus `job_runs` and its DLQ
+  depths) every 15s on its own thread, for `GET /v1/launcher/health`.
 - `run_log_service.adopt_run` keeps the launcher's catalog `job_name` (`lineup-optimizer`).
   The entrypoint's own name goes to `summary.entrypoint`. Overlap, the cap and run_log alerts
   key on catalog names.
@@ -508,8 +522,8 @@
   rerun. A failed nflverse read is cached for 5 minutes. Tests use an in-memory state and a
   frozen `now`; `tests/test_launcher_scheduler_postgres.py` checks the SQL.
 - Chain roots are `running` run_log rows with no k8s Job or process (`chain_root_id = id`,
-  `job_name` = the chain). The watcher's (#344) orphan sweep must skip them; the scheduler
-  ends them itself (`max_duration` -> `timeout`).
+  `job_name` = the chain). The watcher skips them; the scheduler ends them itself
+  (`max_duration` -> `timeout`).
 - `seasons` windows use nflverse game dates: 7 days before the start week's first game through
   2 days after the end week's last game, so the Tuesday after week 18 still ingests. An
   unreadable schedule fails open (logs WARNING).
