@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.database import get_db_cursor
-from src.launcher.catalog import Catalog, UnknownJobError, load_catalog_from_env, validate_run_params
+from src.launcher.catalog import (
+    Catalog,
+    Chain,
+    ResolvedJob,
+    UnknownJobError,
+    load_catalog_from_env,
+    validate_run_params,
+)
 from src.launcher.consumer import overlap_refuses
 from src.launcher.publish import publish_run
 from src.schemas.jobs import JobsResponse, LauncherHealthResponse
@@ -59,68 +66,87 @@ def list_jobs() -> JobsResponse:
     except CatalogUnavailableError:
         return JobsResponse(jobs=[], chains=[])
 
-    names = list(catalog.jobs)
-    last_runs: dict[str, dict[str, Any]] = {}
-    if names:
-        with get_db_cursor() as cursor:
-            cursor.execute(
-                """SELECT DISTINCT ON (job_name) job_name,id,status,started_at,finished_at,trigger_type
-                FROM run_log WHERE job_name=ANY(%s) ORDER BY job_name,started_at DESC""",
-                (names,),
-            )
-            keys = ("job_name", "id", "status", "started_at", "finished_at", "trigger_type")
-            last_runs = {row[0]: dict(zip(keys, row)) for row in cursor.fetchall()}
+    last_runs = _last_runs(list(catalog.jobs))
+    overrides = _pause_overrides()
+    jobs = [
+        _job_info(catalog.resolve(name), last_runs.get(name), overrides.get(name))
+        for name in catalog.jobs
+    ]
+    chains = [
+        _chain_info(name, chain, last_runs, overrides)
+        for name, chain in catalog.chains.items()
+    ]
+    return JobsResponse(jobs=jobs, chains=chains)
 
-    overrides: dict[str, dict[str, Any]] = {}
+
+def _last_runs(names: list[str]) -> dict[str, dict[str, Any]]:
+    """Each job's most recent run_log row, keyed by job name."""
+    if not names:
+        return {}
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """SELECT DISTINCT ON (job_name) job_name,id,status,started_at,finished_at,trigger_type
+            FROM run_log WHERE job_name=ANY(%s) ORDER BY job_name,started_at DESC""",
+            (names,),
+        )
+        keys = ("job_name", "id", "status", "started_at", "finished_at", "trigger_type")
+        return {row[0]: dict(zip(keys, row)) for row in cursor.fetchall()}
+
+
+def _pause_overrides() -> dict[str, dict[str, Any]]:
+    """Every job_overrides row, keyed by job or chain name."""
     with get_db_cursor() as cursor:
         cursor.execute(
             "SELECT job_or_chain,paused_until,reason,set_by,set_at FROM job_overrides"
         )
         keys = ("name", "paused_until", "reason", "set_by", "set_at")
-        overrides = {row[0]: dict(zip(keys, row)) for row in cursor.fetchall()}
+        return {row[0]: dict(zip(keys, row)) for row in cursor.fetchall()}
 
-    jobs = []
-    for name in catalog.jobs:
-        resolved = catalog.resolve(name)
-        job = resolved.job
-        jobs.append(
-            {
-                "name": name,
-                "executor": resolved.executor,
-                "overlap": resolved.overlap,
-                "max_attempts": resolved.max_attempts,
-                "deadline_seconds": int(resolved.deadline.total_seconds()),
-                "alert": resolved.alert,
-                "acts": job.acts,
-                "params": job.params,
-                "profile": job.profile,
-                "command": job.command,
-                "schedules": [
-                    schedule.model_dump(mode="json") for schedule in job.schedules
-                ],
-                "on_event": [event.model_dump(mode="json") for event in job.on_event],
-                "last_run": last_runs.get(name),
-                "pause": overrides.get(name),
+
+def _job_info(
+    resolved: ResolvedJob, last_run: dict | None, pause: dict | None
+) -> dict[str, Any]:
+    """A catalog job with its effective settings (defaults applied), last run and pause."""
+    job = resolved.job
+    return {
+        "name": resolved.name,
+        "executor": resolved.executor,
+        "overlap": resolved.overlap,
+        "max_attempts": resolved.max_attempts,
+        "deadline_seconds": int(resolved.deadline.total_seconds()),
+        "alert": resolved.alert,
+        "acts": job.acts,
+        "params": job.params,
+        "profile": job.profile,
+        "command": job.command,
+        "schedules": [schedule.model_dump(mode="json") for schedule in job.schedules],
+        "on_event": [event.model_dump(mode="json") for event in job.on_event],
+        "last_run": last_run,
+        "pause": pause,
+    }
+
+
+def _chain_info(
+    name: str,
+    chain: Chain,
+    last_runs: dict[str, dict[str, Any]],
+    overrides: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """A catalog chain with its steps' edges and last runs, and its pause."""
+    return {
+        "name": name,
+        "schedule": chain.schedule.model_dump(mode="json") if chain.schedule else None,
+        "max_duration_seconds": int(chain.max_duration.total_seconds()),
+        "steps": {
+            step: {
+                "after": [dependency.model_dump() for dependency in config.after],
+                "latest": config.latest,
+                "last_run": last_runs.get(step),
             }
-        )
-    chains = [
-        {
-            "name": name,
-            "schedule": chain.schedule.model_dump(mode="json") if chain.schedule else None,
-            "max_duration_seconds": int(chain.max_duration.total_seconds()),
-            "steps": {
-                step: {
-                    "after": [dependency.model_dump() for dependency in config.after],
-                    "latest": config.latest,
-                    "last_run": last_runs.get(step),
-                }
-                for step, config in chain.steps.items()
-            },
-            "pause": overrides.get(name),
-        }
-        for name, chain in catalog.chains.items()
-    ]
-    return JobsResponse(jobs=jobs, chains=chains)
+            for step, config in chain.steps.items()
+        },
+        "pause": overrides.get(name),
+    }
 
 
 def launcher_health() -> LauncherHealthResponse:
@@ -202,18 +228,22 @@ def cancel_run(identity: str) -> dict[str, str]:
         cancelled = cursor.fetchone()
         if cancelled:
             if cancelled[0] == identity:
-                cursor.execute(
-                    """UPDATE run_log SET status='cancelled',finished_at=now(),
-                    end_reason='cancelled' WHERE chain_root_id=%s AND id<>%s
-                    AND status IN ('queued','running')""",
-                    (identity, identity),
-                )
+                _cancel_chain_steps(cursor, identity)
             return {"run_id": identity, "status": "cancelled"}
         cursor.execute("SELECT status FROM run_log WHERE id=%s", (identity,))
         row = cursor.fetchone()
         if row is None:
             raise RunNotFoundError(identity)
         raise RunNotCancellableError(row[0])
+
+
+def _cancel_chain_steps(cursor, root_id: str) -> None:
+    """Cancels a chain root's queued and running steps, in the caller's transaction."""
+    cursor.execute(
+        """UPDATE run_log SET status='cancelled',finished_at=now(),end_reason='cancelled'
+        WHERE chain_root_id=%s AND id<>%s AND status IN ('queued','running')""",
+        (root_id, root_id),
+    )
 
 
 def pause_job(

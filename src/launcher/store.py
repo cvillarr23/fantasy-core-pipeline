@@ -122,21 +122,13 @@ class RunStore:
         """Ends a launched run. Without `force` it only fills in a row the process itself
         left `running` (it crashed or never adopted RUN_ID), keeping what run_scope wrote.
         """
+        guard, guard_params = _finish_guard(force, expected_attempt)
         with get_db_cursor() as c:
-            guard = (
-                " AND status IN ('running','success','failure','timeout')"
-                if force
-                else " AND status='running'"
-            )
-            params = (status, end_reason, error, run_id)
-            if expected_attempt is not None:
-                guard += " AND attempt=%s"
-                params += (expected_attempt,)
             c.execute(
                 """UPDATE run_log SET status=%s, end_reason=%s,
                 error=COALESCE(%s,error), finished_at=now() WHERE id=%s"""
                 + guard,
-                params,
+                (status, end_reason, error, run_id, *guard_params),
             )
 
     def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
@@ -163,35 +155,7 @@ class RunStore:
                 ORDER BY r.started_at""",
                 (list(run_ids_with_k8s_job), json.dumps(max_attempts or {})),
             )
-            rows = c.fetchall()
-        result = []
-        for (
-            identity,
-            job,
-            status,
-            attempt,
-            started_at,
-            chain_root_id,
-            trigger,
-            chain_running,
-        ) in rows:
-            if isinstance(trigger, str):
-                trigger = json.loads(trigger)
-            trigger = trigger or {}
-            result.append(
-                WatchedRun(
-                    run_id=identity,
-                    job_name=job,
-                    status=status,
-                    attempt=attempt,
-                    started_at=started_at,
-                    chain_root_id=chain_root_id,
-                    executor=trigger.get("executor"),
-                    k8s_job=trigger.get("k8s_job"),
-                    chain_running=chain_running,
-                )
-            )
-        return result
+            return [_watched_run(row) for row in c.fetchall()]
 
     def mark_cancel_reconciled(self, run_id):
         """Avoid revisiting a cancelled run after its external workload was stopped."""
@@ -220,10 +184,7 @@ class RunStore:
             if isinstance(body, str):
                 body = json.loads(body)
             body["attempt"] = attempt
-            attempt_guard = " AND attempt=%s" if expected_attempt is not None else ""
-            params = (attempt, run_id)
-            if expected_attempt is not None:
-                params += (expected_attempt,)
+            attempt_guard, guard_params = _attempt_guard(expected_attempt)
             c.execute(
                 """UPDATE run_log SET status='queued',attempt=%s,started_at=now(),
                 finished_at=NULL,end_reason=NULL,error=NULL
@@ -233,7 +194,7 @@ class RunStore:
                   WHERE root.id=run_log.chain_root_id AND root.status='running'))"""
                 + attempt_guard
                 + " RETURNING id",
-                params,
+                (attempt, run_id, *guard_params),
             )
             if c.fetchone() is None:
                 return False
@@ -243,3 +204,50 @@ class RunStore:
                 (json.dumps(body), run_id),
             )
             return True
+
+
+def _finish_guard(force, expected_attempt):
+    """The WHERE suffix and its params for finish_running: which statuses it may replace,
+    and the attempt it must still be on."""
+    statuses = (
+        " AND status IN ('running','success','failure','timeout')"
+        if force
+        else " AND status='running'"
+    )
+    attempt_guard, params = _attempt_guard(expected_attempt)
+    return statuses + attempt_guard, params
+
+
+def _attempt_guard(expected_attempt):
+    """A WHERE suffix pinning the row to the attempt the caller acted on, if given."""
+    if expected_attempt is None:
+        return "", ()
+    return " AND attempt=%s", (expected_attempt,)
+
+
+def _watched_run(row):
+    """A watched_runs row as a WatchedRun, with its launch details read from `trigger`."""
+    (
+        identity,
+        job,
+        status,
+        attempt,
+        started_at,
+        chain_root_id,
+        trigger,
+        chain_running,
+    ) = row
+    if isinstance(trigger, str):
+        trigger = json.loads(trigger)
+    trigger = trigger or {}
+    return WatchedRun(
+        run_id=identity,
+        job_name=job,
+        status=status,
+        attempt=attempt,
+        started_at=started_at,
+        chain_root_id=chain_root_id,
+        executor=trigger.get("executor"),
+        k8s_job=trigger.get("k8s_job"),
+        chain_running=chain_running,
+    )

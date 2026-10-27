@@ -75,6 +75,9 @@ class Consumer:
     def admit(self, body):
         """Adds a delivered command to the pending list. Returns False for one to drop (not
         a valid command, or its run is no longer queued); raises when run_log is unreadable.
+
+        A delivery at another attempt than the pending one replaces it only when run_log
+        says it is the current attempt; attempts only grow, so an older one never is.
         """
         try:
             command = RunCommand.model_validate(body)
@@ -84,24 +87,7 @@ class Consumer:
         pending = self.pending.get(command.run_id)
         if pending is not None and pending.attempt == command.attempt:
             return True
-        # A delivery at another attempt than the pending one replaces it only when run_log
-        # says it is the current attempt; attempts only grow, so an older one never is.
-        status, attempt = self.store.run_state(command.run_id)
-        if status != "queued":
-            logger.info(
-                "Ignoring run command run_id=%s job=%s: run is %s",
-                command.run_id,
-                command.job,
-                status or "missing",
-            )
-            return False
-        if command.attempt != attempt:
-            logger.info(
-                "Ignoring stale run command run_id=%s attempt=%s; current attempt is %s",
-                command.run_id,
-                command.attempt,
-                attempt,
-            )
+        if not self._is_current_attempt(command, *self.store.run_state(command.run_id)):
             return False
         self.pending[command.run_id] = command
         return True
@@ -146,83 +132,45 @@ class Consumer:
             params = validate_run_params(resolved.job, command.params)
         except (UnknownJobError, ValueError) as exc:
             with self.store.admission() as admission:
-                admission.end_queued(
-                    command.run_id, "failure", "invalid_command", str(exc)
-                )
-            logger.error("Run %s of %s failed: %s", command.run_id, command.job, exc)
+                self._fail_queued(admission, command, "invalid_command", exc)
             return None
         argv = [*resolved.job.command, *params_to_args(params)]
         with self.store.admission() as admission:
-            status, attempt = admission.run_state(command.run_id)
-            if status != "queued":
-                logger.info(
-                    "Dropping run %s of %s: run is %s",
-                    command.run_id,
-                    command.job,
-                    status,
-                )
-                return None
-            if command.attempt != attempt:
-                logger.info(
-                    "Dropping stale run %s attempt %s; current attempt is %s",
-                    command.run_id,
-                    command.attempt,
-                    attempt,
-                )
-                return None
-            # A step published by a scheduler tick that raced its root's cancel, or left
-            # queued when its root hit max_duration, must not start an ended chain.
-            if (
-                command.chain_root_id
-                and command.chain_root_id != command.run_id
-                and not admission.chain_running(command.chain_root_id)
+            if not self._is_current_attempt(
+                command, *admission.run_state(command.run_id)
             ):
-                admission.end_queued(command.run_id, "skipped", "chain_ended")
-                logger.info(
-                    "Skipped run %s of %s: chain run %s has ended",
-                    command.run_id,
-                    command.job,
-                    command.chain_root_id,
+                return None
+            if self._chain_ended(admission, command):
+                self._skip(
+                    admission,
+                    command,
+                    "chain_ended",
+                    f"chain run {command.chain_root_id} has ended",
                 )
                 return None
-            # `expires_at` decides whether the original request is still worth starting.
-            # Once an attempt has run, its configured retries must not inherit that stale
-            # queue deadline or the first late failure would silently suppress them.
-            if command.attempt == 1 and self.clock() >= command.expires_at:
-                admission.end_queued(command.run_id, "skipped", "expired")
-                logger.warning(
-                    "Run %s of %s expired while queued", command.run_id, command.job
+            if self._expired(command):
+                self._skip(
+                    admission,
+                    command,
+                    "expired",
+                    "expired while queued",
+                    level=logging.WARNING,
                 )
                 return None
-            if admission.job_running(command.job, command.run_id):
-                if resolved.overlap == "forbid":
-                    admission.end_queued(command.run_id, "skipped", "overlap")
-                    logger.info(
-                        "Skipped run %s of %s: another run is still running",
-                        command.run_id,
-                        command.job,
-                    )
-                    return None
+            overlap = self._overlap_outcome(admission, command, resolved)
+            if overlap == "skip":
+                self._skip(
+                    admission, command, "overlap", "another run is still running"
+                )
+                return None
+            if overlap == "wait" or self._capacity_full(admission, resolved):
                 return "wait"
-            if resolved.executor == "inline":
-                if self.inline_runner.busy:
-                    return "wait"
-                k8s_job = None
-            else:
-                if (
-                    admission.running_pods()
-                    >= self.catalog.global_settings.max_concurrent_pods
-                ):
-                    return "wait"
-                try:
-                    k8s_job = k8s.build_job(command, resolved, argv)
-                except k8s.LaunchConfigError as exc:
-                    admission.end_queued(
-                        command.run_id, "failure", "launch_failed", str(exc)
-                    )
-                    logger.error(
-                        "Run %s of %s failed: %s", command.run_id, command.job, exc
-                    )
+            k8s_job = None
+            if resolved.executor != "inline":
+                k8s_job = self._build_k8s_job_or_fail(
+                    admission, command, resolved, argv
+                )
+                if k8s_job is None:
                     return None
             if not admission.claim(
                 command.run_id,
@@ -231,6 +179,86 @@ class Consumer:
             ):
                 return None
         return resolved, argv, k8s_job
+
+    @staticmethod
+    def _is_current_attempt(command, status, attempt):
+        """Whether the command is for a still-queued run at run_log's current attempt."""
+        if status != "queued":
+            logger.info(
+                "Ignoring run command run_id=%s job=%s: run is %s",
+                command.run_id,
+                command.job,
+                status or "missing",
+            )
+            return False
+        if command.attempt != attempt:
+            logger.info(
+                "Ignoring stale run command run_id=%s attempt=%s; current attempt is %s",
+                command.run_id,
+                command.attempt,
+                attempt,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _chain_ended(admission, command):
+        """Whether the command is a chain step whose root is no longer `running`.
+
+        A scheduler tick that raced its root's cancel can publish a step after the cancel,
+        and a step can still be queued when its root hits max_duration; neither may start
+        an ended chain.
+        """
+        return bool(
+            command.chain_root_id
+            and command.chain_root_id != command.run_id
+            and not admission.chain_running(command.chain_root_id)
+        )
+
+    def _expired(self, command):
+        """Whether a first attempt sat queued past its `expires_at`.
+
+        `expires_at` decides whether the original request is still worth starting. Once an
+        attempt has run, its configured retries must not inherit that stale queue deadline
+        or the first late failure would silently suppress them.
+        """
+        return command.attempt == 1 and self.clock() >= command.expires_at
+
+    @staticmethod
+    def _overlap_outcome(admission, command, resolved):
+        """While another run of the job is running: "skip" under `forbid`, "wait" under
+        `queue`. None when no other run is running."""
+        if not admission.job_running(command.job, command.run_id):
+            return None
+        return "skip" if resolved.overlap == "forbid" else "wait"
+
+    def _capacity_full(self, admission, resolved):
+        """Whether the run's executor has no room: the inline runner is busy, or the pod
+        cap is reached."""
+        if resolved.executor == "inline":
+            return self.inline_runner.busy
+        return (
+            admission.running_pods() >= self.catalog.global_settings.max_concurrent_pods
+        )
+
+    def _build_k8s_job_or_fail(self, admission, command, resolved, argv):
+        """The run's k8s Job, or None after failing the run when the launcher's own
+        config can't build it."""
+        try:
+            return k8s.build_job(command, resolved, argv)
+        except k8s.LaunchConfigError as exc:
+            self._fail_queued(admission, command, "launch_failed", exc)
+            return None
+
+    @staticmethod
+    def _skip(admission, command, end_reason, why, level=logging.INFO):
+        admission.end_queued(command.run_id, "skipped", end_reason)
+        logger.log(level, "Skipped run %s of %s: %s", command.run_id, command.job, why)
+
+    @staticmethod
+    def _fail_queued(admission, command, end_reason, exc):
+        admission.end_queued(command.run_id, "failure", end_reason, str(exc))
+        logger.error("Run %s of %s failed: %s", command.run_id, command.job, exc)
 
     def _launch(self, command, resolved, argv, k8s_job):
         context = propagate.extract(
@@ -243,18 +271,9 @@ class Consumer:
         ):
             try:
                 if k8s_job is None:
-                    self.inline_runner.submit(
-                        InlineRun(
-                            run_id=command.run_id,
-                            job=command.job,
-                            argv=argv,
-                            env=command.launch_env(),
-                            deadline_seconds=resolved.deadline.total_seconds(),
-                            attempt=command.attempt,
-                        )
-                    )
+                    self._start_inline(command, resolved, argv)
                 else:
-                    self.launch_pod(k8s_job)
+                    self._start_pod(k8s_job)
             except Exception as exc:
                 logger.exception(
                     "Run %s of %s could not be launched", command.run_id, command.job
@@ -268,6 +287,21 @@ class Consumer:
             resolved.executor,
             command.attempt,
         )
+
+    def _start_inline(self, command, resolved, argv):
+        self.inline_runner.submit(
+            InlineRun(
+                run_id=command.run_id,
+                job=command.job,
+                argv=argv,
+                env=command.launch_env(),
+                deadline_seconds=resolved.deadline.total_seconds(),
+                attempt=command.attempt,
+            )
+        )
+
+    def _start_pod(self, k8s_job):
+        self.launch_pod(k8s_job)
 
     def _launch_failed(self, command, k8s_job, exc):
         """Settles a launch that raised. Returns True when the k8s Job turned out to exist.

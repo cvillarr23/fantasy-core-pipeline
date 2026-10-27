@@ -371,20 +371,23 @@ class Scheduler:
             )
 
     def _chain_covers(self, job: str, schedule: Schedule, slot: datetime) -> bool:
-        tz = ZoneInfo(schedule.tz)
-        day = slot.astimezone(tz).date()
-        start = datetime.combine(day, time(), tzinfo=tz)
-        end = datetime.combine(day + timedelta(days=1), time(), tzinfo=tz)
-        for chain in self._chains_by_job.get(job, []):
-            for root in self.state.chain_roots_between(chain, start, end):
-                if job not in self._scope(chain, root):
-                    continue
-                step = self.state.chain_steps(root.id).get(job)
-                if step is None and root.status == "running":
-                    return True
-                if step is not None and step.status != "skipped":
-                    return True
-        return False
+        """Whether a chain run on the slot's local day covers ``job``."""
+        start, end = _local_day(slot, ZoneInfo(schedule.tz))
+        return any(
+            self._root_covers(chain, root, job)
+            for chain in self._chains_by_job.get(job, [])
+            for root in self.state.chain_roots_between(chain, start, end)
+        )
+
+    def _root_covers(self, chain: str, root: RunRow, job: str) -> bool:
+        """Whether ``job`` is in this chain run's scope and has run (not skipped), or hasn't
+        started yet while the chain is still running."""
+        if job not in self._scope(chain, root):
+            return False
+        step = self.state.chain_steps(root.id).get(job)
+        if step is None:
+            return root.status == "running"
+        return step.status != "skipped"
 
     def _scope(self, chain: str, root: RunRow) -> set[str]:
         from_step = root.trigger.get("from_step")
@@ -438,22 +441,14 @@ class Scheduler:
                     step_name, key, root, now, "max_duration"
                 )
                 continue
-            edges = [
-                (dep.on, self._outcome(runs.get(dep.step)))
-                for dep in step.after
-                if dep.step in scope
-            ]
-            if any(on == "success" and outcome == "finished" for on, outcome in edges):
+            edges = self._edges(step, scope, runs)
+            if _parents_failed(edges):
                 runs[step_name] = self._skip_step(
                     step_name, key, root, now, "dependency_failed"
                 )
                 continue
-            ready = all(
-                outcome == "success" or (on == "finish" and outcome == "finished")
-                for on, outcome in edges
-            )
             latest = self._latest_at(chain, step, root.scheduled_for)
-            if not ready:
+            if not _parents_ready(edges):
                 if latest is None or now < latest:
                     continue
                 logger.info(
@@ -461,8 +456,7 @@ class Scheduler:
                     key,
                     step.latest,
                 )
-            # A manual downstream run was asked for explicitly, so a pause doesn't stop it.
-            if step_name != from_step and self.state.paused(step_name, now):
+            if self._step_paused(step_name, from_step, now):
                 runs[step_name] = self._skip_step(step_name, key, root, now, "paused")
                 continue
             run_id = self._publish(
@@ -471,13 +465,36 @@ class Scheduler:
                 dedupe_key=key,
                 scheduled_for=now,
                 chain_root_id=root.id,
-                expires_at=(
-                    latest + LATEST_GRACE
-                    if latest
-                    else root.scheduled_for + chain.max_duration
-                ),
+                expires_at=_step_expires_at(root, chain, latest),
             )
             runs[step_name] = RunRow(run_id, step_name, "queued", chain_root_id=root.id)
+        self._end_root_if_done(root, chain, scope, runs, expired)
+
+    def _edges(
+        self, step: ChainStep, scope: set[str], runs: dict[str, RunRow]
+    ) -> list[tuple[str, str]]:
+        """``(on, outcome)`` for each of the step's parents in the run's scope."""
+        return [
+            (dep.on, self._outcome(runs.get(dep.step)))
+            for dep in step.after
+            if dep.step in scope
+        ]
+
+    def _step_paused(self, step: str, from_step: str | None, now: datetime) -> bool:
+        """Whether a paused job skips this step. A manual downstream run was asked for
+        explicitly, so a pause doesn't stop its first step."""
+        return step != from_step and self.state.paused(step, now)
+
+    def _end_root_if_done(
+        self,
+        root: RunRow,
+        chain: Chain,
+        scope: set[str],
+        runs: dict[str, RunRow],
+        expired: bool,
+    ) -> None:
+        """Ends the root ``timeout`` past max_duration, or ``success``/``failure`` once no
+        step in scope is pending."""
         if expired:
             logger.warning(
                 "Chain run %s exceeded max_duration %s", root.id, chain.max_duration
@@ -561,6 +578,36 @@ class Scheduler:
         else:
             logger.info("Published %s run %s (%s)", job, result["run_id"], dedupe_key)
         return result["run_id"]
+
+
+def _parents_failed(edges: list[tuple[str, str]]) -> bool:
+    """Whether an ``on: success`` parent finished without succeeding."""
+    return any(on == "success" and outcome == "finished" for on, outcome in edges)
+
+
+def _parents_ready(edges: list[tuple[str, str]]) -> bool:
+    """Whether every parent satisfies its edge: succeeded, or finished for ``on: finish``."""
+    return all(
+        outcome == "success" or (on == "finish" and outcome == "finished")
+        for on, outcome in edges
+    )
+
+
+def _step_expires_at(root: RunRow, chain: Chain, latest: datetime | None) -> datetime:
+    """A step's queue expiry: its ``latest`` plus LATEST_GRACE, else the chain's
+    max_duration."""
+    assert root.scheduled_for is not None
+    if latest:
+        return latest + LATEST_GRACE
+    return root.scheduled_for + chain.max_duration
+
+
+def _local_day(moment: datetime, tz: ZoneInfo) -> tuple[datetime, datetime]:
+    """Start and end of ``moment``'s local day in ``tz``."""
+    day = moment.astimezone(tz).date()
+    start = datetime.combine(day, time(), tzinfo=tz)
+    end = datetime.combine(day + timedelta(days=1), time(), tzinfo=tz)
+    return start, end
 
 
 def _window(schedule: Schedule) -> timedelta:

@@ -290,12 +290,7 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     """
     parent = current_run.get()
     previous_parent_id = os.environ.get("RUN_PARENT_ID")
-    adopted_id = os.environ.pop("RUN_ID", None) if parent is None else None
-    adopted_attempt = (
-        int(os.environ["RUN_ATTEMPT"])
-        if adopted_id and os.environ.get("RUN_ATTEMPT")
-        else None
-    )
+    adopted_id, adopted_attempt = _launcher_run_from_env(parent)
     parent_run_id = (
         parent_run_id or (parent.id if parent else None) or os.getenv("RUN_PARENT_ID")
     )
@@ -304,21 +299,9 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
         trigger = {**env_trigger, **(trigger or {})}
     run = Run(adopted_id or start_run(job_name, trigger_type, trigger, parent_run_id))
     if adopted_id:
-        adopted = adopt_run(
-            adopted_id,
-            job_name,
-            trigger_type,
-            parent_run_id,
-            adopted_attempt,
+        _adopt_launcher_run(
+            adopted_id, job_name, trigger_type, parent_run_id, adopted_attempt
         )
-        if adopted is False:
-            raise RuntimeError(
-                f"Run {adopted_id} attempt {adopted_attempt} is no longer current"
-            )
-    # Only a launcher-adopted run exports its id for subprocesses: that pod runs one job, so
-    # the shared process environment is safe there, unlike the API where requests overlap.
-    if adopted_id:
-        os.environ["RUN_PARENT_ID"] = adopted_id
     token = current_run.set(run)
     capture = _RunLogCapture(run)
     logging.getLogger().addHandler(capture)
@@ -351,10 +334,36 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
         logging.getLogger().removeHandler(capture)
         current_run.reset(token)
         if adopted_id:
-            if previous_parent_id is None:
-                os.environ.pop("RUN_PARENT_ID", None)
-            else:
-                os.environ["RUN_PARENT_ID"] = previous_parent_id
+            _restore_parent_id(previous_parent_id)
+
+
+def _launcher_run_from_env(parent):
+    """The launcher's `(RUN_ID, RUN_ATTEMPT)` for an outermost scope, else `(None, None)`.
+    RUN_ID is consumed, so nested scopes and subprocesses don't adopt the same row."""
+    if parent is not None:
+        return None, None
+    adopted_id = os.environ.pop("RUN_ID", None)
+    attempt = os.environ.get("RUN_ATTEMPT")
+    return adopted_id, int(attempt) if adopted_id and attempt else None
+
+
+def _adopt_launcher_run(adopted_id, job_name, trigger_type, parent_run_id, attempt):
+    """Attaches this process to the launcher's row and exports its id as RUN_PARENT_ID.
+
+    Raises when the row moved on to another attempt. Only a launcher-adopted run exports
+    its id for subprocesses: that pod runs one job, so the shared process environment is
+    safe there, unlike the API where requests overlap.
+    """
+    if adopt_run(adopted_id, job_name, trigger_type, parent_run_id, attempt) is False:
+        raise RuntimeError(f"Run {adopted_id} attempt {attempt} is no longer current")
+    os.environ["RUN_PARENT_ID"] = adopted_id
+
+
+def _restore_parent_id(previous_parent_id):
+    if previous_parent_id is None:
+        os.environ.pop("RUN_PARENT_ID", None)
+    else:
+        os.environ["RUN_PARENT_ID"] = previous_parent_id
 
 
 @contextmanager

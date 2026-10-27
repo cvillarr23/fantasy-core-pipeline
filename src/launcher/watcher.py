@@ -58,25 +58,9 @@ class Watcher:
 
     def reconcile(self, k8s_jobs, pods=None):
         """Apply one snapshot of launcher k8s Jobs to current active/cancelled run rows."""
-        by_run = {}
-        for k8s_job in k8s_jobs:
-            labels = getattr(k8s_job.metadata, "labels", None) or {}
-            run_id = labels.get("fantasy.run-id")
-            if run_id:
-                by_run.setdefault(run_id, []).append(k8s_job)
-        pending_k8s_jobs = set()
-        for pod in pods or []:
-            labels = getattr(pod.metadata, "labels", None) or {}
-            k8s_job_name = labels.get("batch.kubernetes.io/job-name") or labels.get(
-                "job-name"
-            )
-            if k8s_job_name and getattr(pod.status, "phase", None) == "Pending":
-                pending_k8s_jobs.add(k8s_job_name)
-
-        max_attempts = {
-            name: self.catalog.resolve(name).max_attempts for name in self.catalog.jobs
-        }
-        for run in self.store.watched_runs(set(by_run), max_attempts):
+        by_run = _k8s_jobs_by_run(k8s_jobs)
+        pending_k8s_job_names = _pending_k8s_job_names(pods or [])
+        for run in self.store.watched_runs(set(by_run), self._max_attempts()):
             run_k8s_jobs = by_run.get(run.run_id, [])
             if run.status == "cancelled":
                 if self._cancel(run, run_k8s_jobs):
@@ -88,56 +72,86 @@ class Watcher:
             if run.executor == "inline":
                 self._reconcile_inline(run)
             else:
-                self._reconcile_pod(run, run_k8s_jobs, pending_k8s_jobs)
+                self._reconcile_pod(run, run_k8s_jobs, pending_k8s_job_names)
+
+    def _max_attempts(self):
+        return {
+            name: self.catalog.resolve(name).max_attempts for name in self.catalog.jobs
+        }
 
     def _reconcile_inline(self, run):
-        if run.status == "running":
-            if self.inline_runner and self.inline_runner.is_running(run.run_id):
-                return
-            self._orphan(run)
-        elif run.status in {"failure", "timeout"} and self._has_attempt_left(run):
-            self._finish_or_retry(
-                run, run.status, "deadline" if run.status == "timeout" else "exit_code"
-            )
+        if (
+            run.status == "running"
+            and self.inline_runner
+            and self.inline_runner.is_running(run.run_id)
+        ):
+            return
+        self._reconcile_without_workload(run, "exit_code")
 
-    def _reconcile_pod(self, run, k8s_jobs, pending_k8s_jobs):
-        expected_name = run.k8s_job
-        if expected_name is not None:
-            for previous in k8s_jobs:
-                if (
-                    previous.metadata.name != expected_name
-                    and _k8s_job_outcome(previous) is not None
-                ):
-                    self._delete(previous)
-        current = next(
-            (k8s_job for k8s_job in k8s_jobs if k8s_job.metadata.name == expected_name),
-            None,
-        )
-        if expected_name is None and len(k8s_jobs) == 1:
-            current = k8s_jobs[0]
+    def _reconcile_pod(self, run, k8s_jobs, pending_k8s_job_names):
+        self._reap_previous_attempts(run, k8s_jobs)
+        current = self._current_k8s_job(run, k8s_jobs)
         if current is None and k8s_jobs:
-            # A prior attempt's terminal k8s Job may remain visible while Kubernetes
-            # processes its deletion. Reap it without applying its outcome to this try.
-            removed = all(self._delete(previous) for previous in k8s_jobs)
-            if removed and run.status == "running" and self._start_timed_out(run):
-                self._finish_or_retry(run, "failure", "start_timeout")
+            self._reap_leftover_k8s_jobs(run, k8s_jobs)
             return
         if current is None:
-            if run.status == "running":
-                self._orphan(run)
-            elif run.status in {"failure", "timeout"} and self._has_attempt_left(run):
-                self._finish_or_retry(
-                    run,
-                    run.status,
-                    "deadline" if run.status == "timeout" else "job_failed",
-                )
+            self._reconcile_without_workload(run, "job_failed")
             return
         outcome = _k8s_job_outcome(current)
         if run.status in {"success", "failure", "timeout"} and outcome is None:
             return
         self._reconcile_job(
-            run, current, outcome, pending=current.metadata.name in pending_k8s_jobs
+            run,
+            current,
+            outcome,
+            pending=current.metadata.name in pending_k8s_job_names,
         )
+
+    def _reap_previous_attempts(self, run, k8s_jobs):
+        """Deletes finished k8s Jobs of the run's earlier attempts."""
+        if run.k8s_job is None:
+            return
+        for previous in k8s_jobs:
+            if (
+                previous.metadata.name != run.k8s_job
+                and _k8s_job_outcome(previous) is not None
+            ):
+                self._delete(previous)
+
+    @staticmethod
+    def _current_k8s_job(run, k8s_jobs):
+        """The k8s Job of the run's current attempt: the one named in the row, or the only
+        one when the row names none."""
+        current = next(
+            (k8s_job for k8s_job in k8s_jobs if k8s_job.metadata.name == run.k8s_job),
+            None,
+        )
+        if run.k8s_job is None and len(k8s_jobs) == 1:
+            current = k8s_jobs[0]
+        return current
+
+    def _reap_leftover_k8s_jobs(self, run, k8s_jobs):
+        """Deletes k8s Jobs that aren't the current attempt's, without applying their
+        outcome to this attempt, and fails a `running` attempt past its start timeout.
+
+        A prior attempt's terminal k8s Job may remain visible while Kubernetes processes
+        its deletion.
+        """
+        removed = all(self._delete(previous) for previous in k8s_jobs)
+        if removed and run.status == "running" and self._start_timed_out(run):
+            self._finish_or_retry(run, "failure", "start_timeout")
+
+    def _reconcile_without_workload(self, run, failure_reason):
+        """A run with no live k8s Job or inline process: a `running` row is timed out once
+        orphaned, and a recorded failure or timeout with attempts left is retried."""
+        if run.status == "running":
+            self._orphan(run)
+        elif run.status in {"failure", "timeout"} and self._has_attempt_left(run):
+            self._finish_or_retry(
+                run,
+                run.status,
+                "deadline" if run.status == "timeout" else failure_reason,
+            )
 
     def _reconcile_job(self, run, k8s_job, outcome, pending=False):
         if outcome is not None:
@@ -160,30 +174,38 @@ class Watcher:
             logger.warning(
                 "Run %s belongs to removed catalog job %s", run.run_id, run.job_name
             )
-            self.store.finish_running(
-                run.run_id, outcome, reason, force=True, expected_attempt=run.attempt
-            )
-            return
-        retryable = outcome in {"failure", "timeout"} and run.attempt < job.max_attempts
-        if retryable and not run.chain_running:
-            # The chain was cancelled or ran past max_duration: this outcome is final.
-            logger.info("Not retrying run %s: its chain has ended", run.run_id)
-        elif retryable:
-            # A refusal means another writer moved the row on, or the chain ended since it
-            # was read; either way the next tick sees the row's new state.
-            if self.store.requeue_attempt(
-                run.run_id, run.attempt + 1, expected_attempt=run.attempt
-            ):
-                logger.info(
-                    "Retrying run %s of %s at attempt %s",
-                    run.run_id,
-                    job.name,
-                    run.attempt + 1,
-                )
+            job = None
+        if job is not None and self._should_retry(run, outcome, job):
+            self._requeue(run, job)
             return
         self.store.finish_running(
             run.run_id, outcome, reason, force=True, expected_attempt=run.attempt
         )
+
+    @staticmethod
+    def _should_retry(run, outcome, job):
+        """Whether a failure or timeout gets another attempt. A step of a chain that was
+        cancelled or ran past max_duration doesn't: its outcome is final."""
+        if outcome not in {"failure", "timeout"} or run.attempt >= job.max_attempts:
+            return False
+        if not run.chain_running:
+            logger.info("Not retrying run %s: its chain has ended", run.run_id)
+            return False
+        return True
+
+    def _requeue(self, run, job):
+        """Queues the next attempt. A refusal means another writer moved the row on, or the
+        chain ended since it was read; either way the next tick sees the row's new state.
+        """
+        if self.store.requeue_attempt(
+            run.run_id, run.attempt + 1, expected_attempt=run.attempt
+        ):
+            logger.info(
+                "Retrying run %s of %s at attempt %s",
+                run.run_id,
+                job.name,
+                run.attempt + 1,
+            )
 
     def _has_attempt_left(self, run):
         try:
@@ -258,3 +280,25 @@ def _k8s_job_outcome(k8s_job):
             return "timeout", "deadline"
         return "failure", "job_failed"
     return None
+
+
+def _k8s_jobs_by_run(k8s_jobs):
+    """Launcher k8s Jobs grouped by their `fantasy.run-id` label."""
+    by_run = {}
+    for k8s_job in k8s_jobs:
+        labels = getattr(k8s_job.metadata, "labels", None) or {}
+        run_id = labels.get("fantasy.run-id")
+        if run_id:
+            by_run.setdefault(run_id, []).append(k8s_job)
+    return by_run
+
+
+def _pending_k8s_job_names(pods):
+    """Names of the k8s Jobs that own a `Pending` pod."""
+    names = set()
+    for pod in pods:
+        labels = getattr(pod.metadata, "labels", None) or {}
+        name = labels.get("batch.kubernetes.io/job-name") or labels.get("job-name")
+        if name and getattr(pod.status, "phase", None) == "Pending":
+            names.add(name)
+    return names
