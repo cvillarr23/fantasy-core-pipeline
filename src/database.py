@@ -1,6 +1,8 @@
 import os
+import time
 from contextlib import contextmanager
 import logging
+import psycopg2
 import redis
 from psycopg2.pool import ThreadedConnectionPool
 
@@ -21,23 +23,51 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_CONNECT_TIMEOUT_SECONDS = 3
 REDIS_SOCKET_TIMEOUT_SECONDS = 5
 
+# How long the first connect keeps retrying. Cluster DNS and the CNI need about a minute
+# after a node boot, so this leaves headroom while still failing a misconfigured job.
+DB_CONNECT_RETRY_SECONDS = 300
+DB_CONNECT_MAX_DELAY_SECONDS = 30
+
 if not DB_PASSWORD:
     logger.error("DB_PASSWORD environment variable is missing!")
 
-# Establish a connection pool with conservative caps to preserve 12GB node RAM
-try:
-    db_pool = ThreadedConnectionPool(
-        minconn=2,
-        maxconn=10,
-        host=DB_HOST,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
-    logger.info("Database connection pool initialized successfully.")
-except Exception as e:
-    logger.error(f"Failed to initialize database connection pool: {e}")
-    raise
+
+def _open_pool():
+    """Open the pool, retrying connection errors for up to DB_CONNECT_RETRY_SECONDS.
+
+    A CronJob catching up on a missed schedule after a node boot can start before cluster
+    DNS and the CNI are ready, and with backoffLimit 1 the Job controller kills it after one
+    quick restart. Retrying here rides out that warm-up. A wrong password is also an
+    OperationalError, so a bad credential takes the full window to fail.
+    """
+    deadline = time.monotonic() + DB_CONNECT_RETRY_SECONDS
+    delay = 2
+    while True:
+        try:
+            # Conservative caps to preserve 12GB node RAM
+            pool = ThreadedConnectionPool(
+                minconn=2,
+                maxconn=10,
+                host=DB_HOST,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD
+            )
+            logger.info("Database connection pool initialized successfully.")
+            return pool
+        except psycopg2.OperationalError as e:
+            if time.monotonic() + delay > deadline:
+                logger.error(f"Failed to initialize database connection pool: {e}")
+                raise
+            logger.warning(f"Database not reachable yet, retrying in {delay}s: {e}")
+            time.sleep(delay)
+            delay = min(delay * 2, DB_CONNECT_MAX_DELAY_SECONDS)
+        except Exception as e:
+            logger.error(f"Failed to initialize database connection pool: {e}")
+            raise
+
+
+db_pool = _open_pool()
 
 @contextmanager
 def get_db_connection():
