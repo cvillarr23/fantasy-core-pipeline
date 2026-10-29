@@ -11,6 +11,7 @@ import sys
 import time
 
 from src.nfl_schedule import resolve_upcoming_week
+from src.services import run_log_service
 from src.telemetry import configure_tracing
 
 logger = logging.getLogger("DraftPrepRefresher")
@@ -88,4 +89,6 @@ def main() -> int:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     configure_tracing("draft-prep-refresher")
-    sys.exit(main())
+    # The outermost run scope adopts the launcher's RUN_ID, so each stage subprocess records
+    # a child run instead of adopting (and ending) this one.
+    sys.exit(run_log_service.run_main("draft_prep_refresher", main))
