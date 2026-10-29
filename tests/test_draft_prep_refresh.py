@@ -1,8 +1,14 @@
+import os
+import runpy
 import subprocess
+import sys
 from unittest.mock import patch
+
+import pytest
 
 from src.jobs import draft_prep_refresh as job
 from src.nfl_schedule import WeekResolutionError
+from src.services import run_log_service
 
 
 def test_main_runs_all_stages_for_target_through_four_week_horizon(monkeypatch):
@@ -83,3 +89,30 @@ def test_main_rejects_a_week_outside_the_regular_season(monkeypatch):
          patch.object(job.subprocess, "run") as run:
         assert job.main() == 1
     run.assert_not_called()
+
+
+def test_entrypoint_adopts_the_launcher_run_so_stages_become_children(monkeypatch):
+    """A stage that inherited RUN_ID would adopt the refresh's row and end it after one stage,
+    and every later stage would then fail to adopt it."""
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    monkeypatch.setenv("RUN_ID", "launcher-run")
+    monkeypatch.delenv("RUN_PARENT_ID", raising=False)
+    # runpy re-executes the module as __main__; the imported copy would make it warn.
+    monkeypatch.delitem(sys.modules, "src.jobs.draft_prep_refresh")
+    stage_env = []
+
+    def stage(*args, **kwargs):
+        stage_env.append((os.getenv("RUN_ID"), os.getenv("RUN_PARENT_ID")))
+
+    with patch("src.nfl_schedule.resolve_upcoming_week", return_value=18), \
+         patch("src.telemetry.configure_tracing"), \
+         patch.object(run_log_service, "adopt_run", return_value=True) as adopt, \
+         patch.object(run_log_service, "finish_run") as finish, \
+         patch.object(job.subprocess, "run", side_effect=stage), \
+         pytest.raises(SystemExit) as exited:
+        runpy.run_module("src.jobs.draft_prep_refresh", run_name="__main__")
+
+    assert exited.value.code == 0
+    assert stage_env == [(None, "launcher-run")] * len(job.STAGES)
+    assert adopt.call_args.args[0] == "launcher-run"
+    assert finish.call_args.args[:2] == ("launcher-run", "success")
