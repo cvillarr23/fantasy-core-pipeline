@@ -55,11 +55,20 @@ class JobHealthList(BaseModel):
     dead_letters: Optional[list[DeadLetterQueue]] = None
 
 
+class LlmSessionRef(BaseModel):
+    id: str
+    title: str
+
+
+class ChildRun(RunSummary):
+    llm_sessions: list[LlmSessionRef] = []
+
+
 class RunDetail(Run):
     # {role: {ref_type: [display row]}}; rows vary by ref_type (article, rumor, session, action).
     links: dict[str, dict[str, list[dict[str, Any]]]] = {}
     parent: Optional[dict[str, Any]] = None
-    children: list[RunSummary] = []
+    children: list[ChildRun] = []
 
 
 class TraceStage(BaseModel):
