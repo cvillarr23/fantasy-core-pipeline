@@ -15,6 +15,7 @@ from src.launcher.scheduler import (
     RunRow,
     Scheduler,
     latest_slot,
+    next_slot,
     slot_key,
 )
 
@@ -388,6 +389,117 @@ def test_unreadable_nfl_schedule_fails_open(state, commands, caplog):
         scheduler.tick(ct(2026, 10, 27, 16, 1))
     assert root(state).status == "running"
     assert "firing the slot anyway" in caplog.text
+
+
+# Next runs
+
+
+def nfl_schedule_two_seasons(season: int) -> pl.DataFrame:
+    if season == 2026:
+        return nfl_schedule_2026(season)
+    return pl.DataFrame(
+        {
+            "season": [season, season],
+            "game_type": ["REG", "REG"],
+            "week": [1, 18],
+            "gameday": [f"{season}-09-09", f"{season + 1}-01-09"],
+        }
+    )
+
+
+def calendar_scheduler(state, load) -> Scheduler:
+    return Scheduler(load_catalog(FIXTURE), state, seasons=NflSeasonCalendar(load=load))
+
+
+def test_next_slot_is_strictly_after_now():
+    half_hourly = Schedule(cron="*/30 * * * *", tz="America/Chicago")
+    now = datetime(2026, 10, 27, 15, 30, tzinfo=UTC)
+    assert next_slot(half_hourly, now) == datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
+
+
+def test_next_slot_skips_second_pass_of_repeated_hour():
+    daily = Schedule(cron="30 1 * * *", tz="America/Chicago")
+    first_pass = datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
+    assert next_slot(daily, datetime(2026, 11, 1, 6, 0, tzinfo=UTC)) == first_pass
+    assert next_slot(daily, first_pass) == datetime(2026, 11, 2, 7, 30, tzinfo=UTC)
+
+
+def test_next_chain_run_is_the_next_in_season_slot(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_two_seasons)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2026, 10, 26, 12)) == ct(
+        2026, 10, 27, 16
+    )
+
+
+def test_next_chain_run_skips_the_off_season(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_two_seasons)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2027, 3, 1, 12)) == ct(
+        2027, 9, 7, 16
+    )
+
+
+def test_next_chain_run_is_none_without_a_slot_in_the_next_year(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_2026)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2027, 3, 1, 12)) is None
+
+
+def test_next_chain_run_is_none_for_a_chain_with_no_schedule(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_2026)
+    scheduler.catalog.chains["tuesday-weekly"].schedule = None
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2026, 10, 26, 12)) is None
+
+
+def test_next_chain_run_fails_open_on_an_unreadable_nfl_schedule(state):
+    def broken(season):
+        raise RuntimeError("404")
+
+    scheduler = calendar_scheduler(state, broken)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2027, 3, 1, 12)) == ct(
+        2027, 3, 2, 16
+    )
+
+
+def test_next_job_run_is_none_for_a_chain_only_step(scheduler):
+    assert scheduler.next_job_run("sync-league", ct(2026, 10, 26, 12)) is None
+
+
+def test_next_job_run_skips_a_day_its_chain_covers(scheduler):
+    assert scheduler.next_job_run("projections-refresh", ct(2026, 10, 26, 19)) == ct(
+        2026, 10, 28, 18
+    )
+
+
+def test_next_job_run_keeps_a_slot_before_its_chain_starts(scheduler):
+    job = scheduler.catalog.jobs["projections-refresh"]
+    job.schedules = [Schedule(cron="0 12 * * *", tz="America/Chicago")]
+    assert scheduler.next_job_run("projections-refresh", ct(2026, 10, 26, 19)) == ct(
+        2026, 10, 27, 12
+    )
+
+
+def test_next_job_run_keeps_a_chain_day_outside_the_chains_season(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_two_seasons)
+    assert scheduler.next_job_run("projections-refresh", ct(2027, 3, 1, 19)) == ct(
+        2027, 3, 2, 18
+    )
+
+
+def test_next_job_run_uses_the_earliest_of_its_schedules(scheduler):
+    job = scheduler.catalog.jobs["projections-refresh"]
+    job.schedules = [
+        Schedule(cron="0 18 * * *", tz="America/Chicago"),
+        Schedule(cron="0 6 * * 5", tz="America/Chicago"),
+    ]
+    assert scheduler.next_job_run("projections-refresh", ct(2026, 10, 29, 19)) == ct(
+        2026, 10, 30, 6
+    )
+
+
+def test_next_run_ignores_pauses(scheduler, state):
+    state.overrides["tuesday-weekly"] = None
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2026, 10, 26, 12)) == ct(
+        2026, 10, 27, 16
+    )
 
 
 # Pauses

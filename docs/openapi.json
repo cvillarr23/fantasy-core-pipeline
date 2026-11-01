@@ -521,6 +521,18 @@
             "title": "Name",
             "type": "string"
           },
+          "next_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run At"
+          },
           "pause": {
             "anyOf": [
               {
@@ -2997,6 +3009,18 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "next_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run At"
           },
           "on_event": {
             "items": {
