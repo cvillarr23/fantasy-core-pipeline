@@ -6147,6 +6147,16 @@
             "additionalProperties": true,
             "title": "Params",
             "type": "object"
+          },
+          "trigger": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "cli",
+              "mcp"
+            ],
+            "title": "Trigger",
+            "type": "string"
           }
         },
         "title": "StartRunRequest",

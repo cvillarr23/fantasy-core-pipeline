@@ -74,6 +74,7 @@ def start_run_endpoint(name: str, payload: StartRunRequest, request: Request):
             params=payload.params,
             requested_by=_user(request),
             downstream=payload.downstream,
+            trigger=payload.trigger,
         )
     except Exception as error:
         _raise_http(error)

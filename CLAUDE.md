@@ -529,6 +529,13 @@
   rejects unknown names at startup. `tests/test_launcher_k8s.py` snapshots the built Jobs
   against CronJob specs vendored in `tests/fixtures/cronjobs/`. Its allowlist of extra env is
   exact, so update it deliberately.
+- `python -m src.cli jobs ...` and the MCP tools (`list_jobs`, `run_job`, `get_run`, `cancel_run`,
+  `pause_job`, `resume_job`) are remote callers of the Jobs API through `src/jobs_client.py`, not of
+  `jobs_service`: the `X-API-Key` guard and status mapping stay in one place. They send
+  `trigger: "cli"`/`"mcp"` on `POST /v1/jobs/{name}/runs` (`StartRunRequest.trigger` accepts only
+  `manual`, `cli`, `mcp`; scheduler-owned triggers aren't claimable). The MCP tools are async and
+  use `asyncio.to_thread`, since the API they call is served by the same process and a blocking
+  call on the event loop would wait on itself.
 - `src/launcher/scheduler.py` decides what to run and when. `python -m src.launcher` runs
   `Scheduler.run` on its own thread with `PostgresSchedulerState`. It requests runs only through
   `publish_run` and sets each `expires_at`: slot + `max(catch_up, SLOT_GRACE)`; a chain step's

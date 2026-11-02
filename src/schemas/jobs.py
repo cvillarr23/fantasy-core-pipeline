@@ -1,7 +1,7 @@
 """Request and response models for the unified jobs API."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -11,6 +11,8 @@ class StartRunRequest(BaseModel):
 
     params: dict[str, Any] = Field(default_factory=dict)
     downstream: bool = False
+    # Who is asking. Scheduler-owned triggers (schedule, chain, event) are not claimable.
+    trigger: Literal["manual", "cli", "mcp"] = "manual"
 
 
 class RunStartResponse(BaseModel):

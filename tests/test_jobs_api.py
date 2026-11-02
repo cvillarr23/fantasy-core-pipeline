@@ -158,6 +158,39 @@ def test_start_run_persists_queued_row_and_outbox(catalog, monkeypatch):
     assert command["downstream"] is False
 
 
+@pytest.mark.parametrize("trigger", ["cli", "mcp"])
+def test_start_run_records_the_requested_trigger(catalog, monkeypatch, trigger):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
+    published = Mock(return_value={"run_id": "r1", "status": "queued"})
+    monkeypatch.setattr(jobs_service, "publish_run", published)
+
+    jobs_api.start_run_endpoint("sample-job", StartRunRequest(params={"count": 1}, trigger=trigger), request())
+
+    assert published.call_args.kwargs["trigger"] == trigger
+
+
+def test_downstream_start_passes_the_requested_trigger(catalog, monkeypatch):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
+    scheduler = Mock()
+    scheduler.start_chain.return_value = ("root", "run")
+    monkeypatch.setattr(jobs_service, "_scheduler", lambda _catalog: scheduler)
+
+    jobs_api.start_run_endpoint(
+        "sample-job",
+        StartRunRequest(params={"count": 1}, downstream=True, trigger="mcp"),
+        request(),
+    )
+
+    assert scheduler.start_chain.call_args.kwargs["trigger"] == "mcp"
+
+
+def test_start_run_request_rejects_triggers_a_caller_may_not_claim():
+    with pytest.raises(ValueError):
+        StartRunRequest(trigger="schedule")
+
+
 def test_downstream_start_returns_chain_root_and_run_id(catalog, monkeypatch):
     monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
     monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
@@ -166,10 +199,11 @@ def test_downstream_start_returns_chain_root_and_run_id(catalog, monkeypatch):
         def __init__(self, *_):
             pass
 
-        def start_chain(self, name, *, params, requested_by):
+        def start_chain(self, name, *, params, requested_by, trigger):
             assert name == "sample-job"
             assert params == {"count": 2}
             assert requested_by == "operator"
+            assert trigger == "manual"
             return "chain-root", "run-456"
 
     monkeypatch.setattr(jobs_service, "_scheduler", lambda _catalog: FakeScheduler())
