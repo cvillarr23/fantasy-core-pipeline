@@ -607,16 +607,40 @@ def run_detail(identity):
             )
             parents = _rows(c)
             run["parent"] = parents[0] if parents else None
-        # Children: nested runs, plus worker runs that executed an action this run queued.
-        c.execute(
-            """SELECT id,job_name,trigger_type,status,started_at,finished_at FROM run_log
-            WHERE parent_run_id=%s OR (trigger->>'tracking_id') IN (
-              SELECT ref_id FROM run_links WHERE run_id=%s AND ref_type='activity_action' AND role='output')
-            ORDER BY started_at""",
-            (identity, identity),
-        )
-        run["children"] = _rows(c)
+        run["children"] = _child_runs(c, identity)
         return run
+
+
+def _child_runs(c, identity):
+    """Nested runs, plus worker runs that executed an action this run queued."""
+    c.execute(
+        """SELECT id,job_name,trigger_type,status,started_at,finished_at,end_reason FROM run_log
+        WHERE parent_run_id=%s OR (trigger->>'tracking_id') IN (
+          SELECT ref_id FROM run_links WHERE run_id=%s AND ref_type='activity_action' AND role='output')
+        ORDER BY started_at""",
+        (identity, identity),
+    )
+    children = _rows(c)
+    sessions = _llm_sessions_by_run(c, [child["id"] for child in children])
+    for child in children:
+        child["llm_sessions"] = sessions.get(child["id"], [])
+    return children
+
+
+def _llm_sessions_by_run(c, run_ids):
+    """Each run's linked LLM sessions as {run id: [{id, title}]}."""
+    if not run_ids:
+        return {}
+    c.execute(
+        """SELECT l.run_id,s.id,s.title FROM activity_sessions s JOIN run_links l
+        ON l.ref_type='llm_session' AND l.ref_id=s.id
+        WHERE l.run_id=ANY(%s) AND s.league_id=%s ORDER BY s.created_at""",
+        (run_ids, league_id()),
+    )
+    sessions = {}
+    for row in _rows(c):
+        sessions.setdefault(row.pop("run_id"), []).append(row)
+    return sessions
 
 
 def _runs_linked(c, ref_type, ids, role):

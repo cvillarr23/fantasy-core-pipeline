@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 from src.api import jobs as jobs_api
-from src.launcher.catalog import Catalog
+from src.launcher.catalog import Catalog, Schedule
 from src.schemas.jobs import LauncherHealthResponse, PauseRequest, StartRunRequest
 from src.services import jobs_service
 
@@ -324,6 +324,34 @@ def test_list_jobs_returns_jobs_chains_and_reuses_last_run_map(
     assert step.after == []
     assert step.last_run.id == "run-1"
     assert sum("DISTINCT ON (job_name)" in query for query in cursor.sql) == 1
+
+
+def test_list_jobs_reports_next_run_for_jobs_and_chains(catalog, monkeypatch):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(Cursor()))
+    catalog.jobs["sample-job"].schedules = [
+        Schedule(cron="0 12 * * *", tz="America/Chicago")
+    ]
+    catalog.chains["sample-chain"].schedule = Schedule(
+        cron="0 16 * * 2", tz="America/Chicago"
+    )
+    payload = jobs_api.get_jobs()
+    assert payload.jobs[0].next_run_at > datetime.now(timezone.utc)
+    assert payload.chains[0].next_run_at > datetime.now(timezone.utc)
+
+
+def test_list_jobs_has_no_next_run_without_a_schedule(catalog, monkeypatch):
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "get_db_cursor", lambda: db_cursor(Cursor()))
+    payload = jobs_api.get_jobs()
+    assert payload.jobs[0].next_run_at is None
+    assert payload.chains[0].next_run_at is None
+
+
+def test_season_calendar_survives_between_requests(catalog):
+    first = jobs_service._scheduler(catalog)
+    second = jobs_service._scheduler(catalog)
+    assert first.seasons is second.seasons
 
 
 def test_missing_catalog_returns_empty_jobs_and_503_for_write(monkeypatch):

@@ -148,6 +148,24 @@ def test_runs_list_detail_and_health(postgres):
         run_log.run_detail(str(uuid4()))
 
 
+def test_run_detail_children_carry_end_reason_and_llm_sessions(postgres):
+    _, _, _, decision_id = _seed(postgres)
+    with run_log.run_scope("waiver_bot", "queue", parent_run_id=decision_id) as worker:
+        run_log.link("llm_session", ["session-1"], "output")
+    with postgres, postgres.cursor() as c:
+        c.execute(
+            "UPDATE run_log SET end_reason='dependency_failed' WHERE id=%s",
+            (worker.id,),
+        )
+
+    children = {c["job_name"]: c for c in run_log.run_detail(decision_id)["children"]}
+    assert children["lineup_bot"]["llm_sessions"] == []
+    assert children["waiver_bot"]["end_reason"] == "dependency_failed"
+    assert children["waiver_bot"]["llm_sessions"] == [
+        {"id": "session-1", "title": "rumor_digest"}
+    ]
+
+
 @pytest.mark.parametrize("root", ["raw_signal", "rumor_signal", "activity_action"])
 def test_trace_walks_article_to_execution_from_any_root(postgres, root):
     raw_id, rumor_id, digest_id, decision_id = _seed(postgres)

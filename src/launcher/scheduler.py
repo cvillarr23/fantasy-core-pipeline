@@ -38,6 +38,9 @@ nothing:
 - **Manual runs.** ``start_chain`` runs one step with ``downstream`` semantics: a root
   scoped to that step and its descendants. A manual run without ``downstream`` has no
   ``chain_root_id``, so no edges are ever evaluated for it.
+- **Next runs.** ``next_job_run`` and ``next_chain_run`` predict the next slot under the
+  same season rule. A job's slot counts as covered when an earlier slot of its chain falls
+  on that local day. Pauses are ignored, because callers already see them.
 
 Runs are requested through ``launcher.publish.publish_run`` (injectable for tests), which
 writes the queued run_log row and outbox row; a used dedupe key comes back as ``duplicate``.
@@ -76,6 +79,7 @@ SEASON_CACHE_TTL = timedelta(hours=24)
 # A failed nflverse read is cached briefly so ticks every few seconds don't each refetch.
 SEASON_FAILURE_TTL = timedelta(minutes=5)
 LATEST_GRACE = timedelta(minutes=30)
+NEXT_RUN_HORIZON = timedelta(days=366)
 POLL_SECONDS = 15
 FINAL_STATUSES = frozenset({"success", "failure", "timeout", "skipped", "cancelled"})
 RETRYABLE_STATUSES = frozenset({"failure", "timeout"})
@@ -153,6 +157,17 @@ def latest_slot(schedule: Schedule, now: datetime) -> datetime:
     if "*" not in schedule.cron.split()[1]:
         while slot.astimezone(timezone.utc).astimezone(tz).fold:
             slot = croniter(schedule.cron, slot).get_prev(datetime)
+    return slot.astimezone(timezone.utc)
+
+
+def next_slot(schedule: Schedule, now: datetime) -> datetime:
+    """The schedule's first slot after ``now``, in UTC."""
+    tz = ZoneInfo(schedule.tz)
+    slot = croniter(schedule.cron, now.astimezone(tz)).get_next(datetime)
+    # As in latest_slot: a fixed-hour slot fires only on a repeated hour's first pass.
+    if "*" not in schedule.cron.split()[1]:
+        while slot.astimezone(timezone.utc).astimezone(tz).fold:
+            slot = croniter(schedule.cron, slot).get_next(datetime)
     return slot.astimezone(timezone.utc)
 
 
@@ -362,6 +377,54 @@ class Scheduler:
             self.state.finish_chain_root(root.id, "failure", "publish_failed")
             raise
         return root.id, run_id
+
+    def next_job_run(self, job: str, now: datetime | None = None) -> datetime | None:
+        """When ``job``'s own schedules next fire. None for a step with no schedule."""
+        now = now or self.clock()
+        slots = (
+            self._next_firing_slot(schedule, now, job)
+            for schedule in self.catalog.jobs[job].schedules
+        )
+        return min(filter(None, slots), default=None)
+
+    def next_chain_run(
+        self, chain: str, now: datetime | None = None
+    ) -> datetime | None:
+        """When ``chain`` next fires, or None if it has no schedule."""
+        schedule = self.catalog.chains[chain].schedule
+        return (
+            self._next_firing_slot(schedule, now or self.clock()) if schedule else None
+        )
+
+    def _next_firing_slot(
+        self, schedule: Schedule, now: datetime, job: str | None = None
+    ) -> datetime | None:
+        """The first slot after ``now`` that would fire, or None within the horizon."""
+        slot = next_slot(schedule, now)
+        while slot <= now + NEXT_RUN_HORIZON:
+            if self._in_season(schedule, slot) and not self._chain_will_cover(
+                job, schedule, slot
+            ):
+                return slot
+            slot = next_slot(schedule, slot)
+        return None
+
+    def _chain_will_cover(
+        self, job: str | None, schedule: Schedule, slot: datetime
+    ) -> bool:
+        """Predicts ``_chain_covers`` before any chain run exists to read."""
+        start, _ = _local_day(slot, ZoneInfo(schedule.tz))
+        chains = (
+            self.catalog.chains[c].schedule for c in self._chains_by_job.get(job, [])
+        )
+        return any(self._fires_between(s, start, slot) for s in chains if s)
+
+    def _fires_between(
+        self, schedule: Schedule, start: datetime, end: datetime
+    ) -> bool:
+        """Whether ``schedule`` fires from ``start`` up to, but not at, ``end``."""
+        slot = next_slot(schedule, start - timedelta(seconds=1))
+        return slot < end and self._in_season(schedule, slot)
 
     def _guard(self, what: str, func: Callable[..., None], *args: Any) -> None:
         # One bad schedule or chain run must not stop every other slot in the tick.
