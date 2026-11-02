@@ -616,6 +616,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 if entry["evaluation_attempts"] >= MAX_SIGNAL_EVALUATION_FAILURES:
                     entry["reason"] = "evaluation_retry_limit_exceeded"
                     entry["prepared"] = True
+                    entry.pop("held", None)
                     detail = dict(
                         signal_id=signal["id"],
                         reason=entry["reason"],
@@ -641,6 +642,7 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
                 outcome.hold(sid)
                 continue
             entries[str(sid)].update(reason=reason, prepared=True)
+            entries[str(sid)].pop("held", None)
         groups = (
             [[p] for p in payloads]
             if kind == "waiver"

@@ -662,3 +662,47 @@ def test_scheduled_run_past_the_window_still_evaluates_a_held_signal(retry_env, 
         ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert _published(publish) == ["p1"]
     assert _watermark(database) == 3
+
+
+def test_settled_signal_kept_behind_a_gap_is_no_longer_marked_held(retry_env, monkeypatch):
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    with _proposing("p1"), patch.object(
+        ras, "publish_waiver_claim", side_effect=RuntimeError("gateway unavailable")
+    ), pytest.raises(RuntimeError):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    entry = database["7"][1]["signals"]["2"]
+    assert entry["reason"] == "no_beneficial_move"
+    assert "held" not in entry
+
+
+def test_held_signal_dropped_at_the_evaluation_limit_is_no_longer_marked_held(
+    retry_env, monkeypatch
+):
+    """Signal 1's unpublished move keeps signal 2's entry behind the cursor gap."""
+    rows, _, database, _ = retry_env
+    rows[1]["suggested_action"] = ras.BENCH_WATCH_ACTION
+    no_swaps = patch.object(
+        ras.lineup_solver, "evaluate_lineup", return_value={"swaps": []}
+    )
+    no_inputs = patch.object(
+        ras.lineup_solver, "evaluate_lineup", side_effect=RuntimeError("no projections")
+    )
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing(), no_swaps:
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    with _proposing(), no_inputs, pytest.raises(RuntimeError):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    with _proposing("p1"), no_inputs, patch.object(
+        ras, "publish_waiver_claim", side_effect=RuntimeError("gateway unavailable")
+    ):
+        for _ in range(ras.MAX_SIGNAL_EVALUATION_FAILURES - 1):
+            with pytest.raises(RuntimeError):
+                ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    entry = database["7"][1]["signals"]["2"]
+    assert entry["reason"] == "evaluation_retry_limit_exceeded"
+    assert "held" not in entry
