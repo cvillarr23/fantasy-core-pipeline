@@ -83,14 +83,14 @@ Runs can be driven without the web UI. Both callers go through the Jobs API (`sr
 
 ```bash
 python -m src.cli jobs list
-python -m src.cli jobs run lineup-optimizer --param week=9 --downstream
+python -m src.cli jobs run <job> --param week=9 --downstream [--yes]
 python -m src.cli jobs status <run_id>
 python -m src.cli jobs cancel <run_id>
 python -m src.cli jobs pause <job> --reason "ESPN down" [--until 2026-11-03T12:00:00+00:00]
 python -m src.cli jobs resume <job>
 ```
 
-`--param KEY=VALUE` is read as JSON when it parses (`4`, `true`) and as text otherwise. The MCP server exposes the same operations as `list_jobs`, `run_job`, `get_run`, `cancel_run`, `pause_job` and `resume_job`. Runs they start are recorded with `trigger` `cli` or `mcp`.
+`--yes` is required for jobs the catalog flags `acts` (they make real ESPN moves or proposals); the MCP `run_job` docstring tells the model to get the user's go-ahead first. `--param KEY=VALUE` is read as JSON when it parses (`4`, `true`) and as text otherwise. The MCP server exposes the same operations as `list_jobs`, `run_job`, `get_run`, `cancel_run`, `pause_job` and `resume_job`. Runs they start are recorded with `trigger` `cli` or `mcp`.
 
 ## Schema Notes
 

@@ -30,7 +30,7 @@ def test_run_decodes_params_and_sends_the_cli_trigger(capsys):
     code, out, _, _ = _run(
         ["jobs", "run", "sample-job", "--param", "count=4", "--param", "flag=true",
          "--param", "label=hello", "--param", "expr=a=b", "--downstream"],
-        capsys, run_job=run_job,
+        capsys, run_job=run_job, list_jobs=lambda: {"jobs": []},
     )
     assert code == 0
     assert seen == {
@@ -49,7 +49,7 @@ def test_run_defaults_to_no_params_and_no_downstream(capsys):
         seen.update(params=params, downstream=downstream)
         return {}
 
-    _run(["jobs", "run", "sample-job"], capsys, run_job=run_job)
+    _run(["jobs", "run", "sample-job"], capsys, run_job=run_job, list_jobs=lambda: {"jobs": []})
     assert seen == {"params": {}, "downstream": False}
 
 
@@ -94,7 +94,23 @@ def test_api_error_exits_1_with_the_detail_on_stderr(capsys):
     def refuse(*_args, **_kwargs):
         raise JobsApiError(409, "already running")
 
-    code, out, err, _ = _run(["jobs", "run", "sample-job"], capsys, run_job=refuse)
+    code, out, err, _ = _run(
+        ["jobs", "run", "sample-job"], capsys, run_job=refuse, list_jobs=lambda: {"jobs": []}
+    )
     assert code == 1
     assert out == ""
     assert "already running" in err and "409" in err
+
+
+def test_acting_job_needs_yes_and_is_not_started_without_it(capsys):
+    started = []
+    client = dict(
+        run_job=lambda *a, **k: started.append(a) or {"run_id": "r1"},
+        list_jobs=lambda: {"jobs": [{"name": "lineup-optimizer", "acts": True}]},
+    )
+    code, _, err, _ = _run(["jobs", "run", "lineup-optimizer"], capsys, **client)
+    assert (code, started) == (1, [])
+    assert "--yes" in err
+
+    code, _, _, _ = _run(["jobs", "run", "lineup-optimizer", "--yes"], capsys, **client)
+    assert (code, len(started)) == (0, 1)

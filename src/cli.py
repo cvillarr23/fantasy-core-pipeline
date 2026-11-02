@@ -2,7 +2,7 @@
 
 Every command calls the Jobs API through `jobs_client` (so `CORE_API_BASE_URL` and, for the
 mutating commands, `TRIGGER_API_KEY` must be set) and prints the JSON response. Runs started
-here carry `trigger="cli"`. Exit status: 0 on success, 1 when the API refuses or is unreachable,
+here carry `trigger="cli"`. Exit status: 0 on success, 1 when the API refuses, is unreachable, or a job that acts on ESPN lacks `--yes`,
 2 on a usage error.
 """
 import argparse
@@ -51,6 +51,7 @@ def _add_run(commands) -> None:
         help="job param; VALUE is read as JSON when it parses (4, true), else as text. Repeatable",
     )
     command.add_argument("--downstream", action="store_true", help="also run the job's downstream chain steps")
+    command.add_argument("--yes", action="store_true", help="confirm running a job that acts on ESPN")
     command.set_defaults(handler=_run_job)
 
 
@@ -81,7 +82,16 @@ def _add_resume(commands) -> None:
 
 
 def _run_job(args: argparse.Namespace) -> dict:
+    if not args.yes and _acts(args.name):
+        raise JobsApiError(0, f"{args.name} acts on ESPN (real moves or proposals); rerun with --yes to confirm")
     return jobs_client.run_job(args.name, dict(args.param), args.downstream, "cli")
+
+
+def _acts(name: str) -> bool:
+    """True when the catalog flags the job as acting on ESPN. An unknown name is left to the
+    API to reject, so it is not treated as acting."""
+    jobs = jobs_client.list_jobs().get("jobs", [])
+    return any(job["name"] == name and job.get("acts") for job in jobs)
 
 
 def _key_value(text: str) -> tuple[str, Any]:

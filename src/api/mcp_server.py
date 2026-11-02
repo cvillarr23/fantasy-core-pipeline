@@ -307,7 +307,9 @@ async def run_job(name: str, params: dict | None = None, downstream: bool = Fals
     """Start a run of a catalog job now. Returns run_id and status ("queued").
 
     params are the job's declared params (see list_jobs). downstream=True also runs the steps
-    after this job in its chain. Fails with 409 if the job is already running and 422 for
+    after this job in its chain. Jobs flagged acts=true in list_jobs (lineup-optimizer,
+    waiver-trigger, rumor-action-trigger, trade-scan) make real ESPN moves or proposals:
+    check the flag and get the user's explicit go-ahead before running one. Fails with 409 if the job is already running and 422 for
     unknown or invalid params.
     """
     return await asyncio.to_thread(jobs_client.run_job, name, params or {}, downstream, trigger="mcp")
