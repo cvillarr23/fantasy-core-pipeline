@@ -1,8 +1,9 @@
 """`python -m src.launcher`: the unified job launcher (one replica, Recreate strategy).
 
 Loads the catalog from JOB_CATALOG_PATH, checks every profile can be turned into a pod spec,
-then consumes `job_runs` until SIGTERM. The scheduler, the watcher and the heartbeat each run
-on their own thread, so a slow season lookup or broker read never delays admitting runs.
+then consumes `job_runs` until SIGTERM. The scheduler, the event consumer, the watcher and the
+heartbeat each run on their own thread, so a slow season lookup or broker read never delays
+admitting runs.
 Shutdown stops consuming and gives a running inline job KILL_GRACE_SECONDS to exit, so the
 Deployment's terminationGracePeriodSeconds should exceed that.
 """
@@ -15,6 +16,7 @@ import threading
 from src.launcher import heartbeat, k8s
 from src.launcher.catalog import load_catalog_from_env
 from src.launcher.consumer import Consumer
+from src.launcher.event_consumer import EventConsumer
 from src.launcher.inline import InlineRunner
 from src.launcher.scheduler import PostgresSchedulerState, Scheduler
 from src.launcher.watcher import Watcher
@@ -44,6 +46,12 @@ def main() -> int:
     scheduler = Scheduler(catalog, PostgresSchedulerState())
     threading.Thread(
         target=scheduler.run, args=(stop,), name="launcher-scheduler", daemon=True
+    ).start()
+    threading.Thread(
+        target=EventConsumer(scheduler.handle_event).run,
+        args=(stop,),
+        name="launcher-events",
+        daemon=True,
     ).start()
     threading.Thread(
         target=Watcher(catalog, inline_runner=inline_runner).run,

@@ -548,5 +548,13 @@
   watcher retries the same row. Past `max_duration`, the steps not yet started are skipped and
   the root ends `timeout`. A job's own slot is skipped (`chain_step`) on a day a chain run
   covers it.
+- Events: `src/launcher/events.py` holds the `job_events` contract (`JobEvent`) and `emit_event`,
+  which publishes after the caller's commit and logs a broker failure instead of raising.
+  `event_consumer.py` runs on the `launcher-events` thread with its own connection. It declares
+  and consumes `job_events.launcher` (bound `#`; the exchange is the broker's) and acks only after
+  `Scheduler.handle_event` records the run, so a database failure requeues the event. Debounce is
+  leading-edge in fixed windows taken from the event's `at`: dedupe key `job@key@<window start>`,
+  so a redelivery is a no-op. `EVENT_KEY_PATTERN` lives in `queue_contracts` because
+  `catalog.py --check` runs in fantasy-infra's CI with no database. Events pass no params.
 - `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
   it gets no `chain_root_id`, so it never starts downstream steps.

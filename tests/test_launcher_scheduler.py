@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import pytest
 
-from src.launcher.catalog import Schedule, Season, load_catalog
+from src.launcher.catalog import EventSubscription, Schedule, Season, load_catalog
+from src.launcher.events import JobEvent
 from src.launcher.scheduler import (
     NflSeasonCalendar,
     RunRow,
@@ -68,6 +69,7 @@ class FakeState:
         scheduled_for,
         end_reason,
         chain_root_id=None,
+        event_id=None,
     ):
         row = RunRow(
             str(uuid.uuid4()),
@@ -77,7 +79,11 @@ class FakeState:
             chain_root_id=chain_root_id,
         )
         return self.insert(
-            row, dedupe_key=dedupe_key, trigger_type=trigger_type, end_reason=end_reason
+            row,
+            dedupe_key=dedupe_key,
+            trigger_type=trigger_type,
+            end_reason=end_reason,
+            event_id=event_id,
         )
 
     def create_chain_root(
@@ -628,3 +634,110 @@ def test_tuesday_weekly_edges_match_infra_schedule_order():
         "waiver-trigger": "20:30",
         "rumor-action-trigger": "21:45",
     }
+
+
+# ---- events ---------------------------------------------------------------------------
+
+RUMOR = "rumor.signal_created"
+RUMOR_JOB = "rumor-action-trigger"
+WINDOW = datetime(2026, 10, 28, 15, 0, tzinfo=UTC)
+WINDOW_KEY = "rumor-action-trigger@rumor.signal_created@2026-10-28T15:00:00Z"
+
+
+def job_event(at, event_id="e0", key=RUMOR):
+    return JobEvent(
+        event_id=event_id,
+        key=key,
+        subject="player:1",
+        payload={},
+        emitted_by_run_id="run-1",
+        at=at,
+    )
+
+
+def test_burst_inside_one_debounce_window_starts_one_run(scheduler, state, commands):
+    now = WINDOW + timedelta(minutes=1)
+    for i in range(20):
+        at = WINDOW + timedelta(seconds=i * 90)
+        scheduler.handle_event(job_event(at, event_id=f"e{i}"), now)
+    assert len(state.rows(RUMOR_JOB)) == 1
+    (command,) = commands
+    assert (command["job"], command["trigger"]) == (RUMOR_JOB, "event")
+    assert (command["dedupe_key"], command["event_id"]) == (WINDOW_KEY, "e0")
+    assert command["scheduled_for"] == WINDOW
+    assert command["expires_at"] == now + timedelta(minutes=30)
+
+
+def test_unknown_event_key_starts_nothing(scheduler, state, commands):
+    scheduler.handle_event(job_event(WINDOW, key="trade.offer_received"), WINDOW)
+    assert commands == []
+    assert state.runs == {}
+
+
+def test_redelivered_event_is_a_no_op(scheduler, commands):
+    event = job_event(WINDOW)
+    scheduler.handle_event(event, WINDOW)
+    scheduler.handle_event(event, WINDOW + timedelta(hours=3))
+    assert len(commands) == 1
+
+
+def test_each_debounce_window_starts_its_own_run(scheduler, commands):
+    scheduler.handle_event(job_event(WINDOW + timedelta(seconds=1799)), WINDOW)
+    scheduler.handle_event(job_event(WINDOW + timedelta(seconds=1800)), WINDOW)
+    assert [c["dedupe_key"] for c in commands] == [
+        WINDOW_KEY,
+        "rumor-action-trigger@rumor.signal_created@2026-10-28T15:30:00Z",
+    ]
+
+
+def test_every_subscribed_job_debounces_on_its_own_window(state, commands):
+    catalog = load_catalog(FIXTURE).model_copy(deep=True)
+    catalog.jobs["trade-scan"].on_event = [
+        EventSubscription(key=RUMOR, debounce="1h")
+    ]
+    scheduler = Scheduler(
+        catalog, state, fake_publish_run(state, commands), seasons=AlwaysInSeason()
+    )
+    at = WINDOW + timedelta(minutes=45)
+    scheduler.handle_event(job_event(at), at)
+    assert {c["dedupe_key"] for c in commands} == {
+        "rumor-action-trigger@rumor.signal_created@2026-10-28T15:30:00Z",
+        "trade-scan@rumor.signal_created@2026-10-28T15:00:00Z",
+    }
+
+
+def test_paused_job_records_one_skip_per_window_and_starts_nothing(
+    scheduler, state, commands
+):
+    state.overrides[RUMOR_JOB] = None
+    for i in range(3):
+        at = WINDOW + timedelta(minutes=i)
+        scheduler.handle_event(job_event(at, event_id=f"e{i}"), at)
+    assert commands == []
+    (row,) = state.rows(RUMOR_JOB)
+    assert row.status == "skipped"
+    meta = state.meta[row.id]
+    assert meta == {
+        "dedupe_key": WINDOW_KEY,
+        "trigger_type": "event",
+        "end_reason": "paused",
+        "event_id": "e0",
+    }
+
+
+def test_pause_is_judged_at_arrival_not_at_the_event_time(scheduler, state, commands):
+    now = WINDOW + timedelta(minutes=10)
+    state.overrides[RUMOR_JOB] = WINDOW + timedelta(minutes=5)
+    scheduler.handle_event(job_event(WINDOW), now)
+    assert len(commands) == 1
+
+
+def test_publish_failure_reaches_the_caller_so_the_event_is_redelivered(state):
+    def publish(catalog, job, **kwargs):
+        raise RuntimeError("database away")
+
+    scheduler = Scheduler(
+        load_catalog(FIXTURE), state, publish, seasons=AlwaysInSeason()
+    )
+    with pytest.raises(RuntimeError):
+        scheduler.handle_event(job_event(WINDOW), WINDOW)
