@@ -75,6 +75,7 @@ class JobInfo(BaseModel):
     schedules: list[dict[str, Any]]
     on_event: list[dict[str, Any]]
     last_run: LastRun | None = None
+    next_run_at: datetime | None = None
     pause: PauseInfo | None = None
 
 
@@ -89,6 +90,7 @@ class ChainInfo(BaseModel):
     schedule: dict[str, Any] | None = None
     max_duration_seconds: int
     steps: dict[str, ChainStepInfo]
+    next_run_at: datetime | None = None
     pause: PauseInfo | None = None
 
 

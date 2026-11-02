@@ -107,6 +107,20 @@ channels:
           exclusive: false
           autoDelete: false
         bindingVersion: 0.3.0
+  job_events:
+    address: job_events
+    messages:
+      JobEvent:
+        $ref: '#/components/messages/JobEvent'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: job_events
+          type: topic
+          durable: true
+          autoDelete: false
+        bindingVersion: 0.3.0
 operations:
   publish_lineup_updates:
     action: send
@@ -151,6 +165,12 @@ operations:
       $ref: '#/channels/job_runs'
     messages:
     - $ref: '#/channels/job_runs/messages/RunCommand'
+  publish_job_events:
+    action: send
+    channel:
+      $ref: '#/channels/job_events'
+    messages:
+    - $ref: '#/channels/job_events/messages/JobEvent'
 components:
   messages:
     LineupUpdate:
@@ -328,6 +348,20 @@ components:
           attempt: 1
           traceparent: null
           expires_at: '2030-10-02T00:30:00Z'
+    JobEvent:
+      name: JobEvent
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/JobEvent'
+      examples:
+      - payload:
+          event_id: 0f0e2c5e-6c1f-4a53-9a55-7d3b1e0a2f11
+          key: rumor.signal_created
+          subject: player:4046
+          payload:
+            signal_id: 7
+          emitted_by_run_id: 9f1c7ac8-1d6b-4f0e-8f5a-52b9d3f4c6e0
+          at: '2030-10-02T00:30:00Z'
   schemas:
     LineupUpdate:
       type: object
@@ -744,3 +778,30 @@ components:
       - attempt
       - traceparent
       - expires_at
+    JobEvent:
+      type: object
+      additionalProperties: false
+      properties:
+        event_id:
+          type: string
+        key:
+          type: string
+          pattern: ^[a-z0-9_]+(\.[a-z0-9_]+)+$
+        subject:
+          type: string
+        payload:
+          type: object
+        emitted_by_run_id:
+          type:
+          - string
+          - 'null'
+        at:
+          type: string
+          format: date-time
+      required:
+      - event_id
+      - key
+      - subject
+      - payload
+      - emitted_by_run_id
+      - at

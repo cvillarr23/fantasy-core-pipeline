@@ -3,6 +3,7 @@
 import json
 from datetime import datetime, timezone
 from typing import Any, Literal
+from functools import cache
 
 from src.database import get_db_cursor
 from src.launcher.catalog import (
@@ -48,10 +49,18 @@ class LauncherHealthUnavailableError(Exception):
     """The launcher has not recorded a heartbeat yet."""
 
 
+@cache
+def _season_calendar():
+    """One calendar per process, so polling GET /v1/jobs keeps its cached NFL schedule."""
+    from src.launcher.scheduler import NflSeasonCalendar
+
+    return NflSeasonCalendar()
+
+
 def _scheduler(catalog: Catalog):
     from src.launcher.scheduler import PostgresSchedulerState, Scheduler
 
-    return Scheduler(catalog, PostgresSchedulerState())
+    return Scheduler(catalog, PostgresSchedulerState(), seasons=_season_calendar())
 
 
 def _catalog() -> Catalog:
@@ -69,12 +78,18 @@ def list_jobs() -> JobsResponse:
 
     last_runs = _last_runs(list(catalog.jobs))
     overrides = _pause_overrides()
+    scheduler = _scheduler(catalog)
     jobs = [
-        _job_info(catalog.resolve(name), last_runs.get(name), overrides.get(name))
+        _job_info(
+            catalog.resolve(name),
+            last_runs.get(name),
+            overrides.get(name),
+            scheduler.next_job_run(name),
+        )
         for name in catalog.jobs
     ]
     chains = [
-        _chain_info(name, chain, last_runs, overrides)
+        _chain_info(name, chain, last_runs, overrides, scheduler.next_chain_run(name))
         for name, chain in catalog.chains.items()
     ]
     return JobsResponse(jobs=jobs, chains=chains)
@@ -105,9 +120,12 @@ def _pause_overrides() -> dict[str, dict[str, Any]]:
 
 
 def _job_info(
-    resolved: ResolvedJob, last_run: dict | None, pause: dict | None
+    resolved: ResolvedJob,
+    last_run: dict | None,
+    pause: dict | None,
+    next_run_at: datetime | None,
 ) -> dict[str, Any]:
-    """A catalog job with its effective settings (defaults applied), last run and pause."""
+    """A catalog job with its effective settings (defaults applied), runs and pause."""
     job = resolved.job
     return {
         "name": resolved.name,
@@ -123,6 +141,7 @@ def _job_info(
         "schedules": [schedule.model_dump(mode="json") for schedule in job.schedules],
         "on_event": [event.model_dump(mode="json") for event in job.on_event],
         "last_run": last_run,
+        "next_run_at": next_run_at,
         "pause": pause,
     }
 
@@ -132,8 +151,9 @@ def _chain_info(
     chain: Chain,
     last_runs: dict[str, dict[str, Any]],
     overrides: dict[str, dict[str, Any]],
+    next_run_at: datetime | None,
 ) -> dict[str, Any]:
-    """A catalog chain with its steps' edges and last runs, and its pause."""
+    """A catalog chain with its steps' edges and last runs, next slot and pause."""
     return {
         "name": name,
         "schedule": chain.schedule.model_dump(mode="json") if chain.schedule else None,
@@ -146,6 +166,7 @@ def _chain_info(
             }
             for step, config in chain.steps.items()
         },
+        "next_run_at": next_run_at,
         "pause": overrides.get(name),
     }
 

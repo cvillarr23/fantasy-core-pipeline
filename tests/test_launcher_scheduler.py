@@ -9,12 +9,14 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import pytest
 
-from src.launcher.catalog import Schedule, Season, load_catalog
+from src.launcher.catalog import EventSubscription, Schedule, Season, load_catalog
+from src.launcher.events import JobEvent
 from src.launcher.scheduler import (
     NflSeasonCalendar,
     RunRow,
     Scheduler,
     latest_slot,
+    next_slot,
     slot_key,
 )
 
@@ -68,6 +70,7 @@ class FakeState:
         scheduled_for,
         end_reason,
         chain_root_id=None,
+        event_id=None,
     ):
         row = RunRow(
             str(uuid.uuid4()),
@@ -77,7 +80,11 @@ class FakeState:
             chain_root_id=chain_root_id,
         )
         return self.insert(
-            row, dedupe_key=dedupe_key, trigger_type=trigger_type, end_reason=end_reason
+            row,
+            dedupe_key=dedupe_key,
+            trigger_type=trigger_type,
+            end_reason=end_reason,
+            event_id=event_id,
         )
 
     def create_chain_root(
@@ -390,6 +397,117 @@ def test_unreadable_nfl_schedule_fails_open(state, commands, caplog):
     assert "firing the slot anyway" in caplog.text
 
 
+# Next runs
+
+
+def nfl_schedule_two_seasons(season: int) -> pl.DataFrame:
+    if season == 2026:
+        return nfl_schedule_2026(season)
+    return pl.DataFrame(
+        {
+            "season": [season, season],
+            "game_type": ["REG", "REG"],
+            "week": [1, 18],
+            "gameday": [f"{season}-09-09", f"{season + 1}-01-09"],
+        }
+    )
+
+
+def calendar_scheduler(state, load) -> Scheduler:
+    return Scheduler(load_catalog(FIXTURE), state, seasons=NflSeasonCalendar(load=load))
+
+
+def test_next_slot_is_strictly_after_now():
+    half_hourly = Schedule(cron="*/30 * * * *", tz="America/Chicago")
+    now = datetime(2026, 10, 27, 15, 30, tzinfo=UTC)
+    assert next_slot(half_hourly, now) == datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
+
+
+def test_next_slot_skips_second_pass_of_repeated_hour():
+    daily = Schedule(cron="30 1 * * *", tz="America/Chicago")
+    first_pass = datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
+    assert next_slot(daily, datetime(2026, 11, 1, 6, 0, tzinfo=UTC)) == first_pass
+    assert next_slot(daily, first_pass) == datetime(2026, 11, 2, 7, 30, tzinfo=UTC)
+
+
+def test_next_chain_run_is_the_next_in_season_slot(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_two_seasons)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2026, 10, 26, 12)) == ct(
+        2026, 10, 27, 16
+    )
+
+
+def test_next_chain_run_skips_the_off_season(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_two_seasons)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2027, 3, 1, 12)) == ct(
+        2027, 9, 7, 16
+    )
+
+
+def test_next_chain_run_is_none_without_a_slot_in_the_next_year(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_2026)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2027, 3, 1, 12)) is None
+
+
+def test_next_chain_run_is_none_for_a_chain_with_no_schedule(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_2026)
+    scheduler.catalog.chains["tuesday-weekly"].schedule = None
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2026, 10, 26, 12)) is None
+
+
+def test_next_chain_run_fails_open_on_an_unreadable_nfl_schedule(state):
+    def broken(season):
+        raise RuntimeError("404")
+
+    scheduler = calendar_scheduler(state, broken)
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2027, 3, 1, 12)) == ct(
+        2027, 3, 2, 16
+    )
+
+
+def test_next_job_run_is_none_for_a_chain_only_step(scheduler):
+    assert scheduler.next_job_run("sync-league", ct(2026, 10, 26, 12)) is None
+
+
+def test_next_job_run_skips_a_day_its_chain_covers(scheduler):
+    assert scheduler.next_job_run("projections-refresh", ct(2026, 10, 26, 19)) == ct(
+        2026, 10, 28, 18
+    )
+
+
+def test_next_job_run_keeps_a_slot_before_its_chain_starts(scheduler):
+    job = scheduler.catalog.jobs["projections-refresh"]
+    job.schedules = [Schedule(cron="0 12 * * *", tz="America/Chicago")]
+    assert scheduler.next_job_run("projections-refresh", ct(2026, 10, 26, 19)) == ct(
+        2026, 10, 27, 12
+    )
+
+
+def test_next_job_run_keeps_a_chain_day_outside_the_chains_season(state):
+    scheduler = calendar_scheduler(state, nfl_schedule_two_seasons)
+    assert scheduler.next_job_run("projections-refresh", ct(2027, 3, 1, 19)) == ct(
+        2027, 3, 2, 18
+    )
+
+
+def test_next_job_run_uses_the_earliest_of_its_schedules(scheduler):
+    job = scheduler.catalog.jobs["projections-refresh"]
+    job.schedules = [
+        Schedule(cron="0 18 * * *", tz="America/Chicago"),
+        Schedule(cron="0 6 * * 5", tz="America/Chicago"),
+    ]
+    assert scheduler.next_job_run("projections-refresh", ct(2026, 10, 29, 19)) == ct(
+        2026, 10, 30, 6
+    )
+
+
+def test_next_run_ignores_pauses(scheduler, state):
+    state.overrides["tuesday-weekly"] = None
+    assert scheduler.next_chain_run("tuesday-weekly", ct(2026, 10, 26, 12)) == ct(
+        2026, 10, 27, 16
+    )
+
+
 # Pauses
 
 
@@ -628,3 +746,110 @@ def test_tuesday_weekly_edges_match_infra_schedule_order():
         "waiver-trigger": "20:30",
         "rumor-action-trigger": "21:45",
     }
+
+
+# ---- events ---------------------------------------------------------------------------
+
+RUMOR = "rumor.signal_created"
+RUMOR_JOB = "rumor-action-trigger"
+WINDOW = datetime(2026, 10, 28, 15, 0, tzinfo=UTC)
+WINDOW_KEY = "rumor-action-trigger@rumor.signal_created@2026-10-28T15:00:00Z"
+
+
+def job_event(at, event_id="e0", key=RUMOR):
+    return JobEvent(
+        event_id=event_id,
+        key=key,
+        subject="player:1",
+        payload={},
+        emitted_by_run_id="run-1",
+        at=at,
+    )
+
+
+def test_burst_inside_one_debounce_window_starts_one_run(scheduler, state, commands):
+    now = WINDOW + timedelta(minutes=1)
+    for i in range(20):
+        at = WINDOW + timedelta(seconds=i * 90)
+        scheduler.handle_event(job_event(at, event_id=f"e{i}"), now)
+    assert len(state.rows(RUMOR_JOB)) == 1
+    (command,) = commands
+    assert (command["job"], command["trigger"]) == (RUMOR_JOB, "event")
+    assert (command["dedupe_key"], command["event_id"]) == (WINDOW_KEY, "e0")
+    assert command["scheduled_for"] == WINDOW
+    assert command["expires_at"] == now + timedelta(minutes=30)
+
+
+def test_unknown_event_key_starts_nothing(scheduler, state, commands):
+    scheduler.handle_event(job_event(WINDOW, key="trade.offer_received"), WINDOW)
+    assert commands == []
+    assert state.runs == {}
+
+
+def test_redelivered_event_is_a_no_op(scheduler, commands):
+    event = job_event(WINDOW)
+    scheduler.handle_event(event, WINDOW)
+    scheduler.handle_event(event, WINDOW + timedelta(hours=3))
+    assert len(commands) == 1
+
+
+def test_each_debounce_window_starts_its_own_run(scheduler, commands):
+    scheduler.handle_event(job_event(WINDOW + timedelta(seconds=1799)), WINDOW)
+    scheduler.handle_event(job_event(WINDOW + timedelta(seconds=1800)), WINDOW)
+    assert [c["dedupe_key"] for c in commands] == [
+        WINDOW_KEY,
+        "rumor-action-trigger@rumor.signal_created@2026-10-28T15:30:00Z",
+    ]
+
+
+def test_every_subscribed_job_debounces_on_its_own_window(state, commands):
+    catalog = load_catalog(FIXTURE).model_copy(deep=True)
+    catalog.jobs["trade-scan"].on_event = [
+        EventSubscription(key=RUMOR, debounce="1h")
+    ]
+    scheduler = Scheduler(
+        catalog, state, fake_publish_run(state, commands), seasons=AlwaysInSeason()
+    )
+    at = WINDOW + timedelta(minutes=45)
+    scheduler.handle_event(job_event(at), at)
+    assert {c["dedupe_key"] for c in commands} == {
+        "rumor-action-trigger@rumor.signal_created@2026-10-28T15:30:00Z",
+        "trade-scan@rumor.signal_created@2026-10-28T15:00:00Z",
+    }
+
+
+def test_paused_job_records_one_skip_per_window_and_starts_nothing(
+    scheduler, state, commands
+):
+    state.overrides[RUMOR_JOB] = None
+    for i in range(3):
+        at = WINDOW + timedelta(minutes=i)
+        scheduler.handle_event(job_event(at, event_id=f"e{i}"), at)
+    assert commands == []
+    (row,) = state.rows(RUMOR_JOB)
+    assert row.status == "skipped"
+    meta = state.meta[row.id]
+    assert meta == {
+        "dedupe_key": WINDOW_KEY,
+        "trigger_type": "event",
+        "end_reason": "paused",
+        "event_id": "e0",
+    }
+
+
+def test_pause_is_judged_at_arrival_not_at_the_event_time(scheduler, state, commands):
+    now = WINDOW + timedelta(minutes=10)
+    state.overrides[RUMOR_JOB] = WINDOW + timedelta(minutes=5)
+    scheduler.handle_event(job_event(WINDOW), now)
+    assert len(commands) == 1
+
+
+def test_publish_failure_reaches_the_caller_so_the_event_is_redelivered(state):
+    def publish(catalog, job, **kwargs):
+        raise RuntimeError("database away")
+
+    scheduler = Scheduler(
+        load_catalog(FIXTURE), state, publish, seasons=AlwaysInSeason()
+    )
+    with pytest.raises(RuntimeError):
+        scheduler.handle_event(job_event(WINDOW), WINDOW)

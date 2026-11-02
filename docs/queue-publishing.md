@@ -4,7 +4,7 @@ description: The RabbitMQ queues core publishes to, what each message contains, 
 sidebar_position: 6
 ---
 
-Core publishes to seven RabbitMQ queues. Six are consumed by `fantasy-browser-worker`: the API sends all six, and `sync_players` also publishes straight to `waiver_actions`. The seventh, `job_runs`, carries run commands to core's own job launcher. Every message is durable JSON on the default exchange, with the queue name as the routing key.
+Core publishes to seven RabbitMQ queues. Six are consumed by `fantasy-browser-worker`: the API sends all six, and `sync_players` also publishes straight to `waiver_actions`. The seventh, `job_runs`, carries run commands to core's own job launcher. Every message is durable JSON on the default exchange, with the queue name as the routing key. Core also publishes facts to the `job_events` topic exchange, described in [How do events start runs?](#how-do-events-start-runs).
 
 :::tip[Accepted is not done]
 A `202` or `queued` status means the message left core, not that ESPN changed. The worker confirms results into `execution_log`, and the activity runner verifies them. See [Activity submissions](./activity-api.md).
@@ -136,6 +136,52 @@ stateDiagram-v2
 A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` at the command's current `attempt` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. The initial attempt past `expires_at` ends as `skipped (expired)`; retries of an attempt that already started keep their retry budget. A run refused by `overlap: forbid` ends as `skipped (overlap)`.
 
 The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedupe_key>`. Its outermost `run_scope` adopts the row and keeps the catalog job name.
+
+## How do events start runs?
+
+An event is a fact, such as `rumor.signal_created`, that can start runs. A job subscribes through catalog `on_event`, with a `debounce`.
+
+```mermaid
+flowchart LR
+  emit[emit_event or the worker] -->|routing key = event key| ex[(job_events topic)]
+  ex -->|"#"| q[(job_events.launcher)]
+  q --> sched[scheduler: on_event, debounce]
+  sched -->|publish_run| runs[(job_runs)]
+```
+
+| Field | Meaning |
+|---|---|
+| `event_id` | A fresh UUID. The run it starts stores it in `run_log.event_id` |
+| `key` | The fact, as `<domain>.<fact>` in lowercase. It is also the routing key, and never a wildcard |
+| `subject` | What the fact is about, such as `player:4046` |
+| `payload` | A JSON object for logs and other subscribers. Runs don't receive it, so a job with required params can't subscribe |
+| `emitted_by_run_id` | The emitting `run_log` row, or `null` outside a run |
+| `at` | When it happened, in ISO 8601 with a timezone |
+
+**Publishing from core.** Call `src.launcher.events.emit_event(key, subject, payload)` after your own work has committed, so the run it starts can read that work. It returns the `event_id`, or `None` if the broker didn't take the event. A broker failure is logged and never raised, because a retry of the job wouldn't emit again and every subscriber has a schedule to fall back on. A bad key or an unserializable payload raises `ValueError`.
+
+**Publishing from the worker.** Publish the same six fields as JSON to the `job_events` exchange, with `key` as the routing key, `persistent: true` and `contentType: application/json`, on a confirm channel. Check the exchange exists without changing it (`checkExchange`), and send the W3C `traceparent` as a message header, not in the body. Take `emitted_by_run_id` from the run the bot adopted: `RUN_ID` is only in the environment until it is adopted.
+
+The launcher owns `job_events.launcher`, a durable queue it declares at startup with no arguments, bound with `#`. Its depth is in the heartbeat and `GET /v1/launcher/health`. An event published before that queue first exists is lost, because nothing is bound to the exchange. Another subscriber binds its own queue.
+
+### How does debounce work?
+
+The first event in a window starts the run right away, and later events in that window start nothing. Windows are fixed, aligned to the Unix epoch, and picked from the event's own `at`, so a redelivered event is a no-op.
+
+| Case | Outcome |
+|---|---|
+| Key no job subscribes to | Acked and ignored |
+| Several jobs subscribe to the key | Each gets its own run, on its own `debounce` |
+| Job is paused | One `skipped (paused)` run per window, carrying the `event_id` |
+| Another run of the job is running under `overlap: forbid` | `skipped (overlap)`, as for any other trigger |
+| Run still waiting after `debounce` | `skipped (expired)`, because a later event has its own window |
+| Malformed message | Logged and dropped |
+| Launcher was down, events waiting in the queue | Processed on restart. Each keeps its own `at`, so an outage can start one run per old window |
+| Event can't be recorded, for example `run_log` unavailable | Returned to the queue and retried for 15 minutes, holding up the events behind it, then dropped with an ERROR log |
+
+:::warning[A run can miss a later event]
+An event that lands after its window's run has read its data starts nothing. It waits for the next event in a later window or for the job's schedule, so a subscribed job should keep one. An emitter that sends a batch should commit the whole batch before the first `emit_event`.
+:::
 
 ## Related
 

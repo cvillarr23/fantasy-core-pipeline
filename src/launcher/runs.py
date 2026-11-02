@@ -184,12 +184,13 @@ class Runs:
         scheduled_for,
         end_reason,
         chain_root_id=None,
+        event_id=None,
     ):
         """A run that was never going to start. False when `dedupe_key` was already used."""
         self.c.execute(
             """INSERT INTO run_log(id,job_name,trigger_type,parent_run_id,status,finished_at,
-            dedupe_key,scheduled_for,chain_root_id,end_reason)
-            VALUES (%s,%s,%s,%s,'skipped',now(),%s,%s,%s,%s)
+            dedupe_key,scheduled_for,chain_root_id,end_reason,event_id)
+            VALUES (%s,%s,%s,%s,'skipped',now(),%s,%s,%s,%s,%s)
             ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id""",
             (
                 str(uuid.uuid4()),
@@ -200,6 +201,7 @@ class Runs:
                 scheduled_for,
                 chain_root_id,
                 end_reason,
+                event_id,
             ),
         )
         return self.c.fetchone() is not None
