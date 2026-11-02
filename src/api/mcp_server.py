@@ -14,6 +14,7 @@ bearer tokens already issued by Google; it never runs an authorization/token exc
 itself. MCP_GOOGLE_OAUTH_CLIENT_ID/MCP_GOOGLE_ALLOWED_EMAIL/MCP_RESOURCE_URL are sourced
 from OpenBao in deployed environments, same as ESPN credentials.
 """
+import asyncio
 import logging
 import os
 from urllib.parse import urlparse
@@ -24,6 +25,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from src import jobs_client
 from src.services.free_agent_service import browse_free_agents
 from src.services.roster_outlook_service import get_bye_outlook
 from src.services.roster_service import compute_roster_deficits, get_team_roster_players
@@ -118,7 +120,8 @@ mcp = FastMCP(
     instructions=(
         "Structured tools for reasoning about this fantasy football league's roster construction "
         "and trade math, including one team's roster player by player (get_team_roster), the "
-        "free-agent pool (get_free_agents) and a deterministic schedule-aware trade score (score_trade_proposal)."
+        "free-agent pool (get_free_agents) and a deterministic schedule-aware trade score (score_trade_proposal). "
+        "It also lists and controls launcher jobs: list_jobs, run_job, get_run, cancel_run, pause_job, resume_job."
     ),
     token_verifier=GoogleTokenVerifier(),
     auth=AuthSettings(
@@ -287,6 +290,54 @@ def list_trade_candidates(
         league_id, season, week, counterparty_team_id, receive_position, send_position,
         shape, status, sort, min(max(limit, 1), 200), max(offset, 0),
     )
+
+
+# The jobs tools call the Jobs API over HTTP, and that API is served by this same process, so
+# they are async and run the blocking request in a thread: a sync call on the event loop
+# would wait on a server that can't answer until the loop is free.
+
+@mcp.tool()
+async def list_jobs() -> dict:
+    """Launcher catalog: every job and chain with its schedule, params, pause state and last run."""
+    return await asyncio.to_thread(jobs_client.list_jobs)
+
+
+@mcp.tool()
+async def run_job(name: str, params: dict | None = None, downstream: bool = False) -> dict:
+    """Start a run of a catalog job now. Returns run_id and status ("queued").
+
+    params are the job's declared params (see list_jobs). downstream=True also runs the steps
+    after this job in its chain. Jobs flagged acts=true in list_jobs (lineup-optimizer,
+    waiver-trigger, rumor-action-trigger, trade-scan) make real ESPN moves or proposals:
+    check the flag and get the user's explicit go-ahead before running one. Fails with 409 if the job is already running and 422 for
+    unknown or invalid params.
+    """
+    return await asyncio.to_thread(jobs_client.run_job, name, params or {}, downstream, trigger="mcp")
+
+
+@mcp.tool()
+async def get_run(run_id: str) -> dict:
+    """One run's status, timing, summary and error, by run id."""
+    return await asyncio.to_thread(jobs_client.get_run, run_id)
+
+
+@mcp.tool()
+async def cancel_run(run_id: str) -> dict:
+    """Cancel a queued or running run. Cancelling a chain root also cancels its queued and running steps."""
+    return await asyncio.to_thread(jobs_client.cancel_run, run_id)
+
+
+@mcp.tool()
+async def pause_job(name: str, reason: str, until: str | None = None) -> dict:
+    """Stop the scheduler starting a job or chain. until is an ISO 8601 time with a UTC offset
+    (omit to pause until resume_job). Runs already started are not affected."""
+    return await asyncio.to_thread(jobs_client.pause_job, name, reason, until)
+
+
+@mcp.tool()
+async def resume_job(name: str) -> dict:
+    """Lift a pause set by pause_job."""
+    return await asyncio.to_thread(jobs_client.unpause_job, name)
 
 
 mcp_asgi_app = mcp.streamable_http_app()

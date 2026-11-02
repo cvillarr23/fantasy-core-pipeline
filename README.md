@@ -77,6 +77,21 @@ sequenceDiagram
 
 Reference pages live in `docs/` and are published on the [project docs site](https://fantasy-docs.roo-net.cc): [data model](docs/data-model.md), [migrations](docs/migrations.md), [ingestion](docs/ingestion.md), [read-only access](docs/read-only-access.md), [API reference](docs/api-reference.md) and [queue publishing](docs/queue-publishing.md). `docs/openapi.json` and the endpoint tables in the API reference are generated; after changing a route run `DB_PASSWORD=test python scripts/export_openapi.py`, or `tests/test_api_docs.py` fails.
 
+## Jobs CLI and MCP tools
+
+Runs can be driven without the web UI. Both callers go through the Jobs API (`src/jobs_client.py`), so they need `CORE_API_BASE_URL` and, for anything that changes state, `TRIGGER_API_KEY`:
+
+```bash
+python -m src.cli jobs list
+python -m src.cli jobs run <job> --param week=9 --downstream [--yes]
+python -m src.cli jobs status <run_id>
+python -m src.cli jobs cancel <run_id>
+python -m src.cli jobs pause <job> --reason "ESPN down" [--until 2026-11-03T12:00:00+00:00]
+python -m src.cli jobs resume <job>
+```
+
+`--yes` is required for jobs the catalog flags `acts` (they make real ESPN moves or proposals); the MCP `run_job` docstring tells the model to get the user's go-ahead first. `--param KEY=VALUE` is read as JSON when it parses (`4`, `true`) and as text otherwise. The MCP server exposes the same operations as `list_jobs`, `run_job`, `get_run`, `cancel_run`, `pause_job` and `resume_job`. Runs they start are recorded with `trigger` `cli` or `mcp`.
+
 ## Schema Notes
 
 Design rationale for `src/models.py` DDL that's too deep for an inline comment.

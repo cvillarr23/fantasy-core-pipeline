@@ -217,3 +217,48 @@ def test_get_team_bye_outlook_delegates_to_roster_outlook_service():
 
     mock_outlook.assert_called_once_with("123", 2026, 7, 4, "4")
     assert result == {"crunch_weeks": [8]}
+
+
+# ---------------------------------------------------------------------------
+# Jobs and runs - thin wrappers over src.jobs_client (the Jobs API over HTTP). The
+# client's own behavior is covered by tests/test_jobs_client.py; these confirm each tool
+# forwards the right arguments, always as trigger="mcp", off the event loop.
+# ---------------------------------------------------------------------------
+
+def test_list_jobs_forwards_to_the_jobs_client():
+    with patch("src.api.mcp_server.jobs_client") as client:
+        client.list_jobs.return_value = {"jobs": []}
+        assert asyncio.run(mcp_server.list_jobs()) == {"jobs": []}
+
+
+def test_run_job_sends_the_mcp_trigger():
+    with patch("src.api.mcp_server.jobs_client") as client:
+        client.run_job.return_value = {"run_id": "r1", "status": "queued"}
+        result = asyncio.run(mcp_server.run_job("sample-job", params={"count": 2}, downstream=True))
+
+    client.run_job.assert_called_once_with("sample-job", {"count": 2}, True, trigger="mcp")
+    assert result["run_id"] == "r1"
+
+
+def test_run_job_defaults_to_no_params_and_no_downstream():
+    with patch("src.api.mcp_server.jobs_client") as client:
+        asyncio.run(mcp_server.run_job("sample-job"))
+    client.run_job.assert_called_once_with("sample-job", {}, False, trigger="mcp")
+
+
+def test_get_run_cancel_run_pause_and_resume_forward_arguments():
+    with patch("src.api.mcp_server.jobs_client") as client:
+        asyncio.run(mcp_server.get_run("r1"))
+        asyncio.run(mcp_server.cancel_run("r1"))
+        asyncio.run(mcp_server.pause_job("sample-job", reason="maint", until="2026-12-01T00:00:00+00:00"))
+        asyncio.run(mcp_server.resume_job("sample-job"))
+
+    client.get_run.assert_called_once_with("r1")
+    client.cancel_run.assert_called_once_with("r1")
+    client.pause_job.assert_called_once_with("sample-job", "maint", "2026-12-01T00:00:00+00:00")
+    client.unpause_job.assert_called_once_with("sample-job")
+
+
+def test_jobs_tools_are_registered_with_the_server():
+    names = {tool.name for tool in asyncio.run(mcp_server.mcp.list_tools())}
+    assert {"list_jobs", "run_job", "get_run", "cancel_run", "pause_job", "resume_job"} <= names

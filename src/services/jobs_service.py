@@ -2,8 +2,8 @@
 
 import json
 from datetime import datetime, timezone
+from typing import Any, Literal
 from functools import cache
-from typing import Any
 
 from src.database import get_db_cursor
 from src.launcher.catalog import (
@@ -198,6 +198,7 @@ def start_run(
     params: dict[str, Any] | None = None,
     requested_by: str | None = None,
     downstream: bool = False,
+    trigger: Literal["manual", "cli", "mcp"] = "manual",
 ) -> dict[str, str]:
     catalog = _catalog()
     try:
@@ -213,7 +214,7 @@ def start_run(
 
     if downstream:
         chain_root_id, run_id = _scheduler(catalog).start_chain(
-            name, params=params, requested_by=requested_by
+            name, params=params, requested_by=requested_by, trigger=trigger
         )
         return {
             "run_id": run_id,
@@ -224,7 +225,7 @@ def start_run(
     return publish_run(
         catalog,
         name,
-        trigger="manual",
+        trigger=trigger,
         params=params,
         requested_by=requested_by,
         downstream=False,
