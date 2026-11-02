@@ -29,6 +29,12 @@ nothing:
   (``chain_ended``) and the watcher retries none of its steps.
 - **Standalone slots.** A job's own slot is skipped (``chain_step``) on a day when a chain
   run already covers it: the step has a non-skipped run, or the chain is still running.
+- **Events.** ``handle_event`` (the ``launcher-events`` thread) starts each job subscribed to
+  the event's key through catalog ``on_event``, at most once per debounce window: the first
+  event of a window starts the run and carries its ``event_id``, later ones find the dedupe
+  key ``job@key@<window start>`` used. Windows come from the event's own ``at``, so a
+  redelivered event is a no-op. An event landing after that run read its data waits for
+  the next event or the job's schedule. A paused job records one ``skipped`` run per window.
 - **Manual runs.** ``start_chain`` runs one step with ``downstream`` semantics: a root
   scoped to that step and its descendants. A manual run without ``downstream`` has no
   ``chain_root_id``, so no edges are ever evaluated for it.
@@ -49,7 +55,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from graphlib import TopologicalSorter
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -57,6 +63,9 @@ from croniter import croniter
 
 from src.launcher.catalog import Catalog, Chain, ChainStep, Schedule, Season
 from src.launcher.runs import Runs
+
+if TYPE_CHECKING:
+    from src.launcher.events import JobEvent
 
 logger = logging.getLogger("LauncherScheduler")
 
@@ -100,6 +109,7 @@ class SchedulerState(Protocol):
         scheduled_for: datetime,
         end_reason: str,
         chain_root_id: str | None = None,
+        event_id: str | None = None,
     ) -> bool: ...
 
     def create_chain_root(
@@ -127,6 +137,12 @@ class SchedulerState(Protocol):
 
 def slot_key(name: str, slot: datetime) -> str:
     return f"{name}@{slot.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+
+def debounce_window(at: datetime, debounce: timedelta) -> datetime:
+    """The start of the epoch-aligned window of length ``debounce`` containing ``at``."""
+    seconds = debounce.total_seconds()
+    return datetime.fromtimestamp(at.timestamp() // seconds * seconds, timezone.utc)
 
 
 def latest_slot(schedule: Schedule, now: datetime) -> datetime:
@@ -227,6 +243,12 @@ class Scheduler:
         for name, chain in catalog.chains.items():
             for step in chain.steps:
                 self._chains_by_job.setdefault(step, []).append(name)
+        self._subscribers: dict[str, list[tuple[str, timedelta]]] = {}
+        for name, job in catalog.jobs.items():
+            for subscription in job.on_event:
+                self._subscribers.setdefault(subscription.key, []).append(
+                    (name, subscription.debounce)
+                )
 
     def tick(self, now: datetime | None = None) -> None:
         """Fire due chain slots, advance running chains, then fire due job slots."""
@@ -248,6 +270,44 @@ class Scheduler:
             except Exception:
                 logger.exception("Scheduler tick failed")
             stop.wait(poll_seconds)
+
+    def handle_event(self, event: JobEvent, now: datetime | None = None) -> None:
+        """Starts the event's subscribed jobs; an unknown key is ignored.
+
+        An exception reaches the event consumer, which returns the event to the queue.
+        """
+        now = now or self.clock()
+        subscribers = self._subscribers.get(event.key, [])
+        logger.info(
+            "Event %s (%s, %s) from run %s: %d subscribed job(s)",
+            event.event_id,
+            event.key,
+            event.subject,
+            event.emitted_by_run_id,
+            len(subscribers),
+        )
+        for job, debounce in subscribers:
+            self._event_run(job, debounce, event, now)
+
+    def _event_run(
+        self, job: str, debounce: timedelta, event: JobEvent, now: datetime
+    ) -> None:
+        window = debounce_window(event.at, debounce)
+        key = slot_key(f"{job}@{event.key}", window)
+        if self.state.run_exists(key):
+            return
+        if self.state.paused(job, now):
+            self._skip(job, "event", key, event.at, "paused", event.event_id)
+            return
+        self._publish(
+            job,
+            trigger="event",
+            dedupe_key=key,
+            scheduled_for=event.at,
+            event_id=event.event_id,
+            # Past this a later event has its own window, so this one is not worth starting.
+            expires_at=now + debounce,
+        )
 
     def chain_for_step(self, job: str) -> str:
         """The one chain containing ``job``, for a manual run with ``downstream: true``."""
@@ -523,7 +583,13 @@ class Scheduler:
         return latest
 
     def _skip(
-        self, name: str, trigger: str, key: str, slot: datetime, reason: str
+        self,
+        name: str,
+        trigger: str,
+        key: str,
+        slot: datetime,
+        reason: str,
+        event_id: str | None = None,
     ) -> None:
         if self.state.record_skipped(
             job_name=name,
@@ -531,6 +597,7 @@ class Scheduler:
             dedupe_key=key,
             scheduled_for=slot,
             end_reason=reason,
+            event_id=event_id,
         ):
             logger.info("Skipped %s (%s)", key, reason)
 
@@ -559,6 +626,7 @@ class Scheduler:
         params: dict[str, Any] | None = None,
         requested_by: str | None = None,
         downstream: bool = False,
+        event_id: str | None = None,
         expires_at: datetime | None,
     ) -> str:
         result = self.publish(
@@ -570,6 +638,7 @@ class Scheduler:
             dedupe_key=dedupe_key,
             parent_run_id=chain_root_id,
             chain_root_id=chain_root_id,
+            event_id=event_id,
             downstream=downstream,
             scheduled_for=scheduled_for,
             expires_at=expires_at,
@@ -667,6 +736,7 @@ class PostgresSchedulerState:
         scheduled_for: datetime,
         end_reason: str,
         chain_root_id: str | None = None,
+        event_id: str | None = None,
     ) -> bool:
         with self._cursor() as c:
             return Runs(c).insert_skipped(
@@ -676,6 +746,7 @@ class PostgresSchedulerState:
                 scheduled_for=scheduled_for,
                 end_reason=end_reason,
                 chain_root_id=chain_root_id,
+                event_id=event_id,
             )
 
     def create_chain_root(

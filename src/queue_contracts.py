@@ -17,6 +17,12 @@ TRADE_RESPONSES = "trade_responses"
 TRADE_NEGOTIATIONS = "trade_negotiations"
 # Launcher run commands ("run this job"), consumed only by `python -m src.launcher`.
 JOB_RUNS = "job_runs"
+# Launcher events ("this happened"): a topic exchange whose routing key is the event's key.
+JOB_EVENTS = "job_events"
+# The launcher's own subscription to JOB_EVENTS; another subscriber binds its own queue.
+JOB_EVENTS_LAUNCHER_QUEUE = "job_events.launcher"
+# An exact dotted routing key: `<domain>.<fact>`. A wildcard is a binding, not an event.
+EVENT_KEY_PATTERN = r"^[a-z0-9_]+(\.[a-z0-9_]+)+$"
 
 PUBLISHED_QUEUES = frozenset(
     {
@@ -29,3 +35,4 @@ PUBLISHED_QUEUES = frozenset(
         JOB_RUNS,
     }
 )
+PUBLISHED_EXCHANGES = frozenset({JOB_EVENTS})

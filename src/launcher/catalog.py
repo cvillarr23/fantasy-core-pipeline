@@ -23,6 +23,8 @@ from pydantic import (
     model_validator,
 )
 
+from src.queue_contracts import EVENT_KEY_PATTERN
+
 
 class _CatalogYamlLoader(yaml.SafeLoader):
     """Use YAML 1.2 boolean rules so v1 fields such as ``on`` remain strings."""
@@ -186,7 +188,7 @@ class Schedule(CatalogModel):
 
 
 class EventSubscription(CatalogModel):
-    key: str
+    key: str = Field(pattern=EVENT_KEY_PATTERN)
     debounce: timedelta
 
     @field_validator("debounce", mode="before")
@@ -229,6 +231,10 @@ class Job(CatalogModel):
     @classmethod
     def parse_job_deadline(cls, value: Any) -> timedelta | None:
         return None if value is None else _duration(value)
+
+
+def _required_params(job: Job) -> list[str]:
+    return [name for name, kind in job.params.items() if not kind.endswith("?")]
 
 
 class Dependency(CatalogModel):
@@ -320,6 +326,11 @@ class Catalog(CatalogModel):
                 raise ValueError(f"jobs.{name}.deadline exceeds global.max_deadline")
             for schedule in job.schedules:
                 self._validate_schedule_seasons(schedule, f"jobs.{name}.schedules")
+            if job.on_event and _required_params(job):
+                raise ValueError(
+                    f"jobs.{name}.on_event: events pass no params, but it requires "
+                    f"{', '.join(_required_params(job))}"
+                )
         for name, chain in self.chains.items():
             if chain.schedule:
                 self._validate_schedule_seasons(

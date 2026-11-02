@@ -9,7 +9,8 @@ import pytest
 import yaml
 
 from src.api import routes
-from src.queue_contracts import PUBLISHED_QUEUES
+from src.launcher.events import emit_event
+from src.queue_contracts import PUBLISHED_EXCHANGES, PUBLISHED_QUEUES
 from src.services import activity_service, activity_runner
 from tests.test_trade_offers import boundary as offer_boundary, staged_counter
 from tests.test_trade_inbox import (
@@ -32,8 +33,9 @@ def validate(name, payload):
 
 
 def test_channels_match_publisher_constants():
-    assert set(SPEC["channels"]) == PUBLISHED_QUEUES
-    assert {c["address"] for c in SPEC["channels"].values()} == PUBLISHED_QUEUES
+    published = PUBLISHED_QUEUES | PUBLISHED_EXCHANGES
+    assert set(SPEC["channels"]) == published
+    assert {c["address"] for c in SPEC["channels"].values()} == published
 
 
 def test_examples_validate():
@@ -298,3 +300,16 @@ def test_job_run_command():
     assert send["routing_key"] == "job_runs"
     body = json.loads(send["body"])
     validate("RunCommand", body)
+
+
+def test_job_event():
+    connection = MagicMock()
+    with (
+        patch("src.launcher.events.pika.BlockingConnection", return_value=connection),
+        patch(
+            "src.launcher.events.run_log_service.current_run_id", return_value="run-1"
+        ),
+    ):
+        assert emit_event("rumor.signal_created", "player:1", {"signal_id": 7})
+    publish = connection.channel.return_value.basic_publish.call_args.kwargs
+    validate("JobEvent", json.loads(publish["body"]))

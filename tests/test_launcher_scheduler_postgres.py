@@ -12,6 +12,7 @@ import pytest
 
 from src.launcher.catalog import load_catalog
 from src.launcher import publish
+from src.launcher.events import JobEvent
 from src.launcher.scheduler import PostgresSchedulerState, Scheduler
 from src.services import activity_service as activity, run_log_service as run_log
 
@@ -157,3 +158,63 @@ def test_chain_progresses_and_finalizes_through_run_log(conn, state):
             "tuesday-weekly", start, start + timedelta(days=1)
         )
     ] == [chain_root.id]
+
+
+def job_event(event_id, at):
+    return JobEvent(
+        event_id=event_id,
+        key="rumor.signal_created",
+        subject="player:1",
+        payload={},
+        emitted_by_run_id=None,
+        at=at,
+    )
+
+
+def event_rows(conn):
+    with conn, conn.cursor() as c:
+        c.execute(
+            "SELECT job_name,trigger_type,status,end_reason,event_id,dedupe_key FROM run_log"
+        )
+        return c.fetchall()
+
+
+def test_event_burst_writes_one_run_carrying_the_first_event_id(conn, state):
+    window = datetime(2026, 10, 28, 15, 0, tzinfo=UTC)
+    catalog = load_catalog("tests/fixtures/job-catalog.yaml")
+    scheduler = Scheduler(catalog, state, seasons=AlwaysInSeason())
+    for i in range(20):
+        at = window + timedelta(seconds=i * 90)
+        scheduler.handle_event(job_event(f"e{i}", at), at)
+    assert event_rows(conn) == [
+        (
+            "rumor-action-trigger",
+            "event",
+            "queued",
+            None,
+            "e0",
+            "rumor-action-trigger@rumor.signal_created@2026-10-28T15:00:00Z",
+        )
+    ]
+
+
+def test_paused_event_run_records_its_event_id(conn, state):
+    window = datetime(2026, 10, 28, 15, 0, tzinfo=UTC)
+    with conn, conn.cursor() as c:
+        c.execute(
+            "INSERT INTO job_overrides(job_or_chain,paused_until) VALUES (%s,NULL)",
+            ("rumor-action-trigger",),
+        )
+    catalog = load_catalog("tests/fixtures/job-catalog.yaml")
+    scheduler = Scheduler(catalog, state, seasons=AlwaysInSeason())
+    scheduler.handle_event(job_event("e0", window), window)
+    assert event_rows(conn) == [
+        (
+            "rumor-action-trigger",
+            "event",
+            "skipped",
+            "paused",
+            "e0",
+            "rumor-action-trigger@rumor.signal_created@2026-10-28T15:00:00Z",
+        )
+    ]

@@ -258,3 +258,22 @@ def test_season_window_must_be_ordered_weeks():
     raw["seasons"] = {"regular": {"start": 1, "end": 18, "extra": True}}
     with pytest.raises(ValidationError, match="extra"):
         Catalog.model_validate(raw)
+
+
+@pytest.mark.parametrize("key", ["rumor.*", "rumor.#", "rumor", "Rumor.Created", ""])
+def test_on_event_key_must_be_an_exact_routing_key(key):
+    raw = catalog_data()
+    raw["jobs"]["one"]["on_event"] = [{"key": key, "debounce": "30m"}]
+    with pytest.raises(ValidationError, match="key"):
+        Catalog.model_validate(raw)
+
+
+def test_on_event_job_cannot_require_params():
+    raw = catalog_data()
+    raw["jobs"]["one"]["on_event"] = [{"key": "rumor.created", "debounce": "30m"}]
+    raw["jobs"]["one"]["params"] = {"week": "int"}
+    with pytest.raises(ValidationError, match="jobs.one.on_event"):
+        Catalog.model_validate(raw)
+
+    raw["jobs"]["one"]["params"] = {"week": "int?"}
+    assert Catalog.model_validate(raw).jobs["one"].on_event[0].key == "rumor.created"
