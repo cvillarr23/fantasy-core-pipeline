@@ -39,6 +39,18 @@ Rumors add no score bonus and force no move. A qualifying signal with no normal-
 
 Decision evidence adds signal ID, sentiment and confidence to VORP/source evidence. Missing inputs and identities are separate outcomes from no improvement.
 
+## What starts a run?
+
+| Trigger | When | No-benefit signal |
+| --- | --- | --- |
+| Schedule | Daily 21:45, or the `tuesday-weekly` chain's last step | Settled |
+| `rumor.signal_created` event | After the 11:00 digest, once the catalog subscribes the job | Held for a later run |
+| Manual or HTTP | On request | Settled |
+
+The digest emits the event because it writes `rumor_signals`, the table this job reads. `sync_rumors` only writes `raw_signals`, so it emits nothing. The schedule stays as the fallback, because an event is lost if the broker doesn't take it.
+
+An event run reads VORP from the previous evening's refresh, which may not reflect the news behind a signal yet. It still publishes any move that clears the normal rules. A signal with no move stays behind the watermark instead of settling, so the 21:45 run evaluates it on fresh VORP. Signals settled in the meantime aren't evaluated or published again. Once a held signal is 24 hours old, the next run settles it whatever its trigger, so a paused or missed 21:45 run can't stall the cursor. `signals_held` in the outcome details counts the signals that run held, so a second event run on the same day re-evaluates and counts the same signals again.
+
 ## What survives a restart?
 
 | Checkpoint field | Purpose |
@@ -58,7 +70,7 @@ The legacy Redis `rumor_action:last_processed_id` initializes the first team che
 | Work | Limit |
 | --- | --- |
 | Publication | Three failures |
-| Signal evaluation | Three failures and 24 hours |
+| Signal evaluation | Three failures and 24 hours. A held signal has no time limit here, because a hold is not a failure |
 | Waiver action | 24-hour retry window |
 | Lineup action | 20-minute retry window; gateway key lasts 30 minutes |
 | Different season/week | Drop prepared action rather than replay |

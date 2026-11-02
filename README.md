@@ -197,7 +197,7 @@ Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvi
 
 ### Rumor-action application outcomes (#140)
 
-The daily CronJob invokes `python -m src.services.rumor_action_service` directly; the
+The launcher runs `python -m src.services.rumor_action_service` directly; the
 HTTP route shares its service. Each invocation records exactly one `execution_log`
 row (`transaction_type=rumor_action_trigger`, `bot_name=rumor_action_service`).
 `outcome_details` is an additive nullable JSONB column migrated at API startup, before

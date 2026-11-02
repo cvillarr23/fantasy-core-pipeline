@@ -162,6 +162,8 @@ flowchart LR
 
 **Publishing from the worker.** Publish the same six fields as JSON to the `job_events` exchange, with `key` as the routing key, `persistent: true` and `contentType: application/json`, on a confirm channel. Check the exchange exists without changing it (`checkExchange`), and send the W3C `traceparent` as a message header, not in the body. Take `emitted_by_run_id` from the run the bot adopted: `RUN_ID` is only in the environment until it is adopted.
 
+**`rumor.signal_created`.** The worker's rumor digest emits one per `rumor_signals` row, after that run's rows commit, with subject `player:<player_id>` and payload `{"signal_id": <rumor_signals.id>}`. `sync_rumors` doesn't emit it: `raw_signals` rows mean nothing to `rumor_action_service` until the digest has interpreted them.
+
 The launcher owns `job_events.launcher`, a durable queue it declares at startup with no arguments, bound with `#`. Its depth is in the heartbeat and `GET /v1/launcher/health`. An event published before that queue first exists is lost, because nothing is bound to the exchange. Another subscriber binds its own queue.
 
 ### How does debounce work?

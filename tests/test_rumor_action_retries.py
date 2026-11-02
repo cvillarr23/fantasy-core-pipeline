@@ -517,3 +517,192 @@ def test_redis_mirror_failure_does_not_fail_checkpointed_run(retry_env):
         result = ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
     assert result["considered"] == 0
     assert record.call_args.kwargs["status"] == "success"
+
+
+def _proposing(*players):
+    """The normal evaluation proposes adding exactly these players."""
+    return patch.object(
+        ras.waiver_strategy,
+        "propose_waiver_moves",
+        return_value=[{"add_player_id": player} for player in players],
+    )
+
+
+def _published(publish):
+    return [call.args[1]["player_id"] for call in publish.call_args_list]
+
+
+def _watermark(database):
+    return database["7"][1]["watermark"]
+
+
+def _last_run(record):
+    return record.call_args_list[-1].kwargs
+
+
+def test_event_run_keeps_no_benefit_signals_behind_the_watermark(retry_env, monkeypatch):
+    _, redis, database, record = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _watermark(database) == 0
+    assert redis[ras.WATERMARK_REDIS_KEY] == "0"
+    assert _last_run(record)["status"] == "success"
+    assert _last_run(record)["outcome_details"]["reason"] == "no_beneficial_move"
+    assert _last_run(record)["outcome_details"]["signals_held"] == 3
+
+
+def test_scheduled_run_publishes_a_held_signal_the_refresh_made_worthwhile(
+    retry_env, monkeypatch
+):
+    _, _, database, record = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    with _proposing("p2"), patch.object(
+        ras, "publish_waiver_claim", return_value=True
+    ) as publish:
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _published(publish) == ["p2"]
+    assert _watermark(database) == 3
+    assert _last_run(record)["outcome_details"]["signals_held"] == 0
+
+
+def test_scheduled_run_settles_a_held_signal_with_still_no_move(retry_env, monkeypatch):
+    _, _, database, record = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _watermark(database) == 3
+    assert database["7"][1]["signals"] == {}
+    assert _last_run(record)["status"] == "success"
+
+
+def test_event_run_publishes_its_good_move_and_holds_only_the_rest(retry_env, monkeypatch):
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing("p1"), patch.object(
+        ras, "publish_waiver_claim", return_value=True
+    ) as publish:
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _published(publish) == ["p1"]
+    assert _watermark(database) == 1
+
+
+def test_settled_signal_behind_a_held_one_is_not_published_again(retry_env, monkeypatch):
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing("p3"), patch.object(
+        ras, "publish_waiver_claim", return_value=True
+    ) as publish:
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        assert _watermark(database) == 0
+        monkeypatch.setenv("RUN_TRIGGER", "schedule")
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _published(publish) == ["p3"]
+    assert _watermark(database) == 3
+
+
+def test_second_event_run_holds_again(retry_env, monkeypatch):
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _watermark(database) == 0
+
+
+def test_event_run_holds_a_bench_watch_signal(retry_env, monkeypatch):
+    rows, _, database, _ = retry_env
+    del rows[1:]
+    rows[0]["suggested_action"] = ras.BENCH_WATCH_ACTION
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with patch.object(ras.lineup_solver, "evaluate_lineup", return_value={"swaps": []}):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _watermark(database) == 0
+
+
+@pytest.mark.parametrize("trigger", ["schedule", "chain", "manual"])
+def test_other_triggers_settle_no_benefit_signals(retry_env, monkeypatch, trigger):
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", trigger)
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _watermark(database) == 3
+
+
+def test_event_run_stops_holding_once_the_retry_window_has_passed(retry_env, monkeypatch):
+    """With the 21:45 run paused or missed, daily digests must not stall the cursor."""
+    _, _, database, record = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+        later = ras.time.time() + ras.SIGNAL_RETRY_WINDOW_SECONDS + 1
+        with patch.object(ras.time, "time", return_value=later):
+            ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _watermark(database) == 3
+    assert _last_run(record)["status"] == "success"
+
+
+def test_scheduled_run_past_the_window_still_evaluates_a_held_signal(retry_env, monkeypatch):
+    """A hold is not an evaluation failure, so it must not end in a retry-window error."""
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    later = ras.time.time() + ras.SIGNAL_RETRY_WINDOW_SECONDS + 1
+    with _proposing("p1"), patch.object(
+        ras, "publish_waiver_claim", return_value=True
+    ) as publish, patch.object(ras.time, "time", return_value=later):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    assert _published(publish) == ["p1"]
+    assert _watermark(database) == 3
+
+
+def test_settled_signal_kept_behind_a_gap_is_no_longer_marked_held(retry_env, monkeypatch):
+    _, _, database, _ = retry_env
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing():
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    with _proposing("p1"), patch.object(
+        ras, "publish_waiver_claim", side_effect=RuntimeError("gateway unavailable")
+    ), pytest.raises(RuntimeError):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    entry = database["7"][1]["signals"]["2"]
+    assert entry["reason"] == "no_beneficial_move"
+    assert "held" not in entry
+
+
+def test_held_signal_dropped_at_the_evaluation_limit_is_no_longer_marked_held(
+    retry_env, monkeypatch
+):
+    """Signal 1's unpublished move keeps signal 2's entry behind the cursor gap."""
+    rows, _, database, _ = retry_env
+    rows[1]["suggested_action"] = ras.BENCH_WATCH_ACTION
+    no_swaps = patch.object(
+        ras.lineup_solver, "evaluate_lineup", return_value={"swaps": []}
+    )
+    no_inputs = patch.object(
+        ras.lineup_solver, "evaluate_lineup", side_effect=RuntimeError("no projections")
+    )
+    monkeypatch.setenv("RUN_TRIGGER", "event")
+    with _proposing(), no_swaps:
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    with _proposing(), no_inputs, pytest.raises(RuntimeError):
+        ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    monkeypatch.setenv("RUN_TRIGGER", "schedule")
+    with _proposing("p1"), no_inputs, patch.object(
+        ras, "publish_waiver_claim", side_effect=RuntimeError("gateway unavailable")
+    ):
+        for _ in range(ras.MAX_SIGNAL_EVALUATION_FAILURES - 1):
+            with pytest.raises(RuntimeError):
+                ras.evaluate_and_publish_rumor_actions("7", 2026, 4)
+    entry = database["7"][1]["signals"]["2"]
+    assert entry["reason"] == "evaluation_retry_limit_exceeded"
+    assert "held" not in entry
