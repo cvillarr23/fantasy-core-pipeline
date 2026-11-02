@@ -62,7 +62,7 @@ flowchart TD
 | `fantasy-lineup-optimizer` | Tuesday 19:15 | `lineup_solver` |
 | `fantasy-weekly-waiver-trigger` | Tuesday 20:30 | `waiver_evaluator` |
 | `fantasy-rumor-syncer` | Every 30 min | `sync_rumors` |
-| `fantasy-rumor-action-trigger` | Daily 21:45 | `rumor_action_service` |
+| `fantasy-rumor-action-trigger` | Daily 21:45, plus `rumor.signal_created` once the catalog subscribes it | `rumor_action_service` |
 
 :::warning[Not scheduled]
 No CronJob runs `sync_id_crosswalk`, `sync_skill_position_crosswalk` or `sync_defense_strength`. Run them by hand after a large `sync_players` change, in the order shown above.

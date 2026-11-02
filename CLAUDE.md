@@ -564,5 +564,10 @@
   leading-edge in fixed windows taken from the event's `at`: dedupe key `job@key@<window start>`,
   so a redelivery is a no-op. `EVENT_KEY_PATTERN` lives in `queue_contracts` because
   `catalog.py --check` runs in fantasy-infra's CI with no database. Events pass no params.
+- `rumor.signal_created` comes from the worker's digest, per `rumor_signals` row, not from
+  `sync_rumors`: `rumor_action_service` reads `rumor_signals`, not `raw_signals`. A signal gets
+  one look, and an event run reads the previous evening's VORP, so with `RUN_TRIGGER=event` a
+  `no_beneficial_move` signal stays behind the watermark (`_should_hold`) for the 21:45 run.
+  Moves it finds still publish. The hold ends after `SIGNAL_RETRY_WINDOW_SECONDS`.
 - `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
   it gets no `chain_root_id`, so it never starts downstream steps.

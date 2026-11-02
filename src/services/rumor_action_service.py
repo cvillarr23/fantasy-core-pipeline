@@ -84,10 +84,15 @@ class RunOutcome:
         )
         self.signals = {}
         self.deferred_signals = set()
+        self.held_signals = set()
         self.missing_signals = set()
 
     def add(self, name, count=1):
         self.details[name] += count
+
+    def hold(self, signal_id):
+        self.held_signals.add(signal_id)
+        self.deferred_signals.add(signal_id)
 
     def finish_targets(self, targets, matched_players):
         for player, signal in targets.items():
@@ -99,6 +104,7 @@ class RunOutcome:
         d = self.details
         d["signal_reasons"] = dict(Counter(self.signals.values()))
         d["signals_deferred"] = len(self.deferred_signals)
+        d["signals_held"] = len(self.held_signals)
         d["signals_unaccounted"] = sum(
             reason == "pending" and signal_id not in self.deferred_signals
             for signal_id, reason in self.signals.items()
@@ -199,6 +205,22 @@ def _qualifying_signals_by_action(signals: list, action: str) -> dict:
             continue
         result[signal["player_id"]] = signal
     return result
+
+
+def _should_hold(reason: str, entry: dict, now: float) -> bool:
+    """Whether this run leaves a no-benefit signal behind the watermark for a later run.
+
+    The watermark gives a signal one look. An event run follows the 11:00 digest, so it reads
+    VORP from the previous evening's refresh, which may not reflect the news behind the
+    signal yet. Settling the signal here would cost it the look on fresh VORP that the 21:45
+    run gives it, so an event can only add an earlier chance to act. The retry window bounds
+    the hold: with the 21:45 run paused or missed, daily digests must not stall the cursor.
+    """
+    return (
+        os.getenv("RUN_TRIGGER") == "event"
+        and reason == "no_beneficial_move"
+        and now - entry["first_seen_at"] < SIGNAL_RETRY_WINDOW_SECONDS
+    )
 
 
 def _decorate_decision_inputs(existing: dict, signal: dict) -> dict:
@@ -562,7 +584,10 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             )
             entry.setdefault("evaluation_attempts", 0)
             entry.setdefault("first_seen_at", now)
-            if now - entry["first_seen_at"] >= SIGNAL_RETRY_WINDOW_SECONDS:
+            if (
+                now - entry["first_seen_at"] >= SIGNAL_RETRY_WINDOW_SECONDS
+                and not entry.get("held")
+            ):
                 entry["reason"] = "evaluation_retry_window_expired"
                 entry["prepared"] = True
                 detail = dict(
@@ -610,6 +635,10 @@ def _evaluate_and_publish_rumor_actions(team_id, season, week, outcome):
             if reason == "pending":
                 outcome.details["failure_reason"] = "unaccounted_work"
                 errors.append(f"Unaccounted rumor signal {sid}")
+                continue
+            if _should_hold(reason, entries[str(sid)], now):
+                entries[str(sid)]["held"] = True
+                outcome.hold(sid)
                 continue
             entries[str(sid)].update(reason=reason, prepared=True)
         groups = (
