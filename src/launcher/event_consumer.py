@@ -7,14 +7,17 @@ deciding which keys matter. The exchange is the broker's and is only checked, so
 is logged and retried rather than created with the wrong settings.
 
 A delivery is acked once its run is recorded. If recording fails the event goes back to the
-queue, which is safe because the dedupe key makes a second delivery a no-op. A malformed
-event would fail forever, so it is logged and dropped.
+queue, which is safe because the dedupe key makes a second delivery a no-op. A failing event
+returns to the head of the queue and holds up the rest, so one still failing after
+RETRY_LIMIT is rejected and logged: long enough to ride out a database restart, while the job
+keeps its schedule. A malformed event would fail forever, so it is logged and dropped at once.
 
 pika connections aren't thread-safe, so this thread keeps its own.
 """
 
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import pika
@@ -30,6 +33,7 @@ tracer = trace.get_tracer(__name__)
 
 POLL_SECONDS = 5
 PREFETCH_COUNT = 20
+RETRY_LIMIT = timedelta(minutes=15)
 
 
 class EventNotHandled(RuntimeError):
@@ -37,9 +41,12 @@ class EventNotHandled(RuntimeError):
 
 
 class EventConsumer:
-    def __init__(self, handle: Callable[[JobEvent], None]):
+    def __init__(self, handle: Callable[[JobEvent], None], clock=None):
         self.handle = handle
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.failures = 0
+        # (event_id, first failure) of the event at the head of the queue.
+        self.failing: tuple[str, datetime] | None = None
 
     def _on_message(self, channel, method, properties, body):
         event = _parse(body)
@@ -49,13 +56,36 @@ class EventConsumer:
         try:
             self._handle_traced(event, properties)
         except Exception as exc:
+            if self._past_retry_limit(event):
+                logger.exception(
+                    "Dropping event %s (%s, %s): still failing after %s",
+                    event.event_id,
+                    event.key,
+                    event.subject,
+                    RETRY_LIMIT,
+                )
+                channel.basic_nack(method.delivery_tag, requeue=False)
+                return
             channel.basic_nack(method.delivery_tag, requeue=True)
             # Every prefetched delivery would fail the same way, so drop the connection
             # (returning them to the queue) and let run() back off before consuming again.
             raise EventNotHandled(
                 f"event {event.event_id} returned to the queue"
             ) from exc
+        self.failing = None
         channel.basic_ack(method.delivery_tag)
+
+    def _past_retry_limit(self, event):
+        """Records this failure; True once the event has been failing for RETRY_LIMIT. Only
+        one event is tracked, because a failure drops the connection and it comes back first.
+        """
+        now = self.clock()
+        if self.failing is None or self.failing[0] != event.event_id:
+            self.failing = (event.event_id, now)
+        if now - self.failing[1] < RETRY_LIMIT:
+            return False
+        self.failing = None
+        return True
 
     def _handle_traced(self, event, properties):
         """Handles the event inside the emitter's trace, so its run links back to it."""

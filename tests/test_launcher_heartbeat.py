@@ -79,7 +79,11 @@ def test_queue_depths_reads_job_runs_and_leaves_a_missing_queue_unknown(monkeypa
         heartbeat.pika, "BlockingConnection", MagicMock(return_value=connection)
     )
 
-    assert heartbeat.read_queue_depths() == {"job_runs": 4, "job_runs.dlq": None}
+    assert heartbeat.read_queue_depths() == {
+        "job_runs": 4,
+        "job_runs.dlq": None,
+        "job_events.launcher": 4,
+    }
     connection.close.assert_called_once()
 
 
@@ -90,4 +94,8 @@ def test_queue_depths_are_unknown_when_the_broker_is_away(monkeypatch):
         MagicMock(side_effect=pika.exceptions.AMQPConnectionError("down")),
     )
 
-    assert heartbeat.read_queue_depths() == {"job_runs": None, "job_runs.dlq": None}
+    assert heartbeat.read_queue_depths() == {
+        "job_runs": None,
+        "job_runs.dlq": None,
+        "job_events.launcher": None,
+    }

@@ -552,7 +552,8 @@
   which publishes after the caller's commit and logs a broker failure instead of raising.
   `event_consumer.py` runs on the `launcher-events` thread with its own connection. It declares
   and consumes `job_events.launcher` (bound `#`; the exchange is the broker's) and acks only after
-  `Scheduler.handle_event` records the run, so a database failure requeues the event. Debounce is
+  `Scheduler.handle_event` records the run, so a database failure requeues the event; one still
+  failing after `RETRY_LIMIT` (15 minutes) is rejected, so it can't block the queue. Debounce is
   leading-edge in fixed windows taken from the event's `at`: dedupe key `job@key@<window start>`,
   so a redelivery is a no-op. `EVENT_KEY_PATTERN` lives in `queue_contracts` because
   `catalog.py --check` runs in fantasy-infra's CI with no database. Events pass no params.

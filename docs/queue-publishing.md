@@ -162,7 +162,7 @@ flowchart LR
 
 **Publishing from the worker.** Publish the same six fields as JSON to the `job_events` exchange, with `key` as the routing key, `persistent: true` and `contentType: application/json`, on a confirm channel. Check the exchange exists without changing it (`checkExchange`), and send the W3C `traceparent` as a message header, not in the body. Take `emitted_by_run_id` from the run the bot adopted: `RUN_ID` is only in the environment until it is adopted.
 
-The launcher owns `job_events.launcher`, a durable queue it declares at startup with no arguments, bound with `#`. An event published before that queue first exists is lost, because nothing is bound to the exchange. Another subscriber binds its own queue.
+The launcher owns `job_events.launcher`, a durable queue it declares at startup with no arguments, bound with `#`. Its depth is in the heartbeat and `GET /v1/launcher/health`. An event published before that queue first exists is lost, because nothing is bound to the exchange. Another subscriber binds its own queue.
 
 ### How does debounce work?
 
@@ -176,7 +176,8 @@ The first event in a window starts the run right away, and later events in that 
 | Another run of the job is running under `overlap: forbid` | `skipped (overlap)`, as for any other trigger |
 | Run still waiting after `debounce` | `skipped (expired)`, because a later event has its own window |
 | Malformed message | Logged and dropped |
-| `run_log` unavailable | Returned to the queue and retried |
+| Launcher was down, events waiting in the queue | Processed on restart. Each keeps its own `at`, so an outage can start one run per old window |
+| Event can't be recorded, for example `run_log` unavailable | Returned to the queue and retried for 15 minutes, holding up the events behind it, then dropped with an ERROR log |
 
 :::warning[A run can miss a later event]
 An event that lands after its window's run has read its data starts nothing. It waits for the next event in a later window or for the job's schedule, so a subscribed job should keep one. An emitter that sends a batch should commit the whole batch before the first `emit_event`.

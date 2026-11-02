@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pika
@@ -66,6 +67,63 @@ def test_failed_handling_requeues_and_drops_the_connection():
         deliver(EventConsumer(handle), channel, json.dumps(BODY))
     channel.basic_nack.assert_called_once_with(5, requeue=True)
     channel.basic_ack.assert_not_called()
+
+
+START = datetime(2026, 10, 28, 15, 0, tzinfo=timezone.utc)
+
+
+class FailingConsumer:
+    """An EventConsumer whose handler fails while `failing`, on a clock the test moves."""
+
+    def __init__(self):
+        self.now = START
+        self.failing = True
+        self.channel = MagicMock()
+        self.consumer = EventConsumer(self._handle, clock=lambda: self.now)
+
+    def _handle(self, event):
+        if self.failing:
+            raise ValueError("A string literal cannot contain NUL")
+
+    def deliver_at(self, minutes, event_id="e1"):
+        self.now = START + timedelta(minutes=minutes)
+        self.channel.reset_mock()
+        deliver(self.consumer, self.channel, json.dumps({**BODY, "event_id": event_id}))
+
+
+def test_event_still_failing_past_the_limit_is_dropped_so_the_queue_moves(caplog):
+    failing = FailingConsumer()
+    for minutes in (0, 14.9):
+        with pytest.raises(EventNotHandled):
+            failing.deliver_at(minutes)
+        failing.channel.basic_nack.assert_called_once_with(5, requeue=True)
+    with caplog.at_level(logging.ERROR):
+        failing.deliver_at(15)
+    failing.channel.basic_nack.assert_called_once_with(5, requeue=False)
+    failing.channel.basic_ack.assert_not_called()
+    assert "e1" in caplog.text
+
+
+def test_failure_limit_is_timed_per_event():
+    failing = FailingConsumer()
+    with pytest.raises(EventNotHandled):
+        failing.deliver_at(0, event_id="e1")
+    with pytest.raises(EventNotHandled):
+        failing.deliver_at(20, event_id="e2")
+    failing.channel.basic_nack.assert_called_once_with(5, requeue=True)
+
+
+def test_success_clears_the_failure_timer():
+    failing = FailingConsumer()
+    with pytest.raises(EventNotHandled):
+        failing.deliver_at(0)
+    failing.failing = False
+    failing.deliver_at(1)
+    failing.channel.basic_ack.assert_called_once_with(5)
+    failing.failing = True
+    with pytest.raises(EventNotHandled):
+        failing.deliver_at(20)
+    failing.channel.basic_nack.assert_called_once_with(5, requeue=True)
 
 
 def test_handler_runs_inside_the_emitters_trace():

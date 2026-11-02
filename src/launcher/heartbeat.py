@@ -1,7 +1,7 @@
 """Launcher heartbeat: the `launcher_heartbeat` row behind `GET /v1/launcher/health`.
 
 Every POLL_SECONDS it upserts the singleton row (`id=1`) with the time and the depths of
-`job_runs` and its dead-letter queue. It runs on its own thread, so an unreachable broker
+`job_runs`, its dead-letter queue and `job_events.launcher`. It runs on its own thread, so an unreachable broker
 (up to BROKER_TIMEOUT_SECONDS per read) never delays the scheduler's tick, and a missing
 heartbeat still means the launcher process itself has stalled or died.
 """
@@ -13,14 +13,14 @@ import threading
 import pika
 
 from src.database import get_db_cursor
-from src.queue_contracts import AMQP_URL, JOB_RUNS
+from src.queue_contracts import AMQP_URL, JOB_EVENTS_LAUNCHER_QUEUE, JOB_RUNS
 
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 15
 BROKER_TIMEOUT_SECONDS = 5
 # `job_runs` dead-letters to `<queue>.dlq` (fantasy-infra's broker policy).
-QUEUES = (JOB_RUNS, f"{JOB_RUNS}.dlq")
+QUEUES = (JOB_RUNS, f"{JOB_RUNS}.dlq", JOB_EVENTS_LAUNCHER_QUEUE)
 
 
 def read_queue_depths() -> dict[str, int | None]:
