@@ -19,7 +19,7 @@ opentelemetry-sdk==1.45.1
 opentelemetry-instrumentation-fastapi==0.66b1
 opentelemetry-exporter-otlp-proto-http==1.45.1
 pytest==8.2.2
-black==24.4.2
+black==26.10.1
 mypy==2.4.0
 PyYAML==6.0.3
 croniter==6.2.4
