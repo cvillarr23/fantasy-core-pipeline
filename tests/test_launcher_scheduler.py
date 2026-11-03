@@ -777,7 +777,7 @@ def test_burst_inside_one_debounce_window_starts_one_run(scheduler, state, comma
     assert (command["job"], command["trigger"]) == (RUMOR_JOB, "event")
     assert (command["dedupe_key"], command["event_id"]) == (WINDOW_KEY, "e0")
     assert command["scheduled_for"] == WINDOW
-    assert command["expires_at"] == now + timedelta(minutes=30)
+    assert command["expires_at"] == WINDOW + timedelta(minutes=30)
 
 
 def test_unknown_event_key_starts_nothing(scheduler, state, commands):
@@ -842,6 +842,39 @@ def test_pause_is_judged_at_arrival_not_at_the_event_time(scheduler, state, comm
     state.overrides[RUMOR_JOB] = WINDOW + timedelta(minutes=5)
     scheduler.handle_event(job_event(WINDOW), now)
     assert len(commands) == 1
+
+
+def test_event_older_than_its_debounce_is_skipped_as_expired(scheduler, state, commands):
+    now = WINDOW + timedelta(hours=8)
+    scheduler.handle_event(job_event(WINDOW), now)
+    assert commands == []
+    (row,) = state.rows(RUMOR_JOB)
+    assert (row.status, end_reason(state, row)) == ("skipped", "expired")
+    assert state.meta[row.id]["dedupe_key"] == WINDOW_KEY
+
+
+def test_expired_event_redelivered_adds_no_second_row(scheduler, state, commands):
+    event = job_event(WINDOW)
+    scheduler.handle_event(event, WINDOW + timedelta(hours=8))
+    scheduler.handle_event(event, WINDOW + timedelta(hours=9))
+    assert commands == []
+    assert len(state.rows(RUMOR_JOB)) == 1
+
+
+def test_event_just_inside_its_debounce_starts_a_run_expiring_on_the_events_clock(
+    scheduler, commands
+):
+    now = WINDOW + timedelta(minutes=29)
+    scheduler.handle_event(job_event(WINDOW), now)
+    (command,) = commands
+    assert command["expires_at"] == WINDOW + timedelta(minutes=30)
+
+
+def test_event_exactly_one_debounce_old_is_expired(scheduler, state, commands):
+    scheduler.handle_event(job_event(WINDOW), WINDOW + timedelta(minutes=30))
+    assert commands == []
+    (row,) = state.rows(RUMOR_JOB)
+    assert end_reason(state, row) == "expired"
 
 
 def test_publish_failure_reaches_the_caller_so_the_event_is_redelivered(state):
