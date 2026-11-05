@@ -168,7 +168,7 @@ The launcher owns `job_events.launcher`, a durable queue it declares at startup 
 
 ### How does debounce work?
 
-The first event in a window starts the run right away, and later events in that window start nothing. Windows are fixed, aligned to the Unix epoch, and picked from the event's own `at`, so a redelivered event is a no-op.
+The first event in a window starts the run right away, and later events in that window start nothing. Windows are fixed, aligned to the Unix epoch, and picked from the event's own `at`, so a redelivered event is a no-op. An event is judged by its own `at`: once it is older than the `debounce` when the launcher handles it, it is skipped as expired, and a run it did start expires `debounce` after `at`.
 
 | Case | Outcome |
 |---|---|
@@ -178,7 +178,7 @@ The first event in a window starts the run right away, and later events in that 
 | Another run of the job is running under `overlap: forbid` | `skipped (overlap)`, as for any other trigger |
 | Run still waiting after `debounce` | `skipped (expired)`, because a later event has its own window |
 | Malformed message | Logged and dropped |
-| Launcher was down, events waiting in the queue | Processed on restart. Each keeps its own `at`, so an outage can start one run per old window |
+| Launcher was down, events waiting in the queue | Processed on restart. An event older than its `debounce` is recorded as `skipped (expired)` and starts nothing, one row per old window. Newer ones start a run as usual |
 | Event can't be recorded, for example `run_log` unavailable | Returned to the queue and retried for 15 minutes, holding up the events behind it, then dropped with an ERROR log |
 
 :::warning[A run can miss a later event]

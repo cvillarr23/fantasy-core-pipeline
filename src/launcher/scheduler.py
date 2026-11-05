@@ -34,7 +34,9 @@ nothing:
   event of a window starts the run and carries its ``event_id``, later ones find the dedupe
   key ``job@key@<window start>`` used. Windows come from the event's own ``at``, so a
   redelivered event is a no-op. An event landing after that run read its data waits for
-  the next event or the job's schedule. A paused job records one ``skipped`` run per window.
+  the next event or the job's schedule. A paused job records one ``skipped`` run per window,
+  and so does an event older than its debounce (``expired``), such as one replayed after a
+  launcher outage.
 - **Manual runs.** ``start_chain`` runs one step with ``downstream`` semantics: a root
   scoped to that step and its descendants. A manual run without ``downstream`` has no
   ``chain_root_id``, so no edges are ever evaluated for it.
@@ -147,6 +149,13 @@ def debounce_window(at: datetime, debounce: timedelta) -> datetime:
     """The start of the epoch-aligned window of length ``debounce`` containing ``at``."""
     seconds = debounce.total_seconds()
     return datetime.fromtimestamp(at.timestamp() // seconds * seconds, timezone.utc)
+
+
+def _event_expired(event: JobEvent, debounce: timedelta, now: datetime) -> bool:
+    """Whether the event is older than its debounce. A later event has its own window, so a
+    run for this one is not worth starting: after a launcher outage the queue replays events
+    that the job's schedule has since covered."""
+    return now >= event.at + debounce
 
 
 def latest_slot(schedule: Schedule, now: datetime) -> datetime:
@@ -311,6 +320,9 @@ class Scheduler:
         key = slot_key(f"{job}@{event.key}", window)
         if self.state.run_exists(key):
             return
+        if _event_expired(event, debounce, now):
+            self._skip(job, "event", key, event.at, "expired", event.event_id)
+            return
         if self.state.paused(job, now):
             self._skip(job, "event", key, event.at, "paused", event.event_id)
             return
@@ -320,8 +332,7 @@ class Scheduler:
             dedupe_key=key,
             scheduled_for=event.at,
             event_id=event.event_id,
-            # Past this a later event has its own window, so this one is not worth starting.
-            expires_at=now + debounce,
+            expires_at=event.at + debounce,
         )
 
     def chain_for_step(self, job: str) -> str:
