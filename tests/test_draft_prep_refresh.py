@@ -91,11 +91,62 @@ def test_main_rejects_a_week_outside_the_regular_season(monkeypatch):
     run.assert_not_called()
 
 
+def test_week_offset_refreshes_only_that_week(monkeypatch):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    with patch.object(job, "resolve_upcoming_week", return_value=7), \
+         patch.object(job.subprocess, "run") as run:
+        assert job.main(["--week-offset", "2"]) == 0
+
+    assert [c.args[0] for c in run.call_args_list] == [
+        [job.sys.executable, "-u", "-m", stage, "--season", "2026", "--week", "9"]
+        for stage in job.STAGES
+    ]
+
+
+def test_week_offset_fails_when_its_week_fails(monkeypatch):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    with patch.object(job, "resolve_upcoming_week", return_value=7), \
+         patch.object(job.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "stage")) as run:
+        assert job.main(["--week-offset", "0"]) == 1
+    assert run.call_count == 1
+
+
+@pytest.mark.parametrize("upcoming", [16, None])
+def test_week_offset_past_the_regular_season_or_offseason_is_a_noop(monkeypatch, upcoming):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    with patch.object(job, "resolve_upcoming_week", return_value=upcoming), \
+         patch.object(job.subprocess, "run") as run:
+        assert job.main(["--week-offset", "3"]) == 0
+    run.assert_not_called()
+
+
+def test_week_offset_must_not_be_negative():
+    with pytest.raises(SystemExit):
+        job.main(["--week-offset", "-1"])
+
+
+def test_entrypoint_passes_its_week_offset_through(monkeypatch):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    monkeypatch.delenv("RUN_ID", raising=False)
+    monkeypatch.setattr(sys, "argv", ["draft_prep_refresh", "--week-offset", "1"])
+    monkeypatch.delitem(sys.modules, "src.jobs.draft_prep_refresh")
+    with patch("src.nfl_schedule.resolve_upcoming_week", return_value=18), \
+         patch("src.telemetry.configure_tracing"), \
+         patch.object(run_log_service, "start_run", return_value="run"), \
+         patch.object(run_log_service, "finish_run"), \
+         patch.object(job.subprocess, "run") as run, \
+         pytest.raises(SystemExit) as exited:
+        runpy.run_module("src.jobs.draft_prep_refresh", run_name="__main__")
+    assert exited.value.code == 0
+    run.assert_not_called()
+
+
 def test_entrypoint_adopts_the_launcher_run_so_stages_become_children(monkeypatch):
     """A stage that inherited RUN_ID would adopt the refresh's row and end it after one stage,
     and every later stage would then fail to adopt it."""
     monkeypatch.setenv("CURRENT_YEAR", "2026")
     monkeypatch.setenv("RUN_ID", "launcher-run")
+    monkeypatch.setattr(sys, "argv", ["draft_prep_refresh"])
     monkeypatch.delenv("RUN_PARENT_ID", raising=False)
     # runpy re-executes the module as __main__; the imported copy would make it warn.
     monkeypatch.delitem(sys.modules, "src.jobs.draft_prep_refresh")

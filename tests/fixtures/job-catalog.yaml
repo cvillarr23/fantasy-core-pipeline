@@ -43,6 +43,8 @@ jobs:
   projections-refresh:
     profile: core
     command: [python, -m, src.jobs.draft_prep_refresh]
+    params: {week_offset: 'int?'}
+    fan_out: {param: week_offset, values: [0, 1, 2, 3]}
     schedules:
       - {cron: '0 18 * * *', tz: America/Chicago, catch_up: 1h}
   lineup-optimizer:

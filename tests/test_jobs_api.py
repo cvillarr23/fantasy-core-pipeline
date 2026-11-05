@@ -71,7 +71,7 @@ class Cursor:
         if "RETURNING chain_root_id" in self.last_query:
             if self.update_status in ("queued", "running"):
                 self.update_status = "cancelled"
-                return (self.chain_root_id,)
+                return (self.chain_root_id, "pod")
             return None
         if "SELECT status FROM run_log" in self.last_query:
             return (self.select_status,) if self.select_status is not None else None

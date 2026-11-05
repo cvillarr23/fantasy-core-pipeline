@@ -58,7 +58,7 @@ flowchart TD
 | `fantasy-weekly-ingestor` | Tuesday 16:00 | `sync_league`, then `metrics_extractor` |
 | `fantasy-sync-actual-scores` | Tuesday 17:05 | `sync_actual_scores` |
 | `fantasy-sync-actual-scores-reconcile` | Friday 10:00 | `sync_actual_scores` again, to pick up stat corrections |
-| `fantasy-draft-prep-refresher` | Daily 18:00 | For the upcoming week and up to three more: `sync_projections`, `sync_kicker_dst`, `vorp_matrix` |
+| `fantasy-draft-prep-refresher` | Daily 18:00 | For the upcoming week and up to three more: `sync_projections`, `sync_kicker_dst`, `vorp_matrix`. Under the launcher, `projections-refresh` fans out one child per week (`--week-offset 0..3`), and the children run in parallel within the pod cap |
 | `fantasy-lineup-optimizer` | Tuesday 19:15 | `lineup_solver` |
 | `fantasy-weekly-waiver-trigger` | Tuesday 20:30 | `waiver_evaluator` |
 | `fantasy-rumor-syncer` | Every 30 min | `sync_rumors` |

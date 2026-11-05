@@ -11,9 +11,12 @@ waiting for its job's previous run doesn't hold up other jobs:
 
 - no longer `queued` (cancelled, or already handled) -> dropped
 - a chain step whose root is no longer `running` (cancelled, or past max_duration) ->
-  `skipped (chain_ended)`
+  `skipped (chain_ended)`, and a fan-out child whose parent isn't -> `skipped (fan_out_ended)`
 - past `expires_at` -> `skipped (expired)`
 - another run of the job is running -> `skipped (overlap)` under `forbid`, waits under `queue`
+- a fan-out job's run without its fan-out param -> `running` with executor `fan_out` and
+  nothing launched: the scheduler publishes its children, which then pass through here like
+  any run, except that their parent and siblings don't count as an overlap
 - pod cap full, or the inline runner busy -> waits. The pod cap counts the launcher's
   `running` pod rows plus the active k8s Jobs matching the catalog's `counted_k8s_jobs`
   (the KEDA browser worker), so both share one pod budget
@@ -36,10 +39,15 @@ from opentelemetry import propagate, trace
 from pydantic import ValidationError
 
 from src.launcher import k8s
-from src.launcher.catalog import UnknownJobError, params_to_args, validate_run_params
+from src.launcher.catalog import (
+    UnknownJobError,
+    fans_out,
+    params_to_args,
+    validate_run_params,
+)
 from src.launcher.inline import InlineRun
 from src.launcher.publish import RunCommand
-from src.launcher.runs import RunStore
+from src.launcher.runs import FAN_OUT, RunStore
 from src.queue_contracts import AMQP_URL, JOB_RUNS
 
 logger = logging.getLogger(__name__)
@@ -163,6 +171,15 @@ class Consumer:
                     f"chain run {command.chain_root_id} has ended",
                 )
                 return None
+            fan_out_parent = self._fan_out_parent(admission, command)
+            if fan_out_parent and fan_out_parent[1] != "running":
+                self._skip(
+                    admission,
+                    command,
+                    "fan_out_ended",
+                    f"fan-out run {fan_out_parent[0]} has ended",
+                )
+                return None
             if self._expired(command):
                 self._skip(
                     admission,
@@ -172,13 +189,20 @@ class Consumer:
                     level=logging.WARNING,
                 )
                 return None
-            overlap = self._overlap_outcome(admission, command, resolved)
+            overlap = self._overlap_outcome(
+                admission, command, resolved, fan_out_parent
+            )
             if overlap == "skip":
                 self._skip(
                     admission, command, "overlap", "another run is still running"
                 )
                 return None
-            if overlap == "wait" or self._capacity_full(admission, resolved):
+            if overlap == "wait":
+                return "wait"
+            if fans_out(resolved.job, params):
+                self._claim_fan_out(admission, command)
+                return None
+            if self._capacity_full(admission, resolved):
                 return "wait"
             k8s_job = None
             if resolved.executor != "inline":
@@ -230,6 +254,21 @@ class Consumer:
             and not admission.chain_running(command.chain_root_id)
         )
 
+    @staticmethod
+    def _fan_out_parent(admission, command):
+        """`(parent_run_id, status)` when the command is a fan-out child, else None."""
+        if not command.parent_run_id:
+            return None
+        status = admission.fan_out_parent_status(command.parent_run_id)
+        return (command.parent_run_id, status) if status else None
+
+    @staticmethod
+    def _claim_fan_out(admission, command):
+        """Claims a fan-out parent, which takes no pod or inline slot: the scheduler
+        publishes its children and ends it once they have all finished."""
+        if admission.claim(command.run_id, FAN_OUT):
+            logger.info("Fanning out run %s of %s", command.run_id, command.job)
+
     def _expired(self, command):
         """Whether a first attempt sat queued past its `expires_at`.
 
@@ -240,10 +279,12 @@ class Consumer:
         return command.attempt == 1 and self.clock() >= command.expires_at
 
     @staticmethod
-    def _overlap_outcome(admission, command, resolved):
+    def _overlap_outcome(admission, command, resolved, fan_out_parent=None):
         """While another run of the job is running: "skip" under `forbid`, "wait" under
-        `queue`. None when no other run is running."""
-        if not admission.job_running(command.job, command.run_id):
+        `queue`. None when no other run is running. A fan-out child's own parent and
+        siblings are the same run, so they don't count."""
+        parent_id = fan_out_parent[0] if fan_out_parent else None
+        if not admission.job_running(command.job, command.run_id, parent_id):
             return None
         return "skip" if resolved.overlap == "forbid" else "wait"
 

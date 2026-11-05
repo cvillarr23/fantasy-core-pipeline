@@ -572,5 +572,15 @@
   one look, and an event run reads the previous evening's VORP, so with `RUN_TRIGGER=event` a
   `no_beneficial_move` signal stays behind the watermark (`_should_hold`) for the 21:45 run.
   Moves it finds still publish. The hold ends after `SIGNAL_RETRY_WINDOW_SECONDS`.
+- Fan-out (`jobs.<name>.fan_out: {param, values}`, on the job, not a chain step): each run
+  that leaves `param` unset is claimed with executor `fan_out` (`runs.FAN_OUT`) and launches
+  nothing. `Scheduler._advance_fan_out` publishes one child per value (the parent's params,
+  trigger and chain root, `parent_run_id` = the parent) and ends the parent once none is
+  pending, with `failure` (`fan_out_failed`) if any child didn't succeed. Children carry the
+  retries; the parent never retries. They share the parent's `job_name` and chain root, so
+  `chain_steps` reads only rows parented by the root, and overlap leaves out a child's own
+  parent and siblings. Cancelling the parent cancels its children. `projections-refresh` fans
+  out `week_offset` 0..3 (`draft_prep_refresh --week-offset`); without the flag it still
+  runs the whole horizon in order.
 - `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
   it gets no `chain_root_id`, so it never starts downstream steps.

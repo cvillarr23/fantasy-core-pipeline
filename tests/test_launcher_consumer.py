@@ -21,13 +21,14 @@ class FakeStore:
         self.bodies = []
         self.fail = False
 
-    def add(self, run_id, job, status="queued", executor=None, attempt=1):
+    def add(self, run_id, job, status="queued", executor=None, attempt=1, parent=None):
         self.rows[run_id] = {
             "job": job,
             "status": status,
             "executor": executor,
             "attempt": attempt,
             "end_reason": None,
+            "parent": parent,
         }
 
     @contextmanager
@@ -50,11 +51,18 @@ class FakeStore:
         row = self.rows.get(run_id)
         return row["attempt"] if row else None
 
-    def job_running(self, job, run_id):
+    def job_running(self, job, run_id, fan_out_parent_id=None):
         return any(
-            r["job"] == job and r["status"] == "running" and i != run_id
+            r["job"] == job
+            and r["status"] == "running"
+            and i not in (run_id, fan_out_parent_id)
+            and (fan_out_parent_id is None or r["parent"] != fan_out_parent_id)
             for i, r in self.rows.items()
         )
+
+    def fan_out_parent_status(self, run_id):
+        row = self.rows.get(run_id)
+        return row["status"] if row and row["executor"] == "fan_out" else None
 
     def chain_running(self, chain_root_id):
         return self.status(chain_root_id) == "running"
@@ -544,3 +552,65 @@ def test_default_count_uses_the_catalog_selectors(store, clock, runner, launch_p
         queue_run(store, consumer, "r1")
         assert consumer.drain() == []
     count.assert_called_once_with(["scaledjob.keda.sh/name=worker"])
+
+
+def test_fan_out_run_without_its_param_is_claimed_and_launches_nothing(
+    store, consumer, launch_pod
+):
+    store.add("busy", "trade-scan", status="running", executor="pod")
+    store.add("busy-2", "trade-inbox", status="running", executor="pod")
+    queue_run(store, consumer, "parent", "projections-refresh")
+    assert consumer.drain() == []
+    assert consumer.pending == {}
+    assert store.rows["parent"]["status"] == "running"
+    assert store.rows["parent"]["executor"] == "fan_out"
+    launch_pod.assert_not_called()
+
+
+def test_fan_out_child_launches_beside_its_parent_and_siblings(
+    store, consumer, launch_pod
+):
+    store.add("parent", "projections-refresh", status="running", executor="fan_out")
+    store.add(
+        "sibling", "projections-refresh", "running", executor="pod", parent="parent"
+    )
+    store.add("child", "projections-refresh", parent="parent")
+    consumer.admit(
+        body(
+            "child",
+            "projections-refresh",
+            params={"week_offset": 1},
+            parent_run_id="parent",
+        )
+    )
+    assert consumer.drain() == ["child"]
+    assert store.rows["child"]["executor"] == "pod"
+    argv = launch_pod.call_args.args[0].spec.template.spec.containers[0].command
+    assert argv[-2:] == ["--week-offset", "1"]
+
+
+def test_fan_out_run_still_skips_on_overlap_with_another_run(
+    store, consumer, launch_pod
+):
+    store.add("earlier", "projections-refresh", status="running", executor="fan_out")
+    queue_run(store, consumer, "parent", "projections-refresh")
+    consumer.drain()
+    assert store.rows["parent"]["status"] == "skipped"
+    assert store.rows["parent"]["end_reason"] == "overlap"
+
+
+def test_child_of_an_ended_fan_out_is_skipped_at_admission(store, consumer, launch_pod):
+    store.add("parent", "projections-refresh", status="cancelled", executor="fan_out")
+    store.add("child", "projections-refresh", parent="parent")
+    consumer.admit(
+        body(
+            "child",
+            "projections-refresh",
+            params={"week_offset": 0},
+            parent_run_id="parent",
+        )
+    )
+    assert consumer.drain() == []
+    assert store.rows["child"]["status"] == "skipped"
+    assert store.rows["child"]["end_reason"] == "fan_out_ended"
+    launch_pod.assert_not_called()

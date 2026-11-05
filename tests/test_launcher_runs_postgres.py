@@ -267,3 +267,75 @@ def test_migration_never_nulls_a_column_a_newer_writer_set(postgres):
     assert (executor, k8s_job) == ("pod", "job-new")
     assert expires_at == datetime(2026, 10, 27, 12, tzinfo=timezone.utc)
     assert "expires_at" not in trigger
+
+
+def fan_out_parent(job="rumor-syncer"):
+    return claimed(job, executor=runs_module.FAN_OUT)
+
+
+def test_cancelling_a_fan_out_parent_cancels_its_active_children_only(postgres):
+    parent = fan_out_parent()
+    queued = queue(parent_run_id=parent)
+    running = claimed(parent_run_id=parent)
+    done = claimed(parent_run_id=parent)
+    run_log.finish_run(done, "success")
+    other = claimed("trade-scan")
+    with runs_module.get_db_cursor() as c:
+        assert Runs(c).cancel(parent) is True
+    assert [row(postgres, i)[0] for i in (parent, queued, running, done, other)] == [
+        "cancelled",
+        "cancelled",
+        "cancelled",
+        "success",
+        "running",
+    ]
+
+
+def test_fan_out_parent_is_not_watched_and_its_ended_childrens_retries_stop(postgres):
+    store = RunStore()
+    parent = fan_out_parent()
+    child = claimed(executor="inline", parent_run_id=parent)
+    limits = {"rumor-syncer": 2}
+    assert [(r.run_id, r.group_running) for r in store.watched_runs([], limits)] == [
+        (child, True)
+    ]
+    store.finish_running(child, "failure", "job_failed")
+    with runs_module.get_db_cursor() as c:
+        Runs(c).finish_fan_out(parent, "failure", "fan_out_failed")
+    assert store.watched_runs([], limits) == []
+    assert not store.requeue_attempt(child, 2)
+    assert row(postgres, child)[0] == "failure"
+
+
+def test_fan_out_child_retries_while_its_parent_runs(postgres):
+    store = RunStore()
+    parent = fan_out_parent()
+    child = claimed(executor="inline", parent_run_id=parent)
+    store.finish_running(child, "failure", "job_failed")
+    assert store.requeue_attempt(child, 2)
+    assert row(postgres, child) == ("queued", None, 2)
+
+
+def test_overlap_ignores_a_childs_own_fan_out_but_not_other_runs(postgres):
+    parent = fan_out_parent()
+    sibling = claimed(parent_run_id=parent)
+    child = queue(parent_run_id=parent)
+    with RunStore().admission() as admission:
+        assert admission.fan_out_parent_status(parent) == "running"
+        assert admission.fan_out_parent_status(sibling) is None
+        assert not admission.job_running("rumor-syncer", child, parent)
+        assert admission.job_running("rumor-syncer", child)
+        assert admission.launcher_counts() == (1, 1)
+    claimed()
+    with RunStore().admission() as admission:
+        assert admission.job_running("rumor-syncer", child, parent)
+
+
+def test_finish_fan_out_ends_only_a_running_fan_out_parent(postgres):
+    parent = fan_out_parent()
+    pod = claimed("trade-scan")
+    with runs_module.get_db_cursor() as c:
+        Runs(c).finish_fan_out(pod, "success", None)
+        Runs(c).finish_fan_out(parent, "success", None)
+    assert row(postgres, parent)[0] == "success"
+    assert row(postgres, pod)[0] == "running"
