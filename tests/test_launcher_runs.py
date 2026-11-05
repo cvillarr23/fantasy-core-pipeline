@@ -87,21 +87,38 @@ def test_claim_sets_launch_columns_and_reports_a_lost_race():
 
 
 def test_cancel_returns_true_the_current_status_or_none():
-    assert Runs(Cursor(("root-x", ))).cancel("run-1") is True
+    assert Runs(Cursor(("root-x", "pod"))).cancel("run-1") is True
     assert Runs(Cursor(None, ("success",))).cancel("run-1") == "success"
     assert Runs(Cursor(None, None)).cancel("run-1") is None
 
 
 def test_cancelling_a_chain_root_also_cancels_its_steps():
-    cursor = Cursor(("root-1",))
+    cursor = Cursor(("root-1", None))
     assert Runs(cursor).cancel("root-1") is True
     assert "chain_root_id=%s AND id<>%s" in cursor.queries[1][0]
 
 
 def test_cancelling_a_step_leaves_the_rest_of_the_chain():
-    cursor = Cursor(("root-1",))
+    cursor = Cursor(("root-1", "pod"))
     assert Runs(cursor).cancel("step-1") is True
     assert len(cursor.queries) == 1
+
+
+def test_cancelling_a_fan_out_parent_also_cancels_its_children():
+    cursor = Cursor(("root-1", "fan_out"))
+    assert Runs(cursor).cancel("parent-1") is True
+    query, params = cursor.queries[1]
+    assert "parent_run_id=%s" in query and params == ("parent-1",)
+
+
+def test_job_running_leaves_out_a_fan_out_childs_parent_and_siblings():
+    cursor = Cursor(None, None)
+    Runs(cursor).job_running("refresh", "child-1")
+    Runs(cursor).job_running("refresh", "child-1", "parent-1")
+    assert "parent_run_id" not in cursor.queries[0][0]
+    query, params = cursor.queries[1]
+    assert "id<>%s AND parent_run_id IS DISTINCT FROM %s" in query
+    assert params == ("refresh", "child-1", "parent-1", "parent-1")
 
 
 def test_finish_guard_depends_on_force_and_attempt():

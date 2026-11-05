@@ -132,8 +132,11 @@ stateDiagram-v2
 | `chain` | `job@chain_root` |
 | `event` | `job@key@debounce_window` |
 | `manual`, `cli`, `mcp` | A fresh UUID (the run id) |
+| A fan-out child (any trigger) | `job@parent_run#param=value` |
 
 A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` at the command's current `attempt` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. The initial attempt past `expires_at` ends as `skipped (expired)`; retries of an attempt that already started keep their retry budget. A run refused by `overlap: forbid` ends as `skipped (overlap)`.
+
+A job with catalog `fan_out: {param, values}` fans out each run that leaves `param` unset. The launcher claims that run with executor `fan_out` and starts nothing for it. The scheduler then publishes one child command per value, with the parent's params plus `param=value`, the parent's trigger and chain root, and `parent_run_id` = the parent. Children are ordinary commands: they wait for the pod cap like any run, and neither their parent nor their siblings count as an overlap. A child whose parent has ended (cancelled) is `skipped (fan_out_ended)`. The parent ends `success` once every child succeeds, or `failure` (`fan_out_failed`) once none is pending and any did not.
 
 The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedupe_key>`. Its outermost `run_scope` adopts the row and keeps the catalog job name.
 

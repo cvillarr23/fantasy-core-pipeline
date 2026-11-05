@@ -78,6 +78,7 @@ class FakeState:
             "skipped",
             scheduled_for=scheduled_for,
             chain_root_id=chain_root_id,
+            parent_run_id=chain_root_id,
         )
         return self.insert(
             row,
@@ -122,13 +123,35 @@ class FakeState:
         return {
             r.job_name: r
             for r in self.runs.values()
-            if r.chain_root_id == root_id and r.id != root_id
+            if r.chain_root_id == root_id
+            and r.id != root_id
+            and r.parent_run_id == root_id
         }
 
     def finish_chain_root(self, root_id, status, end_reason):
         if self.runs[root_id].status == "running":
             self.runs[root_id].status = status
             self.meta[root_id]["end_reason"] = end_reason
+
+    def active_fan_outs(self):
+        return [
+            r
+            for r in self.runs.values()
+            if r.status == "running" and r.executor == "fan_out"
+        ]
+
+    def fan_out_children(self, parent_id):
+        return {
+            self.meta[r.id]["dedupe_key"]: r
+            for r in self.runs.values()
+            if r.parent_run_id == parent_id
+        }
+
+    def finish_fan_out(self, parent_id, status, end_reason):
+        parent = self.runs[parent_id]
+        if parent.status == "running" and parent.executor == "fan_out":
+            parent.status = status
+            self.meta[parent_id]["end_reason"] = end_reason
 
 
 class AlwaysInSeason:
@@ -155,7 +178,13 @@ def fake_publish_run(state, commands):
             return {"run_id": existing.id, "status": "duplicate"}
         command = {"run_id": str(uuid.uuid4()), "job": job, **kwargs}
         row = RunRow(
-            command["run_id"], job, "queued", chain_root_id=kwargs["chain_root_id"]
+            command["run_id"],
+            job,
+            "queued",
+            chain_root_id=kwargs["chain_root_id"],
+            parent_run_id=kwargs["parent_run_id"],
+            trigger_type=kwargs["trigger"],
+            trigger={"params": kwargs["params"] or {}},
         )
         state.insert(
             row, dedupe_key=kwargs["dedupe_key"], trigger_type=kwargs["trigger"]
@@ -886,3 +915,145 @@ def test_publish_failure_reaches_the_caller_so_the_event_is_redelivered(state):
     )
     with pytest.raises(RuntimeError):
         scheduler.handle_event(job_event(WINDOW), WINDOW)
+
+
+# Fan-out
+
+
+def claim_fan_out(row: RunRow, at: datetime) -> RunRow:
+    """What the consumer does with a fan-out run that leaves its param unset."""
+    row.status, row.executor, row.started_at = "running", "fan_out", at
+    return row
+
+
+def fan_out_parent(state, scheduler, at, trigger="schedule", params=None):
+    """A claimed projections-refresh parent, as a schedule slot would leave it."""
+    scheduler._publish(
+        "projections-refresh",
+        trigger=trigger,
+        # The job's own slot key, so the tick doesn't also fire its 18:00 schedule.
+        dedupe_key=slot_key("projections-refresh", at),
+        scheduled_for=at,
+        params=params,
+        expires_at=at + timedelta(hours=1),
+    )
+    (parent,) = [r for r in state.rows("projections-refresh") if r.parent_run_id is None]
+    return claim_fan_out(parent, at)
+
+
+def children(state, parent):
+    return sorted(
+        state.fan_out_children(parent.id).values(),
+        key=lambda r: r.trigger["params"]["week_offset"],
+    )
+
+
+def test_fan_out_publishes_one_child_per_value(scheduler, state, commands):
+    at = ct(2026, 11, 4, 18, 0)
+    parent = fan_out_parent(state, scheduler, at)
+    commands.clear()
+    scheduler.tick(at + timedelta(seconds=15))
+    scheduler.tick(at + timedelta(seconds=30))
+    published = jobs(commands, "projections-refresh")
+    assert [c["params"] for c in published] == [{"week_offset": v} for v in range(4)]
+    for value, command in enumerate(published):
+        assert command["parent_run_id"] == parent.id
+        assert command["chain_root_id"] is None
+        assert command["trigger"] == "schedule"
+        assert command["dedupe_key"] == (
+            f"projections-refresh@{parent.id}#week_offset={value}"
+        )
+        # The job's default 1h deadline, counted from when the parent started.
+        assert command["expires_at"] == at + timedelta(hours=1)
+    assert parent.status == "running"
+
+
+def test_fan_out_ends_success_once_every_child_succeeds(scheduler, state):
+    at = ct(2026, 11, 4, 18, 0)
+    parent = fan_out_parent(state, scheduler, at)
+    scheduler.tick(at)
+    *first, last = children(state, parent)
+    for child in first:
+        child.status = "success"
+    scheduler.tick(at + timedelta(minutes=5))
+    assert parent.status == "running"
+    last.status = "success"
+    scheduler.tick(at + timedelta(minutes=10))
+    assert parent.status == "success"
+    assert end_reason(state, parent) is None
+
+
+def test_fan_out_fails_when_any_child_does_not_succeed(scheduler, state):
+    at = ct(2026, 11, 4, 18, 0)
+    parent = fan_out_parent(state, scheduler, at)
+    scheduler.tick(at)
+    statuses = ["success", "failure", "skipped", "success"]
+    for child, status in zip(children(state, parent), statuses):
+        child.status = status
+    scheduler.tick(at + timedelta(minutes=5))
+    assert parent.status == "failure"
+    assert end_reason(state, parent) == "fan_out_failed"
+
+
+def test_fan_out_waits_for_a_child_with_attempts_left(scheduler, state):
+    scheduler.catalog.jobs["projections-refresh"].max_attempts = 2
+    at = ct(2026, 11, 4, 18, 0)
+    parent = fan_out_parent(state, scheduler, at)
+    scheduler.tick(at)
+    for child in children(state, parent):
+        child.status = "success"
+    children(state, parent)[2].status = "failure"
+    scheduler.tick(at + timedelta(minutes=5))
+    assert parent.status == "running"
+    children(state, parent)[2].attempt = 2
+    scheduler.tick(at + timedelta(minutes=10))
+    assert parent.status == "failure"
+
+
+def test_fan_out_children_keep_the_parents_other_params(scheduler, state, commands):
+    scheduler.catalog.jobs["projections-refresh"].params["dry_run"] = "bool?"
+    at = ct(2026, 11, 4, 18, 0)
+    fan_out_parent(state, scheduler, at, trigger="manual", params={"dry_run": True})
+    commands.clear()
+    scheduler.tick(at)
+    published = jobs(commands, "projections-refresh")
+    assert published[0]["params"] == {"dry_run": True, "week_offset": 0}
+    assert {c["trigger"] for c in published} == {"manual"}
+
+
+def test_fan_out_parent_of_a_job_that_no_longer_fans_out_is_cancelled(
+    scheduler, state, commands
+):
+    at = ct(2026, 11, 4, 18, 0)
+    parent = fan_out_parent(state, scheduler, at)
+    scheduler.catalog.jobs["projections-refresh"].fan_out = None
+    commands.clear()
+    scheduler.tick(at)
+    assert jobs(commands, "projections-refresh") == []
+    assert (parent.status, end_reason(state, parent)) == ("cancelled", "not_fan_out")
+
+
+def test_fan_out_chain_step_gates_its_downstream_on_the_parent(
+    scheduler, state, commands, tuesday
+):
+    chain_root = tuesday
+    for job in ("sync-league", "metrics-extractor", "sync-actual-scores"):
+        finish(state, chain_root, job, "success")
+        scheduler.tick(ct(2026, 10, 27, 16, 20))
+    parent = claim_fan_out(
+        step(state, chain_root, "projections-refresh"), ct(2026, 10, 27, 16, 21)
+    )
+    scheduler.tick(ct(2026, 10, 27, 16, 22))
+    kids = children(state, parent)
+    assert len(kids) == 4
+    assert {c["chain_root_id"] for c in jobs(commands, "projections-refresh")} == {
+        chain_root.id
+    }
+    # The children share the step's job_name and chain root, but the step is still the parent.
+    assert step(state, chain_root, "projections-refresh") is parent
+    assert not jobs(commands, "lineup-optimizer")
+    for child in kids:
+        child.status = "success"
+    scheduler.tick(ct(2026, 10, 27, 16, 40))
+    assert parent.status == "success"
+    assert jobs(commands, "lineup-optimizer", "chain")

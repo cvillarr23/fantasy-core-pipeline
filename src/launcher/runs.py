@@ -11,6 +11,10 @@ Launch details live in columns (`executor`, `k8s_job`, `expires_at`, `cancel_rec
 `trigger` keeps only what asked for the run. A row is a launcher run once it has an executor,
 which `claim` sets, so queued rows and the browser worker's rows have none.
 
+A fan-out parent is claimed with executor `fan_out` (`FAN_OUT`) and has no k8s Job or process:
+its children (`parent_run_id` = the parent) do the work, and the scheduler ends it. Like a chain
+root it groups runs, so a cancel reaches its children and an ended parent stops their retries.
+
 The run's own process finishes through `run_log_service.finish_run`, which keeps its contract
 with the browser worker's `db/run_log.js`; the statuses below are shared with it.
 """
@@ -38,6 +42,8 @@ REQUEUEABLE_STATUSES = ("running", *RETRYABLE_STATUSES)
 
 # A row the launcher claimed (see module docstring).
 LAUNCHER_RUN = "executor IS NOT NULL"
+# The executor of a fan-out parent, which launches nothing itself.
+FAN_OUT = "fan_out"
 
 
 @dataclass(frozen=True)
@@ -53,8 +59,9 @@ class WatchedRun:
     executor: str | None
     k8s_job: str | None
     # False for a chain step whose root is no longer `running` (cancelled, or past its
-    # max_duration): its failure is final, since a retry must not restart an ended chain.
-    chain_running: bool = True
+    # max_duration), or a fan-out child whose parent is not: its failure is final, since a
+    # retry must not restart an ended chain or fan-out.
+    group_running: bool = True
 
 
 class Runs:
@@ -80,18 +87,33 @@ class Runs:
         row = self.c.fetchone()
         return row[0] if row else None
 
-    def job_running(self, job, run_id):
+    def job_running(self, job, run_id, fan_out_parent_id=None):
         """Whether another run of this catalog job is running. Launcher runs keep their
-        catalog job_name, so CronJob-era rows (entrypoint names) never match."""
-        self.c.execute(
-            "SELECT 1 FROM run_log WHERE job_name=%s AND status='running' AND id<>%s LIMIT 1",
-            (job, run_id),
+        catalog job_name, so CronJob-era rows (entrypoint names) never match.
+
+        For a fan-out child, its own parent and siblings don't count: they are one run.
+        """
+        query = (
+            "SELECT 1 FROM run_log WHERE job_name=%s AND status='running' AND id<>%s"
         )
+        params = (job, run_id)
+        if fan_out_parent_id:
+            query += " AND id<>%s AND parent_run_id IS DISTINCT FROM %s"
+            params += (fan_out_parent_id, fan_out_parent_id)
+        self.c.execute(query + " LIMIT 1", params)
         return self.c.fetchone() is not None
 
     def chain_running(self, chain_root_id):
         """Whether a chain root is still `running`, so its steps may start."""
         return self.status(chain_root_id) == "running"
+
+    def fan_out_parent_status(self, run_id):
+        """`run_id`'s status when it is a fan-out parent, else None."""
+        self.c.execute(
+            "SELECT status FROM run_log WHERE id=%s AND executor=%s", (run_id, FAN_OUT)
+        )
+        row = self.c.fetchone()
+        return row[0] if row else None
 
     def running_pods(self):
         self.c.execute(
@@ -102,7 +124,8 @@ class Runs:
     def launcher_counts(self):
         """`(running launcher runs, queued runs)`, for the health endpoint."""
         self.c.execute(
-            f"""SELECT count(*) FILTER (WHERE status='running' AND {LAUNCHER_RUN}),
+            f"""SELECT count(*) FILTER (WHERE status='running' AND {LAUNCHER_RUN}
+              AND executor<>'{FAN_OUT}'),
             count(*) FILTER (WHERE status='queued') FROM run_log"""
         )
         return self.c.fetchone()
@@ -111,14 +134,18 @@ class Runs:
         """Return active/cancelled runs, runs with a live k8s Job, and retryable outcomes.
 
         Terminal outcomes are selected only while retryable (attempts left, and a chain step's
-        root still running), keeping old run_log history out of every watcher tick. Pod
-        failures can happen before a k8s Job is created.
+        root and a fan-out child's parent still running), keeping old run_log history out of
+        every watcher tick. Pod failures can happen before a k8s Job is created. Fan-out
+        parents have no workload to watch, so they are left out.
         """
         self.c.execute(
             f"""SELECT r.id,r.job_name,r.status,r.attempt,r.started_at,r.chain_root_id,
-            r.executor,r.k8s_job,COALESCE(r.chain_root_id IS NULL OR root.status='running',false)
+            r.executor,r.k8s_job,COALESCE(
+              (r.chain_root_id IS NULL OR root.status='running')
+              AND (fan.id IS NULL OR fan.status='running'),false)
             FROM run_log r LEFT JOIN run_log root ON root.id=r.chain_root_id
-            WHERE r.{LAUNCHER_RUN}
+            LEFT JOIN run_log fan ON fan.id=r.parent_run_id AND fan.executor='{FAN_OUT}'
+            WHERE r.{LAUNCHER_RUN} AND r.executor<>'{FAN_OUT}'
             AND (r.chain_root_id IS NULL OR r.chain_root_id<>r.id)
             AND (r.status='running'
               OR (r.status='cancelled' AND r.cancel_reconciled_at IS NULL)
@@ -126,7 +153,8 @@ class Runs:
               OR (r.executor IN ('inline','pod')
                   AND r.status IN {_in(RETRYABLE_STATUSES)}
                   AND r.attempt<COALESCE((%s::jsonb->>r.job_name)::int,r.attempt)
-                  AND (r.chain_root_id IS NULL OR root.status='running')))
+                  AND (r.chain_root_id IS NULL OR root.status='running')
+                  AND (fan.id IS NULL OR fan.status='running')))
             ORDER BY r.started_at""",
             (list(run_ids_with_k8s_job), json.dumps(max_attempts or {})),
         )
@@ -272,23 +300,43 @@ class Runs:
             (status, end_reason, root_id),
         )
 
+    def finish_fan_out(self, parent_id, status, end_reason):
+        """Ends a running fan-out parent once its children are done."""
+        self.c.execute(
+            """UPDATE run_log SET status=%s, end_reason=%s, finished_at=now()
+            WHERE id=%s AND status='running' AND executor=%s""",
+            (status, end_reason, parent_id, FAN_OUT),
+        )
+
     def cancel(self, run_id):
-        """Cancels a queued or running run, and a chain root's queued and running steps in
-        the same transaction (the scheduler only advances `running` roots).
+        """Cancels a queued or running run, and a chain root's or fan-out parent's queued and
+        running steps or children in the same transaction (the scheduler only advances
+        `running` roots and parents).
 
         Returns True when cancelled, else the row's current status, or None for no such run.
         """
         self.c.execute(
             f"""UPDATE run_log SET status='cancelled',finished_at=now(),end_reason='cancelled'
-            WHERE id=%s AND status IN {_in(CANCELLABLE_STATUSES)} RETURNING chain_root_id""",
+            WHERE id=%s AND status IN {_in(CANCELLABLE_STATUSES)}
+            RETURNING chain_root_id,executor""",
             (run_id,),
         )
         cancelled = self.c.fetchone()
         if cancelled is None:
             return self.status(run_id)
-        if cancelled[0] == run_id:
+        chain_root_id, executor = cancelled
+        if chain_root_id == run_id:
             self._cancel_chain_steps(run_id)
+        elif executor == FAN_OUT:
+            self._cancel_fan_out_children(run_id)
         return True
+
+    def _cancel_fan_out_children(self, parent_id):
+        self.c.execute(
+            f"""UPDATE run_log SET status='cancelled',finished_at=now(),end_reason='cancelled'
+            WHERE parent_run_id=%s AND status IN {_in(CANCELLABLE_STATUSES)}""",
+            (parent_id,),
+        )
 
     def _cancel_chain_steps(self, root_id):
         self.c.execute(
@@ -308,8 +356,9 @@ class Runs:
     def requeue_attempt(self, run_id, attempt, expected_attempt=None):
         """Queues another attempt on the same run and resets its durable outbox command.
 
-        A chain step is requeued only while its root is `running`, so a retry can't restart
-        a chain that was cancelled or ran past its max_duration.
+        A chain step is requeued only while its root is `running`, and a fan-out child only
+        while its parent is, so a retry can't restart a chain that was cancelled or ran past
+        its max_duration, or a cancelled fan-out.
         """
         body = self._outbox_body_for_update(run_id)
         if body is None:
@@ -338,7 +387,10 @@ class Runs:
             WHERE id=%s AND status IN {_in(REQUEUEABLE_STATUSES)}
             AND (chain_root_id IS NULL OR chain_root_id=id OR EXISTS (
               SELECT 1 FROM run_log root
-              WHERE root.id=run_log.chain_root_id AND root.status='running'))"""
+              WHERE root.id=run_log.chain_root_id AND root.status='running'))
+            AND NOT EXISTS (
+              SELECT 1 FROM run_log parent WHERE parent.id=run_log.parent_run_id
+              AND parent.executor='{FAN_OUT}' AND parent.status<>'running')"""
             + attempt_guard
             + " RETURNING id",
             (attempt, run_id, *guard_params),

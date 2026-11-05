@@ -218,3 +218,50 @@ def test_paused_event_run_records_its_event_id(conn, state):
             "rumor-action-trigger@rumor.signal_created@2026-10-28T15:00:00Z",
         )
     ]
+
+
+def test_fan_out_step_publishes_children_and_ends_through_run_log(conn, state):
+    scheduler = Scheduler(
+        load_catalog("tests/fixtures/job-catalog.yaml"), state, seasons=AlwaysInSeason()
+    )
+    scheduler.tick(TUESDAY)
+    (chain_root,) = state.active_chain_roots()
+    for job in ("sync-league", "metrics-extractor", "sync-actual-scores"):
+        set_status(conn, job, "success")
+        scheduler.tick(TUESDAY + timedelta(minutes=5))
+    parent = state.chain_steps(chain_root.id)["projections-refresh"]
+    with conn, conn.cursor() as c:
+        # What the consumer does with a run that leaves week_offset unset.
+        c.execute(
+            "UPDATE run_log SET status='running',executor='fan_out' WHERE id=%s",
+            (parent.id,),
+        )
+    (claimed,) = state.active_fan_outs()
+    assert (claimed.id, claimed.trigger_type) == (parent.id, "chain")
+
+    scheduler.tick(TUESDAY + timedelta(minutes=6))
+    scheduler.tick(TUESDAY + timedelta(minutes=7))
+    children = state.fan_out_children(parent.id)
+    assert sorted(children) == [
+        f"projections-refresh@{parent.id}#week_offset={value}" for value in range(4)
+    ]
+    assert {(c.trigger_type, c.chain_root_id, c.status) for c in children.values()} == {
+        ("chain", chain_root.id, "queued")
+    }
+    assert sorted(c.trigger["params"]["week_offset"] for c in children.values()) == [
+        0,
+        1,
+        2,
+        3,
+    ]
+    assert state.chain_steps(chain_root.id)["projections-refresh"].id == parent.id
+
+    with conn, conn.cursor() as c:
+        c.execute(
+            "UPDATE run_log SET status='success' WHERE parent_run_id=%s", (parent.id,)
+        )
+    scheduler.tick(TUESDAY + timedelta(minutes=8))
+    assert state.active_fan_outs() == []
+    steps = state.chain_steps(chain_root.id)
+    assert steps["projections-refresh"].status == "success"
+    assert steps["lineup-optimizer"].status == "queued"

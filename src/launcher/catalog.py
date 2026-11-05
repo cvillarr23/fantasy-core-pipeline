@@ -211,6 +211,14 @@ def _validate_params(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
+class FanOut(CatalogModel):
+    """A run of the job that leaves ``param`` unset starts one child run per value instead
+    of a process, and finishes once they all have (see the scheduler's docstring)."""
+
+    param: str
+    values: list[int | float | str | bool] = Field(min_length=1)
+
+
 class Job(CatalogModel):
     profile: str
     command: list[str] = Field(min_length=1)
@@ -224,6 +232,7 @@ class Job(CatalogModel):
     acts: bool = False
     schedules: list[Schedule] = Field(default_factory=list)
     on_event: list[EventSubscription] = Field(default_factory=list)
+    fan_out: FanOut | None = None
 
     @field_validator("params")
     @classmethod
@@ -234,6 +243,37 @@ class Job(CatalogModel):
     @classmethod
     def parse_job_deadline(cls, value: Any) -> timedelta | None:
         return None if value is None else _duration(value)
+
+    @model_validator(mode="after")
+    def validate_fan_out(self) -> "Job":
+        if self.fan_out is not None:
+            self.fan_out.values = _fan_out_values(self.fan_out, self.params)
+        return self
+
+
+def _fan_out_values(fan_out: FanOut, params: dict[str, str]) -> list[Any]:
+    """The values typed as the param's declared type. The param must be optional, since a
+    run that leaves it out is the one that fans out."""
+    type_name = params.get(fan_out.param)
+    if type_name is None:
+        raise ValueError(
+            f"fan_out.param {fan_out.param!r} is not one of the job's params"
+        )
+    if not type_name.endswith("?"):
+        raise ValueError(
+            f"fan_out.param {fan_out.param!r} must be optional ({type_name}?)"
+        )
+    values = [
+        _coerce_param(fan_out.param, type_name[:-1], value) for value in fan_out.values
+    ]
+    if len(set(values)) != len(values):
+        raise ValueError("fan_out.values must be unique")
+    return values
+
+
+def fans_out(job: Job, params: dict[str, Any]) -> bool:
+    """Whether a run of ``job`` with these (validated) params is a fan-out parent."""
+    return job.fan_out is not None and job.fan_out.param not in params
 
 
 def _required_params(job: Job) -> list[str]:
@@ -268,7 +308,7 @@ class Chain(CatalogModel):
         return _duration(value)
 
 
-_RESERVED = {"class", "group", "fan_out", "approval"}
+_RESERVED = {"class", "group", "approval"}
 
 
 def _reject_reserved(value: Any, path: str = "catalog") -> None:

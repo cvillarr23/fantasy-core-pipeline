@@ -339,7 +339,7 @@ def test_failed_step_is_not_requeued_once_its_chain_root_is_cancelled(postgres):
     # revisited every tick; the live chain's failure still is, and still requeues.
     watched = {row.run_id: row for row in store.watched_runs([], max_attempts)}
     assert set(watched) == {live_step}
-    assert watched[live_step].chain_running is True
+    assert watched[live_step].group_running is True
     assert not store.requeue_attempt(step, 2, expected_attempt=1)
     assert store.requeue_attempt(live_step, 2, expected_attempt=1)
     assert rows(
@@ -351,7 +351,7 @@ def test_failed_step_is_not_requeued_once_its_chain_root_is_cancelled(postgres):
     # A step whose k8s Job is still visible is selected so its Job is reaped, marked as
     # belonging to an ended chain so its failure is final.
     with_k8s_job = store.watched_runs([step], max_attempts)
-    assert [(row.run_id, row.chain_running) for row in with_k8s_job] == [(step, False)]
+    assert [(row.run_id, row.group_running) for row in with_k8s_job] == [(step, False)]
 
 
 def test_standalone_run_still_requeues(postgres):
@@ -364,7 +364,7 @@ def test_standalone_run_still_requeues(postgres):
         "lineup-optimizer": CATALOG.resolve("lineup-optimizer").max_attempts
     }
     assert [
-        (row.run_id, row.chain_running) for row in store.watched_runs([], max_attempts)
+        (row.run_id, row.group_running) for row in store.watched_runs([], max_attempts)
     ] == [(identity, True)]
     assert store.requeue_attempt(identity, 2, expected_attempt=1)
 

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from src.launcher.catalog import (
     Catalog,
     UnknownJobError,
+    fans_out,
     load_catalog,
     load_catalog_from_env,
     params_to_args,
@@ -175,12 +176,49 @@ def test_params_reject_unknown_types(type_name):
         Catalog.model_validate(raw)
 
 
-@pytest.mark.parametrize("field", ["class", "group", "fan_out", "approval"])
+@pytest.mark.parametrize("field", ["class", "group", "approval"])
 def test_v2_fields_fail_with_not_implemented_error(field):
     raw = catalog_data()
     raw["jobs"]["one"][field] = True
     with pytest.raises(ValueError, match="not implemented"):
         Catalog.model_validate(raw)
+
+
+def fan_out_catalog(fan_out: dict, params: dict | None = None) -> dict:
+    raw = catalog_data()
+    raw["jobs"]["one"]["params"] = {"week_offset": "int?"} if params is None else params
+    raw["jobs"]["one"]["fan_out"] = fan_out
+    return raw
+
+
+def test_fan_out_runs_without_its_param_fan_out():
+    catalog = Catalog.model_validate(
+        fan_out_catalog({"param": "week_offset", "values": [0, 1, 2, 3]})
+    )
+    job = catalog.jobs["one"]
+    assert job.fan_out.values == [0, 1, 2, 3]
+    assert fans_out(job, {})
+    assert not fans_out(job, {"week_offset": 2})
+    assert not fans_out(catalog_data_job(), {})
+
+
+def catalog_data_job():
+    return Catalog.model_validate(catalog_data()).jobs["one"]
+
+
+@pytest.mark.parametrize(
+    ("fan_out", "params", "message"),
+    [
+        ({"param": "week", "values": [1]}, None, "not one of the job's params"),
+        ({"param": "week_offset", "values": [1]}, {"week_offset": "int"}, "optional"),
+        ({"param": "week_offset", "values": []}, None, "at least 1"),
+        ({"param": "week_offset", "values": [1, 1]}, None, "unique"),
+        ({"param": "week_offset", "values": [1, "two"]}, None, "must be int"),
+    ],
+)
+def test_fan_out_rejects_bad_param_or_values(fan_out, params, message):
+    with pytest.raises(ValidationError, match=message):
+        Catalog.model_validate(fan_out_catalog(fan_out, params))
 
 
 def test_json_schema_and_check_cli():

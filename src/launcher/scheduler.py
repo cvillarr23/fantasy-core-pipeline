@@ -27,6 +27,15 @@ nothing:
   ``max_duration`` every step not yet started is skipped and the root ends ``timeout``.
   Once a root has ended (``timeout`` or cancelled), the consumer skips a step still queued
   (``chain_ended``) and the watcher retries none of its steps.
+- **Fan-out.** A job with catalog ``fan_out: {param, values}`` fans out every run that
+  leaves ``param`` unset: the consumer claims it with executor ``fan_out`` and launches
+  nothing, and each tick publishes one child per value not yet published (the parent's
+  params plus ``param=value``, its trigger and chain root, ``parent_run_id`` = the parent,
+  dedupe key ``job@<parent id>#param=value``). Children are ordinary runs: the pod cap
+  bounds how many run at once, and each retries by ``max_attempts``. Once none is pending
+  the parent ends ``success``, or ``failure`` (``fan_out_failed``) when any child didn't
+  succeed. The parent itself is never retried. In a chain it is the step, so its status
+  decides the edges after it. A run that sets ``param`` is one ordinary run.
 - **Standalone slots.** A job's own slot is skipped (``chain_step``) on a day when a chain
   run already covers it: the step has a non-skipped run, or the chain is still running.
 - **Events.** ``handle_event`` (the ``launcher-events`` thread) starts each job subscribed to
@@ -67,7 +76,7 @@ import polars as pl
 from croniter import croniter
 
 from src.launcher.catalog import Catalog, Chain, ChainStep, Schedule, Season
-from src.launcher.runs import Runs
+from src.launcher.runs import FAN_OUT, Runs
 
 if TYPE_CHECKING:
     from src.launcher.events import JobEvent
@@ -99,6 +108,11 @@ class RunRow:
     scheduled_for: datetime | None = None
     chain_root_id: str | None = None
     trigger: dict[str, Any] = field(default_factory=dict)
+    parent_run_id: str | None = None
+    trigger_type: str | None = None
+    executor: str | None = None
+    started_at: datetime | None = None
+    dedupe_key: str | None = None
 
 
 class SchedulerState(Protocol):
@@ -138,6 +152,14 @@ class SchedulerState(Protocol):
 
     def finish_chain_root(
         self, root_id: str, status: str, end_reason: str | None
+    ) -> None: ...
+
+    def active_fan_outs(self) -> list[RunRow]: ...
+
+    def fan_out_children(self, parent_id: str) -> dict[str, RunRow]: ...
+
+    def finish_fan_out(
+        self, parent_id: str, status: str, end_reason: str | None
     ) -> None: ...
 
 
@@ -275,11 +297,14 @@ class Scheduler:
                 )
 
     def tick(self, now: datetime | None = None) -> None:
-        """Fire due chain slots, advance running chains, then fire due job slots."""
+        """Fire due chain slots, advance fan-outs and then chains (so a fan-out step that
+        ends lets its chain move on in the same tick), then fire due job slots."""
         now = now or self.clock()
         for name, chain in self.catalog.chains.items():
             if chain.schedule:
                 self._guard(f"chain {name} slot", self._chain_slot, name, chain, now)
+        for parent in self.state.active_fan_outs():
+            self._guard(f"fan-out run {parent.id}", self._advance_fan_out, parent)
         for root in self.state.active_chain_roots():
             self._guard(f"chain run {root.id}", self._advance, root, now)
         for name, job in self.catalog.jobs.items():
@@ -543,11 +568,18 @@ class Scheduler:
             return "pending"
         if run.status == "success":
             return "success"
-        if run.status in RETRYABLE_STATUSES and run.attempt < self._max_attempts(
-            run.job_name
-        ):
+        if self._retry_pending(run):
             return "pending"
         return "finished"
+
+    def _retry_pending(self, run: RunRow) -> bool:
+        """Whether a failed run has attempts left. A fan-out parent is never retried: its
+        children carry the attempts."""
+        return (
+            run.status in RETRYABLE_STATUSES
+            and run.executor != FAN_OUT
+            and run.attempt < self._max_attempts(run.job_name)
+        )
 
     def _max_attempts(self, job: str) -> int:
         return self.catalog.resolve(job).max_attempts
@@ -604,6 +636,58 @@ class Scheduler:
             )
             runs[step_name] = RunRow(run_id, step_name, "queued", chain_root_id=root.id)
         self._end_root_if_done(root, chain, scope, runs, expired)
+
+    def _advance_fan_out(self, parent: RunRow) -> None:
+        """Publishes the parent's missing children, then ends it once none is pending."""
+        job = self.catalog.jobs.get(parent.job_name)
+        fan_out = job.fan_out if job else None
+        if fan_out is None:
+            logger.warning(
+                "Fan-out run %s: job %s no longer fans out; cancelling",
+                parent.id,
+                parent.job_name,
+            )
+            self.state.finish_fan_out(parent.id, "cancelled", "not_fan_out")
+            return
+        children = self.state.fan_out_children(parent.id)
+        for value in fan_out.values:
+            key = _fan_out_key(parent, fan_out.param, value)
+            if key not in children:
+                children[key] = self._publish_child(parent, fan_out.param, value, key)
+        self._end_fan_out_if_done(parent, children)
+
+    def _publish_child(
+        self, parent: RunRow, param: str, value: Any, key: str
+    ) -> RunRow:
+        """One child run: the parent's params with ``param=value``, under its trigger and
+        chain root. It may wait up to one job deadline after the parent started."""
+        assert parent.started_at is not None
+        run_id = self._publish(
+            parent.job_name,
+            trigger=parent.trigger_type or "manual",
+            dedupe_key=key,
+            scheduled_for=parent.started_at,
+            chain_root_id=parent.chain_root_id,
+            parent_run_id=parent.id,
+            params={**parent.trigger.get("params", {}), param: value},
+            expires_at=parent.started_at + self._deadline(parent.job_name),
+        )
+        return RunRow(run_id, parent.job_name, "queued", parent_run_id=parent.id)
+
+    def _deadline(self, job: str) -> timedelta:
+        return self.catalog.resolve(job).deadline
+
+    def _end_fan_out_if_done(self, parent: RunRow, children: dict[str, RunRow]) -> None:
+        """Ends the parent ``success`` when every child succeeded, or ``failure`` once
+        none is pending and any did not."""
+        outcomes = [self._outcome(child) for child in children.values()]
+        if "pending" in outcomes:
+            return
+        if all(outcome == "success" for outcome in outcomes):
+            self.state.finish_fan_out(parent.id, "success", None)
+        else:
+            self.state.finish_fan_out(parent.id, "failure", "fan_out_failed")
+        logger.info("Fan-out run %s of %s finished", parent.id, parent.job_name)
 
     def _edges(
         self, step: ChainStep, scope: set[str], runs: dict[str, RunRow]
@@ -697,6 +781,7 @@ class Scheduler:
         dedupe_key: str,
         scheduled_for: datetime,
         chain_root_id: str | None = None,
+        parent_run_id: str | None = None,
         params: dict[str, Any] | None = None,
         requested_by: str | None = None,
         downstream: bool = False,
@@ -710,7 +795,7 @@ class Scheduler:
             params=params,
             requested_by=requested_by,
             dedupe_key=dedupe_key,
-            parent_run_id=chain_root_id,
+            parent_run_id=parent_run_id or chain_root_id,
             chain_root_id=chain_root_id,
             event_id=event_id,
             downstream=downstream,
@@ -746,6 +831,10 @@ def _step_expires_at(root: RunRow, chain: Chain, latest: datetime | None) -> dat
     return root.scheduled_for + chain.max_duration
 
 
+def _fan_out_key(parent: RunRow, param: str, value: Any) -> str:
+    return f"{parent.job_name}@{parent.id}#{param}={value}"
+
+
 def _local_day(moment: datetime, tz: ZoneInfo) -> tuple[datetime, datetime]:
     """Start and end of ``moment``'s local day in ``tz``."""
     day = moment.astimezone(tz).date()
@@ -759,7 +848,10 @@ def _window(schedule: Schedule) -> timedelta:
     return max(schedule.catch_up or timedelta(0), SLOT_GRACE)
 
 
-_ROW_COLUMNS = "id,job_name,status,attempt,scheduled_for,chain_root_id,trigger"
+_ROW_COLUMNS = (
+    "id,job_name,status,attempt,scheduled_for,chain_root_id,trigger,"
+    "parent_run_id,trigger_type,executor,started_at,dedupe_key"
+)
 
 
 def _row(values: tuple) -> RunRow:
@@ -774,6 +866,11 @@ def _row(values: tuple) -> RunRow:
         scheduled_for=values[4],
         chain_root_id=values[5],
         trigger=trigger or {},
+        parent_run_id=values[7],
+        trigger_type=values[8],
+        executor=values[9],
+        started_at=values[10],
+        dedupe_key=values[11],
     )
 
 
@@ -864,11 +961,13 @@ class PostgresSchedulerState:
             return [_row(values) for values in c.fetchall()]
 
     def chain_steps(self, root_id: str) -> dict[str, RunRow]:
+        """The chain's own steps. A fan-out step's children share its job_name and chain
+        root, so only rows parented by the root are steps."""
         with self._cursor() as c:
             c.execute(
                 f"""SELECT {_ROW_COLUMNS} FROM run_log WHERE chain_root_id=%s AND id<>%s
-                ORDER BY attempt, started_at""",
-                (root_id, root_id),
+                AND parent_run_id=%s ORDER BY attempt, started_at""",
+                (root_id, root_id, root_id),
             )
             return {row.job_name: row for row in map(_row, c.fetchall())}
 
@@ -877,3 +976,31 @@ class PostgresSchedulerState:
     ) -> None:
         with self._cursor() as c:
             Runs(c).finish_chain_root(root_id, status, end_reason)
+
+    def active_fan_outs(self) -> list[RunRow]:
+        with self._cursor() as c:
+            c.execute(
+                f"""SELECT {_ROW_COLUMNS} FROM run_log WHERE status='running'
+                AND executor=%s ORDER BY started_at""",
+                (FAN_OUT,),
+            )
+            return [_row(values) for values in c.fetchall()]
+
+    def fan_out_children(self, parent_id: str) -> dict[str, RunRow]:
+        """The parent's children by dedupe key. Only children have one: the parent has no
+        process whose run_scope could nest other rows under it."""
+        with self._cursor() as c:
+            c.execute(
+                f"""SELECT {_ROW_COLUMNS} FROM run_log WHERE parent_run_id=%s
+                AND dedupe_key IS NOT NULL""",
+                (parent_id,),
+            )
+            return {
+                row.dedupe_key or row.id: row for row in map(_row, c.fetchall())
+            }
+
+    def finish_fan_out(
+        self, parent_id: str, status: str, end_reason: str | None
+    ) -> None:
+        with self._cursor() as c:
+            Runs(c).finish_fan_out(parent_id, status, end_reason)
