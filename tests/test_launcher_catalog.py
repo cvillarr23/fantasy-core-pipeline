@@ -277,3 +277,11 @@ def test_on_event_job_cannot_require_params():
 
     raw["jobs"]["one"]["params"] = {"week": "int?"}
     assert Catalog.model_validate(raw).jobs["one"].on_event[0].key == "rumor.created"
+
+
+def test_counted_k8s_jobs_defaults_empty_and_accepts_label_selectors():
+    assert Catalog.model_validate(catalog_data()).global_settings.counted_k8s_jobs == []
+    data = catalog_data()
+    data["global"]["counted_k8s_jobs"] = ["scaledjob.keda.sh/name=worker"]
+    catalog = Catalog.model_validate(data)
+    assert catalog.global_settings.counted_k8s_jobs == ["scaledjob.keda.sh/name=worker"]

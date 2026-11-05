@@ -275,6 +275,28 @@ def job_exists(name):
     return None
 
 
+def count_active_jobs(selectors):
+    """How many unfinished k8s Jobs match any of the label selectors. A Job whose pod is still
+    Pending counts too, since its resource requests are already reserved."""
+    names = set()
+    for selector in selectors:
+        jobs = batch_v1_api().list_namespaced_job(
+            K8S_NAMESPACE,
+            label_selector=selector,
+            _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+        ).items
+        names.update(job.metadata.name for job in jobs if not _job_finished(job))
+    return len(names)
+
+
+def _job_finished(job):
+    """Whether the Job has a true Complete or Failed condition."""
+    conditions = (job.status and job.status.conditions) or []
+    return any(
+        c.type in ("Complete", "Failed") and c.status == "True" for c in conditions
+    )
+
+
 def create_job(job):
     """Creates the Job. AlreadyExists means a previous launcher created it for this attempt
     before crashing, so it counts as launched rather than failing the run."""

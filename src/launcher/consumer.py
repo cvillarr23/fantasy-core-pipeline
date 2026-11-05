@@ -14,7 +14,9 @@ waiting for its job's previous run doesn't hold up other jobs:
   `skipped (chain_ended)`
 - past `expires_at` -> `skipped (expired)`
 - another run of the job is running -> `skipped (overlap)` under `forbid`, waits under `queue`
-- pod cap full, or the inline runner busy -> waits
+- pod cap full, or the inline runner busy -> waits. The pod cap counts the launcher's
+  `running` pod rows plus the active k8s Jobs matching the catalog's `counted_k8s_jobs`
+  (the KEDA browser worker), so both share one pod budget
 - otherwise `running`, then the k8s Job is created or the inline runner takes it
 
 A run still marked `running` after its pod died holds its overlap and cap slot until the
@@ -62,13 +64,25 @@ def overlap_refuses(catalog, job, store=None):
 
 
 class Consumer:
-    def __init__(self, catalog, inline_runner, store=None, clock=None, launch_pod=None):
+    def __init__(
+        self,
+        catalog,
+        inline_runner,
+        store=None,
+        clock=None,
+        launch_pod=None,
+        count_external_pods=None,
+    ):
         self.catalog = catalog
         self.inline_runner = inline_runner
         self.store = store or RunStore()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.launch_pod = launch_pod or k8s.create_job
+        self.count_external_pods = count_external_pods or (
+            lambda: k8s.count_active_jobs(catalog.global_settings.counted_k8s_jobs)
+        )
         self.pending: OrderedDict[str, RunCommand] = OrderedDict()
+        self._external_pods_this_pass: int | None = None
 
     # ---- admission ------------------------------------------------------------------
 
@@ -108,6 +122,7 @@ class Consumer:
     def drain(self):
         """One pass over the pending list; returns the run_ids launched."""
         launched = []
+        self._external_pods_this_pass = None
         for run_id, command in list(self.pending.items()):
             try:
                 outcome = self._decide(command)
@@ -237,9 +252,23 @@ class Consumer:
         cap is reached."""
         if resolved.executor == "inline":
             return self.inline_runner.busy
-        return (
-            admission.running_pods() >= self.catalog.global_settings.max_concurrent_pods
-        )
+        pods = admission.running_pods() + self._external_pods()
+        return pods >= self.catalog.global_settings.max_concurrent_pods
+
+    def _external_pods(self):
+        """Active k8s Jobs the launcher didn't create, looked up at most once per pass.
+
+        Runs launched earlier in the same pass are already `running` rows, so the one
+        snapshot stays right for the whole pass. A failed lookup counts as 0: a k8s API blip
+        mustn't hold every run, and creating the run's own Job will surface a real outage.
+        """
+        if self._external_pods_this_pass is None:
+            try:
+                self._external_pods_this_pass = self.count_external_pods()
+            except Exception as exc:
+                logger.warning("Could not count external k8s Jobs; counting 0: %s", exc)
+                self._external_pods_this_pass = 0
+        return self._external_pods_this_pass
 
     def _build_k8s_job_or_fail(self, admission, command, resolved, argv):
         """The run's k8s Job, or None after failing the run when the launcher's own

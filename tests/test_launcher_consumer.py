@@ -1,7 +1,7 @@
 import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from kubernetes.client.rest import ApiException
@@ -460,3 +460,87 @@ def test_overlap_refuses_only_forbid_jobs_with_a_running_run(store):
     catalog = CATALOG.model_copy(deep=True)
     catalog.jobs["rumor-syncer"].overlap = "queue"
     assert not overlap_refuses(catalog, "rumor-syncer", store=store)
+
+
+def _counting_consumer(store, clock, runner, launch_pod, counts):
+    """A consumer whose external Job count comes from `counts`; each lookup is recorded."""
+    lookups = []
+
+    def count():
+        lookups.append(1)
+        value = counts[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    consumer = Consumer(
+        CATALOG,
+        runner,
+        store=store,
+        clock=clock,
+        launch_pod=launch_pod,
+        count_external_pods=count,
+    )
+    return consumer, lookups
+
+
+def test_active_keda_jobs_fill_the_cap_until_they_exit(
+    store, clock, runner, launch_pod
+):
+    counts = [1]
+    consumer, _ = _counting_consumer(store, clock, runner, launch_pod, counts)
+    store.add("a", "trade-scan", status="running", executor="pod")
+    queue_run(store, consumer, "r1")
+    assert consumer.drain() == []
+    assert store.rows["r1"]["status"] == "queued"
+    counts[0] = 0
+    assert consumer.drain() == ["r1"]
+    launch_pod.assert_called_once()
+
+
+def test_external_jobs_are_counted_once_per_pass(store, clock, runner, launch_pod):
+    consumer, lookups = _counting_consumer(store, clock, runner, launch_pod, [1])
+    queue_run(store, consumer, "r1", job="rumor-syncer")
+    queue_run(store, consumer, "r2", job="trade-scan")
+    # One KEDA Job plus r1's pod fill the cap of 2, so r2 waits.
+    assert consumer.drain() == ["r1"]
+    assert lookups == [1]
+    assert list(consumer.pending) == ["r2"]
+    consumer.drain()
+    assert lookups == [1, 1]
+
+
+def test_failed_external_count_does_not_hold_runs(store, clock, runner, launch_pod):
+    counts = [ApiException(status=500)]
+    consumer, _ = _counting_consumer(store, clock, runner, launch_pod, counts)
+    queue_run(store, consumer, "r1")
+    assert consumer.drain() == ["r1"]
+
+
+def test_inline_runs_never_count_external_jobs(store, clock, runner, launch_pod):
+    catalog = CATALOG.model_copy(deep=True)
+    catalog.jobs["rumor-syncer"].executor = "inline"
+    count = MagicMock(return_value=5)
+    consumer = Consumer(
+        catalog,
+        runner,
+        store=store,
+        clock=clock,
+        launch_pod=launch_pod,
+        count_external_pods=count,
+    )
+    queue_run(store, consumer, "r1")
+    assert consumer.drain() == ["r1"]
+    count.assert_not_called()
+
+
+def test_default_count_uses_the_catalog_selectors(store, clock, runner, launch_pod):
+    catalog = CATALOG.model_copy(deep=True)
+    catalog.global_settings.counted_k8s_jobs = ["scaledjob.keda.sh/name=worker"]
+    consumer = make_consumer(store, clock, runner, launch_pod, catalog)
+    with patch.object(
+        consumer_module.k8s, "count_active_jobs", return_value=2
+    ) as count:
+        queue_run(store, consumer, "r1")
+        assert consumer.drain() == []
+    count.assert_called_once_with(["scaledjob.keda.sh/name=worker"])
