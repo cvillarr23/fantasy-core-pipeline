@@ -101,6 +101,9 @@ def _validate_cron(value: str) -> str:
 
 class GlobalSettings(CatalogModel):
     max_concurrent_pods: int = Field(ge=1)
+    # Label selectors for k8s Jobs the launcher doesn't create (the KEDA browser worker). Their
+    # active Jobs count toward max_concurrent_pods, so both share one pod budget.
+    counted_k8s_jobs: list[str] = Field(default_factory=list)
     max_deadline: timedelta
     start_timeout: timedelta
     manual_queue_ttl: timedelta

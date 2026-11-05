@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from kubernetes import client
 from kubernetes.client import ApiClient
 from kubernetes.client.rest import ApiException
 
@@ -241,3 +242,35 @@ def test_create_job_raises_other_api_errors():
         pytest.raises(ApiException),
     ):
         k8s.create_job(job)
+
+
+def _listed_job(name, condition=None):
+    conditions = (
+        [client.V1JobCondition(type=condition, status="True")] if condition else None
+    )
+    return client.V1Job(
+        metadata=client.V1ObjectMeta(name=name),
+        status=client.V1JobStatus(conditions=conditions),
+    )
+
+
+def test_count_active_jobs_counts_unfinished_jobs_once_across_selectors():
+    api = MagicMock()
+    api.list_namespaced_job.return_value.items = [
+        _listed_job("running"),
+        _listed_job("pending"),
+        _listed_job("done", "Complete"),
+        _listed_job("failed", "Failed"),
+    ]
+    with patch.object(k8s, "batch_v1_api", return_value=api):
+        assert k8s.count_active_jobs(["a=1", "b=2"]) == 2
+    selectors = [
+        c.kwargs["label_selector"] for c in api.list_namespaced_job.call_args_list
+    ]
+    assert selectors == ["a=1", "b=2"]
+
+
+def test_count_active_jobs_without_selectors_never_calls_the_api():
+    with patch.object(k8s, "batch_v1_api") as api:
+        assert k8s.count_active_jobs([]) == 0
+    api.assert_not_called()

@@ -504,7 +504,10 @@
   "fix" this by acking after launch.
 - Overlap and `max_concurrent_pods` are counts of `running` run_log rows (pods counted by
   `executor='pod'`), decided under a `pg_advisory_xact_lock`. A crashed pod's row
-  holds its slot until the watcher times it out as orphaned.
+  holds its slot until the watcher times it out as orphaned. The pod cap also counts the
+  unfinished k8s Jobs matching the catalog's `global.counted_k8s_jobs` label selectors (the KEDA
+  browser worker, whose run_log rows have no `executor`). The consumer looks them up once per pass
+  and counts 0 if the k8s API errors.
 - `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s. A
   failure or timeout with attempts left requeues the same row at the next attempt
   (`RunStore.requeue_attempt`), and each attempt only ever acts on its own k8s Job. A run
