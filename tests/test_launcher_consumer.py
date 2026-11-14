@@ -21,7 +21,16 @@ class FakeStore:
         self.bodies = []
         self.fail = False
 
-    def add(self, run_id, job, status="queued", executor=None, attempt=1, parent=None):
+    def add(
+        self,
+        run_id,
+        job,
+        status="queued",
+        executor=None,
+        attempt=1,
+        parent=None,
+        trigger="manual",
+    ):
         self.rows[run_id] = {
             "job": job,
             "status": status,
@@ -29,6 +38,7 @@ class FakeStore:
             "attempt": attempt,
             "end_reason": None,
             "parent": parent,
+            "trigger": trigger,
         }
 
     @contextmanager
@@ -52,13 +62,17 @@ class FakeStore:
         return row["attempt"] if row else None
 
     def job_running(self, job, run_id, fan_out_parent_id=None):
-        return any(
-            r["job"] == job
+        return bool(self.running_triggers(job, run_id, fan_out_parent_id))
+
+    def running_triggers(self, job, run_id, fan_out_parent_id=None):
+        return {
+            r["trigger"]
+            for i, r in self.rows.items()
+            if r["job"] == job
             and r["status"] == "running"
             and i not in (run_id, fan_out_parent_id)
             and (fan_out_parent_id is None or r["parent"] != fan_out_parent_id)
-            for i, r in self.rows.items()
-        )
+        }
 
     def fan_out_parent_status(self, run_id):
         row = self.rows.get(run_id)
@@ -190,6 +204,74 @@ def test_queue_overlap_waits_for_the_running_run(store, clock, runner, launch_po
     assert store.rows["r1"]["status"] == "queued"
     store.rows["earlier"]["status"] = "success"
     assert consumer.drain() == ["r1"]
+
+
+def running_run(store, trigger, run_id="earlier"):
+    store.add(run_id, "rumor-syncer", status="running", executor="pod", trigger=trigger)
+
+
+def test_schedule_run_waits_behind_an_event_run_under_forbid(store, consumer):
+    running_run(store, "event")
+    queue_run(store, consumer, "r1", trigger="schedule")
+    assert consumer.drain() == []
+    assert store.rows["r1"]["status"] == "queued"
+    store.rows["earlier"]["status"] = "success"
+    assert consumer.drain() == ["r1"]
+
+
+def test_chain_step_waits_behind_an_event_run_under_forbid(store, consumer):
+    store.add("root", "tuesday-weekly", status="running")
+    running_run(store, "event")
+    queue_run(store, consumer, "r1", trigger="chain", chain_root_id="root")
+    assert consumer.drain() == []
+    assert store.rows["r1"]["status"] == "queued"
+    store.rows["earlier"]["status"] = "success"
+    assert consumer.drain() == ["r1"]
+
+
+def test_event_run_waits_behind_another_event_run(store, consumer):
+    running_run(store, "event")
+    queue_run(store, consumer, "r1", trigger="event")
+    assert consumer.drain() == []
+    assert store.rows["r1"]["status"] == "queued"
+
+
+@pytest.mark.parametrize(
+    ("trigger", "holders"),
+    [
+        ("schedule", ["schedule"]),
+        ("event", ["schedule"]),
+        ("chain", ["chain"]),
+        ("manual", ["event"]),
+        ("cli", ["event"]),
+        ("schedule", ["event", "manual"]),
+    ],
+)
+def test_forbid_still_skips_unless_only_event_runs_hold_the_job(
+    store, consumer, launch_pod, trigger, holders
+):
+    store.add("root", "tuesday-weekly", status="running")
+    for i, holder in enumerate(holders):
+        running_run(store, holder, run_id=f"earlier-{i}")
+    queue_run(store, consumer, "r1", trigger=trigger, chain_root_id="root")
+    assert consumer.drain() == []
+    assert (store.rows["r1"]["status"], store.rows["r1"]["end_reason"]) == (
+        "skipped",
+        "overlap",
+    )
+    launch_pod.assert_not_called()
+
+
+def test_run_waiting_behind_an_event_run_still_expires(store, clock, consumer):
+    running_run(store, "event")
+    queue_run(store, consumer, "r1", trigger="schedule", ttl=timedelta(minutes=5))
+    assert consumer.drain() == []
+    clock.now = NOW + timedelta(minutes=5)
+    assert consumer.drain() == []
+    assert (store.rows["r1"]["status"], store.rows["r1"]["end_reason"]) == (
+        "skipped",
+        "expired",
+    )
 
 
 def test_full_cap_waits_then_launches_when_a_slot_frees(store, consumer, launch_pod):
@@ -468,6 +550,11 @@ def test_overlap_refuses_only_forbid_jobs_with_a_running_run(store):
     catalog = CATALOG.model_copy(deep=True)
     catalog.jobs["rumor-syncer"].overlap = "queue"
     assert not overlap_refuses(catalog, "rumor-syncer", store=store)
+
+
+def test_overlap_refuses_a_manual_run_behind_an_event_run(store):
+    running_run(store, "event")
+    assert overlap_refuses(CATALOG, "rumor-syncer", store=store)
 
 
 def _counting_consumer(store, clock, runner, launch_pod, counts):

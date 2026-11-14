@@ -508,6 +508,9 @@
   unfinished k8s Jobs matching the catalog's `global.counted_k8s_jobs` label selectors (the KEDA
   browser worker, whose run_log rows have no `executor`). The consumer looks them up once per pass
   and counts 0 if the k8s API errors.
+  Under `forbid`, a schedule, chain or event run still waits when every run holding the job is an
+  event run, so jobs with `on_event` don't need `overlap: queue`. Manual/CLI/MCP runs keep the
+  409 (`overlap_refuses`).
 - `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s. A
   failure or timeout with attempts left requeues the same row at the next attempt
   (`RunStore.requeue_attempt`), and each attempt only ever acts on its own k8s Job. A run

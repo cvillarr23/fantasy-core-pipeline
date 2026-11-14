@@ -331,6 +331,21 @@ def test_overlap_ignores_a_childs_own_fan_out_but_not_other_runs(postgres):
         assert admission.job_running("rumor-syncer", child, parent)
 
 
+def test_running_triggers_name_each_other_running_runs_trigger(postgres):
+    queued = queue(trigger="schedule")
+    event = claimed(trigger="event")
+    with RunStore().admission() as admission:
+        assert admission.running_triggers("rumor-syncer", queued) == {"event"}
+        assert admission.running_triggers("rumor-syncer", event) == set()
+    claimed(trigger="schedule")
+    claimed(trigger="event")
+    with RunStore().admission() as admission:
+        assert admission.running_triggers("rumor-syncer", queued) == {
+            "event",
+            "schedule",
+        }
+
+
 def test_finish_fan_out_ends_only_a_running_fan_out_parent(postgres):
     parent = fan_out_parent()
     pod = claimed("trade-scan")

@@ -88,20 +88,25 @@ class Runs:
         return row[0] if row else None
 
     def job_running(self, job, run_id, fan_out_parent_id=None):
-        """Whether another run of this catalog job is running. Launcher runs keep their
-        catalog job_name, so CronJob-era rows (entrypoint names) never match.
+        """Whether another run of this catalog job is running."""
+        return bool(self.running_triggers(job, run_id, fan_out_parent_id))
+
+    def running_triggers(self, job, run_id, fan_out_parent_id=None):
+        """The trigger types of the other running runs of this catalog job. Launcher runs
+        keep their catalog job_name, so CronJob-era rows (entrypoint names) never match.
 
         For a fan-out child, its own parent and siblings don't count: they are one run.
         """
         query = (
-            "SELECT 1 FROM run_log WHERE job_name=%s AND status='running' AND id<>%s"
+            "SELECT DISTINCT trigger_type FROM run_log"
+            " WHERE job_name=%s AND status='running' AND id<>%s"
         )
         params = (job, run_id)
         if fan_out_parent_id:
             query += " AND id<>%s AND parent_run_id IS DISTINCT FROM %s"
             params += (fan_out_parent_id, fan_out_parent_id)
-        self.c.execute(query + " LIMIT 1", params)
-        return self.c.fetchone() is not None
+        self.c.execute(query, params)
+        return {row[0] for row in self.c.fetchall()}
 
     def chain_running(self, chain_root_id):
         """Whether a chain root is still `running`, so its steps may start."""
