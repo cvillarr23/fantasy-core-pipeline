@@ -13,7 +13,9 @@ waiting for its job's previous run doesn't hold up other jobs:
 - a chain step whose root is no longer `running` (cancelled, or past max_duration) ->
   `skipped (chain_ended)`, and a fan-out child whose parent isn't -> `skipped (fan_out_ended)`
 - past `expires_at` -> `skipped (expired)`
-- another run of the job is running -> `skipped (overlap)` under `forbid`, waits under `queue`
+- another run of the job is running -> `skipped (overlap)` under `forbid`, waits under `queue`.
+  A schedule, chain or event run also waits under `forbid` when every run holding the job is
+  an event run; a manual one still skips (the Jobs API answers it 409 before queueing)
 - a fan-out job's run without its fan-out param -> `running` with executor `fan_out` and
   nothing launched: the scheduler publishes its children, which then pass through here like
   any run, except that their parent and siblings don't count as an overlap
@@ -56,6 +58,8 @@ tracer = trace.get_tracer(__name__)
 POLL_SECONDS = 5
 PREFETCH_COUNT = 20
 RECONNECT_BACKOFF_SECONDS = (1, 2, 5, 10, 30)
+# Triggers the launcher itself requests, as opposed to a person (manual, cli, mcp).
+AUTOMATIC_TRIGGERS = ("schedule", "chain", "event")
 
 
 class RunLogUnavailable(RuntimeError):
@@ -281,12 +285,30 @@ class Consumer:
     @staticmethod
     def _overlap_outcome(admission, command, resolved, fan_out_parent=None):
         """While another run of the job is running: "skip" under `forbid`, "wait" under
-        `queue`. None when no other run is running. A fan-out child's own parent and
-        siblings are the same run, so they don't count."""
+        `queue` or behind event runs only. None when no other run is running. A fan-out
+        child's own parent and siblings are the same run, so they don't count."""
         parent_id = fan_out_parent[0] if fan_out_parent else None
-        if not admission.job_running(command.job, command.run_id, parent_id):
+        holders = admission.running_triggers(command.job, command.run_id, parent_id)
+        if not holders:
             return None
-        return "skip" if resolved.overlap == "forbid" else "wait"
+        if resolved.overlap == "queue" or Consumer._waits_behind_event_runs(
+            command, holders
+        ):
+            return "wait"
+        return "skip"
+
+    @staticmethod
+    def _waits_behind_event_runs(command, holders):
+        """Whether an automatic run waits, even under `forbid`, because only event runs hold
+        its job.
+
+        An event is a speed-up over the job's schedule. A slot or chain step that skipped
+        behind one would alert, and could end its chain root `failure`, for a run that is
+        doing the same work moments early. An event run behind another waits too, so a
+        signal from the next debounce window isn't left for the next slot. A manual run keeps
+        `forbid`'s 409, and the run's own `expires_at` still bounds every wait.
+        """
+        return command.trigger in AUTOMATIC_TRIGGERS and holders == {"event"}
 
     def _capacity_full(self, admission, resolved):
         """Whether the run's executor has no room: the inline runner is busy, or the pod

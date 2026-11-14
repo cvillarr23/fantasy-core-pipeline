@@ -134,7 +134,7 @@ stateDiagram-v2
 | `manual`, `cli`, `mcp` | A fresh UUID (the run id) |
 | A fan-out child (any trigger) | `job@parent_run#param=value` |
 
-A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` at the command's current `attempt` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. The initial attempt past `expires_at` ends as `skipped (expired)`; retries of an attempt that already started keep their retry budget. A run refused by `overlap: forbid` ends as `skipped (overlap)`.
+A second request with a used key returns the existing run as `duplicate`, because `run_log.dedupe_key` is unique. The launcher acks each command once it has checked the run is still `queued` at the command's current `attempt` and added it to its pending list, not when the run starts, so a run waiting for the pod cap never trips RabbitMQ's 30-minute `consumer_timeout`. After a restart it rebuilds that list from queued `run_log` rows. The initial attempt past `expires_at` ends as `skipped (expired)`; retries of an attempt that already started keep their retry budget. A run refused by `overlap: forbid` ends as `skipped (overlap)`, except that a `schedule`, `chain` or `event` run waits when every run holding the job is an event run. An event is a speed-up over the job's schedule, so a slot or chain step that skipped behind one would alert, and could fail its chain, for work done moments early. A manual, CLI or MCP run still gets the 409, and a waiting run still expires at its `expires_at`.
 
 A job with catalog `fan_out: {param, values}` fans out each run that leaves `param` unset. The launcher claims that run with executor `fan_out` and starts nothing for it. The scheduler then publishes one child command per value, with the parent's params plus `param=value`, the parent's trigger and chain root, and `parent_run_id` = the parent. Children are ordinary commands: they wait for the pod cap like any run, and neither their parent nor their siblings count as an overlap. A child whose parent has ended (cancelled) is `skipped (fan_out_ended)`. The parent ends `success` once every child succeeds, or `failure` (`fan_out_failed`) once none is pending and any did not.
 
@@ -178,7 +178,8 @@ The first event in a window starts the run right away, and later events in that 
 | Key no job subscribes to | Acked and ignored |
 | Several jobs subscribe to the key | Each gets its own run, on its own `debounce` |
 | Job is paused | One `skipped (paused)` run per window, carrying the `event_id` |
-| Another run of the job is running under `overlap: forbid` | `skipped (overlap)`, as for any other trigger |
+| Another event run of the job is running | Waits for it, even under `overlap: forbid` |
+| A non-event run of the job is running under `overlap: forbid` | `skipped (overlap)`, as for any other trigger |
 | Run still waiting after `debounce` | `skipped (expired)`, because a later event has its own window |
 | Malformed message | Logged and dropped |
 | Launcher was down, events waiting in the queue | Processed on restart. An event older than its `debounce` is recorded as `skipped (expired)` and starts nothing, one row per old window. Newer ones start a run as usual |

@@ -111,10 +111,11 @@ def test_cancelling_a_fan_out_parent_also_cancels_its_children():
     assert "parent_run_id=%s" in query and params == ("parent-1",)
 
 
-def test_job_running_leaves_out_a_fan_out_childs_parent_and_siblings():
-    cursor = Cursor(None, None)
-    Runs(cursor).job_running("refresh", "child-1")
-    Runs(cursor).job_running("refresh", "child-1", "parent-1")
+def test_running_triggers_leave_out_a_fan_out_childs_parent_and_siblings():
+    cursor = Cursor([("event",), ("schedule",)], [])
+    assert Runs(cursor).running_triggers("refresh", "child-1") == {"event", "schedule"}
+    assert not Runs(cursor).job_running("refresh", "child-1", "parent-1")
+    assert "SELECT DISTINCT trigger_type" in cursor.queries[0][0]
     assert "parent_run_id" not in cursor.queries[0][0]
     query, params = cursor.queries[1]
     assert "id<>%s AND parent_run_id IS DISTINCT FROM %s" in query
