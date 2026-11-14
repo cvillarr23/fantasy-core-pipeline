@@ -276,3 +276,22 @@ def test_dead_letter_depths_skip_missing_queues():
 def test_dead_letter_depths_are_none_when_the_broker_is_down():
     with patch("pika.BlockingConnection", side_effect=OSError("refused")):
         assert run_log.dead_letter_depths() is None
+
+
+def _listed_trigger(client, trigger):
+    """GETs the runs list filtered by `trigger`; returns (status code, trigger passed to SQL)."""
+    cursor = MagicMock(description=[], fetchall=MagicMock(return_value=[]))
+    with patch.object(run_log, "get_db_cursor") as get_cursor:
+        get_cursor.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/activity/runs", params={"trigger": trigger})
+    sent = cursor.execute.call_args[0][1]["trigger"] if cursor.execute.called else None
+    return response.status_code, sent
+
+
+@pytest.mark.parametrize("trigger", run_log.TRIGGER_TYPES)
+def test_runs_list_filters_by_every_trigger_type(client, trigger):
+    assert _listed_trigger(client, trigger) == (200, trigger)
+
+
+def test_runs_list_rejects_an_unknown_trigger(client):
+    assert _listed_trigger(client, "cron") == (422, None)
