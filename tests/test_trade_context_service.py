@@ -373,6 +373,7 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
     cursor.fetchall.side_effect = [
         [("500", "100"), ("100", "500")],
         [("500", 3, 4.0, 12.0), ("100", 3, -2.0, 7.0)],
+        [("500", 9, 80.0, 50.0, 2.0)],
     ]
 
     @contextmanager
@@ -387,10 +388,18 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
         result = service.get_league_trade_context("123", 2026, 3, 4)
     build.assert_called_once_with(2026, request_timeout_seconds=10)
     fetch.assert_called_once_with(build.return_value, include_schedule=True)
-    assert cursor.execute.call_count == 2
+    assert cursor.execute.call_count == 3
     assert set(cursor.execute.call_args_list[0].args[1][0]) == {"100", "500", "-1"}
     assert cursor.execute.call_args_list[1].args[1][:3] == (2026, 3, 6)
+    # One ownership query for every rostered player, as of the requested week.
+    assert cursor.execute.call_args_list[2].args[1][1:] == (2026, 3)
     assert result["teams"]["1"]["roster"][0]["player_id"] == "500"
+    players = [p for team in result["teams"].values() for p in team["roster"]]
+    assert next(p for p in players if p["player_id"] == "500")["espn"] == {
+        "pos_rank": 9, "percent_owned": 80.0, "percent_started": 50.0,
+        "percent_bench": 30.0, "percent_change": 2.0,
+    }
+    assert next(p for p in players if p["player_id"] == "100")["espn"] is None
     history.assert_called_once_with("123", 2026)
     assert result["strength_metric"]["teams_with_strength"] == 4
     assert result["strength_metric"]["source"] == (
@@ -408,6 +417,7 @@ def test_ambiguous_crosswalk_is_reported_as_unmapped(monkeypatch, raw):
     cursor = MagicMock()
     cursor.fetchall.side_effect = [
         [("500", "100"), ("other", "100"), ("100", "500")],
+        [],
         [],
     ]
 

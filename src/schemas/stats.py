@@ -4,6 +4,8 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from src.schemas.espn_ownership import EspnOwnership
+
 
 class VorpSort(str, Enum):
     vorp = "vorp"
@@ -27,3 +29,4 @@ class VorpStat(BaseModel):
     scarcity_multiplier: Optional[float] = None
     defense_matchup_multiplier: Optional[float] = None
     vorp_score: Optional[float] = None
+    espn: Optional[EspnOwnership] = None

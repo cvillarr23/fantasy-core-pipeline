@@ -1,7 +1,16 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.api.stats import DEFAULT_VORP_LIMIT
+from src.schemas.espn_ownership import EspnOwnership
+from src.services import stats_service
+
+
+@pytest.fixture(autouse=True)
+def _no_espn_ownership(monkeypatch):
+    monkeypatch.setattr(stats_service, "load_espn_ownership", lambda *a, **k: {})
 
 
 @contextmanager
@@ -68,6 +77,7 @@ def test_browse_vorp_filters_and_defaults_to_vorp_sort(client):
             "scarcity_multiplier": 1.1,
             "defense_matchup_multiplier": 0.98,
             "vorp_score": 4.62,
+            "espn": None,
         }
     ]
     query, params = cursor.execute.call_args.args
@@ -141,6 +151,7 @@ def test_browse_vorp_serializes_null_metrics(client):
             "scarcity_multiplier": None,
             "defense_matchup_multiplier": None,
             "vorp_score": None,
+            "espn": None,
         }
     ]
 
@@ -172,3 +183,18 @@ def test_browse_vorp_db_failure_returns_500(client):
 
     assert response.status_code == 500
     assert "connection refused" not in response.text
+
+
+def test_browse_vorp_serializes_espn_ownership(client, monkeypatch):
+    espn = EspnOwnership(pos_rank=2, percent_owned=99.0, percent_started=90.0, percent_bench=9.0, percent_change=0.5)
+    monkeypatch.setattr(stats_service, "load_espn_ownership", lambda *a, **k: {"p1": espn})
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [VORP_ROW]
+
+    with patch("src.services.stats_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        response = client.get("/v1/stats/vorp?season=2026&week=3")
+
+    assert response.json()[0]["espn"] == {
+        "pos_rank": 2, "percent_owned": 99.0, "percent_started": 90.0,
+        "percent_bench": 9.0, "percent_change": 0.5,
+    }

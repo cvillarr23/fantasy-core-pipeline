@@ -193,6 +193,29 @@ def test_load_weekly_metrics_by_espn_id_maps_query_rows():
     assert query_args == (2026, 2, "8")
 
 
+def test_load_espn_ownership_by_espn_id_keys_loader_result_by_espn_id():
+    cursor = MagicMock()
+    # First fetchall: roster player_id -> espn_id; second: the loader's ownership rows.
+    cursor.fetchall.side_effect = [[("p1", "100"), ("p2", "200")], [("p1", 4, 70.0, 40.0, 2.0)]]
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = matchup_service._load_espn_ownership_by_espn_id(season=2026, week=2, team_id="8")
+
+    assert list(result) == ["100"]
+    assert result["100"].pos_rank == 4 and result["100"].percent_bench == 30.0
+    assert cursor.execute.call_args_list[0].args[1] == ("8",)
+    assert cursor.execute.call_args_list[1].args[1] == (["p1", "p2"], 2026, 2)
+
+
+def test_apply_espn_ownership_leaves_unknown_players_none():
+    from src.schemas.espn_ownership import EspnOwnership
+
+    espn = EspnOwnership(pos_rank=1)
+    lines = [{"espn_id": "100"}, {"espn_id": "999"}]
+    matchup_service._apply_espn_ownership(lines, {"100": espn})
+    assert lines == [{"espn_id": "100", "espn": espn}, {"espn_id": "999", "espn": None}]
+
+
 def test_apply_weekly_metrics_sets_values_for_known_players_only():
     lines = [
         matchup_service._shape_lineup_player_line(_make_roster_player(playerId=1)),

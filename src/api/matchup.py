@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
+from src.schemas.espn_ownership import EspnOwnership
 from src.services.matchup_service import (
     ESPNTimeoutError,
     NoMatchupFoundError,
@@ -134,6 +135,7 @@ class LineupPlayerLine(BaseModel):
     rumor_suggested_action: Optional[str] = None
     # {"action": "move_to_ir" | "activate_from_ir", "reason": ...}; display-only.
     ir_suggestion: Optional[dict] = None
+    espn: Optional[EspnOwnership] = None
 
 
 class RosterResponse(BaseModel):

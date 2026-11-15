@@ -3,6 +3,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from src.schemas.espn_ownership import EspnOwnership
+
 
 class RecentNewsItem(BaseModel):
     source: str
@@ -21,6 +23,7 @@ class PlayerSummaryResponse(BaseModel):
     # Same nullability and meaning as PlayerSearchResult.espn_id.
     espn_id: Optional[str] = None
     recent_news: List[RecentNewsItem]
+    espn: Optional[EspnOwnership] = None
 
 
 class PlayerSearchResult(BaseModel):
@@ -38,3 +41,4 @@ class PlayerSearchResult(BaseModel):
     injury_status: Optional[str] = None
     vorp_score: Optional[float] = None
     projected_points: Optional[float] = None
+    espn: Optional[EspnOwnership] = None

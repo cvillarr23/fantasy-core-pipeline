@@ -1688,7 +1688,7 @@ def test_get_draft_status_decodes_top_candidates_json(client):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
-    assert response.json()["recommendation"]["top_candidates"] == candidates
+    assert response.json()["recommendation"]["top_candidates"] == [{**c, "espn": None} for c in candidates]
 
 
 def test_get_draft_status_handles_malformed_top_candidates_json(client):
@@ -1751,7 +1751,7 @@ def test_get_draft_status_includes_espn_suggestion_with_vorp_match(client):
     assert suggestion == {
         "espn_player_id": "4362249", "player_id": "p9", "name": "Best Back",
         "position": "RB", "team": "KC", "vorp_score": 12.5,
-        "suggested_at": "2026-08-25T00:00:00Z",
+        "suggested_at": "2026-08-25T00:00:00Z", "espn": None,
     }
     # Internal staging must never leak into the response.
     assert "_espn_suggestion_staging" not in response.json()["recommendation"]
@@ -3464,3 +3464,35 @@ def test_get_draft_logs_tail_is_clamped_to_the_max(client):
 
     assert response.status_code == 200
     assert mock_core_api.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == 1000
+
+
+def test_get_draft_status_attaches_espn_ownership_to_picks_and_candidates(client):
+    from src.schemas.espn_ownership import EspnOwnership
+
+    espn = EspnOwnership(pos_rank=3, percent_owned=95.0, percent_started=85.0, percent_bench=10.0, percent_change=1.0)
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchone.return_value = None
+    candidates = [
+        {"player_id": "p2", "name": "Best Back", "position": "RB", "vorp_score": 10.0, "team": "KC"},
+        {"player_id": "p3", "name": "Other", "position": "WR", "vorp_score": 9.0, "team": "SF"},
+    ]
+    mock_redis = MagicMock()
+    mock_redis.hgetall.return_value = {"top_candidates": json.dumps(candidates), "last_processed_pick_at": "1000"}
+    seen = []
+
+    def fake_loader(cursor, ids, season, week):
+        seen.append((sorted(i for i in ids if i), season))
+        return {"p2": espn}
+
+    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
+         patch("src.api.draft._redis_client", return_value=mock_redis), \
+         patch("src.api.draft.load_espn_ownership", fake_loader), \
+         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         patch("src.api.draft.time.time", return_value=1005):
+        response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
+
+    top = response.json()["recommendation"]["top_candidates"]
+    assert top[0]["espn"]["pos_rank"] == 3 and top[0]["espn"]["percent_bench"] == 10.0
+    assert top[1]["espn"] is None
+    assert seen == [(["p2", "p3"], 2026)]

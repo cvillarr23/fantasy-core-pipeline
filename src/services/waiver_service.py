@@ -28,6 +28,7 @@ from src.backtesting import waiver_strategy
 from src.database import get_db_cursor
 from src.ingestion.metrics_extractor import normalize_team
 from src.ingestion.sync_league import refresh_rosters_if_stale
+from src.services.espn_ownership import load_espn_ownership
 from src.ir_eligibility import load_open_ir_slots
 from src.nfl_byes import bye_week_for, bye_weeks_or_empty, teams_playing_from_byes
 from src.optimization.lineup_solver import (
@@ -134,8 +135,10 @@ def load_prior_week_waiver_pools(cursor, team_id: str, season: int, week: int,
     return bench_by_position, free_agents_by_position, {"source_mode": "rolling_prior_weeks", "source_weeks": weeks}
 
 
-def _load_player_display(cursor, player_ids: set, bye_weeks: dict | None = None) -> dict:
-    """player_id -> {espn_id, name, position, pro_team, injury_status, bye_week}, one batched query."""
+def _load_player_display(cursor, player_ids: set, bye_weeks: dict | None = None,
+                         season: int | None = None, week: int | None = None) -> dict:
+    """player_id -> {espn_id, name, position, pro_team, injury_status, bye_week, espn}, one batched
+    query plus one for the ESPN market signal (when season and week are given)."""
     if not player_ids:
         return {}
     cursor.execute(
@@ -146,11 +149,17 @@ def _load_player_display(cursor, player_ids: set, bye_weeks: dict | None = None)
         """,
         (list(player_ids),),
     )
+    rows = cursor.fetchall()
+    espn_by_player = (
+        load_espn_ownership(cursor, [row[0] for row in rows], season, week)
+        if season is not None and week is not None else {}
+    )
     return {
         player_id: {"espn_id": espn_id, "name": name, "position": position, "pro_team": team,
                     "injury_status": injury_status,
-                    "bye_week": bye_week_for(team, bye_weeks or {})}
-        for player_id, espn_id, name, position, team, injury_status in cursor.fetchall()
+                    "bye_week": bye_week_for(team, bye_weeks or {}),
+                    "espn": espn_by_player.get(player_id)}
+        for player_id, espn_id, name, position, team, injury_status in rows
     }
 
 
@@ -289,7 +298,7 @@ def compute_waiver_recommendations(season: int, week: int,
             | {m["ir_player_id"] for m in ir_and_adds}
             | {p["player_id"] for p in stash}
         )
-        display_by_player_id = _load_player_display(cursor, player_ids, bye_weeks)
+        display_by_player_id = _load_player_display(cursor, player_ids, bye_weeks, season, week)
 
     recommendations = [_shape_recommendation(m, display_by_player_id) for m in moves]
     recommendations.sort(key=lambda r: (r["kind"] != "add", -r["vorp_delta"]))

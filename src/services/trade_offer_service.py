@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from src.queue_contracts import TRADE_SUBMISSIONS
 from src.database import get_db_cursor
+from src.services.espn_ownership import load_espn_ownership
 from src.schemas.trade import ProposalEvaluation
 
 logger = logging.getLogger("TradeOfferService")
@@ -534,13 +535,21 @@ def list_offers(
             for side in ("incoming_player_ids", "outgoing_player_ids")
             for pid in (row["counter_offer"] or {}).get(side, [])
         }
-        names = {}
+        names, internal_ids, ownership_by_season = {}, {}, {}
         if ids:
             cursor.execute(
-                "SELECT espn_id, name FROM players WHERE espn_id = ANY(%s)",
+                "SELECT espn_id, name, player_id FROM players WHERE espn_id = ANY(%s)",
                 (list(ids),),
             )
-            names = dict(cursor.fetchall())
+            for espn_id, name, player_id in cursor.fetchall():
+                names[espn_id] = name
+                internal_ids[espn_id] = player_id
+            # An offer's market signal is the newest row of its own season (week 18 caps
+            # the loader's "latest week at or before"); one query per distinct season.
+            for offer_season in {row["season"] for row in rows if row["season"]}:
+                ownership_by_season[offer_season] = load_espn_ownership(
+                    cursor, list(internal_ids.values()), offer_season, 18
+                )
     result = []
     for row in rows:
         offer = row["counter_offer"] or {}
@@ -571,8 +580,13 @@ def list_offers(
             }
         )
         for side in ("incoming", "outgoing"):
+            ownership = ownership_by_season.get(row["season"], {})
             item[f"{side}_players"] = [
-                dict(espn_id=pid, name=names.get(pid))
+                dict(
+                    espn_id=pid,
+                    name=names.get(pid),
+                    espn=ownership.get(internal_ids.get(pid)),
+                )
                 for pid in offer.get(f"{side}_player_ids", [])
             ]
         audit = (row["outcome_details"] or {}).get("approval")

@@ -13,9 +13,9 @@ def _cursor_context(cursor):
     yield cursor
 
 
-def _browse(rows, weeks=(4,), **kwargs):
+def _browse(rows, weeks=(4,), ownership=(), **kwargs):
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [[(w,) for w in weeks], rows]
+    cursor.fetchall.side_effect = [[(w,) for w in weeks], rows, list(ownership)]
     with patch.object(
         service, "get_db_cursor", lambda: _cursor_context(cursor)
     ), patch.object(service, "refresh_rosters_if_stale") as refresh, patch.object(
@@ -50,6 +50,26 @@ def test_browse_full_pool_and_same_position_swaps():
     assert agents["fa4"]["vorp_score"] is None
     assert agents["fa4"]["vorp_delta"] is None
     schedule.assert_not_called()
+
+
+def test_free_agents_and_their_bench_player_carry_espn_ownership():
+    ownership = [("fa1", 4, 60.0, 45.0, 2.5), ("bench1", 20, 30.0, None, None)]
+    result, cursor, _ = _browse(ROWS, ownership=ownership, position="rb", q="alpha")
+    agent = result["free_agents"][0]
+    assert agent["player_id"] == "fa1"
+    assert agent["espn"].pos_rank == 4
+    assert agent["espn"].percent_bench == 15.0
+    assert agent["bench_player"]["espn"].percent_owned == 30.0
+    assert agent["bench_player"]["espn"].percent_bench is None
+    ownership_sql, params = cursor.execute.call_args[0]
+    assert "espn_player_ownership" in ownership_sql
+    assert params == (["bench1", "fa1"], 2026, 4)
+
+
+def test_free_agent_without_ownership_row_has_null_espn():
+    result, _, _ = _browse(ROWS)
+    assert all(p["espn"] is None for p in result["free_agents"])
+    assert all(p["bench_player"] is None or p["bench_player"]["espn"] is None for p in result["free_agents"])
 
 
 def test_filters_sort_and_pagination_apply_in_order():

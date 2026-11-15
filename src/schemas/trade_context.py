@@ -3,6 +3,8 @@
 from typing import Literal
 from pydantic import BaseModel, Field
 
+from src.schemas.espn_ownership import EspnOwnership
+
 
 class PlayerWeekMetrics(BaseModel):
     vorp_score: float | None
@@ -21,6 +23,7 @@ class TradeContextPlayer(BaseModel):
     metrics: dict[str, PlayerWeekMetrics]
     # From the nflverse schedule; null when the schedule couldn't be read.
     nfl_bye_week: int | None = None
+    espn: EspnOwnership | None = None
 
 
 class TeamStrength(BaseModel):
