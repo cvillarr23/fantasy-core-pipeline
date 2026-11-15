@@ -268,3 +268,14 @@ def test_run_migrations_creates_trade_candidate_tables_before_indices():
     assert "CREATE TABLE IF NOT EXISTS trade_candidate_runs" in executed[table_idx]
     indices_idx = next(i for i, s in enumerate(executed) if s is migrations.CREATE_INDICES)
     assert table_idx < indices_idx
+
+
+def test_run_migrations_creates_espn_player_ownership_before_indices():
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as mock_get_cursor:
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+    statements = [c.args[0] for c in cursor.execute.call_args_list]
+    table = next(i for i, s in enumerate(statements) if "CREATE TABLE IF NOT EXISTS espn_player_ownership" in s)
+    indices = next(i for i, s in enumerate(statements) if "CREATE INDEX" in s)
+    assert table < indices
