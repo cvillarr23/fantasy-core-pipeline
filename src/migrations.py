@@ -40,6 +40,7 @@ from src.models import (
     CREATE_TRADE_CANDIDATE_TABLES,
     CREATE_RUMOR_SIGNALS_TABLE,
     CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE,
+    CREATE_ESPN_PLAYER_OWNERSHIP_TABLE,
     CREATE_INDICES,
     ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS,
     CREATE_FANTASY_SCORE_HISTORY_TABLES,
@@ -153,6 +154,10 @@ def run_migrations():
             logger.info("Validating 'rumor_signals' interpretation ledger...")
             cursor.execute(CREATE_RUMOR_SIGNALS_TABLE)
             cursor.execute(CREATE_RUMOR_ACTION_CHECKPOINTS_TABLE)
+
+            # 4j. Execute ESPN market-signal ledger
+            logger.info("Validating 'espn_player_ownership' market-signal ledger...")
+            cursor.execute(CREATE_ESPN_PLAYER_OWNERSHIP_TABLE)
 
             # 5. Generate query speed optimizations
             logger.info("Optimizing relational query indices...")

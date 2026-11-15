@@ -605,6 +605,24 @@ CREATE TABLE IF NOT EXISTS trade_candidates (
 );
 """
 
+# ESPN's league-wide market signal per player per week, refreshed daily by
+# sync_espn_ownership; a re-sync within a week upserts that week's row and older weeks stay
+# as history for backtesting. Every metric is nullable: ESPN reports -1 or omits the field
+# for players it has no figure for, and that must not read as 0%.
+CREATE_ESPN_PLAYER_OWNERSHIP_TABLE = """
+CREATE TABLE IF NOT EXISTS espn_player_ownership (
+    player_id VARCHAR(50) REFERENCES players(player_id) ON DELETE CASCADE,
+    season INT,
+    week INT,
+    percent_owned REAL,
+    percent_started REAL,
+    percent_change REAL,
+    pos_rank INT,
+    captured_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (player_id, season, week)
+);
+"""
+
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_execution_log_trade_offer_key
     ON execution_log ((counter_offer->>'offer_key'))
