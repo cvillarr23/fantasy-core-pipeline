@@ -9039,7 +9039,16 @@
             "schema": {
               "anyOf": [
                 {
-                  "pattern": "^(schedule|queue|http|manual)$",
+                  "enum": [
+                    "schedule",
+                    "chain",
+                    "event",
+                    "manual",
+                    "cli",
+                    "mcp",
+                    "queue",
+                    "http"
+                  ],
                   "type": "string"
                 },
                 {

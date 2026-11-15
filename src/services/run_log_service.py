@@ -93,8 +93,9 @@ CREATE TABLE IF NOT EXISTS launcher_heartbeat (
 # The launcher's trigger types, defined here so the launcher can import them without every
 # job's run_scope importing the launcher. TRIGGER_TYPES adds the ones other writers record.
 LauncherTrigger = Literal["schedule", "chain", "event", "manual", "cli", "mcp"]
+TriggerType = Literal[LauncherTrigger, "queue", "http"]
 LAUNCHER_TRIGGERS = get_args(LauncherTrigger)
-TRIGGER_TYPES = (*LAUNCHER_TRIGGERS, "queue", "http")
+TRIGGER_TYPES = get_args(TriggerType)
 STATUSES = (
     "queued",
     "skipped",
