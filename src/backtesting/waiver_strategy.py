@@ -3,6 +3,10 @@ Minimal weekly waiver rule (CORE-15). No waiver-decision logic exists anywhere e
 repo - sync_players.py only publishes injury-transition alerts - so this is new logic,
 built specifically to be scorable against a static (no-moves) baseline. No FAAB/budget
 modeling.
+
+These rules rank players by weekly_stats.vorp_score, which season_replay.run_week writes
+just before them. So the ESPN market weight for a backtest sweep is set on that replay
+(run_season_replay(market_weight=...), or --espn-market-weight), not here.
 """
 import json
 import logging

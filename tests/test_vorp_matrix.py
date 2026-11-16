@@ -588,3 +588,143 @@ def test_run_vorp_pipeline_scores_rostered_kicker_and_dst_against_free_agent_bas
     assert vorp_by_player["PHI"] > 0
     assert vorp_by_player["fa_k"] == 0
     assert vorp_by_player["NYG"] == 0
+
+
+# ---------------------------------------------------------------------------
+# ESPN market multiplier — off (weight 0) by default
+# ---------------------------------------------------------------------------
+
+MARKET_SCHEMA = {"player_id": pl.Utf8, "position": pl.Utf8, "vorp_score": pl.Float64}
+OWNERSHIP_SCHEMA = {"player_id": pl.Utf8, "percent_started": pl.Float64}
+
+
+def _market_frame(rows):
+    return pl.DataFrame(rows, schema=MARKET_SCHEMA, orient="row")
+
+
+def _ownership(rows):
+    return pl.DataFrame(rows, schema=OWNERSHIP_SCHEMA, orient="row")
+
+
+def _multipliers(out):
+    return dict(zip(out["player_id"], out["market_multiplier"]))
+
+
+def test_market_weight_zero_is_identity_for_every_row():
+    df = _market_frame([("a", "WR", 12.5), ("b", "WR", -3.25), ("c", "QB", 0.0), ("d", "TE", 7.1)])
+    ownership = _ownership([("a", 95.0), ("b", 4.0), ("c", 50.0)])
+
+    out = vm.apply_market_multiplier(df, ownership, weight=0.0)
+
+    assert out["market_multiplier"].to_list() == [1.0] * 4
+    assert out["vorp_score"].to_list() == df["vorp_score"].to_list()
+
+
+def test_market_multiplier_rises_with_start_percent_within_clip_bounds():
+    weight = 0.2
+    df = _market_frame([("lo", "RB", 5.0), ("mid", "RB", 5.0), ("hi", "RB", 5.0)])
+    ownership = _ownership([("lo", 2.0), ("mid", 40.0), ("hi", 98.0)])
+
+    m = _multipliers(vm.compute_market_multiplier(df, ownership, weight))
+
+    assert m["lo"] < m["mid"] < m["hi"]
+    assert m["lo"] == 1 - weight / 2
+    assert m["mid"] == 1.0
+    assert m["hi"] == 1 + weight / 2
+
+
+def test_market_multiplier_is_neutral_without_ownership_data():
+    df = _market_frame([("known_lo", "WR", 5.0), ("known_hi", "WR", 5.0), ("unknown", "WR", 5.0)])
+    ownership = _ownership([("known_lo", 10.0), ("known_hi", 90.0)])
+
+    out = vm.apply_market_multiplier(df, ownership, weight=0.2)
+
+    assert _multipliers(out)["unknown"] == 1.0
+    assert out.filter(pl.col("player_id") == "unknown")["vorp_score"].item() == 5.0
+
+
+def test_market_percentile_is_computed_within_position():
+    """The QB's 10% is the top start% among QBs, so he gets the top multiplier even though
+    every WR is started more often than he is."""
+    df = _market_frame([
+        ("qb_top", "QB", 5.0), ("qb_low", "QB", 5.0),
+        ("wr_low", "WR", 5.0), ("wr_top", "WR", 5.0),
+    ])
+    ownership = _ownership([("qb_top", 10.0), ("qb_low", 1.0), ("wr_low", 60.0), ("wr_top", 90.0)])
+
+    m = _multipliers(vm.compute_market_multiplier(df, ownership, weight=0.2))
+
+    assert m["qb_top"] == m["wr_top"] == 1.1
+    assert m["qb_low"] == m["wr_low"] == 0.9
+
+
+def test_market_single_known_player_in_position_is_neutral():
+    df = _market_frame([("only", "TE", 5.0)])
+    m = _multipliers(vm.compute_market_multiplier(df, _ownership([("only", 80.0)]), weight=0.2))
+    assert m["only"] == 1.0
+
+
+def test_market_multiplier_divides_negative_vorp_so_high_start_percent_still_helps():
+    df = _market_frame([("popular", "WR", -2.0), ("ignored", "WR", -2.0)])
+    ownership = _ownership([("popular", 90.0), ("ignored", 5.0)])
+
+    out = vm.apply_market_multiplier(df, ownership, weight=0.2)
+    vorp = dict(zip(out["player_id"], out["vorp_score"]))
+
+    assert vorp["popular"] > -2.0 > vorp["ignored"]
+    assert vorp["popular"] == -2.0 / 1.1
+
+
+def test_load_market_percent_started_takes_latest_week_at_or_before_target():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("a", 55.0)]
+
+    out = vm.load_market_percent_started(mock_cursor, 2026, 9)
+
+    query, params = mock_cursor.execute.call_args.args
+    assert "week <= %s" in query
+    assert "DISTINCT ON (player_id)" in query and "week DESC" in query
+    assert params == (2026, 9)
+    assert out.to_dicts() == [{"player_id": "a", "percent_started": 55.0}]
+
+
+def _pipeline_stat_rows():
+    def stat_row(player_id, position, projected, is_rostered):
+        return (player_id, position, projected, None, None, None, None, "BUF", None,
+                is_rostered, is_rostered, None)
+    return [
+        stat_row("wr1", "WR", 15.0, True), stat_row("wr2", "WR", 9.0, False),
+        stat_row("wr3", "WR", 6.0, False), stat_row("qb1", "QB", 20.0, True),
+    ]
+
+
+def _run_pipeline(market_weight, ownership_rows=None):
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (2, {"QB": 1, "WR": 1})
+    fetches = [[("WR", "WR"), ("QB", "QB")], _pipeline_stat_rows()]
+    if ownership_rows is not None:
+        fetches.append(ownership_rows)
+    mock_cursor.fetchall.side_effect = fetches
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    with patch("src.optimization.vorp_matrix.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        vm.run_vorp_pipeline(season=2026, week=5, market_weight=market_weight)
+    _, persisted = mock_cursor.executemany.call_args.args
+    queries = [c.args[0] for c in mock_cursor.execute.call_args_list]
+    return {row[6]: row[4] for row in persisted}, queries
+
+
+def test_run_vorp_pipeline_at_weight_zero_never_reads_ownership(monkeypatch):
+    monkeypatch.setattr(vm, "ESPN_MARKET_WEIGHT", 0.0)
+    _, queries = _run_pipeline(market_weight=None)
+    assert not any("espn_player_ownership" in q for q in queries)
+
+
+def test_run_vorp_pipeline_applies_market_weight_to_persisted_vorp():
+    baseline, _ = _run_pipeline(market_weight=0.0)
+    weighted, queries = _run_pipeline(market_weight=0.2, ownership_rows=[("wr1", 99.0), ("wr3", 1.0)])
+
+    assert any("espn_player_ownership" in q for q in queries)
+    assert weighted["wr1"] == baseline["wr1"] * 1.1
+    assert weighted["qb1"] == baseline["qb1"]  # no ownership row: neutral

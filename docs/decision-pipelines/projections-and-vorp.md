@@ -66,6 +66,8 @@ expected_depth = max(1, round(0.5 × league_starting_demand[position]))
 ratio = clamp(positive_VORP_free_agent_count / expected_depth, 0, 1)
 scarcity_multiplier = 1 + 0.35 × (1 − ratio)
 vorp_score = vorp_base × applicable_scarcity_multiplier
+market_multiplier = clamp(1 + w × (start_pctile − 0.5), 1 − w/2, 1 + w/2)
+vorp_score = vorp_score × market_multiplier   (÷ when vorp_score < 0)
 ```
 
 | Input | Rule |
@@ -78,6 +80,11 @@ vorp_score = vorp_base × applicable_scarcity_multiplier
 | Missing/degenerate signal | Contribute 0 for null, fewer than two observations or zero standard deviation |
 | Usage shares | Excluded because projections already include usage |
 | Scarcity eligibility | Only unrostered players with positive base VORP; everyone else uses 1.0 |
+| `w` | `ESPN_MARKET_WEIGHT`, default `0.0`. At 0 the market step is skipped and `vorp_score` is unchanged |
+| `start_pctile` | ESPN `percent_started` ranked within position (ties averaged), scaled to 0..1; 0.5 when a position has one known value. Each player's latest `espn_player_ownership` week at or before the target week, same season |
+| Missing ownership | `market_multiplier` = 1.0 |
+| Negative `vorp_score` | Divided by the multiplier, so a higher start% always raises the score |
+| Market in backtests | `season_replay --espn-market-weight` (default 0.0); replays never read the env var |
 
 :::tip[Predict the result]
 12 adjusted points minus an 8-point baseline gives 4 VORP, or 5.4 at maximum scarcity. A 6-point player stays at −2, even when the position is thin.
