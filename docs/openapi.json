@@ -1143,6 +1143,17 @@
       },
       "DraftPickSummary": {
         "properties": {
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ESPN's market signal for this player (latest week captured this season); null when ESPN has no row for them or player_id is null."
+          },
           "espn_player_id": {
             "anyOf": [
               {
@@ -1596,6 +1607,67 @@
         "title": "DraftStatusResponse",
         "type": "object"
       },
+      "EspnOwnership": {
+        "properties": {
+          "percent_bench": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Bench"
+          },
+          "percent_change": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Change"
+          },
+          "percent_owned": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Owned"
+          },
+          "percent_started": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Started"
+          },
+          "pos_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pos Rank"
+          }
+        },
+        "title": "EspnOwnership",
+        "type": "object"
+      },
       "ExcludedPlayer": {
         "properties": {
           "espn_id": {
@@ -1708,6 +1780,16 @@
             ],
             "title": "Bye Week"
           },
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "espn_id": {
             "title": "Espn Id",
             "type": "string"
@@ -1795,6 +1877,16 @@
               }
             ],
             "title": "Bye Week"
+          },
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "espn_id": {
             "title": "Espn Id",
@@ -3445,6 +3537,16 @@
             "title": "Deficit Flag",
             "type": "boolean"
           },
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "espn_id": {
             "title": "Espn Id",
             "type": "string"
@@ -3869,6 +3971,42 @@
           "name"
         ],
         "title": "OfferPlayer",
+        "type": "object"
+      },
+      "OfferPlayerWithEspn": {
+        "description": "Outgoing-offer players only. The incoming inbox shares OfferPlayer and its review token\nbinds what the proposer sent, so market data stays off it.",
+        "properties": {
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "espn_id",
+          "name"
+        ],
+        "title": "OfferPlayerWithEspn",
         "type": "object"
       },
       "OfferResolution": {
@@ -4342,6 +4480,16 @@
       },
       "PlayerSearchResult": {
         "properties": {
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "espn_id": {
             "anyOf": [
               {
@@ -4414,6 +4562,16 @@
       },
       "PlayerSummaryResponse": {
         "properties": {
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "espn_id": {
             "anyOf": [
               {
@@ -7380,6 +7538,16 @@
             "title": "Eligible Slots",
             "type": "array"
           },
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "espn_id": {
             "title": "Espn Id",
             "type": "string"
@@ -7687,7 +7855,7 @@
           },
           "incoming_players": {
             "items": {
-              "$ref": "#/components/schemas/OfferPlayer"
+              "$ref": "#/components/schemas/OfferPlayerWithEspn"
             },
             "title": "Incoming Players",
             "type": "array"
@@ -7739,7 +7907,7 @@
           },
           "outgoing_players": {
             "items": {
-              "$ref": "#/components/schemas/OfferPlayer"
+              "$ref": "#/components/schemas/OfferPlayerWithEspn"
             },
             "title": "Outgoing Players",
             "type": "array"
@@ -8254,6 +8422,16 @@
             ],
             "title": "Defense Matchup Multiplier"
           },
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "matchup_coefficient": {
             "anyOf": [
               {
@@ -8427,6 +8605,16 @@
               }
             ],
             "title": "Bye Week"
+          },
+          "espn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EspnOwnership"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "espn_id": {
             "anyOf": [

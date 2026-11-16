@@ -3,6 +3,7 @@ Player summary/search read logic, split out of src/api/players.py so the router 
 thin HTTP controller over this module doing the actual DB work.
 """
 from src.database import get_db_cursor
+from src.services.espn_ownership import load_latest_espn_ownership
 
 RECENT_NEWS_LIMIT = 5
 SEARCH_RESULT_LIMIT = 20
@@ -64,11 +65,13 @@ def search_players(query: str) -> list:
             LIMIT %s;
         """, (f"%{query}%", SEARCH_RESULT_LIMIT))
         rows = cursor.fetchall()
+        espn_by_player = load_latest_espn_ownership(cursor, [row[0] for row in rows])
 
     return [
         {
             "player_id": row[0], "espn_id": row[1], "name": row[2], "position": row[3], "team": row[4],
             "injury_status": row[5], "vorp_score": row[6], "projected_points": row[7],
+            "espn": espn_by_player.get(row[0]),
         }
         for row in rows
     ]
@@ -84,6 +87,7 @@ def get_player_summary(player_id: str) -> dict:
         if row is None:
             raise PlayerNotFoundError(f"Unknown player_id '{player_id}'.")
         recent_news = _recent_news(cursor, player_id, RECENT_NEWS_LIMIT)
+        espn = load_latest_espn_ownership(cursor, [player_id]).get(player_id)
 
     return {
         "player_id": row[0],
@@ -94,4 +98,5 @@ def get_player_summary(player_id: str) -> dict:
         "injury_status": row[5],
         "espn_id": row[6],
         "recent_news": recent_news,
+        "espn": espn,
     }

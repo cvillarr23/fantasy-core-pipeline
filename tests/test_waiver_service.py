@@ -6,6 +6,12 @@ import pytest
 from src.services import waiver_service
 
 
+@pytest.fixture(autouse=True)
+def _no_espn_ownership(monkeypatch):
+    """These tests feed the cursor fixed display rows; the ownership loader gets its own tests."""
+    monkeypatch.setattr(waiver_service, "load_espn_ownership", lambda *a, **k: {})
+
+
 @contextmanager
 def _fake_db_cursor(cursor):
     yield cursor
@@ -72,11 +78,33 @@ def test_compute_waiver_recommendations_sorted_by_vorp_delta_desc(monkeypatch):
         "injury_status": None,
         "net_vorp": 9.0,
         "bye_week": None,
+        "espn": None,
     }
     assert result["recommendations"][1]["bench_player"]["injury_status"] == "Questionable"
     assert result["recommendations"][0]["rumor_sentiment"] is None
     assert result["recommendations"][0]["rumor_confidence"] is None
     assert result["recommendations"][0]["rumor_suggested_action"] is None
+
+
+def test_display_attaches_espn_ownership_for_one_batched_lookup(monkeypatch):
+    from src.schemas.espn_ownership import EspnOwnership
+
+    calls = []
+
+    def fake_loader(cur, ids, season, week):
+        calls.append((sorted(ids), season, week))
+        return {"godwin": EspnOwnership(pos_rank=7, percent_owned=88.0, percent_started=70.0, percent_bench=18.0)}
+
+    monkeypatch.setattr(waiver_service, "load_espn_ownership", fake_loader)
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("jax_dst", "JAX", "Jacksonville Jaguars", "D/ST", "JAX", None),
+        ("godwin", "3116165", "Chris Godwin", "WR", "TB", None),
+    ]
+    display = waiver_service._load_player_display(cursor, {"jax_dst", "godwin"}, None, 2026, 3)
+    assert calls == [(["godwin", "jax_dst"], 2026, 3)]
+    assert display["godwin"]["espn"].percent_bench == 18.0
+    assert display["jax_dst"]["espn"] is None
 
 
 def test_cross_position_swap_keeps_each_players_default_position():

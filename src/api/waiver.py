@@ -10,6 +10,7 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from src.schemas.espn_ownership import EspnOwnership
 from src.services.waiver_service import WaiverInputsUnavailableError, compute_waiver_recommendations
 from src.services.free_agent_service import browse_free_agents
 
@@ -27,6 +28,7 @@ class FreeAgentPlayer(BaseModel):
     projected_points: Optional[float] = None
     vorp_score: Optional[float] = None
     bye_week: Optional[int] = None
+    espn: Optional[EspnOwnership] = None
 
 
 class FreeAgentEntry(FreeAgentPlayer):
@@ -73,6 +75,7 @@ class WaiverPlayerSummary(BaseModel):
     # Per-week VORP averaged over horizon_weeks (a bye week counts as replacement level).
     net_vorp: float
     bye_week: Optional[int] = None
+    espn: Optional[EspnOwnership] = None
 
 
 class WaiverLineupGain(BaseModel):

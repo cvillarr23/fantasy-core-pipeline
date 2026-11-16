@@ -11,6 +11,7 @@ from src.optimization.lineup_solver import (
     PREGAME_WINDOW_WEEKS,
     load_teams_playing,
 )
+from src.services.espn_ownership import load_espn_ownership
 from src.services.waiver_service import WaiverInputsUnavailableError
 
 
@@ -51,6 +52,17 @@ def _load_source(cursor, team_id, season, week):
             f"could not load the nflverse schedule for Season {season} Week {week}: {exc}"
         ) from exc
     return {"source_mode": "rolling_prior_weeks", "source_weeks": weeks}, teams_playing
+
+
+def _attach_espn(page: list, season: int, week: int) -> None:
+    """Set `espn` on each returned free agent and its bench player, from one batched query for
+    the page only (not the whole pool)."""
+    bench_players = [p["bench_player"] for p in page if p["bench_player"] is not None]
+    ids = [p["player_id"] for p in page + bench_players]
+    with get_db_cursor() as cursor:
+        espn_by_player = load_espn_ownership(cursor, ids, season, week)
+    for player in page + bench_players:
+        player["espn"] = espn_by_player.get(player["player_id"])
 
 
 def browse_free_agents(
@@ -156,11 +168,13 @@ def browse_free_agents(
             p["player_id"],
         )
     )
+    page = filtered[offset:] if limit is None else filtered[offset : offset + limit]
+    _attach_espn(page, season, week)
     return {
         "season": season,
         "week": week,
         # limit=None returns the whole sorted pool (the chat grounding trims it per position).
-        "free_agents": filtered[offset:] if limit is None else filtered[offset : offset + limit],
+        "free_agents": page,
         "total": len(filtered),
         "limit": limit,
         "offset": offset,

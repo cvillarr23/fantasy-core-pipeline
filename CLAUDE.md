@@ -90,6 +90,10 @@
   it is null unless it validates and matches the offer fingerprint, the row's teams and
   sides, and the `score` summary's timestamp, version, week and final score. See
   `docs/trade-inbox-api.md` for recovery and the worker contract.
+- Player payloads carry `espn: EspnOwnership | None` (`src/schemas/espn_ownership.py`), ESPN's market
+  signal. A service collects its player ids and calls `espn_ownership.load_espn_ownership` once (latest
+  row at or before the week, same season), never per player; no row means `null`. It is display-only,
+  so keep it out of review tokens and offer keys (the inbox's `OfferPlayer` has no `espn` on purpose).
 - Pydantic request/response models live in `src/schemas/<domain>.py`, not inline in the
   router. **Do not confuse this with `src/models.py`**, which holds only raw DB DDL string
   constants consumed by `run_migrations()` and has nothing to do with the API layer — a

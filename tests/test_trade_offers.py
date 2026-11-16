@@ -324,7 +324,8 @@ def test_list_filters_and_espn_names(client):
     row = staged()
     cursor.fetchall.side_effect = [
         [tuple(row[k] for k in service.ROW_COLUMNS)],
-        [("4259545", "Player Name")],
+        [("4259545", "Player Name", "p-4259545")],
+        [("p-4259545", 6, 75.0, 60.0, 1.5)],
     ]
     with patch.object(service, "get_db_cursor") as db:
         db.return_value.__enter__.return_value = cursor
@@ -338,8 +339,19 @@ def test_list_filters_and_espn_names(client):
     assert params == ["awaiting_approval", "123456789", 2026, 10, 2]
     assert "espn_id" in cursor.execute.call_args_list[1].args[0]
     offer = response.json()["offers"][0]
-    assert offer["incoming_players"][0] == {"espn_id": "4259545", "name": "Player Name"}
-    assert offer["incoming_players"][1] == {"espn_id": "-16021", "name": None}
+    assert offer["incoming_players"][0] == {
+        "espn_id": "4259545",
+        "name": "Player Name",
+        "espn": {
+            "pos_rank": 6, "percent_owned": 75.0, "percent_started": 60.0,
+            "percent_bench": 15.0, "percent_change": 1.5,
+        },
+    }
+    # No players row, so no ownership either.
+    assert offer["incoming_players"][1] == {"espn_id": "-16021", "name": None, "espn": None}
+    ownership_sql, ownership_params = cursor.execute.call_args_list[2].args
+    assert "espn_player_ownership" in ownership_sql
+    assert ownership_params == (["p-4259545"], 2026, 18)
     assert "screenshot_path" not in offer
     assert "evaluation" in offer and offer["evaluation"] is None
 

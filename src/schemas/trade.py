@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
+from src.schemas.espn_ownership import EspnOwnership
 from src.schemas.trade_score import TradeScore, TradeScoreRequest
 
 OfferStatus = Literal[
@@ -86,6 +87,13 @@ class OfferPlayer(BaseModel):
     name: str | None
 
 
+class OfferPlayerWithEspn(OfferPlayer):
+    """Outgoing-offer players only. The incoming inbox shares OfferPlayer and its review token
+    binds what the proposer sent, so market data stays off it."""
+
+    espn: EspnOwnership | None = None
+
+
 class ProposalTarget(BaseModel):
     team_id: str
     # Targets drawn from the precomputed trade-candidate set carry only team_id; the deficit
@@ -142,8 +150,8 @@ class TradeOffer(BaseModel):
     to_team_id: str | None = None
     incoming_player_ids: list[str] = Field(default_factory=list)
     outgoing_player_ids: list[str] = Field(default_factory=list)
-    incoming_players: list[OfferPlayer]
-    outgoing_players: list[OfferPlayer]
+    incoming_players: list[OfferPlayerWithEspn]
+    outgoing_players: list[OfferPlayerWithEspn]
     message: str | None = None
     drafted_message: str | None = None
     message_edited: bool = False

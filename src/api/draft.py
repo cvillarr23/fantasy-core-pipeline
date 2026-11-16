@@ -53,6 +53,8 @@ from kubernetes import client
 from pydantic import BaseModel, Field, field_validator
 
 from src.database import get_db_cursor, get_redis_client
+from src.schemas.espn_ownership import EspnOwnership
+from src.services.espn_ownership import load_espn_ownership
 from src.k8s_client import (
     K8S_NAMESPACE,
     K8S_REQUEST_TIMEOUT_SECONDS,
@@ -234,6 +236,7 @@ class DraftPickSummary(BaseModel):
     projected_points: Optional[float] = Field(None, description="Player's most recent weekly_stats.projected_points, same current-value caveat as vorp_score.")
     scarcity_multiplier: Optional[float] = Field(None, description="Player's most recent weekly_stats.scarcity_multiplier, same current-value caveat as vorp_score.")
     matchup_coefficient: Optional[float] = Field(None, description="Player's most recent weekly_stats.matchup_coefficient, same current-value caveat as vorp_score.")
+    espn: Optional[EspnOwnership] = Field(None, description="ESPN's market signal for this player (latest week captured this season); null when ESPN has no row for them or player_id is null.")
 
 
 class TeamAggregate(BaseModel):
@@ -1093,6 +1096,27 @@ def _is_stale(job_state: str, recommendation: dict) -> bool:
         return True
 
 
+# A draft happens before any week is played; week 18 makes the loader take the newest row of the season.
+DRAFT_OWNERSHIP_WEEK = 18
+
+
+def _attach_espn_ownership(cursor, season: int, recent_picks: list, team_rosters: dict, recommendation: dict) -> None:
+    """Sets `espn` on every pick, ranked candidate and the ESPN suggestion, from one batched
+    query. Applied on read because the market signal moves during a draft."""
+    candidates = recommendation.get("top_candidates") or []
+    suggestion = recommendation.get("espn_suggestion")
+    targets = (
+        recent_picks
+        + [pick for picks in team_rosters.values() for pick in picks]
+        + [c for c in candidates if isinstance(c, dict)]
+        + ([suggestion] if suggestion else [])
+    )
+    ownership = load_espn_ownership(cursor, [t.get("player_id") for t in targets], season, DRAFT_OWNERSHIP_WEEK)
+    for target in targets:
+        espn = ownership.get(target.get("player_id"))
+        target["espn"] = espn.model_dump() if espn is not None else None
+
+
 def _resolve_espn_suggestion(cursor, staging: dict) -> Optional[dict]:
     """Joins fantasy-browser-worker's scraped ESPN suggested-pick (issue #80) against our own
     players/VORP data - the "API half" of CORE-19. staging is
@@ -1230,6 +1254,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
                 espn_suggestion = _resolve_espn_suggestion(cursor, espn_suggestion_staging)
                 if espn_suggestion is not None:
                     recommendation["espn_suggestion"] = espn_suggestion
+            _attach_espn_ownership(cursor, season, recent_picks, team_rosters, recommendation)
     except Exception as e:
         logger.error(f"Failed to read draft picks/slots/mode for league {league_id}: {e}")
         db_ok = False

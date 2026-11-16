@@ -10,6 +10,7 @@ from statistics import mean, pstdev
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 
 from src.database import get_db_cursor
+from src.services.espn_ownership import load_espn_ownership
 from src.nfl_byes import bye_weeks_or_empty
 from src.optimization.bye_outlook import attach_bye_outlooks
 from src.espn_positions import DEFAULT_POSITIONS
@@ -138,6 +139,12 @@ def _schedule_events(raw, teams, periods):
     return events
 
 
+def _espn_payload(espn_ownership, player_id):
+    """The player's market signal as a plain dict (the context is cached), or None."""
+    espn = (espn_ownership or {}).get(player_id)
+    return espn.model_dump() if espn is not None else None
+
+
 def shape_trade_context(
     raw,
     identities,
@@ -148,6 +155,7 @@ def shape_trade_context(
     horizon,
     fetched_at,
     stored_events=None,
+    espn_ownership=None,
 ):
     """Shape current ownership with schedule/history evidence and no future leakage.
 
@@ -237,6 +245,7 @@ def shape_trade_context(
                     ],
                     "injury_status": player.get("injuryStatus"),
                     "metrics": player_metrics,
+                    "espn": _espn_payload(espn_ownership, player_id),
                 }
             )
         teams[team_id]["roster"] = roster
@@ -403,7 +412,7 @@ def get_league_trade_context(
             week + horizon - 1,
             max(week for weeks in periods.values() for week in weeks),
         )
-        identities, metrics = {}, {}
+        identities, metrics, espn_ownership = {}, {}, {}
         if espn_ids:
             with get_db_cursor() as cursor:
                 cursor.execute(
@@ -432,6 +441,9 @@ def get_league_trade_context(
                         }
                         for player_id, target_week, vorp, projected in cursor.fetchall()
                     }
+                espn_ownership = load_espn_ownership(
+                    cursor, list(identities.values()), season, week
+                )
         context = shape_trade_context(
             raw,
             identities,
@@ -442,6 +454,7 @@ def get_league_trade_context(
             horizon,
             fetched_at,
             stored_events=load_stored_events(league_id, season),
+            espn_ownership=espn_ownership,
         )
         # Both teams' NFL byes and bye-crunch weeks, so trade proposals and negotiations
         # can target a partner whose byes complement ours.

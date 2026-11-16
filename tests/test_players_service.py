@@ -4,7 +4,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.schemas.espn_ownership import EspnOwnership
 from src.services import players_service
+
+
+ESPN = EspnOwnership(pos_rank=12, percent_owned=91.0, percent_started=80.0, percent_bench=11.0, percent_change=3.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_espn_ownership(monkeypatch):
+    """Cursor mocks here return fixed rows; the loader has its own tests."""
+    monkeypatch.setattr(players_service, "load_latest_espn_ownership", lambda *a, **k: {})
 
 
 @contextmanager
@@ -79,3 +89,27 @@ def test_search_players_success():
     # No espn_id resolved yet - the UI must see this and disable manual pick
     # rather than fall back to the internal id, which would draft a different, real player.
     assert results[1]["espn_id"] is None
+
+
+def test_summary_and_search_carry_espn_ownership_or_none(monkeypatch):
+    seen = []
+
+    def fake_loader(cur, ids):
+        seen.append(list(ids))
+        return {"p1": ESPN}
+
+    monkeypatch.setattr(players_service, "load_latest_espn_ownership", fake_loader)
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None, "1")
+    cursor.fetchall.return_value = []
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        assert players_service.get_player_summary("p1")["espn"] == ESPN
+
+    cursor.fetchall.return_value = [
+        ("p1", "1", "Some Back", "RB", "KC", None, 1.0, 2.0),
+        ("p2", None, "Backup", "RB", "SF", None, None, None),
+    ]
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        results = players_service.search_players("S")
+    assert results[0]["espn"] == ESPN and results[1]["espn"] is None
+    assert seen == [["p1"], ["p1", "p2"]]

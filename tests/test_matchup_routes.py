@@ -181,6 +181,8 @@ def test_roster_current_week_projections_with_real_service(client, monkeypatch):
     cursor.fetchall.side_effect = [
         [("1", 4.0, 15.5), ("2", None, 9.2), ("3", None, None),
          ("4", None, None), ("6", 0.0, 0.0)],
+        [("p1", "1"), ("p2", "2")],  # roster player_id -> espn_id
+        [("p1", 5, 90.0, 75.0, 1.0)],  # ownership: only player 1 has a row
         [],  # rumor signals
     ]
     with patch("src.services.matchup_service.build_league", return_value=league), \
@@ -196,5 +198,11 @@ def test_roster_current_week_projections_with_real_service(client, monkeypatch):
     assert [p["projected_points"] for p in body["starters"]] == [15.5, None]
     assert [p["projected_points"] for p in body["bench"]] == [9.2, None, None, 0.0]
     assert body["bench"][0]["net_vorp"] is None
+    assert body["starters"][0]["espn"] == {
+        "pos_rank": 5, "percent_owned": 90.0, "percent_started": 75.0,
+        "percent_bench": 15.0, "percent_change": 1.0,
+    }
+    assert body["starters"][1]["espn"] is None
+    assert all(p["espn"] is None for p in body["bench"])
     assert cursor.execute.call_args_list[0].args[1] == (2026, 2, "8")
     league.box_scores.assert_not_called()

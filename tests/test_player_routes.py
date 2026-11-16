@@ -2,6 +2,20 @@ from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from src.schemas.espn_ownership import EspnOwnership
+from src.services import players_service
+
+
+ESPN = EspnOwnership(pos_rank=12, percent_owned=91.0, percent_started=80.0, percent_bench=11.0, percent_change=3.0)
+ESPN_JSON = {"pos_rank": 12, "percent_owned": 91.0, "percent_started": 80.0, "percent_bench": 11.0, "percent_change": 3.0}
+
+
+@pytest.fixture(autouse=True)
+def _no_espn_ownership(monkeypatch):
+    monkeypatch.setattr(players_service, "load_latest_espn_ownership", lambda *a, **k: {})
+
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
@@ -126,3 +140,21 @@ def test_search_players_db_error_returns_500(client):
         response = client.get("/v1/players/search?q=Some")
 
     assert response.status_code == 500
+
+
+def test_player_payloads_serialize_espn_ownership_and_null(client, monkeypatch):
+    monkeypatch.setattr(players_service, "load_latest_espn_ownership", lambda cur, ids: {"p1": ESPN})
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None, None)
+    mock_cursor.fetchall.return_value = []
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        assert client.get("/v1/players/p1/summary").json()["espn"] == ESPN_JSON
+
+    mock_cursor.fetchall.return_value = [
+        ("p1", "e1", "Some Back", "RB", "KC", None, 1.0, 2.0),
+        ("p2", None, "Some Backup", "RB", "SF", None, None, None),
+    ]
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)):
+        body = client.get("/v1/players/search?q=Some").json()
+    assert body[0]["espn"] == ESPN_JSON
+    assert body[1]["espn"] is None

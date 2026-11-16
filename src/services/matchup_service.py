@@ -8,6 +8,7 @@ import os
 import requests
 
 from src.database import get_db_cursor
+from src.services.espn_ownership import load_espn_ownership
 from src.ingestion.sync_league import build_league
 from src.ir_eligibility import lineup_ir_hints, load_lineup_slot_counts_row, open_ir_slots
 from src.nfl_byes import bye_week_for, bye_weeks_or_empty
@@ -100,6 +101,29 @@ def _load_weekly_metrics_by_espn_id(season: int, week: int, team_id: str) -> dic
             espn_id: {"net_vorp": vorp, "projected_points": projected_points}
             for espn_id, vorp, projected_points in cursor.fetchall()
         }
+
+
+def _load_espn_ownership_by_espn_id(season: int, week: int, team_id: str) -> dict:
+    """espn_id -> EspnOwnership for every rostered player with a market-signal row."""
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT p.player_id, p.espn_id
+            FROM league_rosters r
+            JOIN players p ON r.player_id = p.player_id
+            WHERE r.team_id = %s AND p.espn_id IS NOT NULL;
+            """,
+            (team_id,),
+        )
+        espn_id_by_player = dict(cursor.fetchall())
+        ownership = load_espn_ownership(cursor, list(espn_id_by_player), season, week)
+    return {espn_id_by_player[pid]: espn for pid, espn in ownership.items()}
+
+
+def _apply_espn_ownership(player_lines: list, ownership_by_espn_id: dict) -> None:
+    """Mutates player_lines in place; `espn` stays None for a player with no market-signal row."""
+    for line in player_lines:
+        line["espn"] = ownership_by_espn_id.get(line["espn_id"])
 
 
 def _apply_weekly_metrics(player_lines: list, metrics_by_espn_id: dict) -> None:
@@ -382,6 +406,10 @@ def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     metrics_by_espn_id = _load_weekly_metrics_by_espn_id(season, week, our_team_id)
     _apply_weekly_metrics(starters, metrics_by_espn_id)
     _apply_weekly_metrics(bench, metrics_by_espn_id)
+
+    ownership_by_espn_id = _load_espn_ownership_by_espn_id(season, week, our_team_id)
+    _apply_espn_ownership(starters, ownership_by_espn_id)
+    _apply_espn_ownership(bench, ownership_by_espn_id)
 
     rumor_signal_by_espn_id = _load_rumor_signal_by_espn_id(our_team_id)
     _apply_rumor_signal(starters, rumor_signal_by_espn_id)

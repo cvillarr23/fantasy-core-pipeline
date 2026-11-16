@@ -1,6 +1,20 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_espn_ownership(monkeypatch):
+    """These tests feed the cursor fixed display rows; the ownership loader gets its own tests."""
+    monkeypatch.setattr(_waiver_service(), "load_espn_ownership", lambda *a, **k: {})
+
+
+def _waiver_service():
+    from src.services import waiver_service
+
+    return waiver_service
+
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
@@ -58,6 +72,35 @@ def test_get_waiver_recommendations_success(client, monkeypatch):
     assert rec["rumor_sentiment"] is None
     assert body["source_mode"] == "target_week"
     assert body["source_weeks"] == [3]
+
+
+def test_waiver_players_carry_espn_ownership_and_null_when_missing(client, monkeypatch):
+    from src.schemas.espn_ownership import EspnOwnership
+
+    _mock_waiver_strategy_calls(
+        monkeypatch,
+        [{"position": "RB", "add_player_id": "rb_fa", "drop_player_id": "rb_bench",
+          "add_vorp_score": 8.0, "drop_vorp_score": 2.0}],
+    )
+    monkeypatch.setattr(
+        _waiver_service(), "load_espn_ownership",
+        lambda *a, **k: {"rb_fa": EspnOwnership(pos_rank=5, percent_owned=70.0, percent_started=50.0,
+                                                  percent_bench=20.0, percent_change=-1.5)},
+    )
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ("rb_fa", "101", "FA RB", "RB", "SEA", None),
+        ("rb_bench", "102", "Bench RB", "RB", "NYJ", None),
+    ]
+    with patch("src.services.waiver_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        body = client.get("/v1/waiver/recommendations?season=2026&week=3&horizon=1").json()
+
+    rec = body["recommendations"][0]
+    assert rec["free_agent"]["espn"] == {
+        "pos_rank": 5, "percent_owned": 70.0, "percent_started": 50.0,
+        "percent_bench": 20.0, "percent_change": -1.5,
+    }
+    assert rec["bench_player"]["espn"] is None
 
 
 def test_cross_position_swap_returns_each_players_default_position(client, monkeypatch):
@@ -149,7 +192,7 @@ def test_get_waiver_recommendations_serializes_ir_and_add(client, monkeypatch):
     assert body["open_ir_slots"] == 1
     assert body["ir_moves"] == [{"action": "move_to_ir", "position": "RB", "player": {
         "espn_id": "102", "name": "Hurt RB", "position": "RB", "pro_team": "NYJ", "injury_status": "IR", "net_vorp": -1.0,
-        "bye_week": None,
+        "bye_week": None, "espn": None,
     }}]
 
 
