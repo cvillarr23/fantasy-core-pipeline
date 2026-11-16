@@ -2,7 +2,7 @@
 Dynamic VORP (Value Over Replacement Player) matrix evaluator (CORE-05).
 
 Pipeline: matchup coefficient -> FLEX allocation -> replacement baselines -> VORP base ->
-scarcity multipliers -> persist. Projections are scaled by the matchup coefficient before
+scarcity multipliers -> ESPN market multiplier -> persist. Projections are scaled by the matchup coefficient before
 baselines are computed, per the issue's spec, so a replacement-level player's own matchup
 already factors into where the replacement line sits.
 """
@@ -35,6 +35,10 @@ W_DEFENSE = 0.05
 # unrelated, own-team-signal-based multiplier. This bound is #93's opponent-defense-based
 # defense_matchup_multiplier.
 DEFENSE_MATCHUP_BOUNDS = (0.9, 1.1)
+# Weight of ESPN's percent-started percentile in vorp_score. 0.0 (the default) skips the step
+# entirely, so vorp_score is bit-identical to the pre-market pipeline until it is tuned.
+# Unrelated to W_MARKET above, which weights Vegas implied team totals.
+ESPN_MARKET_WEIGHT = float(os.getenv("ESPN_MARKET_WEIGHT", "0.0"))
 FLEX_DEFAULT_WEIGHTS = {"RB": 0.5, "WR": 0.4, "TE": 0.1}
 SCARCITY_DEPTH_FACTOR = 0.5
 SCARCITY_MAX_MULTIPLIER = 1.35
@@ -285,6 +289,71 @@ def apply_scarcity(df: pl.DataFrame, multipliers: dict) -> pl.DataFrame:
     )
 
 
+def load_market_percent_started(cursor, season: int, week: int) -> pl.DataFrame:
+    """Each player's percent_started from his latest espn_player_ownership snapshot at or
+    before the target week of the same season. Rows with an unknown start% are left out, so
+    those players fall back to a neutral market multiplier."""
+    cursor.execute("""
+        SELECT player_id, percent_started FROM (
+            SELECT DISTINCT ON (player_id) player_id, percent_started
+            FROM espn_player_ownership
+            WHERE season = %s AND week <= %s
+            ORDER BY player_id, week DESC
+        ) latest
+        WHERE percent_started IS NOT NULL;
+    """, (season, week))
+    rows = cursor.fetchall()
+    schema = {"player_id": pl.Utf8, "percent_started": pl.Float64}
+    return pl.DataFrame(rows, schema=schema, orient="row") if rows else pl.DataFrame(schema=schema)
+
+
+def _position_percentile() -> pl.Expr:
+    """percent_started rank within position scaled to [0, 1] (ties share their average rank);
+    0.5 for a position with only one known start%. Null where start% is unknown."""
+    known = pl.col("percent_started").is_not_null()
+    rank = pl.col("percent_started").rank(method="average").over("position")
+    count = known.sum().over("position")
+    return (
+        pl.when(~known).then(None)
+        .when(count <= 1).then(0.5)
+        .otherwise((rank - 1) / (count - 1))
+    )
+
+
+def compute_market_multiplier(df: pl.DataFrame, ownership: pl.DataFrame, weight: float) -> pl.DataFrame:
+    """Adds market_multiplier = 1 + weight * (pctile - 0.5), clipped to
+    [1 - weight/2, 1 + weight/2], where pctile ranks ESPN percent_started within position.
+    A player with no ownership data gets 1.0."""
+    lower, upper = 1 - weight / 2, 1 + weight / 2
+    joined = df.join(ownership, on="player_id", how="left")
+    return joined.with_columns(
+        _position_percentile().alias("_market_pctile")
+    ).with_columns(
+        pl.when(pl.col("_market_pctile").is_null())
+        .then(1.0)
+        .otherwise((1 + weight * (pl.col("_market_pctile") - 0.5)).clip(lower, upper))
+        .alias("market_multiplier")
+    ).drop(["percent_started", "_market_pctile"])
+
+
+def _market_adjusted_vorp() -> pl.Expr:
+    """vorp_score is signed, so a multiplier above 1 would push a below-replacement player
+    further down. Dividing negative scores keeps the direction: a higher start% always
+    raises the score, a lower one always lowers it."""
+    return (
+        pl.when(pl.col("vorp_score") < 0)
+        .then(pl.col("vorp_score") / pl.col("market_multiplier"))
+        .otherwise(pl.col("vorp_score") * pl.col("market_multiplier"))
+    )
+
+
+def apply_market_multiplier(df: pl.DataFrame, ownership: pl.DataFrame, weight: float) -> pl.DataFrame:
+    """Blends ESPN start% into vorp_score as a market prior. Every consumer of
+    weekly_stats.vorp_score (waivers, free agents, trades, lineup) picks it up from there."""
+    df = compute_market_multiplier(df, ownership, weight)
+    return df.with_columns(_market_adjusted_vorp().alias("vorp_score"))
+
+
 def compute_defense_matchup_multiplier(df: pl.DataFrame) -> pl.DataFrame:
     """
     Opponent-defense-strength multiplier (#93), clamped to DEFENSE_MATCHUP_BOUNDS
@@ -347,9 +416,21 @@ def load_roster_positions(cursor) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
 
 
-def run_vorp_pipeline(season: int, week: int) -> int:
+def _apply_market_step(conn, df: pl.DataFrame, season: int, week: int, weight: float) -> pl.DataFrame:
+    with conn.cursor() as cursor:
+        ownership = load_market_percent_started(cursor, season, week)
+    df = apply_market_multiplier(df, ownership, weight)
+    adjusted = df.filter(pl.col("market_multiplier") != 1.0).height
+    logger.info(f"ESPN market weight {weight}: {adjusted} of {df.height} row(s) adjusted.")
+    return df
+
+
+def run_vorp_pipeline(season: int, week: int, market_weight: float | None = None) -> int:
     """Orchestrates load -> coefficient -> flex -> baselines -> vorp_base -> scarcity ->
-    persist, inside one connection."""
+    market -> persist, inside one connection. market_weight defaults to ESPN_MARKET_WEIGHT;
+    the backtest passes its own."""
+    if market_weight is None:
+        market_weight = ESPN_MARKET_WEIGHT
     logger.info(f"Running dynamic VORP matrix pipeline for season {season} week {week}...")
 
     with tracer.start_as_current_span("vorp_pipeline.run", attributes={"season": season, "week": week}):
@@ -407,6 +488,10 @@ def run_vorp_pipeline(season: int, week: int) -> int:
                 df = compute_vorp(df, baselines)
                 multipliers = compute_scarcity_multipliers(df, rank_at)
                 df = apply_scarcity(df, multipliers)
+
+            if market_weight != 0:
+                with tracer.start_as_current_span("vorp_pipeline.market", attributes={"weight": market_weight}):
+                    df = _apply_market_step(conn, df, season, week, market_weight)
 
             with tracer.start_as_current_span("vorp_pipeline.defense_matchup"):
                 # Off by default: the persisted multiplier is a real NULL (not 1.0) when

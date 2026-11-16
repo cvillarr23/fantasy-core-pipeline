@@ -195,3 +195,20 @@ def test_run_week_returns_lineup_waiver_and_static_points():
     assert result["lineup"] == {"our_points": 1.0, "week": 5}
     assert result["our_waiver_points"] == 15.0  # players 1 and 2 on current roster
     assert result["static_points"] == 10.0  # only player 1 on static roster
+
+
+def test_run_week_passes_market_weight_to_vorp_pipeline():
+    mock_conn = MagicMock()
+    with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline") as vorp, \
+         patch.object(season_replay.lineup_solver, "load_roster_pool", return_value=[]), \
+         patch.object(season_replay.lineup_solver, "build_and_solve_lineup", return_value=[]), \
+         patch.object(season_replay, "persist_starters"), \
+         patch.object(season_replay.waiver_strategy, "run_weekly_waivers"), \
+         patch.object(season_replay, "load_current_roster_ids", return_value=set()), \
+         patch.object(season_replay, "reveal_week_actuals"), \
+         patch.object(season_replay.scoring, "score_lineup_week", return_value={}):
+        season_replay.run_week(mock_conn, 2023, 5, {}, naive_starters=[], static_roster_ids=set())
+        season_replay.run_week(mock_conn, 2023, 6, {}, naive_starters=[], static_roster_ids=set(), market_weight=0.3)
+
+    assert vorp.call_args_list[0].kwargs == {"season": 2023, "week": 5, "market_weight": 0.0}
+    assert vorp.call_args_list[1].kwargs == {"season": 2023, "week": 6, "market_weight": 0.3}

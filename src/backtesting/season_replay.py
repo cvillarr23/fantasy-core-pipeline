@@ -145,11 +145,15 @@ def reveal_week_actuals(conn, season: int, week: int, actuals_for_week: dict) ->
         )
 
 
-def run_week(conn, season: int, week: int, actuals_for_week: dict, naive_starters: list, static_roster_ids: set) -> dict:
+def run_week(
+    conn, season: int, week: int, actuals_for_week: dict, naive_starters: list, static_roster_ids: set,
+    market_weight: float = 0.0,
+) -> dict:
     """One week's decision phase (VORP -> lineup solve -> waivers) followed by the reveal
     phase (write actuals, then score). See module docstring for the no-lookahead ordering
-    this function exists to enforce."""
-    vorp_matrix.run_vorp_pipeline(season=season, week=week)
+    this function exists to enforce. market_weight is vorp_matrix's ESPN market weight,
+    passed explicitly so a replay never inherits the ESPN_MARKET_WEIGHT env var."""
+    vorp_matrix.run_vorp_pipeline(season=season, week=week, market_weight=market_weight)
 
     with conn.cursor() as cursor:
         roster_pool = lineup_solver.load_roster_pool(cursor, draft_simulator.OUR_TEAM_ID, season, week)
@@ -176,7 +180,10 @@ def run_week(conn, season: int, week: int, actuals_for_week: dict, naive_starter
     return {"lineup": lineup_record, "our_waiver_points": our_waiver_points, "static_points": static_points}
 
 
-def run_season_replay(season: int, weeks=None, rounds: Optional[int] = None, out_dir: str = report.DEFAULT_OUTPUT_ROOT) -> dict:
+def run_season_replay(
+    season: int, weeks=None, rounds: Optional[int] = None, out_dir: str = report.DEFAULT_OUTPUT_ROOT,
+    market_weight: float = 0.0,
+) -> dict:
     weeks = list(weeks) if weeks is not None else list(default_weeks(season))
     rounds = rounds if rounds is not None else draft_simulator.DEFAULT_ROUNDS
 
@@ -228,7 +235,10 @@ def run_season_replay(season: int, weeks=None, rounds: Optional[int] = None, out
         static_weekly_points = []
         for week in weeks:
             with get_db_connection() as conn:
-                week_result = run_week(conn, season, week, actuals_by_week.get(week, {}), naive_starters, static_roster_ids)
+                week_result = run_week(
+                    conn, season, week, actuals_by_week.get(week, {}), naive_starters, static_roster_ids,
+                    market_weight=market_weight,
+                )
             weekly_lineup_records.append(week_result["lineup"])
             our_weekly_waiver_points.append(week_result["our_waiver_points"])
             static_weekly_points.append(week_result["static_points"])
@@ -254,5 +264,9 @@ def run_season_replay(season: int, weeks=None, rounds: Optional[int] = None, out
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay a historical season through the fantasy pipeline's decision logic.")
     parser.add_argument("--season", type=int, required=True)
+    parser.add_argument(
+        "--espn-market-weight", type=float, default=0.0,
+        help="vorp_matrix's ESPN start%% weight for this replay (default 0.0, no market prior).",
+    )
     args = parser.parse_args()
-    run_season_replay(season=args.season)
+    run_season_replay(season=args.season, market_weight=args.espn_market_weight)
