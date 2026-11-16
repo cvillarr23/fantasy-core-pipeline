@@ -201,6 +201,11 @@ def postgres(monkeypatch):
                 player_id TEXT, season INT, week INT, vorp_score DOUBLE PRECISION,
                 projected_points DOUBLE PRECISION, PRIMARY KEY (player_id, season, week)
             );
+            CREATE TEMP TABLE espn_player_ownership (
+                player_id TEXT, season INT, week INT, percent_owned REAL,
+                percent_started REAL, percent_change REAL, pos_rank INT,
+                PRIMARY KEY (player_id, season, week)
+            );
         """
         )
 
@@ -262,6 +267,16 @@ def test_postgres_full_pool_ownership_metrics_and_prior_means(postgres):
                 ("fa1", 2025, 3, 100.0, 100.0),
             ],
         )
+        cursor.executemany(
+            "INSERT INTO espn_player_ownership VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            [
+                ("fa1", 2026, 2, 10.0, 5.0, 0.0, 30),
+                ("fa1", 2026, 3, 60.0, 45.0, 2.5, 4),
+                ("fa1", 2026, 5, 99.0, 99.0, 9.0, 1),
+                ("fa1", 2025, 3, 80.0, 70.0, 1.0, 2),
+                ("bench", 2026, 3, 30.0, None, None, 20),
+            ],
+        )
     result = service.browse_free_agents(2026, 4)
     assert result["source_weeks"] == [2, 3]
     assert result["total"] == 4
@@ -273,6 +288,10 @@ def test_postgres_full_pool_ownership_metrics_and_prior_means(postgres):
     assert agents["fa1"]["bench_player"]["player_id"] == "bench"
     assert agents["fa1"]["bench_player"]["injury_status"] == "OUT"
     assert agents["fa2"]["vorp_delta"] == -3.0
+    # Latest week <= 4 this season (week 3), not a later week or another season.
+    assert (agents["fa1"]["espn"].pos_rank, agents["fa1"]["espn"].percent_bench) == (4, 15.0)
+    assert agents["fa1"]["bench_player"]["espn"].percent_bench is None
+    assert agents["fa2"]["espn"] is None
     assert agents["bye"]["vorp_score"] is None
     assert agents["unknown"]["vorp_score"] is None
     with postgres.cursor() as cursor:
