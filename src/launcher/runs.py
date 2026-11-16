@@ -289,11 +289,17 @@ class Runs:
     ):
         """Ends a launched run. Without `force` it only fills in a row the process itself
         left `running` (it crashed or never adopted RUN_ID), keeping what run_scope wrote.
+
+        With `force` it may override a final status the process wrote, but keeps that row's
+        `finished_at`: the process knows when it ended, and the watcher only notices up to a
+        tick later, which would inflate the run's duration.
         """
         guard, guard_params = _finish_guard(force, expected_attempt)
         self.c.execute(
-            """UPDATE run_log SET status=%s, end_reason=%s,
-            error=COALESCE(%s,error), finished_at=now() WHERE id=%s"""
+            """UPDATE run_log SET status=%s, end_reason=%s, error=COALESCE(%s,error),
+            finished_at=CASE WHEN status='running' THEN now()
+                ELSE COALESCE(finished_at, now()) END
+            WHERE id=%s"""
             + guard,
             (status, end_reason, error, run_id, *guard_params),
         )
