@@ -104,6 +104,7 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | Method | Path | Purpose | `X-API-Key` | Publishes to |
 |---|---|---|---|---|
 | `GET` | `/v1/jobs` | List catalog jobs and chains, including overrides and latest runs. | No |  |
+| `GET` | `/v1/jobs/resource-suggestions` | Suggest each job's catalog resources from its runs' measured CPU and memory. | No |  |
 | `DELETE` | `/v1/jobs/{name}/pause` | Remove a job or chain pause. | Yes |  |
 | `PUT` | `/v1/jobs/{name}/pause` | Pause a catalog job or chain until a time, or indefinitely. | Yes |  |
 | `POST` | `/v1/jobs/{name}/runs` | Queue a catalog job run for the launcher. | Yes | `job_runs` |

@@ -18,7 +18,7 @@ from src.launcher.consumer import overlap_refuses
 from src.launcher.publish import publish_run
 from src.launcher.runs import Runs
 from src.schemas.jobs import JobsResponse, LauncherHealthResponse
-from src.services import run_log_service
+from src.services import resource_usage_service, run_log_service
 
 
 class CatalogUnavailableError(Exception):
@@ -93,6 +93,11 @@ def list_jobs() -> JobsResponse:
         for name, chain in catalog.chains.items()
     ]
     return JobsResponse(jobs=jobs, chains=chains)
+
+
+def resource_suggestions(days: int, min_runs: int) -> dict[str, Any]:
+    """Each catalog job's measured usage and suggested `resources`."""
+    return resource_usage_service.suggest_resources(_catalog(), days, min_runs)
 
 
 def _last_runs(names: list[str]) -> dict[str, dict[str, Any]]:

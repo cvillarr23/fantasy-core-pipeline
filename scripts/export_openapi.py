@@ -108,6 +108,7 @@ DESCRIPTIONS = {
     "GET /v1/activity/jobs": "Latest run and recent failure count per job, plus dead-letter queue depths.",
     "GET /v1/activity/trace": "Trace an article, rumor evaluation or move through the rumor pipeline.",
     "GET /v1/jobs": "List catalog jobs and chains, including overrides and latest runs.",
+    "GET /v1/jobs/resource-suggestions": "Suggest each job's catalog resources from its runs' measured CPU and memory.",
     "GET /v1/launcher/health": "Show launcher heartbeat age, queue depths and run counts.",
     "POST /v1/jobs/{name}/runs": "Queue a catalog job run for the launcher.",
     "POST /v1/runs/{identity}/cancel": "Cancel a queued or running launcher run.",

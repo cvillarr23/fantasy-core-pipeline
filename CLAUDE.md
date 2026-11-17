@@ -589,5 +589,14 @@
   parent and siblings. Cancelling the parent cancels its children. `projections-refresh` fans
   out `week_offset` 0..3 (`draft_prep_refresh --week-offset`); without the flag it still
   runs the whole horizon in order.
+- Per-run usage: a launcher-adopted run records `summary.resources` itself as it finishes
+  (`src/run_usage.py`, called from `run_scope`; the worker's `db/run_log.js` mirrors it for node
+  jobs). It isn't read from Prometheus because most pods live 2-10s, under one cAdvisor scrape.
+  A pod run reads its container's cgroup v2 files (`cpu.stat`, `memory.peak`, `cpu.max`,
+  `memory.max`), which count child processes too. The inline runner sets `RUN_EXECUTOR=inline`,
+  because an inline run shares the launcher's cgroup, so those runs use `getrusage`. An API
+  request's scope never measures, since its process is shared. `resource_usage_service`
+  (`GET /v1/jobs/resource-suggestions`, `python -m src.cli jobs resources`) turns successful
+  pod runs into suggested catalog `resources`. Its rules live in that module's docstring.
 - `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
   it gets no `chain_root_id`, so it never starts downstream steps.

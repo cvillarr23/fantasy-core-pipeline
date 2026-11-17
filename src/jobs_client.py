@@ -53,6 +53,10 @@ def unpause_job(name: str) -> dict:
     return _request("DELETE", f"/v1/jobs/{_seg(name)}/pause", authenticated=True)
 
 
+def resource_suggestions(days: int = 30, min_runs: int = 5) -> dict:
+    return _request("GET", f"/v1/jobs/resource-suggestions?days={days}&min_runs={min_runs}")
+
+
 def _seg(value: str) -> str:
     return quote(value, safe="")
 

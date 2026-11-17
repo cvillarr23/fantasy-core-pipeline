@@ -295,3 +295,34 @@ def test_runs_list_filters_by_every_trigger_type(client, trigger):
 
 def test_runs_list_rejects_an_unknown_trigger(client):
     assert _listed_trigger(client, "cron") == (422, None)
+
+
+def test_adopted_run_records_its_resource_usage(recorded, monkeypatch):
+    monkeypatch.setenv("RUN_ID", "launcher-run")
+    monkeypatch.setenv("RUN_ATTEMPT", "3")
+    measured = []
+
+    def measure(attempt, wall_seconds):
+        measured.append(attempt)
+        return {"cpu_seconds": 1.5, "attempt": attempt}
+
+    with (
+        patch.object(run_log, "adopt_run"),
+        patch.object(run_log, "measure_run_usage", side_effect=measure),
+    ):
+        with run_log.run_scope("sync_rumors"):
+            with run_log.run_scope("child"):
+                pass
+    child_summary, outer_summary = (call[3] for call in recorded["finish"])
+    assert outer_summary["resources"] == {"cpu_seconds": 1.5, "attempt": 3}
+    assert "resources" not in child_summary
+    assert measured == [3]
+
+
+def test_unadopted_run_records_no_usage(recorded, monkeypatch):
+    monkeypatch.delenv("RUN_ID", raising=False)
+    with patch.object(run_log, "measure_run_usage") as measure:
+        with run_log.run_scope("api_request"):
+            pass
+    measure.assert_not_called()
+    assert "resources" not in recorded["finish"][0][3]

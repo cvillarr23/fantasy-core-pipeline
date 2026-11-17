@@ -1,6 +1,6 @@
 """Thin REST controller for unified launcher jobs and runs."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from src.api.routes import require_trigger_api_key
 from src.schemas.jobs import (
@@ -9,6 +9,7 @@ from src.schemas.jobs import (
     LauncherHealthResponse,
     PauseRequest,
     PauseResponse,
+    ResourceSuggestionsResponse,
     RunStartResponse,
     StartRunRequest,
     UnpauseResponse,
@@ -51,6 +52,16 @@ def _user(request: Request) -> str:
 @jobs_router.get("/jobs", response_model=JobsResponse)
 def get_jobs():
     return jobs_service.list_jobs()
+
+
+@jobs_router.get("/jobs/resource-suggestions", response_model=ResourceSuggestionsResponse)
+def get_resource_suggestions(
+    days: int = Query(30, ge=1, le=90), min_runs: int = Query(5, ge=1, le=1000)
+):
+    try:
+        return jobs_service.resource_suggestions(days, min_runs)
+    except Exception as error:
+        _raise_http(error)
 
 
 @jobs_router.get("/launcher/health", response_model=LauncherHealthResponse)

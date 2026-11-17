@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_cancel(commands)
     _add_pause(commands)
     _add_resume(commands)
+    _add_resources(commands)
     return parser
 
 
@@ -79,6 +80,13 @@ def _add_resume(commands) -> None:
     command = commands.add_parser("resume", help="lift a pause")
     command.add_argument("name", help="job or chain name")
     command.set_defaults(handler=lambda args: jobs_client.unpause_job(args.name))
+
+
+def _add_resources(commands) -> None:
+    command = commands.add_parser("resources", help="suggest catalog resources from measured runs")
+    command.add_argument("--days", type=int, default=30, help="look back this many days (default 30)")
+    command.add_argument("--min-runs", type=int, default=5, help="measured runs a job needs (default 5)")
+    command.set_defaults(handler=lambda args: jobs_client.resource_suggestions(args.days, args.min_runs))
 
 
 def _run_job(args: argparse.Namespace) -> dict:
