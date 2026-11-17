@@ -146,6 +146,13 @@ class Resources(CatalogModel):
     limits: ResourceSpec
 
 
+class ConcurrencyGroup(CatalogModel):
+    """Jobs sharing one resource (the stored ESPN browser session): at most ``limit`` of
+    their runs are `running` at once, across jobs."""
+
+    limit: int = Field(ge=1)
+
+
 class Defaults(CatalogModel):
     executor: Literal["pod", "inline"] = "pod"
     overlap: Literal["forbid", "queue"] = "forbid"
@@ -230,6 +237,7 @@ class Job(CatalogModel):
     alert: Literal["none", "warning", "critical"] | None = None
     resources: Resources | None = None
     acts: bool = False
+    group: str | None = None
     schedules: list[Schedule] = Field(default_factory=list)
     on_event: list[EventSubscription] = Field(default_factory=list)
     fan_out: FanOut | None = None
@@ -308,7 +316,7 @@ class Chain(CatalogModel):
         return _duration(value)
 
 
-_RESERVED = {"class", "group", "approval"}
+_RESERVED = {"class", "approval"}
 
 
 def _reject_reserved(value: Any, path: str = "catalog") -> None:
@@ -339,6 +347,7 @@ class ResolvedJob:
     deadline: timedelta
     alert: str
     resources: Resources
+    group: str | None
 
 
 class Catalog(CatalogModel):
@@ -347,6 +356,7 @@ class Catalog(CatalogModel):
     seasons: dict[str, Season] = Field(default_factory=dict)
     profiles: dict[str, Profile]
     defaults: Defaults = Field(default_factory=Defaults)
+    groups: dict[str, ConcurrencyGroup] = Field(default_factory=dict)
     jobs: dict[str, Job]
     chains: dict[str, Chain] = Field(default_factory=dict)
 
@@ -363,6 +373,10 @@ class Catalog(CatalogModel):
             if job.profile not in self.profiles:
                 raise ValueError(
                     f"jobs.{name}.profile references unknown profile {job.profile!r}"
+                )
+            if job.group is not None and job.group not in self.groups:
+                raise ValueError(
+                    f"jobs.{name}.group references unknown group {job.group!r}"
                 )
             deadline = job.deadline or self.defaults.deadline
             if deadline > max_deadline:
@@ -425,7 +439,12 @@ class Catalog(CatalogModel):
             deadline=job.deadline or defaults.deadline,
             alert=job.alert or defaults.alert,
             resources=job.resources or defaults.resources,
+            group=job.group,
         )
+
+    def group_jobs(self, group: str) -> list[str]:
+        """The names of the jobs in a concurrency group."""
+        return [name for name, job in self.jobs.items() if job.group == group]
 
     def _validate_schedule_seasons(self, schedule: Schedule, path: str) -> None:
         for season in schedule.seasons:

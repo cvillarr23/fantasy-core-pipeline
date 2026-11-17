@@ -24,11 +24,13 @@ def catalog():
                 "manual_queue_ttl": "30m",
             },
             "profiles": {"core": {"image": "core:test"}},
+            "groups": {"espn-session": {"limit": 1}},
             "jobs": {
                 "sample-job": {
                     "profile": "core",
                     "command": ["python", "-m", "sample"],
                     "params": {"count": "int", "dry_run": "bool?"},
+                    "group": "espn-session",
                 }
             },
             "chains": {
@@ -348,10 +350,12 @@ def test_list_jobs_returns_jobs_chains_and_reuses_last_run_map(
         payload.jobs[0].executor,
         payload.jobs[0].max_attempts,
         payload.jobs[0].deadline_seconds,
+        payload.jobs[0].group,
     ) == (
         resolved.executor,
         resolved.max_attempts,
         int(resolved.deadline.total_seconds()),
+        "espn-session",
     )
     assert payload.jobs[0].last_run.id == "run-1"
     step = payload.chains[0].steps["sample-job"]

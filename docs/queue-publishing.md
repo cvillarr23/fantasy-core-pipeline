@@ -138,6 +138,8 @@ A second request with a used key returns the existing run as `duplicate`, becaus
 
 A job with catalog `fan_out: {param, values}` fans out each run that leaves `param` unset. The launcher claims that run with executor `fan_out` and starts nothing for it. The scheduler then publishes one child command per value, with the parent's params plus `param=value`, the parent's trigger and chain root, and `parent_run_id` = the parent. Children are ordinary commands: they wait for the pod cap like any run, and neither their parent nor their siblings count as an overlap. A child whose parent has ended (cancelled) is `skipped (fan_out_ended)`. The parent ends `success` once every child succeeds, or `failure` (`fan_out_failed`) once none is pending and any did not.
 
+Jobs that share a resource (trade-scan and trade-inbox both drive the stored ESPN browser session) name a catalog concurrency group: top-level `groups: {<name>: {limit: N}}` and `group: <name>` on each job. A run whose group already has `limit` launcher runs of its jobs `running` waits, under `forbid` too, since another job holds the resource; its `expires_at` still bounds the wait. A fan-out parent takes no slot, its children each do. KEDA browser worker pods aren't counted yet: they join groups once the worker runs under the launcher.
+
 The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedupe_key>`. Its outermost `run_scope` adopts the row and keeps the catalog job name.
 
 ## How do events start runs?

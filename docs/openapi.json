@@ -3244,6 +3244,17 @@
             "title": "Executor",
             "type": "string"
           },
+          "group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group"
+          },
           "last_run": {
             "anyOf": [
               {

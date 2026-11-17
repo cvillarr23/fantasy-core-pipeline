@@ -176,12 +176,38 @@ def test_params_reject_unknown_types(type_name):
         Catalog.model_validate(raw)
 
 
-@pytest.mark.parametrize("field", ["class", "group", "approval"])
+@pytest.mark.parametrize("field", ["class", "approval"])
 def test_v2_fields_fail_with_not_implemented_error(field):
     raw = catalog_data()
     raw["jobs"]["one"][field] = True
     with pytest.raises(ValueError, match="not implemented"):
         Catalog.model_validate(raw)
+
+
+def grouped_catalog(limit=1, group="espn-session") -> dict:
+    raw = catalog_data()
+    raw["groups"] = {"espn-session": {"limit": limit}}
+    raw["jobs"]["two"] = {**raw["jobs"]["one"], "group": group}
+    raw["jobs"]["three"] = {**raw["jobs"]["one"], "group": group}
+    return raw
+
+
+def test_jobs_in_a_group_resolve_with_it():
+    catalog = Catalog.model_validate(grouped_catalog())
+    assert catalog.groups["espn-session"].limit == 1
+    assert catalog.resolve("two").group == "espn-session"
+    assert catalog.resolve("one").group is None
+    assert catalog.group_jobs("espn-session") == ["two", "three"]
+
+
+def test_job_group_must_be_defined():
+    with pytest.raises(ValidationError, match="unknown group 'other'"):
+        Catalog.model_validate(grouped_catalog(group="other"))
+
+
+def test_group_limit_must_be_positive():
+    with pytest.raises(ValidationError, match="limit"):
+        Catalog.model_validate(grouped_catalog(limit=0))
 
 
 def fan_out_catalog(fan_out: dict, params: dict | None = None) -> dict:

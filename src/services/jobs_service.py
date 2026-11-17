@@ -136,6 +136,7 @@ def _job_info(
         "name": resolved.name,
         "executor": resolved.executor,
         "overlap": resolved.overlap,
+        "group": resolved.group,
         "max_attempts": resolved.max_attempts,
         "deadline_seconds": int(resolved.deadline.total_seconds()),
         "alert": resolved.alert,

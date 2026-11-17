@@ -515,6 +515,11 @@
   Under `forbid`, a schedule, chain or event run still waits when every run holding the job is an
   event run, so jobs with `on_event` don't need `overlap: queue`. Manual/CLI/MCP runs keep the
   409 (`overlap_refuses`).
+- Concurrency groups (`groups.<name>.limit` in the catalog, `group: <name>` on a job) cap how many
+  runs of the group's jobs are `running` at once, counted like the pod cap
+  (`Runs.running_in_jobs`, under the admission lock). A full group always waits, never skips or
+  409s. Fan-out parents and executor-less rows (CronJob-era, browser worker) don't count, so KEDA
+  worker pods aren't in a group until the worker runs under the launcher.
 - `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s. A
   failure or timeout with attempts left requeues the same row at the next attempt
   (`RunStore.requeue_attempt`), and each attempt only ever acts on its own k8s Job. A run
