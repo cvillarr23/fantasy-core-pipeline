@@ -75,6 +75,29 @@ def test_finish_running_only_replaces_what_its_guard_allows(postgres):
     assert row(postgres, identity)[:2] == ("failure", "job_failed")
 
 
+def test_forced_finish_keeps_the_finished_at_the_process_wrote(postgres):
+    store = RunStore()
+    ended = claimed()
+    run_log.finish_run(ended, "success")
+    (written,) = row(postgres, ended, "finished_at")
+    store.finish_running(ended, "failure", "job_failed", force=True, expected_attempt=1)
+    assert row(postgres, ended, "status,end_reason,finished_at") == (
+        "failure",
+        "job_failed",
+        written,
+    )
+
+
+def test_forced_finish_of_a_running_row_stamps_finished_at(postgres):
+    store = RunStore()
+    crashed = claimed()
+    before = datetime.now(timezone.utc)
+    store.finish_running(crashed, "timeout", "orphaned", force=True, expected_attempt=1)
+    status, finished_at = row(postgres, crashed, "status,finished_at")
+    assert status == "timeout"
+    assert finished_at >= before - timedelta(seconds=5)
+
+
 def test_end_queued_leaves_a_claimed_run_alone(postgres):
     queued = queue()
     running = claimed("trade-scan")
