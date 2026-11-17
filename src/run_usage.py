@@ -15,8 +15,10 @@ An inline run (`RUN_EXECUTOR=inline`) shares the launcher's cgroup, and a pod wi
 cgroup v2 files has nothing better, so both fall back to `getrusage` for this process and its
 waited-for children (`source: "rusage"`, no throttling or limits).
 
-`wall_seconds` is the run scope's own duration, so the interpreter's start-up CPU makes the
-average cores a little high, never low. A run killed by its limit or deadline records nothing.
+`wall_seconds` is this process's lifetime (`/proc/self/stat`), the same span the CPU counters
+cover, interpreter start-up and imports included: a short job can spend most of its CPU before
+the run scope opens. Where `/proc` can't say, the run scope's own duration stands in. A run
+killed by its limit or deadline records nothing.
 """
 
 import logging
@@ -27,9 +29,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+PROC_ROOT = Path("/proc")
 
 
-def measure_run_usage(attempt, wall_seconds, cgroup_root=None):
+def measure_run_usage(attempt, scope_seconds, cgroup_root=None, proc_root=None):
     """`summary.resources` for this run, or None when nothing could be read."""
     try:
         usage = (
@@ -41,7 +44,21 @@ def measure_run_usage(attempt, wall_seconds, cgroup_root=None):
     except Exception:
         logger.warning("Could not measure this run's resource usage", exc_info=True)
         return None
+    wall_seconds = _process_lifetime(proc_root or PROC_ROOT) or scope_seconds
     return {**usage, "attempt": attempt, "wall_seconds": round(wall_seconds, 3)}
+
+
+def _process_lifetime(proc):
+    """Seconds since this process started, or None when `/proc` can't say. `stat`'s 22nd
+    field is the start time in clock ticks since boot; the command name (field 2) can hold
+    spaces, so fields are counted after its closing parenthesis."""
+    try:
+        uptime = float((proc / "uptime").read_text().split()[0])
+        fields = (proc / "self" / "stat").read_text().rsplit(")", 1)[1].split()
+        started = int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+    return max(uptime - started, 0.0)
 
 
 def _cgroup_usage(root):
