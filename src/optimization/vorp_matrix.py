@@ -290,11 +290,12 @@ def apply_scarcity(df: pl.DataFrame, multipliers: dict) -> pl.DataFrame:
 
 
 def load_market_percent_started(cursor, season: int, week: int) -> pl.DataFrame:
-    """Each player's percent_started from his latest espn_player_ownership snapshot at or
-    before the target week of the same season. Rows with an unknown start% are left out, so
-    those players fall back to a neutral market multiplier."""
+    """The live market signal: each player's percent_started (as market_score) from his
+    latest espn_player_ownership snapshot at or before the target week of the same season.
+    Rows with an unknown start% are left out, so those players fall back to a neutral market
+    multiplier."""
     cursor.execute("""
-        SELECT player_id, percent_started FROM (
+        SELECT player_id, percent_started AS market_score FROM (
             SELECT DISTINCT ON (player_id) player_id, percent_started
             FROM espn_player_ownership
             WHERE season = %s AND week <= %s
@@ -302,16 +303,40 @@ def load_market_percent_started(cursor, season: int, week: int) -> pl.DataFrame:
         ) latest
         WHERE percent_started IS NOT NULL;
     """, (season, week))
-    rows = cursor.fetchall()
-    schema = {"player_id": pl.Utf8, "percent_started": pl.Float64}
+    return _market_frame(cursor.fetchall())
+
+
+def load_market_ecr(cursor, season: int, week: int) -> pl.DataFrame:
+    """The backtest stand-in for ESPN start%: FantasyPros weekly positional ECR from the
+    latest scrape week at or before the target week, taken as a whole snapshot so a player
+    missing from it is neutral rather than carrying a stale rank. fp_weekly_ecr exists only
+    in backtest schemas (backtest_schema.BACKTEST_ONLY_DDL). The rank is negated so rank 1
+    scores highest and gets the top percentile."""
+    cursor.execute("""
+        SELECT player_id, ecr
+        FROM fp_weekly_ecr
+        WHERE season = %s AND week = (
+            SELECT MAX(week) FROM fp_weekly_ecr WHERE season = %s AND week <= %s
+        );
+    """, (season, season, week))
+    return _market_frame([(player_id, -ecr) for player_id, ecr in cursor.fetchall()])
+
+
+# The percentile input of the market step, by source. "espn" is the live default.
+MARKET_SOURCES = {"espn": load_market_percent_started, "ecr": load_market_ecr}
+
+
+def _market_frame(rows: list) -> pl.DataFrame:
+    schema = {"player_id": pl.Utf8, "market_score": pl.Float64}
     return pl.DataFrame(rows, schema=schema, orient="row") if rows else pl.DataFrame(schema=schema)
 
 
 def _position_percentile() -> pl.Expr:
-    """percent_started rank within position scaled to [0, 1] (ties share their average rank);
-    0.5 for a position with only one known start%. Null where start% is unknown."""
-    known = pl.col("percent_started").is_not_null()
-    rank = pl.col("percent_started").rank(method="average").over("position")
+    """market_score rank within position scaled to [0, 1] (ties share their average rank);
+    0.5 for a position with only one known score. Null where the score is unknown. Shared by
+    every market source, so the live and backtest paths can't drift."""
+    known = pl.col("market_score").is_not_null()
+    rank = pl.col("market_score").rank(method="average").over("position")
     count = known.sum().over("position")
     return (
         pl.when(~known).then(None)
@@ -320,12 +345,12 @@ def _position_percentile() -> pl.Expr:
     )
 
 
-def compute_market_multiplier(df: pl.DataFrame, ownership: pl.DataFrame, weight: float) -> pl.DataFrame:
+def compute_market_multiplier(df: pl.DataFrame, market: pl.DataFrame, weight: float) -> pl.DataFrame:
     """Adds market_multiplier = 1 + weight * (pctile - 0.5), clipped to
-    [1 - weight/2, 1 + weight/2], where pctile ranks ESPN percent_started within position.
-    A player with no ownership data gets 1.0."""
+    [1 - weight/2, 1 + weight/2], where pctile ranks market_score (one of MARKET_SOURCES)
+    within position. A player with no market data gets 1.0."""
     lower, upper = 1 - weight / 2, 1 + weight / 2
-    joined = df.join(ownership, on="player_id", how="left")
+    joined = df.join(market, on="player_id", how="left")
     return joined.with_columns(
         _position_percentile().alias("_market_pctile")
     ).with_columns(
@@ -333,7 +358,7 @@ def compute_market_multiplier(df: pl.DataFrame, ownership: pl.DataFrame, weight:
         .then(1.0)
         .otherwise((1 + weight * (pl.col("_market_pctile") - 0.5)).clip(lower, upper))
         .alias("market_multiplier")
-    ).drop(["percent_started", "_market_pctile"])
+    ).drop(["market_score", "_market_pctile"])
 
 
 def _market_adjusted_vorp() -> pl.Expr:
@@ -347,10 +372,11 @@ def _market_adjusted_vorp() -> pl.Expr:
     )
 
 
-def apply_market_multiplier(df: pl.DataFrame, ownership: pl.DataFrame, weight: float) -> pl.DataFrame:
-    """Blends ESPN start% into vorp_score as a market prior. Every consumer of
-    weekly_stats.vorp_score (waivers, free agents, trades, lineup) picks it up from there."""
-    df = compute_market_multiplier(df, ownership, weight)
+def apply_market_multiplier(df: pl.DataFrame, market: pl.DataFrame, weight: float) -> pl.DataFrame:
+    """Blends the market signal (ESPN start% live) into vorp_score as a market prior. Every
+    consumer of weekly_stats.vorp_score (waivers, free agents, trades, lineup) picks it up
+    from there."""
+    df = compute_market_multiplier(df, market, weight)
     return df.with_columns(_market_adjusted_vorp().alias("vorp_score"))
 
 
@@ -416,19 +442,24 @@ def load_roster_positions(cursor) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
 
 
-def _apply_market_step(conn, df: pl.DataFrame, season: int, week: int, weight: float) -> pl.DataFrame:
+def _apply_market_step(conn, df: pl.DataFrame, season: int, week: int, weight: float,
+                       source: str) -> pl.DataFrame:
     with conn.cursor() as cursor:
-        ownership = load_market_percent_started(cursor, season, week)
-    df = apply_market_multiplier(df, ownership, weight)
+        market = MARKET_SOURCES[source](cursor, season, week)
+    df = apply_market_multiplier(df, market, weight)
     adjusted = df.filter(pl.col("market_multiplier") != 1.0).height
-    logger.info(f"ESPN market weight {weight}: {adjusted} of {df.height} row(s) adjusted.")
+    logger.info(f"Market weight {weight} ({source}): {adjusted} of {df.height} row(s) adjusted.")
     return df
 
 
-def run_vorp_pipeline(season: int, week: int, market_weight: float | None = None) -> int:
+def run_vorp_pipeline(season: int, week: int, market_weight: float | None = None,
+                      market_source: str = "espn") -> int:
     """Orchestrates load -> coefficient -> flex -> baselines -> vorp_base -> scarcity ->
     market -> persist, inside one connection. market_weight defaults to ESPN_MARKET_WEIGHT;
-    the backtest passes its own."""
+    the backtest passes its own, and market_source="ecr" to rank FantasyPros ECR instead of
+    ESPN start%."""
+    if market_source not in MARKET_SOURCES:
+        raise ValueError(f"Unknown market_source {market_source!r}; expected one of {sorted(MARKET_SOURCES)}.")
     if market_weight is None:
         market_weight = ESPN_MARKET_WEIGHT
     logger.info(f"Running dynamic VORP matrix pipeline for season {season} week {week}...")
@@ -491,7 +522,7 @@ def run_vorp_pipeline(season: int, week: int, market_weight: float | None = None
 
             if market_weight != 0:
                 with tracer.start_as_current_span("vorp_pipeline.market", attributes={"weight": market_weight}):
-                    df = _apply_market_step(conn, df, season, week, market_weight)
+                    df = _apply_market_step(conn, df, season, week, market_weight, market_source)
 
             with tracer.start_as_current_span("vorp_pipeline.defense_matchup"):
                 # Off by default: the persisted multiplier is a real NULL (not 1.0) when

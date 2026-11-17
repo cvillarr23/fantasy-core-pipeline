@@ -28,6 +28,22 @@ logger = logging.getLogger("BacktestSchema")
 
 BACKTEST_SCHEMA_PREFIX = "backtest"
 
+# Tables only backtest schemas get, created after run_migrations(). They hold stand-in data
+# that must never land in production tables: fp_weekly_ecr is FantasyPros weekly positional
+# ECR, which vorp_matrix.load_market_ecr ranks in place of ESPN start% (espn_player_ownership
+# is real ESPN history only).
+BACKTEST_ONLY_DDL = """
+CREATE TABLE IF NOT EXISTS fp_weekly_ecr (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    player_id VARCHAR(50) NOT NULL,
+    pos VARCHAR(10) NOT NULL,
+    ecr DOUBLE PRECISION NOT NULL,
+    scrape_date DATE NOT NULL,
+    PRIMARY KEY (season, week, player_id)
+);
+"""
+
 
 def schema_name(season: int) -> str:
     return f"{BACKTEST_SCHEMA_PREFIX}_{season}"
@@ -73,6 +89,9 @@ def provision_schema(schema: str, wipe: bool = True) -> None:
 
     with backtest_db(schema):
         run_migrations()
+        with database.get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(BACKTEST_ONLY_DDL)
     logger.info(f"Provisioned backtest schema '{schema}'.")
 
 

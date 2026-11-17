@@ -10,6 +10,12 @@ in memory from the season's start (loaded once via historical_data.load_actual_w
 specifically so this ordering is a property of this module's control flow, not of what data
 happens to exist in the database. Getting this backwards would silently let the system
 "cheat" by seeing results before deciding - see tests/test_season_replay.py.
+
+The default base projection is one fixed preseason value for every week. That leaves the
+market signal as the only in-season information, so a market-weight sweep would reward any
+weight. base_projection="rolling" re-seeds week N's projected_points from the mean of weeks
+N-3..N-1's actuals (rolling_projections reads only weeks below N, so it is already-revealed
+data) before that week's VORP run, the way live projections move week to week.
 """
 import argparse
 import logging
@@ -132,6 +138,38 @@ def assign_initial_starters_all_teams(conn, season: int) -> None:
         persist_starters(conn, team_id, starter_ids, [p["player_id"] for p in roster])
 
 
+ROLLING_WINDOW_WEEKS = 3
+BASE_PROJECTIONS = ("preseason", "rolling")
+
+
+def rolling_projections(actuals_by_week: dict, week: int) -> dict:
+    """{player_id: mean actual points over weeks week-3..week-1}, for players with at least
+    one of those weeks. Never reads `week` or later."""
+    totals: dict = {}
+    for prior in range(max(1, week - ROLLING_WINDOW_WEEKS), week):
+        for player_id, points in actuals_by_week.get(prior, {}).items():
+            totals.setdefault(player_id, []).append(points)
+    return {player_id: sum(points) / len(points) for player_id, points in totals.items()}
+
+
+def seed_rolling_projections(conn, season: int, week: int, actuals_by_week: dict) -> None:
+    """Overwrites week N's seeded projected_points with rolling_projections. Players with no
+    prior actuals (and every player in week 1) keep their preseason value. Only existing rows
+    are updated, so bye weeks stay rowless."""
+    projections = rolling_projections(actuals_by_week, week)
+    if not projections:
+        return
+    rows = [(points, player_id, season, week) for player_id, points in projections.items()]
+    with conn.cursor() as cursor:
+        cursor.executemany(
+            """
+            UPDATE weekly_stats SET projected_points = %s
+            WHERE player_id = %s AND season = %s AND week = %s;
+            """,
+            rows,
+        )
+
+
 def reveal_week_actuals(conn, season: int, week: int, actuals_for_week: dict) -> None:
     """Writes week N's real actual_points into weekly_stats. MUST be called only after
     week N's decision phase has already run - see module docstring."""
@@ -147,17 +185,25 @@ def reveal_week_actuals(conn, season: int, week: int, actuals_for_week: dict) ->
 
 def run_week(
     conn, season: int, week: int, actuals_for_week: dict, naive_starters: list, static_roster_ids: set,
-    market_weight: float = 0.0,
+    market_weight: float = 0.0, market_source: str = "espn", rolling_history: dict | None = None,
 ) -> dict:
     """One week's decision phase (VORP -> lineup solve -> waivers) followed by the reveal
     phase (write actuals, then score). See module docstring for the no-lookahead ordering
-    this function exists to enforce. market_weight is vorp_matrix's ESPN market weight,
-    passed explicitly so a replay never inherits the ESPN_MARKET_WEIGHT env var."""
-    vorp_matrix.run_vorp_pipeline(season=season, week=week, market_weight=market_weight)
+    this function exists to enforce. market_weight and market_source are vorp_matrix's market
+    step, passed explicitly so a replay never inherits the ESPN_MARKET_WEIGHT env var.
+    rolling_history (actuals by week) switches on the rolling base projection."""
+    if rolling_history is not None:
+        seed_rolling_projections(conn, season, week, rolling_history)
+        # run_vorp_pipeline updates these rows on its own pooled connection; left
+        # uncommitted, this transaction's row locks would block it forever.
+        conn.commit()
+    vorp_matrix.run_vorp_pipeline(
+        season=season, week=week, market_weight=market_weight, market_source=market_source,
+    )
 
     with conn.cursor() as cursor:
         roster_pool = lineup_solver.load_roster_pool(cursor, draft_simulator.OUR_TEAM_ID, season, week)
-    our_starters = lineup_solver.build_and_solve_lineup(roster_pool)
+    our_starters = scoring.solve_backtest_lineup(roster_pool)
     persist_starters(
         conn, draft_simulator.OUR_TEAM_ID,
         {p["player_id"] for p in our_starters}, [p["player_id"] for p in roster_pool],
@@ -182,8 +228,10 @@ def run_week(
 
 def run_season_replay(
     season: int, weeks=None, rounds: Optional[int] = None, out_dir: str = report.DEFAULT_OUTPUT_ROOT,
-    market_weight: float = 0.0,
+    market_weight: float = 0.0, market_source: str = "espn", base_projection: str = "preseason",
 ) -> dict:
+    if base_projection not in BASE_PROJECTIONS:
+        raise ValueError(f"Unknown base_projection {base_projection!r}; expected one of {BASE_PROJECTIONS}.")
     weeks = list(weeks) if weeks is not None else list(default_weeks(season))
     rounds = rounds if rounds is not None else draft_simulator.DEFAULT_ROUNDS
 
@@ -204,6 +252,8 @@ def run_season_replay(
             historical_data.seed_players(conn, player_pool)
             historical_data.seed_league_settings(conn, season)
             seed_weekly_stats_shell(conn, player_pool, projected_points_by_player, season, weeks, teams_playing_by_week)
+            if market_source == "ecr":
+                historical_data.seed_weekly_ecr(conn, historical_data.load_weekly_ecr(season, player_pool))
 
         with get_db_connection() as conn:
             picks = draft_simulator.run_draft(conn, adp, season, rounds=rounds, week=1)
@@ -230,6 +280,7 @@ def run_season_replay(
             naive_starters = scoring.compute_naive_starters(draft_roster_pool)
             static_roster_ids = {p["player_id"] for p in draft_roster_pool}
 
+        rolling_history = actuals_by_week if base_projection == "rolling" else None
         weekly_lineup_records = []
         our_weekly_waiver_points = []
         static_weekly_points = []
@@ -237,7 +288,7 @@ def run_season_replay(
             with get_db_connection() as conn:
                 week_result = run_week(
                     conn, season, week, actuals_by_week.get(week, {}), naive_starters, static_roster_ids,
-                    market_weight=market_weight,
+                    market_weight=market_weight, market_source=market_source, rolling_history=rolling_history,
                 )
             weekly_lineup_records.append(week_result["lineup"])
             our_weekly_waiver_points.append(week_result["our_waiver_points"])
@@ -268,5 +319,16 @@ if __name__ == "__main__":
         "--espn-market-weight", type=float, default=0.0,
         help="vorp_matrix's ESPN start%% weight for this replay (default 0.0, no market prior).",
     )
+    parser.add_argument(
+        "--market-source", choices=sorted(vorp_matrix.MARKET_SOURCES), default="espn",
+        help="What the market step ranks: espn (percent_started, live) or ecr (FantasyPros weekly ECR stand-in).",
+    )
+    parser.add_argument(
+        "--base-projection", choices=BASE_PROJECTIONS, default="preseason",
+        help="preseason (one fixed value all season) or rolling (mean of the prior 3 weeks' actuals).",
+    )
     args = parser.parse_args()
-    run_season_replay(season=args.season, market_weight=args.espn_market_weight)
+    run_season_replay(
+        season=args.season, market_weight=args.espn_market_weight,
+        market_source=args.market_source, base_projection=args.base_projection,
+    )

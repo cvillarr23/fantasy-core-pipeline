@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -595,7 +596,7 @@ def test_run_vorp_pipeline_scores_rostered_kicker_and_dst_against_free_agent_bas
 # ---------------------------------------------------------------------------
 
 MARKET_SCHEMA = {"player_id": pl.Utf8, "position": pl.Utf8, "vorp_score": pl.Float64}
-OWNERSHIP_SCHEMA = {"player_id": pl.Utf8, "percent_started": pl.Float64}
+OWNERSHIP_SCHEMA = {"player_id": pl.Utf8, "market_score": pl.Float64}
 
 
 def _market_frame(rows):
@@ -685,7 +686,8 @@ def test_load_market_percent_started_takes_latest_week_at_or_before_target():
     assert "week <= %s" in query
     assert "DISTINCT ON (player_id)" in query and "week DESC" in query
     assert params == (2026, 9)
-    assert out.to_dicts() == [{"player_id": "a", "percent_started": 55.0}]
+    assert "percent_started AS market_score" in query
+    assert out.to_dicts() == [{"player_id": "a", "market_score": 55.0}]
 
 
 def _pipeline_stat_rows():
@@ -698,7 +700,7 @@ def _pipeline_stat_rows():
     ]
 
 
-def _run_pipeline(market_weight, ownership_rows=None):
+def _run_pipeline(market_weight, ownership_rows=None, market_source="espn"):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = (2, {"QB": 1, "WR": 1})
@@ -709,7 +711,7 @@ def _run_pipeline(market_weight, ownership_rows=None):
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
     with patch("src.optimization.vorp_matrix.get_db_connection") as mock_get_conn:
         mock_get_conn.return_value.__enter__.return_value = mock_conn
-        vm.run_vorp_pipeline(season=2026, week=5, market_weight=market_weight)
+        vm.run_vorp_pipeline(season=2026, week=5, market_weight=market_weight, market_source=market_source)
     _, persisted = mock_cursor.executemany.call_args.args
     queries = [c.args[0] for c in mock_cursor.execute.call_args_list]
     return {row[6]: row[4] for row in persisted}, queries
@@ -728,3 +730,39 @@ def test_run_vorp_pipeline_applies_market_weight_to_persisted_vorp():
     assert any("espn_player_ownership" in q for q in queries)
     assert weighted["wr1"] == baseline["wr1"] * 1.1
     assert weighted["qb1"] == baseline["qb1"]  # no ownership row: neutral
+
+
+def test_load_market_ecr_reads_latest_scrape_week_and_negates_rank():
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("a", 1.0), ("b", 12.0)]
+
+    out = vm.load_market_ecr(mock_cursor, 2024, 6)
+
+    query, params = mock_cursor.execute.call_args.args
+    assert "fp_weekly_ecr" in query and "MAX(week)" in query
+    assert params == (2024, 2024, 6)
+    assert out.to_dicts() == [{"player_id": "a", "market_score": -1.0}, {"player_id": "b", "market_score": -12.0}]
+
+
+def test_ecr_rank_one_gets_the_top_percentile():
+    df = _market_frame([("rank1", "RB", 5.0), ("rank2", "RB", 5.0), ("rank30", "RB", 5.0)])
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("rank1", 1.0), ("rank2", 2.0), ("rank30", 30.0)]
+    market = vm.load_market_ecr(mock_cursor, 2024, 6)
+
+    m = _multipliers(vm.compute_market_multiplier(df, market, weight=0.2))
+
+    assert m["rank1"] == 1.1
+    assert m["rank30"] == 0.9
+    assert m["rank1"] > m["rank2"] > m["rank30"]
+
+
+def test_run_vorp_pipeline_ecr_source_reads_ecr_not_espn():
+    _, queries = _run_pipeline(market_weight=0.2, ownership_rows=[("wr1", 1.0)], market_source="ecr")
+    assert any("fp_weekly_ecr" in q for q in queries)
+    assert not any("espn_player_ownership" in q for q in queries)
+
+
+def test_run_vorp_pipeline_rejects_unknown_market_source():
+    with pytest.raises(ValueError, match="market_source"):
+        vm.run_vorp_pipeline(season=2026, week=5, market_weight=0.2, market_source="yahoo")

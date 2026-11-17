@@ -32,6 +32,14 @@ flowchart LR
 
 The command downloads historical data and writes reports without publishing actions to ESPN. The original connection pool is restored after the isolated replay.
 
+## Tune the market weight
+
+`ESPN_MARKET_WEIGHT` is chosen by replaying seasons with FantasyPros weekly ECR standing in for ESPN start%, over the rolling base projection:
+
+1. Check the stand-in still agrees with ESPN for a week that has a snapshot. Dump that week's `espn_player_ownership` (`player_id`, `position`, `percent_started`) to CSV, then run `python -m src.backtesting.market_stand_in --season 2026 --week 10 --espn-csv espn.csv`. A position under 0.8 Spearman is a poor stand-in.
+2. Run the sweep against a throwaway database (it wipes `backtest_<season>` once per weight and appends to `backtest_results`): `python -m src.backtesting.market_weight_sweep --seasons 2023 2024 2025`.
+3. Read the printed table: waiver gain and lineup points per season and pooled, each against weight 0 in its group.
+
 ## Troubleshoot the run
 
 | Symptom or need | Action |

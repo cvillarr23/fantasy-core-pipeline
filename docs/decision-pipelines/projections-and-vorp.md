@@ -81,10 +81,12 @@ vorp_score = vorp_score × market_multiplier   (÷ when vorp_score < 0)
 | Usage shares | Excluded because projections already include usage |
 | Scarcity eligibility | Only unrostered players with positive base VORP; everyone else uses 1.0 |
 | `w` | `ESPN_MARKET_WEIGHT`, default `0.0`. At 0 the market step is skipped and `vorp_score` is unchanged |
-| `start_pctile` | ESPN `percent_started` ranked within position (ties averaged), scaled to 0..1; 0.5 when a position has one known value. Each player's latest `espn_player_ownership` week at or before the target week, same season |
-| Missing ownership | `market_multiplier` = 1.0 |
+| `start_pctile` | The market score ranked within position (ties averaged), scaled to 0..1; 0.5 when a position has one known value |
+| Market score, live (`espn`) | ESPN `percent_started`: each player's latest `espn_player_ownership` week at or before the target week, same season |
+| Market score, backtest (`ecr`) | Negated FantasyPros weekly positional ECR (rank 1 scores highest) from the latest `fp_weekly_ecr` scrape week at or before the target week. Both sources share one percentile function |
+| Missing market data | `market_multiplier` = 1.0 |
 | Negative `vorp_score` | Divided by the multiplier, so a higher start% always raises the score |
-| Market in backtests | `season_replay --espn-market-weight` (default 0.0); replays never read the env var |
+| Market in backtests | `season_replay --espn-market-weight` (default 0.0) and `--market-source` (`espn` or `ecr`); replays never read the env var. `market_weight_sweep` chooses the weight |
 
 :::tip[Predict the result]
 12 adjusted points minus an 8-point baseline gives 4 VORP, or 5.4 at maximum scarcity. A 6-point player stays at −2, even when the position is thin.
