@@ -377,3 +377,17 @@ def test_finish_fan_out_ends_only_a_running_fan_out_parent(postgres):
         Runs(c).finish_fan_out(parent, "success", None)
     assert row(postgres, parent)[0] == "success"
     assert row(postgres, pod)[0] == "running"
+
+
+def test_running_in_jobs_counts_running_launcher_runs_of_the_group(postgres):
+    claimed("trade-scan")
+    claimed("trade-inbox", executor="inline")
+    claimed()
+    queue("trade-inbox")
+    run_log.finish_run(claimed("trade-scan"), "success")
+    fan_out_parent("trade-scan")
+    legacy_row(postgres, "f3d1b0c2-0000-4000-8000-000000000352", "running", {})
+    with RunStore().admission() as admission:
+        assert admission.running_in_jobs(["trade-scan", "trade-inbox"]) == 2
+        assert admission.running_in_jobs(["rumor-syncer"]) == 1
+        assert admission.running_in_jobs([]) == 0

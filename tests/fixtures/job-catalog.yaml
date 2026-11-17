@@ -17,6 +17,9 @@ profiles:
   core: {image: CORE_IMAGE, secrets: [db, espn, redis, trigger-api, league-config]}
   core-ops: {image: CORE_IMAGE, serviceAccount: fantasy-core-pipeline, secrets: [db, espn, redis, trigger-api, league-config, amqp]}
   worker: {image: WORKER_IMAGE, serviceAccount: fantasy-browser-worker, secrets: [db, espn, llm, notify, league-config], volumes: [espn-session-state]}
+# trade-scan and trade-inbox drive the one stored ESPN browser session.
+groups:
+  espn-session: {limit: 1}
 defaults:
   executor: pod
   overlap: forbid
@@ -114,6 +117,7 @@ jobs:
       - {cron: '0 11 * * *', tz: America/Chicago, catch_up: 2h}
   trade-inbox:
     profile: worker
+    group: espn-session
     command: [node, src/bots/trade_inbox.js, --refresh]
     deadline: 11m
     resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1200Mi}}
@@ -121,6 +125,7 @@ jobs:
       - {cron: '0 8-22/2 * * *', tz: America/Chicago, catch_up: 30m}
   trade-scan:
     profile: worker
+    group: espn-session
     command: [node, src/bots/trade_scan.js, --stage]
     deadline: 16m
     resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1200Mi}}

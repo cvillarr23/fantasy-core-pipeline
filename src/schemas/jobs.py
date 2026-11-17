@@ -65,6 +65,7 @@ class JobInfo(BaseModel):
     name: str
     executor: str
     overlap: str
+    group: str | None = None
     max_attempts: int
     deadline_seconds: int
     alert: str

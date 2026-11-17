@@ -22,6 +22,8 @@ waiting for its job's previous run doesn't hold up other jobs:
 - pod cap full, or the inline runner busy -> waits. The pod cap counts the launcher's
   `running` pod rows plus the active k8s Jobs matching the catalog's `counted_k8s_jobs`
   (the KEDA browser worker), so both share one pod budget
+- its concurrency group full (`limit` runs of the group's jobs `running`) -> waits, even under
+  `forbid`: another job holds the shared resource, so this run isn't a duplicate
 - otherwise `running`, then the k8s Job is created or the inline runner takes it
 
 A run still marked `running` after its pod died holds its overlap and cap slot until the
@@ -206,6 +208,8 @@ class Consumer:
             if fans_out(resolved.job, params):
                 self._claim_fan_out(admission, command)
                 return None
+            if self._group_full(admission, resolved):
+                return "wait"
             if self._capacity_full(admission, resolved):
                 return "wait"
             k8s_job = None
@@ -309,6 +313,19 @@ class Consumer:
         `forbid`'s 409, and the run's own `expires_at` still bounds every wait.
         """
         return command.trigger in AUTOMATIC_TRIGGERS and holders == {"event"}
+
+    def _group_full(self, admission, resolved):
+        """Whether the run's concurrency group already has `limit` runs going.
+
+        Counted under the admission lock like the pod cap, so two launchers can't both take
+        the last slot. The run's own `expires_at` bounds the wait. KEDA worker pods share the
+        ESPN session too but aren't counted until the worker runs under the launcher.
+        """
+        if resolved.group is None:
+            return False
+        limit = self.catalog.groups[resolved.group].limit
+        jobs = self.catalog.group_jobs(resolved.group)
+        return admission.running_in_jobs(jobs) >= limit
 
     def _capacity_full(self, admission, resolved):
         """Whether the run's executor has no room: the inline runner is busy, or the pod

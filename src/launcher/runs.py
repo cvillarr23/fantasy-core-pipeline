@@ -4,8 +4,9 @@
 advisory lock across its reads and its claim, `publish_run` inserts the row and its outbox
 command together. `RunStore` opens a cursor per call for the callers that need only one.
 
-Overlap and the pod cap are not separate locks: they are counts of `running` rows, so any
-final status written by a pod's run_scope, the inline runner or the watcher frees them.
+Overlap, the pod cap and concurrency groups are not separate locks: they are counts of
+`running` rows, so any final status written by a pod's run_scope, the inline runner or the
+watcher frees them.
 
 Launch details live in columns (`executor`, `k8s_job`, `expires_at`, `cancel_reconciled_at`);
 `trigger` keeps only what asked for the run. A row is a launcher run once it has an executor,
@@ -123,6 +124,18 @@ class Runs:
     def running_pods(self):
         self.c.execute(
             "SELECT count(*) FROM run_log WHERE status='running' AND executor='pod'"
+        )
+        return self.c.fetchone()[0]
+
+    def running_in_jobs(self, jobs):
+        """How many launcher runs of these catalog jobs are running, for a concurrency group.
+        A fan-out parent holds nothing (its children each count), and rows the launcher
+        didn't claim (CronJob-era, browser worker) have no executor, so they never count.
+        """
+        self.c.execute(
+            f"""SELECT count(*) FROM run_log WHERE status='running' AND job_name=ANY(%s)
+            AND {LAUNCHER_RUN} AND executor<>'{FAN_OUT}'""",
+            (list(jobs),),
         )
         return self.c.fetchone()[0]
 

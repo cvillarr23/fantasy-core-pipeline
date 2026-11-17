@@ -8,7 +8,10 @@ from kubernetes.client.rest import ApiException
 
 from src.launcher import consumer as consumer_module
 from src.launcher.consumer import Consumer, overlap_refuses
-from tests.test_launcher_k8s import CATALOG, LAUNCHER_ENV
+import yaml
+
+from src.launcher.catalog import Catalog, _CatalogYamlLoader
+from tests.test_launcher_k8s import CATALOG, FIXTURES, LAUNCHER_ENV
 
 NOW = datetime(2026, 10, 27, 19, 15, tzinfo=timezone.utc)
 
@@ -80,6 +83,14 @@ class FakeStore:
 
     def chain_running(self, chain_root_id):
         return self.status(chain_root_id) == "running"
+
+    def running_in_jobs(self, jobs):
+        return sum(
+            r["status"] == "running"
+            and r["job"] in jobs
+            and r["executor"] not in (None, "fan_out")
+            for r in self.rows.values()
+        )
 
     def running_pods(self):
         return sum(
@@ -701,3 +712,81 @@ def test_child_of_an_ended_fan_out_is_skipped_at_admission(store, consumer, laun
     assert store.rows["child"]["status"] == "skipped"
     assert store.rows["child"]["end_reason"] == "fan_out_ended"
     launch_pod.assert_not_called()
+
+
+def grouped_catalog(limit, jobs):
+    """The fixture catalog with `jobs` (and only them) in one `espn-session` group."""
+    raw = yaml.load(
+        (FIXTURES / "job-catalog.yaml").read_text(), Loader=_CatalogYamlLoader
+    )
+    raw["groups"] = {"espn-session": {"limit": limit}}
+    for name, job in raw["jobs"].items():
+        job.pop("group", None)
+        if name in jobs:
+            job["group"] = "espn-session"
+    return Catalog.model_validate(raw)
+
+
+def test_limit_one_group_runs_one_job_at_a_time(store, consumer, launch_pod):
+    store.add("scan", "trade-scan", status="running", executor="pod")
+    queue_run(store, consumer, "inbox", "trade-inbox")
+    assert consumer.drain() == []
+    assert store.rows["inbox"]["status"] == "queued"
+    store.rows["scan"]["status"] = "success"
+    assert consumer.drain() == ["inbox"]
+    launch_pod.assert_called_once()
+
+
+def test_limit_one_group_admits_one_of_two_runs_queued_together(
+    store, consumer, launch_pod
+):
+    queue_run(store, consumer, "scan", "trade-scan")
+    queue_run(store, consumer, "inbox", "trade-inbox")
+    assert consumer.drain() == ["scan"]
+    assert store.rows["inbox"]["status"] == "queued"
+    assert list(consumer.pending) == ["inbox"]
+
+
+def test_full_group_waits_even_for_a_manual_forbid_run(store, consumer):
+    store.add("scan", "trade-scan", status="running", executor="pod")
+    queue_run(store, consumer, "inbox", "trade-inbox", trigger="manual")
+    consumer.drain()
+    assert store.rows["inbox"]["status"] == "queued"
+
+
+def test_full_group_does_not_hold_jobs_outside_it(store, consumer):
+    store.add("scan", "trade-scan", status="running", executor="pod")
+    queue_run(store, consumer, "r1")
+    assert consumer.drain() == ["r1"]
+
+
+def test_group_run_still_expires_while_it_waits(store, clock, consumer, launch_pod):
+    store.add("scan", "trade-scan", status="running", executor="pod")
+    queue_run(store, consumer, "inbox", "trade-inbox")
+    clock.now = NOW + timedelta(minutes=30)
+    consumer.drain()
+    assert (store.rows["inbox"]["status"], store.rows["inbox"]["end_reason"]) == (
+        "skipped",
+        "expired",
+    )
+    launch_pod.assert_not_called()
+
+
+def test_group_limit_two_admits_two_runs(store, clock, runner, launch_pod):
+    catalog = grouped_catalog(2, {"trade-scan", "trade-inbox", "rumor-syncer"})
+    consumer = make_consumer(store, clock, runner, launch_pod, catalog)
+    store.add("scan", "trade-scan", status="running", executor="inline")
+    queue_run(store, consumer, "inbox", "trade-inbox")
+    queue_run(store, consumer, "r1")
+    assert consumer.drain() == ["inbox"]
+    assert store.rows["r1"]["status"] == "queued"
+
+
+def test_fan_out_parent_takes_no_group_slot(store, clock, runner, launch_pod):
+    catalog = grouped_catalog(1, {"projections-refresh", "trade-scan"})
+    consumer = make_consumer(store, clock, runner, launch_pod, catalog)
+    queue_run(store, consumer, "parent", "projections-refresh")
+    consumer.drain()
+    assert store.rows["parent"]["executor"] == "fan_out"
+    queue_run(store, consumer, "scan", "trade-scan")
+    assert consumer.drain() == ["scan"]
