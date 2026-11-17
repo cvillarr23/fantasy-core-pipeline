@@ -18,6 +18,12 @@ def test_bench_is_owned_minus_started():
     assert espn.percent_change == 1.25
 
 
+def test_bench_is_rounded_to_two_decimals_to_drop_float_noise():
+    cur = _cursor([("p1", 1, 97.48, 61.51, 0.0)])
+    assert 97.48 - 61.51 != 35.97
+    assert load_espn_ownership(cur, ["p1"], 2026, 5)["p1"].percent_bench == 35.97
+
+
 def test_bench_floors_at_zero_and_none_when_input_missing():
     cur = _cursor([("a", 1, 40.0, 60.0, None), ("b", None, None, 10.0, None), ("c", None, 10.0, None, None)])
     result = load_espn_ownership(cur, ["a", "b", "c"], 2026, 5)
