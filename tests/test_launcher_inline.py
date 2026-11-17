@@ -96,7 +96,8 @@ def test_child_gets_run_identity_and_launcher_env(runner, store, tmp_path, monke
     out = tmp_path / "env"
     code = (
         "import os, pathlib, sys; "
-        f"pathlib.Path({str(out)!r}).write_text(os.environ['RUN_ID'] + ' ' + sys.argv[1])"
+        f"pathlib.Path({str(out)!r}).write_text("
+        "os.environ['RUN_ID'] + ' ' + sys.argv[1] + ' ' + os.environ['RUN_EXECUTOR'])"
     )
     run = InlineRun(
         "r1",
@@ -107,7 +108,7 @@ def test_child_gets_run_identity_and_launcher_env(runner, store, tmp_path, monke
     )
     runner.submit(run)
     wait_idle(runner)
-    assert out.read_text() == "r1 2026"
+    assert out.read_text() == "r1 2026 inline"
 
 
 def test_runner_is_busy_until_the_run_finishes(runner):

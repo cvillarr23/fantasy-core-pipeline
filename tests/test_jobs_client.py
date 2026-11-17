@@ -100,3 +100,12 @@ def test_unreachable_api_is_a_jobs_api_error():
     with patch("src.jobs_client.requests.request", side_effect=requests.ConnectionError("refused")):
         with pytest.raises(JobsApiError, match="refused"):
             jobs_client.list_jobs()
+
+
+def test_resource_suggestions_is_a_keyless_get_with_its_window():
+    _, request = _call(jobs_client.resource_suggestions, _response(body={"jobs": []}), 14, 3)
+    assert request.call_args.args == (
+        "GET",
+        "http://core:8000/v1/jobs/resource-suggestions?days=14&min_runs=3",
+    )
+    assert "X-API-Key" not in request.call_args.kwargs["headers"]

@@ -3333,6 +3333,131 @@
         "title": "JobInfo",
         "type": "object"
       },
+      "JobResourceSuggestion": {
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/JobResources"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "runs": {
+            "title": "Runs",
+            "type": "integer"
+          },
+          "suggested": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SuggestedResources"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "runs",
+          "current",
+          "usage",
+          "suggested",
+          "reason"
+        ],
+        "title": "JobResourceSuggestion",
+        "type": "object"
+      },
+      "JobResources": {
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/ResourceQuantities"
+          },
+          "requests": {
+            "$ref": "#/components/schemas/ResourceQuantities"
+          }
+        },
+        "required": [
+          "requests",
+          "limits"
+        ],
+        "title": "JobResources",
+        "type": "object"
+      },
+      "JobUsage": {
+        "description": "Percentiles over a job's measured successful runs (`run_log.summary.resources`).",
+        "properties": {
+          "avg_cpu_cores": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cpu_seconds": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peak_memory_bytes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "throttled_fraction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "cpu_seconds",
+          "avg_cpu_cores",
+          "peak_memory_bytes",
+          "throttled_fraction"
+        ],
+        "title": "JobUsage",
+        "type": "object"
+      },
       "JobsResponse": {
         "properties": {
           "chains": {
@@ -5007,6 +5132,50 @@
         "title": "RecentNewsItem",
         "type": "object"
       },
+      "ResourceQuantities": {
+        "properties": {
+          "cpu": {
+            "title": "Cpu",
+            "type": "string"
+          },
+          "memory": {
+            "title": "Memory",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cpu",
+          "memory"
+        ],
+        "title": "ResourceQuantities",
+        "type": "object"
+      },
+      "ResourceSuggestionsResponse": {
+        "properties": {
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobResourceSuggestion"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "min_runs": {
+            "title": "Min Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "days",
+          "min_runs",
+          "jobs"
+        ],
+        "title": "ResourceSuggestionsResponse",
+        "type": "object"
+      },
       "RetryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6608,6 +6777,27 @@
           "teams_with_strength"
         ],
         "title": "StrengthMetric",
+        "type": "object"
+      },
+      "SuggestedResources": {
+        "properties": {
+          "cpu_throttled": {
+            "title": "Cpu Throttled",
+            "type": "boolean"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/ResourceQuantities"
+          },
+          "requests": {
+            "$ref": "#/components/schemas/ResourceQuantities"
+          }
+        },
+        "required": [
+          "requests",
+          "limits",
+          "cpu_throttled"
+        ],
+        "title": "SuggestedResources",
         "type": "object"
       },
       "SwapInstruction": {
@@ -8342,6 +8532,29 @@
           "reasons"
         ],
         "title": "UnscoredWeek",
+        "type": "object"
+      },
+      "UsageStats": {
+        "properties": {
+          "max": {
+            "title": "Max",
+            "type": "number"
+          },
+          "p50": {
+            "title": "P50",
+            "type": "number"
+          },
+          "p95": {
+            "title": "P95",
+            "type": "number"
+          }
+        },
+        "required": [
+          "p50",
+          "p95",
+          "max"
+        ],
+        "title": "UsageStats",
         "type": "object"
       },
       "ValidationError": {
@@ -10154,6 +10367,60 @@
           }
         },
         "summary": "Get Jobs"
+      }
+    },
+    "/v1/jobs/resource-suggestions": {
+      "get": {
+        "operationId": "get_resource_suggestions_v1_jobs_resource_suggestions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_runs",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Min Runs",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceSuggestionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Resource Suggestions"
       }
     },
     "/v1/jobs/{name}/pause": {

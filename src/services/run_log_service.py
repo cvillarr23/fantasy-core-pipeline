@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import deque
 from contextlib import contextmanager
@@ -22,6 +23,7 @@ from typing import Literal, get_args
 
 from src.database import get_db_cursor
 from src.queue_contracts import DRAFT_TARGETS, LINEUP_UPDATES, WAIVER_ACTIONS
+from src.run_usage import measure_run_usage
 from src.services.activity_service import league_id, redact
 
 logger = logging.getLogger(__name__)
@@ -331,6 +333,7 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
     token = current_run.set(run)
     capture = _RunLogCapture(run)
     logging.getLogger().addHandler(capture)
+    started = time.monotonic()
 
     def finish(status, error=None):
         logging.getLogger().removeHandler(capture)
@@ -338,7 +341,11 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
             run.id,
             status,
             error,
-            {**capture.summary(), **run.summary},
+            {
+                **capture.summary(),
+                **run.summary,
+                **_launcher_run_usage(adopted_id, adopted_attempt, started),
+            },
             expected_attempt=adopted_attempt,
         )
 
@@ -361,6 +368,15 @@ def run_scope(job_name, trigger_type=None, trigger=None, parent_run_id=None):
         current_run.reset(token)
         if adopted_id:
             _restore_parent_id(previous_parent_id)
+
+
+def _launcher_run_usage(adopted_id, attempt, started):
+    """`{"resources": ...}` for a launcher-adopted run, which owns its pod (or, inline, its
+    process), else nothing: an API request's scope shares its process with other requests."""
+    if not adopted_id:
+        return {}
+    usage = measure_run_usage(attempt or 1, time.monotonic() - started)
+    return {"resources": usage} if usage else {}
 
 
 def _launcher_run_from_env(parent):

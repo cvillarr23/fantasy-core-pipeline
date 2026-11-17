@@ -148,7 +148,8 @@ class InlineRunner:
                 self._busy.clear()
 
     def _execute(self, run):
-        env = {**os.environ, **run.env}
+        # Its cgroup is the launcher's, so the run measures itself with getrusage instead.
+        env = {**os.environ, **run.env, "RUN_EXECUTOR": "inline"}
         argv = expand_command(run.argv, env)
         logger.info("Starting inline run run_id=%s job=%s", run.run_id, run.job)
         process = self._start_process(run, argv, env)

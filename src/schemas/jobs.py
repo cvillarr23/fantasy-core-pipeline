@@ -99,6 +99,53 @@ class JobsResponse(BaseModel):
     chains: list[ChainInfo]
 
 
+class ResourceQuantities(BaseModel):
+    cpu: str
+    memory: str
+
+
+class JobResources(BaseModel):
+    requests: ResourceQuantities
+    limits: ResourceQuantities
+
+
+class UsageStats(BaseModel):
+    p50: float
+    p95: float
+    max: float
+
+
+class JobUsage(BaseModel):
+    """Percentiles over a job's measured successful runs (`run_log.summary.resources`)."""
+
+    cpu_seconds: UsageStats | None
+    avg_cpu_cores: UsageStats | None
+    peak_memory_bytes: UsageStats | None
+    # Share of each run's wall time held back by its CPU limit.
+    throttled_fraction: UsageStats | None
+
+
+class SuggestedResources(JobResources):
+    # The current CPU limit is throttling the job, so the suggestion keeps at least it.
+    cpu_throttled: bool
+
+
+class JobResourceSuggestion(BaseModel):
+    name: str
+    runs: int
+    current: JobResources
+    usage: JobUsage | None
+    # Null with a `reason` (`no_measured_runs`, `insufficient_runs`) until enough runs exist.
+    suggested: SuggestedResources | None
+    reason: str | None
+
+
+class ResourceSuggestionsResponse(BaseModel):
+    days: int
+    min_runs: int
+    jobs: list[JobResourceSuggestion]
+
+
 class LauncherHealthResponse(BaseModel):
     heartbeat_at: datetime
     heartbeat_age_seconds: float
