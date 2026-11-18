@@ -7,10 +7,11 @@ from src.schemas.espn_ownership import EspnOwnership
 
 
 def _percent_bench(percent_owned, percent_started):
-    """Owned minus started, floored at 0; None when ESPN gave either figure as unknown."""
+    """Owned minus started, floored at 0 and rounded to ESPN's 2 decimals (the subtraction
+    leaves float noise); None when ESPN gave either figure as unknown."""
     if percent_owned is None or percent_started is None:
         return None
-    return max(percent_owned - percent_started, 0.0)
+    return round(max(percent_owned - percent_started, 0.0), 2)
 
 
 def _ownership(row) -> EspnOwnership:
