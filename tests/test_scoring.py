@@ -77,3 +77,15 @@ def test_summarize_season_aggregates_weekly_lineup_records():
     assert result["waiver"] == waiver_summary
     assert result["draft"] == draft_summary
     assert result["weekly"] == weekly
+
+
+def test_backtest_lineup_solve_fills_the_backtest_league_slots_without_k_or_dst():
+    """The backtest pool has no K or D/ST, so the solver's default slots (which include
+    both) would be infeasible and start nobody."""
+    starters = scoring.solve_backtest_lineup(_roster_pool())
+    assert {p["player_id"] for p in starters} == {"qb1", "rb1", "rb2", "wr1", "wr2", "te1", "rb3"}
+
+
+def test_compute_naive_starters_fills_a_skill_only_roster():
+    pool = [{**p, "projected_points": 1.0} for p in _roster_pool()]
+    assert len(scoring.compute_naive_starters(pool)) == 7

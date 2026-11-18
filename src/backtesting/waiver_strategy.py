@@ -5,8 +5,10 @@ built specifically to be scorable against a static (no-moves) baseline. No FAAB/
 modeling.
 
 These rules rank players by weekly_stats.vorp_score, which season_replay.run_week writes
-just before them. So the ESPN market weight for a backtest sweep is set on that replay
-(run_season_replay(market_weight=...), or --espn-market-weight), not here.
+just before them. So the market weight and its source (ESPN start%, or the FantasyPros ECR
+stand-in) for a backtest sweep are set on that replay (run_season_replay(market_weight=...,
+market_source=...), or --espn-market-weight/--market-source; market_weight_sweep runs the
+grid), not here.
 """
 import json
 import logging

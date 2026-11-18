@@ -66,3 +66,27 @@ def test_backtest_db_restores_pool_on_exception():
             pass
     assert database.db_pool is original_pool
     fake_pool.closeall.assert_called_once()
+
+
+def test_provision_schema_creates_backtest_only_tables_after_migrations():
+    calls = []
+    mock_conn = MagicMock()
+    backtest_cursor = MagicMock()
+    backtest_cursor.execute.side_effect = lambda q, *a: calls.append(q)
+    backtest_conn = MagicMock()
+    backtest_conn.cursor.return_value.__enter__.return_value = backtest_cursor
+    with patch("src.backtesting.backtest_schema.psycopg2.connect", return_value=mock_conn), \
+         patch("src.backtesting.backtest_schema.backtest_db") as mock_backtest_db, \
+         patch("src.backtesting.backtest_schema.run_migrations", side_effect=lambda: calls.append("migrations")), \
+         patch("src.backtesting.backtest_schema.database.get_db_connection") as mock_get_conn:
+        mock_get_conn.return_value.__enter__.return_value = backtest_conn
+        backtest_schema.provision_schema("backtest_2023", wipe=True)
+
+    assert calls[0] == "migrations"
+    assert "CREATE TABLE IF NOT EXISTS fp_weekly_ecr" in calls[1]
+
+
+def test_fp_weekly_ecr_is_not_a_production_table():
+    import src.models as models
+    production_ddl = " ".join(v for v in vars(models).values() if isinstance(v, str))
+    assert "fp_weekly_ecr" not in production_ddl

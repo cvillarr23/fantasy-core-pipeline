@@ -213,3 +213,66 @@ def test_load_teams_playing_by_week_no_schedule_returns_empty_sets():
     with patch("src.backtesting.historical_data.nfl.load_schedules", return_value=pl.DataFrame()):
         result = historical_data.load_teams_playing_by_week(2023, [1, 2])
     assert result == {1: set(), 2: set()}
+
+
+def _ecr_schedule():
+    return pl.DataFrame({
+        "game_type": ["REG", "REG", "REG", "REG", "POST"],
+        "week": [1, 1, 2, 2, 19],
+        "gameday": ["2023-09-07", "2023-09-10", "2023-09-14", "2023-09-18", "2024-01-13"],
+    })
+
+
+def _ecr_archive():
+    return pl.DataFrame({
+        "page_type": ["weekly-rb", "weekly-wr", "weekly-k", "redraft-rb", "weekly-rb", "weekly-rb", "weekly-qb", "weekly-wr"],
+        # 09-08 is after week 1's Thursday game but before its Sunday: still week 1.
+        # 09-13 and 09-15 both precede week 2's last game; the later scrape wins.
+        "scrape_date": ["2023-09-08", "2023-09-08", "2023-09-08", "2023-08-20", "2023-09-13", "2023-09-15", "2023-09-15", "2024-01-20"],
+        "id": ["100", "200", "900", "100", "100", "100", "999", "200"],
+        "pos": ["RB", "WR", "K", "RB", "RB", "RB", "QB", "WR"],
+        "ecr": [3.0, 7.0, 1.0, 4.0, 9.0, 2.0, 5.0, 1.0],
+    })
+
+
+def _load_weekly_ecr():
+    with patch("src.backtesting.historical_data.nfl.load_ff_rankings", return_value=_ecr_archive()), \
+         patch("src.backtesting.historical_data.nfl.load_schedules", return_value=_ecr_schedule()):
+        return historical_data.load_weekly_ecr(2023, _player_pool())
+
+
+def test_load_weekly_ecr_keeps_weekly_skill_pages_mapped_to_their_week():
+    out = _load_weekly_ecr().sort(["week", "player_id"])
+    assert out.select(["season", "week", "player_id", "pos", "ecr"]).rows() == [
+        (2023, 1, "1", "RB", 3.0),
+        (2023, 1, "2", "WR", 7.0),
+        (2023, 2, "1", "RB", 2.0),
+    ]
+
+
+def test_load_weekly_ecr_takes_the_latest_scrape_when_two_map_to_one_week():
+    week2 = _load_weekly_ecr().filter(pl.col("week") == 2)
+    assert week2["scrape_date"].unique().to_list() == ["2023-09-15"]
+
+
+def test_load_weekly_ecr_logs_match_rate_per_position(caplog):
+    with caplog.at_level("INFO", logger="BacktestHistoricalData"):
+        _load_weekly_ecr()
+    # The week-2 QB (fantasypros id 999) has no crosswalk row.
+    assert any("QB" in r.message and "0/1" in r.message and r.levelname == "WARNING" for r in caplog.records)
+    assert any("RB" in r.message and "2/2" in r.message for r in caplog.records)
+
+
+def test_scrape_week_is_none_after_the_regular_season():
+    reg = _ecr_schedule().filter(pl.col("game_type") == "REG")
+    assert historical_data.scrape_week("2023-09-19", reg) is None
+    assert historical_data.scrape_week("2023-09-01", reg) == 1
+
+
+def test_seed_weekly_ecr_inserts_rows():
+    mock_conn = MagicMock()
+    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+    assert historical_data.seed_weekly_ecr(mock_conn, _load_weekly_ecr()) == 3
+    query, rows = mock_cursor.executemany.call_args.args
+    assert "fp_weekly_ecr" in query
+    assert (2023, 1, "1", "RB", 3.0, "2023-09-08") in rows

@@ -25,12 +25,15 @@ flowchart LR
 | ADP proxy | FantasyPros ECR scrape before opening kickoff |
 | No eligible scrape | Prior-season actual-point ranks |
 | Fixed preseason projection | `max(1, 30 − 0.15 × rank)` |
+| Rolling projection (`--base-projection rolling`) | Week N: mean actual points over weeks N−3..N−1 (already revealed); preseason value in week 1 or with no prior weeks |
+| Market stand-in (`--market-source ecr`) | FantasyPros weekly positional ECR in a backtest-only `fp_weekly_ecr` table, scrape mapped to the first week whose last game is on or after it; usually starts around week 3-4 |
+| Lineup slots | The fixed league's QB, 2 RB, 2 WR, TE and FLEX. The pool has no K or D/ST |
 | Outside ranked pool | Weekly shell projection 0 |
 | League and ownership | Fixed standard league and simulated draft; scheduled playing teams |
 | Draft opponents | Pick by ADP |
 
 :::note[This tests decision mechanics]
-Synthetic preseason values are not historical weekly Sleeper forecasts. Current-week actuals are revealed only after decisions; the replay does not reconstruct historical ESPN ownership.
+Synthetic preseason values are not historical weekly Sleeper forecasts. Current-week actuals are revealed only after decisions; the replay does not reconstruct historical ESPN ownership, so market-weight tuning ranks FantasyPros weekly ECR instead (see `market_stand_in` for its agreement with ESPN start%).
 :::
 
 ## What does each comparison measure?
@@ -65,4 +68,4 @@ Synthetic preseason values are not historical weekly Sleeper forecasts. Current-
 - [Run and verify a backtest](run-backtest.md)
 - [Draft rules](draft.md)
 - [Waiver rules](waivers.md)
-- Implementation: [season_replay.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/season_replay.py), [historical_data.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/historical_data.py), [scoring.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/scoring.py)
+- Implementation: [market_weight_sweep.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/market_weight_sweep.py), [season_replay.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/season_replay.py), [historical_data.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/historical_data.py), [scoring.py](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/src/backtesting/scoring.py)

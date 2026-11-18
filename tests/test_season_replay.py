@@ -160,7 +160,7 @@ def test_run_week_enforces_no_lookahead_ordering():
 
     with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline", side_effect=track("vorp")), \
          patch.object(season_replay.lineup_solver, "load_roster_pool", side_effect=track("load_roster_pool", [])), \
-         patch.object(season_replay.lineup_solver, "build_and_solve_lineup", side_effect=track("solve_lineup", [])), \
+         patch.object(season_replay.scoring, "solve_backtest_lineup", side_effect=track("solve_lineup", [])), \
          patch.object(season_replay, "persist_starters", side_effect=track("persist_starters")), \
          patch.object(season_replay.waiver_strategy, "run_weekly_waivers", side_effect=track("waivers")), \
          patch.object(season_replay, "load_current_roster_ids", side_effect=track("load_roster_ids", set())), \
@@ -180,7 +180,7 @@ def test_run_week_returns_lineup_waiver_and_static_points():
     mock_conn = MagicMock()
     with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline"), \
          patch.object(season_replay.lineup_solver, "load_roster_pool", return_value=[]), \
-         patch.object(season_replay.lineup_solver, "build_and_solve_lineup", return_value=[]), \
+         patch.object(season_replay.scoring, "solve_backtest_lineup", return_value=[]), \
          patch.object(season_replay, "persist_starters"), \
          patch.object(season_replay.waiver_strategy, "run_weekly_waivers"), \
          patch.object(season_replay, "load_current_roster_ids", return_value={"1", "2"}), \
@@ -201,7 +201,7 @@ def test_run_week_passes_market_weight_to_vorp_pipeline():
     mock_conn = MagicMock()
     with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline") as vorp, \
          patch.object(season_replay.lineup_solver, "load_roster_pool", return_value=[]), \
-         patch.object(season_replay.lineup_solver, "build_and_solve_lineup", return_value=[]), \
+         patch.object(season_replay.scoring, "solve_backtest_lineup", return_value=[]), \
          patch.object(season_replay, "persist_starters"), \
          patch.object(season_replay.waiver_strategy, "run_weekly_waivers"), \
          patch.object(season_replay, "load_current_roster_ids", return_value=set()), \
@@ -210,5 +210,101 @@ def test_run_week_passes_market_weight_to_vorp_pipeline():
         season_replay.run_week(mock_conn, 2023, 5, {}, naive_starters=[], static_roster_ids=set())
         season_replay.run_week(mock_conn, 2023, 6, {}, naive_starters=[], static_roster_ids=set(), market_weight=0.3)
 
-    assert vorp.call_args_list[0].kwargs == {"season": 2023, "week": 5, "market_weight": 0.0}
-    assert vorp.call_args_list[1].kwargs == {"season": 2023, "week": 6, "market_weight": 0.3}
+    assert vorp.call_args_list[0].kwargs == {"season": 2023, "week": 5, "market_weight": 0.0, "market_source": "espn"}
+    assert vorp.call_args_list[1].kwargs == {"season": 2023, "week": 6, "market_weight": 0.3, "market_source": "espn"}
+
+
+def _patched_run_week(mock_conn, week, **kwargs):
+    call_order = []
+    with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline", side_effect=lambda **k: call_order.append(("vorp", k))), \
+         patch.object(season_replay.lineup_solver, "load_roster_pool", return_value=[]), \
+         patch.object(season_replay.scoring, "solve_backtest_lineup", return_value=[]), \
+         patch.object(season_replay, "persist_starters"), \
+         patch.object(season_replay.waiver_strategy, "run_weekly_waivers"), \
+         patch.object(season_replay, "load_current_roster_ids", return_value=set()), \
+         patch.object(season_replay, "reveal_week_actuals", side_effect=lambda *a: call_order.append(("reveal",))), \
+         patch.object(season_replay, "seed_rolling_projections", side_effect=lambda *a: call_order.append(("rolling", a))), \
+         patch.object(season_replay.scoring, "score_lineup_week", return_value={}):
+        season_replay.run_week(mock_conn, 2023, week, {}, naive_starters=[], static_roster_ids=set(), **kwargs)
+    return call_order
+
+
+def test_run_week_passes_market_source_to_vorp_pipeline():
+    calls = _patched_run_week(MagicMock(), 6, market_weight=0.1, market_source="ecr")
+    assert ("vorp", {"season": 2023, "week": 6, "market_weight": 0.1, "market_source": "ecr"}) in calls
+
+
+def test_run_week_rolling_base_reseeds_projections_before_vorp():
+    history = {4: {"1": 10.0}}
+    calls = _patched_run_week(MagicMock(), 6, rolling_history=history)
+    names = [c[0] for c in calls]
+    assert names.index("rolling") < names.index("vorp") < names.index("reveal")
+    assert calls[names.index("rolling")][1][1:] == (2023, 6, history)
+
+
+def test_run_week_commits_rolling_projections_before_vorp_runs():
+    """run_vorp_pipeline updates the same weekly_stats rows on its own pooled connection, so
+    an uncommitted reseed would hold their row locks and block it forever."""
+    mock_conn = MagicMock()
+    order = []
+    mock_conn.commit.side_effect = lambda: order.append("commit")
+    with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline", side_effect=lambda **k: order.append("vorp")), \
+         patch.object(season_replay.lineup_solver, "load_roster_pool", return_value=[]), \
+         patch.object(season_replay.scoring, "solve_backtest_lineup", return_value=[]), \
+         patch.object(season_replay, "persist_starters"), \
+         patch.object(season_replay.waiver_strategy, "run_weekly_waivers"), \
+         patch.object(season_replay, "load_current_roster_ids", return_value=set()), \
+         patch.object(season_replay, "reveal_week_actuals"), \
+         patch.object(season_replay, "seed_rolling_projections"), \
+         patch.object(season_replay.scoring, "score_lineup_week", return_value={}):
+        season_replay.run_week(mock_conn, 2023, 6, {}, naive_starters=[], static_roster_ids=set(), rolling_history={})
+    assert order[:2] == ["commit", "vorp"]
+
+
+def test_run_week_preseason_base_never_reseeds():
+    calls = _patched_run_week(MagicMock(), 6)
+    assert "rolling" not in [c[0] for c in calls]
+
+
+def test_rolling_projection_means_up_to_three_prior_weeks():
+    history = {1: {"a": 30.0}, 2: {"a": 3.0, "b": 8.0}, 3: {"a": 6.0}, 4: {"a": 9.0, "b": 4.0}, 5: {"a": 99.0}}
+    projections = season_replay.rolling_projections(history, week=5)
+    assert projections == {"a": 6.0, "b": 6.0}
+
+
+def test_rolling_projection_never_reads_the_target_week_or_later():
+    history = {3: {"a": 6.0}, 5: {"a": 1000.0}, 6: {"a": 1000.0}}
+    assert season_replay.rolling_projections(history, week=5) == {"a": 6.0}
+    assert season_replay.rolling_projections(history, week=1) == {}
+
+
+def test_seed_rolling_projections_updates_only_the_target_week_rows():
+    mock_conn = MagicMock()
+    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+    season_replay.seed_rolling_projections(mock_conn, 2023, 5, {4: {"a": 9.0}})
+    query, rows = mock_cursor.executemany.call_args.args
+    assert query.strip().startswith("UPDATE weekly_stats SET projected_points")
+    assert rows == [(9.0, "a", 2023, 5)]
+
+
+def test_seed_rolling_projections_week_one_keeps_preseason():
+    mock_conn = MagicMock()
+    season_replay.seed_rolling_projections(mock_conn, 2023, 1, {})
+    mock_conn.cursor.assert_not_called()
+
+
+def test_run_week_solves_our_lineup_with_the_backtest_league_slots():
+    pool = [
+        {"player_id": pid, "name": pid, "position": pos, "vorp_score": 1.0}
+        for pid, pos in [("q", "QB"), ("r1", "RB"), ("r2", "RB"), ("w1", "WR"), ("w2", "WR"), ("t", "TE"), ("r3", "RB")]
+    ]
+    with patch.object(season_replay.vorp_matrix, "run_vorp_pipeline"), \
+         patch.object(season_replay.lineup_solver, "load_roster_pool", return_value=pool), \
+         patch.object(season_replay, "persist_starters") as persist, \
+         patch.object(season_replay.waiver_strategy, "run_weekly_waivers"), \
+         patch.object(season_replay, "load_current_roster_ids", return_value=set()), \
+         patch.object(season_replay, "reveal_week_actuals"), \
+         patch.object(season_replay.scoring, "score_lineup_week", return_value={}):
+        season_replay.run_week(MagicMock(), 2023, 5, {}, naive_starters=[], static_roster_ids=set())
+    starter_ids = persist.call_args.args[2]
+    assert starter_ids == {"q", "r1", "r2", "w1", "w2", "t", "r3"}
