@@ -130,3 +130,18 @@ def test_verified_move_invalidates_before_publishing_outcome():
         activity_runner.reconcile_action("id", {2026: league})
 
     assert [c.args for c in order.call_args_list][:2] == [("invalidate", "123"), ("record", "verified_complete")]
+
+
+def test_cached_pydantic_models_come_back_as_dicts(read_cache_redis):
+    """A model inside a cached payload must round-trip as its fields, not its str(), or the
+    route's response model rejects every cache hit."""
+    from src.schemas.espn_ownership import EspnOwnership
+
+    espn = EspnOwnership(pos_rank=1, percent_owned=99.9, percent_started=98.7, percent_bench=1.2, percent_change=0.03)
+    load = MagicMock(return_value={"starters": [{"player_id": "1", "espn": espn}]})
+
+    read_cache.cached(["roster", "123", 2026], 60, load)
+    hit = read_cache.cached(["roster", "123", 2026], 60, load)
+
+    load.assert_called_once()
+    assert hit["starters"][0]["espn"] == espn.model_dump()

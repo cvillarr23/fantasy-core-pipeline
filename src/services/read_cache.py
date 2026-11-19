@@ -6,6 +6,8 @@ import logging
 import os
 import threading
 from concurrent.futures import Future
+
+from pydantic import BaseModel
 from src.database import get_redis_client
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,14 @@ def league_key(season):
     # The league id must be the second key element: cached() reads it to find the
     # invalidate_league() version counter for the entry.
     return [os.getenv("ESPN_LEAGUE_ID"), season]
+
+
+def _json_default(value):
+    """Payloads may carry Pydantic models (the ESPN market signal). str() would cache their repr,
+    which the route's response model then rejects on every cache hit."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return str(value)
 
 
 def cached(key, ttl, load):
@@ -48,7 +58,7 @@ def cached(key, ttl, load):
         result = load()
         if redis is not None:
             try:
-                redis.setex(redis_key, ttl, json.dumps(result, default=str))
+                redis.setex(redis_key, ttl, json.dumps(result, default=_json_default))
             except Exception:
                 logger.warning("Read cache write unavailable")
         pending.set_result(result)
