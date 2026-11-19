@@ -83,7 +83,7 @@ MIN_AUTO_PUBLISH_WINDOW_SECONDS = int(os.getenv("MIN_AUTO_PUBLISH_WINDOW_SECONDS
 # "circuit_breaker"), rather than letting a systemic problem (a dead browser-worker pod, an
 # expired ESPN session) burn through every remaining pick in the draft one at a time.
 MAX_CONSECUTIVE_PUBLISH_FAILURES = int(os.getenv("MAX_CONSECUTIVE_PUBLISH_FAILURES", "3"))
-# Set by _draft_sync_env() alongside DRAFT_PICK_CLOCK_SECONDS - the listener's own practice/live
+# Set by the catalog's param_env alongside DRAFT_PICK_CLOCK_SECONDS - the listener's own practice/live
 # tag, forwarded on every published target so fantasy-browser-worker's click bot can safely
 # submit for real in a practice room without needing its own DRY_RUN=false set (which would also,
 # and unsafely, apply to any live-league target the same worker pod ever processes).
@@ -129,8 +129,8 @@ MIN_PUBLISH_WINDOW_SECONDS = 1
 # it also avoids the 8.1-style collision.
 XREADGROUP_BLOCK_MS = 5000
 REDIS_SOCKET_TIMEOUT_SECONDS = 15
-# The generated Job (src/api/draft.py's start_draft_sync) sets backoff_limit=0 and
-# restart_policy="Never" - nothing outside this process will ever restart it. Now that
+# The launcher runs this as a one-attempt service job (backoff_limit=0, restart_policy="Never")
+# - nothing outside this process will ever restart it. Now that
 # XREADGROUP_BLOCK_MS is bounded above, an unhandled TimeoutError/ConnectionError from a
 # merely transient Redis stall (a brief network blip, not a truly dead connection) would
 # permanently end recommendations for the rest of the draft instead of just this one poll.
@@ -1898,10 +1898,9 @@ def run_draft_listener(league_id: str, team_id: str, season: int, week: int, del
         # not a crash - the generated Job sets backoff_limit=0/restart_policy="Never" (see
         # XREADGROUP_BLOCK_MS's comment above), so this is the only way the Job ever reaches
         # a real terminal state (Active -> Succeeded) instead of running forever against an
-        # ESPN socket that has nothing left to send. Both existing "already active" guards
-        # in src/api/draft.py (_active_listeners_on_other_leagues, start_draft_sync's
-        # same-league check) key strictly off job_state == "Active", so Succeeded already
-        # unblocks the next practice run with no separate reaping step needed here.
+        # ESPN socket that has nothing left to send. The "already active" guards in
+        # src/api/draft.py key off the run being queued or running, so a run that ended
+        # `success` unblocks the next practice run with no separate reaping step needed here.
         if r_client.hget(_listener_board_key(league_id), "draft_state") == "complete":
             logger.info("listener_stopping_draft_complete league_id=%s team_id=%s", league_id, team_id)
             return

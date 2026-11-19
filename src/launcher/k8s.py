@@ -28,6 +28,10 @@ TTL_SECONDS_AFTER_FINISHED = 86400
 IMAGE_PULL_SECRET = "ghcr-pull-secret"
 ESPN_SESSION_SECRET = "espn-session-secrets"
 ESPN_SESSION_STATE_DIR = "/var/run/espn-session"
+# A service run is stopped by cancelling it, and the draft endpoints wait for its pod to go.
+# Both draft entrypoints exit on SIGTERM and the listener's consumer-group read survives a kill,
+# so nothing needs Kubernetes' 30s default.
+SERVICE_TERMINATION_GRACE_SECONDS = 5
 
 
 class LaunchConfigError(RuntimeError):
@@ -200,11 +204,17 @@ def job_name(command):
     return dns1123_slug(command.job)[: 63 - len(suffix)].rstrip("-") + suffix
 
 
-def build_job(command, resolved, argv):
-    """The k8s Job for one attempt of a run. `argv` is the catalog command plus params."""
+def build_job(command, resolved, argv, param_env=None):
+    """The k8s Job for one attempt of a run. `argv` is the catalog command plus the params
+    passed as flags; `param_env` holds the ones the catalog's `param_env` passes as env."""
     profile = resolved.profile
     image = resolve_image(profile.image)
     env = [client.V1EnvVar(name=k, value=v) for k, v in command.launch_env().items()]
+    # `$$` keeps a caller's `$(VAR)` literal, as params_to_args does for flags.
+    env += [
+        client.V1EnvVar(name=k, value=v.replace("$", "$$"))
+        for k, v in (param_env or {}).items()
+    ]
     env_from = []
     for bundle in profile.secrets:
         bundle_env, bundle_env_from = BUNDLES[bundle]()
@@ -223,6 +233,9 @@ def build_job(command, resolved, argv):
         "fantasy.job": resolved.name,
         "fantasy.run-id": command.run_id,
     }
+    service = resolved.job_class == "service"
+    if service:
+        labels["fantasy.class"] = "service"
     return client.V1Job(
         api_version="batch/v1",
         kind="Job",
@@ -235,6 +248,9 @@ def build_job(command, resolved, argv):
                 metadata=client.V1ObjectMeta(labels=labels),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
+                    termination_grace_period_seconds=(
+                        SERVICE_TERMINATION_GRACE_SECONDS if service else None
+                    ),
                     service_account_name=profile.serviceAccount,
                     image_pull_secrets=[client.V1LocalObjectReference(name=IMAGE_PULL_SECRET)],
                     volumes=volumes or None,

@@ -1,14 +1,16 @@
-# Mirrors the 16 production CronJobs in fantasy-infra (base/core-pipeline, base/browser-worker):
+# Mirrors the 15 production CronJobs in fantasy-infra (base/core-pipeline, base/browser-worker):
 # same commands, schedules, deadlines and resources. weekly-ingestor's initContainer split becomes
 # the sync-league -> metrics-extractor chain steps; the reconcile and prescan CronJobs become
 # second schedules on their jobs; the Tuesday clock offsets become the tuesday-weekly chain.
 # Profile secrets/volumes name src/launcher/k8s.py's BUNDLES/VOLUMES. A profile covers every
 # CronJob it replaces, so some jobs get env they don't read; core-ops adds the broker URL and the
-# fantasy-core-pipeline service account for the injury syncer and the draft Job sweeper.
+# fantasy-core-pipeline service account for the injury syncer. The draft jobs are services the
+# draft endpoints start and cancel (src/services/draft_run_service.py); they have no schedule.
 version: 1
 global:
   max_concurrent_pods: 2
   max_deadline: 2h
+  max_service_deadline: 8h
   start_timeout: 10m
   manual_queue_ttl: 30m
 seasons:
@@ -17,6 +19,8 @@ profiles:
   core: {image: CORE_IMAGE, secrets: [db, espn, redis, trigger-api, league-config]}
   core-ops: {image: CORE_IMAGE, serviceAccount: fantasy-core-pipeline, secrets: [db, espn, redis, trigger-api, league-config, amqp]}
   worker: {image: WORKER_IMAGE, serviceAccount: fantasy-browser-worker, secrets: [db, espn, llm, notify, league-config], volumes: [espn-session-state]}
+  # The draft room connector: ESPN cookies, the league ids and Redis, as its pods had before.
+  worker-draft: {image: WORKER_IMAGE, secrets: [espn, redis, league-config]}
 # trade-scan and trade-inbox drive the one stored ESPN browser session.
 groups:
   espn-session: {limit: 1}
@@ -87,13 +91,47 @@ jobs:
     max_attempts: 2
     schedules:
       - {cron: '*/10 * * * 4,0,1', tz: America/Chicago, catch_up: 0}
-  stale-draft-job-sweeper:
-    profile: core-ops
-    command: [python, -m, src.ops.sweep_stale_draft_jobs]
-    deadline: 14m
-    max_attempts: 2
-    schedules:
-      - {cron: '*/15 * * * *', tz: America/Chicago, catch_up: 0}
+  # Draft-day services. A practice run is retired once its connector's heartbeat lapses.
+  draft-listener:
+    class: service
+    profile: core
+    command: [python, -m, src.optimization.draft_matrix]
+    params: &listener-params {league_id: str, team_id: str, season: int, week: 'int?', mode: str, pick_clock_seconds: int, auto_draft_delay_seconds: int}
+    param_env: &listener-env {mode: DRAFT_MODE, pick_clock_seconds: DRAFT_PICK_CLOCK_SECONDS, auto_draft_delay_seconds: AUTO_DRAFT_DELAY_SECONDS}
+    deadline: 6h
+    alert: critical
+    resources: &listener-resources {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 1000m, memory: 1Gi}}
+  practice-draft-listener:
+    class: service
+    profile: core
+    command: [python, -m, src.optimization.draft_matrix]
+    params: *listener-params
+    param_env: *listener-env
+    deadline: 3h
+    alert: none
+    resources: *listener-resources
+    health: &practice-health {key: 'draft:{league_id}:health', grace: 10m}
+  draft-connector:
+    class: service
+    profile: worker-draft
+    command: [node, src/bots/draft_sync.js]
+    # league_id is only for lookups: a live connector takes its league from ESPN_LEAGUE_ID.
+    params: {league_id: str}
+    param_env: {league_id: DRAFT_LEAGUE_ID}
+    deadline: 6h
+    alert: critical
+    resources: &connector-resources {requests: {cpu: 200m, memory: 512Mi}, limits: {cpu: 1000m, memory: 1200Mi}}
+  practice-draft-connector:
+    class: service
+    profile: worker-draft
+    command: [node, src/bots/draft_sync.js]
+    params: {room_url: str, league_id: 'str?'}
+    # league_id is only for the health key and lookups; draft_sync.js learns it from the room.
+    param_env: {room_url: DRAFT_ROOM_URL, league_id: DRAFT_LEAGUE_ID}
+    deadline: 3h
+    alert: none
+    resources: *connector-resources
+    health: *practice-health
   trade-candidates:
     profile: core
     command: [python, -m, src.jobs.trade_candidates]

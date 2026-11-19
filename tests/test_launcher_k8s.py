@@ -162,6 +162,36 @@ def test_manual_run_job_name_prefixes_the_job_and_params_become_flags():
     assert container["command"][-3:] == ["--week", "7", "--dry-run"]
 
 
+def test_service_job_gets_param_env_a_short_grace_and_its_class_label():
+    resolved = CATALOG.resolve("practice-draft-connector")
+    run = command("practice-draft-connector", trigger="manual", dedupe_key="d1")
+    job = ApiClient().sanitize_for_serialization(
+        k8s.build_job(
+            run,
+            resolved,
+            list(resolved.job.command),
+            {"DRAFT_ROOM_URL": "https://espn/x?a=$(DB_PASSWORD)", "DRAFT_LEAGUE_ID": "42"},
+        )
+    )
+    pod = job["spec"]["template"]["spec"]
+    (container,) = pod["containers"]
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    # Kubernetes expands $(VAR) in env values too, so a caller's text stays literal.
+    assert env["DRAFT_ROOM_URL"] == "https://espn/x?a=$$(DB_PASSWORD)"
+    assert env["DRAFT_LEAGUE_ID"] == "42"
+    assert container["command"] == ["node", "src/bots/draft_sync.js"]
+    assert pod["terminationGracePeriodSeconds"] == k8s.SERVICE_TERMINATION_GRACE_SECONDS
+    assert job["metadata"]["labels"]["fantasy.class"] == "service"
+    assert job["spec"]["activeDeadlineSeconds"] == 3 * 3600
+    assert "serviceAccountName" not in pod
+
+
+def test_batch_job_keeps_the_default_grace_and_no_class_label():
+    job = build("lineup-optimizer")
+    assert "terminationGracePeriodSeconds" not in job["spec"]["template"]["spec"]
+    assert "fantasy.class" not in job["metadata"]["labels"]
+
+
 def test_job_name_stays_within_label_limit():
     run = command(job="x" * 80, attempt=12)
     assert len(k8s.job_name(run)) <= 63
@@ -171,9 +201,9 @@ def test_job_name_stays_within_label_limit():
 def test_otel_service_name_follows_the_module():
     env = {
         e.name: e.value
-        for e in k8s._otel_env(["python", "-m", "src.ops.sweep_stale_draft_jobs"])
+        for e in k8s._otel_env(["python", "-m", "src.optimization.draft_matrix"])
     }
-    assert env["OTEL_SERVICE_NAME"] == "ops-sweep-stale-draft-jobs"
+    assert env["OTEL_SERVICE_NAME"] == "optimization-draft-matrix"
     assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
 
 

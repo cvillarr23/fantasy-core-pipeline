@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import string
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
@@ -105,6 +106,9 @@ class GlobalSettings(CatalogModel):
     # active Jobs count toward max_concurrent_pods, so both share one pod budget.
     counted_k8s_jobs: list[str] = Field(default_factory=list)
     max_deadline: timedelta
+    # Service jobs (a draft listener) run for hours, so they get their own cap. Unset means
+    # max_deadline, so a catalog without service jobs needs no change.
+    max_service_deadline: timedelta | None = None
     start_timeout: timedelta
     manual_queue_ttl: timedelta
 
@@ -112,6 +116,17 @@ class GlobalSettings(CatalogModel):
     @classmethod
     def parse_durations(cls, value: Any) -> timedelta:
         return _duration(value)
+
+    @field_validator("max_service_deadline", mode="before")
+    @classmethod
+    def parse_service_deadline(cls, value: Any) -> timedelta | None:
+        return None if value is None else _duration(value)
+
+    def deadline_cap(self, job_class: str) -> tuple[str, timedelta]:
+        """The name and value of the global deadline cap for a job of this class."""
+        if job_class == "service":
+            return "max_service_deadline", self.max_service_deadline or self.max_deadline
+        return "max_deadline", self.max_deadline
 
 
 class Season(CatalogModel):
@@ -226,8 +241,33 @@ class FanOut(CatalogModel):
     values: list[int | float | str | bool] = Field(min_length=1)
 
 
+class Health(CatalogModel):
+    """A Redis key a service run's own process (or its partner) keeps alive. Once the run is
+    older than ``grace`` and the key is gone, the watcher retires the run as unhealthy."""
+
+    key: str = Field(min_length=1)
+    grace: timedelta
+
+    @field_validator("grace", mode="before")
+    @classmethod
+    def parse_grace(cls, value: Any) -> timedelta:
+        return _duration(value)
+
+    def fields(self) -> list[str]:
+        """The params the key template names."""
+        return [name for _, name, _, _ in string.Formatter().parse(self.key) if name]
+
+
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+
+
 class Job(CatalogModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
     profile: str
+    # `batch` runs to completion under the pod cap; `service` runs for hours (a draft
+    # listener), is exempt from the pod cap and is capped by max_service_deadline instead.
+    job_class: Literal["batch", "service"] = Field(default="batch", alias="class")
     command: list[str] = Field(min_length=1)
     params: dict[str, str] = Field(default_factory=dict)
     executor: Literal["pod", "inline"] | None = None
@@ -241,6 +281,10 @@ class Job(CatalogModel):
     schedules: list[Schedule] = Field(default_factory=list)
     on_event: list[EventSubscription] = Field(default_factory=list)
     fan_out: FanOut | None = None
+    # Params passed to the process as env vars instead of flags, for entrypoints that read
+    # env (the browser worker's draft_sync.js reads DRAFT_ROOM_URL).
+    param_env: dict[str, str] = Field(default_factory=dict)
+    health: Health | None = None
 
     @field_validator("params")
     @classmethod
@@ -256,6 +300,30 @@ class Job(CatalogModel):
     def validate_fan_out(self) -> "Job":
         if self.fan_out is not None:
             self.fan_out.values = _fan_out_values(self.fan_out, self.params)
+        return self
+
+    @model_validator(mode="after")
+    def validate_param_env(self) -> "Job":
+        for param, env_name in self.param_env.items():
+            if param not in self.params:
+                raise ValueError(f"param_env {param!r} is not one of the job's params")
+            if not _ENV_NAME.fullmatch(env_name):
+                raise ValueError(f"param_env {param!r}: {env_name!r} is not an env var name")
+        return self
+
+    @model_validator(mode="after")
+    def validate_service(self) -> "Job":
+        if self.health is not None:
+            if self.job_class != "service":
+                raise ValueError("health: only service jobs declare a health key")
+            for name in self.health.fields():
+                if name not in self.params:
+                    raise ValueError(f"health.key field {name!r} is not one of the job's params")
+        if self.job_class == "service":
+            if self.executor == "inline":
+                raise ValueError("a service job runs on the pod executor")
+            if self.fan_out is not None:
+                raise ValueError("a service job cannot fan out")
         return self
 
 
@@ -282,6 +350,27 @@ def _fan_out_values(fan_out: FanOut, params: dict[str, str]) -> list[Any]:
 def fans_out(job: Job, params: dict[str, Any]) -> bool:
     """Whether a run of ``job`` with these (validated) params is a fan-out parent."""
     return job.fan_out is not None and job.fan_out.param not in params
+
+
+def split_params(job: Job, params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """(validated) params -> (the ones passed as flags, `{ENV_NAME: value}` for `param_env`)."""
+    argv_params = {k: v for k, v in params.items() if k not in job.param_env}
+    env = {
+        job.param_env[k]: str(v)
+        for k, v in params.items()
+        if k in job.param_env and v is not None
+    }
+    return argv_params, env
+
+
+def health_key(job: Job, params: dict[str, Any]) -> str | None:
+    """The run's health key, or None when the job has none or the run leaves a field unset."""
+    if job.health is None:
+        return None
+    values = {name: params.get(name) for name in job.health.fields()}
+    if any(value is None for value in values.values()):
+        return None
+    return job.health.key.format(**values)
 
 
 def _required_params(job: Job) -> list[str]:
@@ -316,7 +405,7 @@ class Chain(CatalogModel):
         return _duration(value)
 
 
-_RESERVED = {"class", "approval"}
+_RESERVED = {"approval"}
 
 
 def _reject_reserved(value: Any, path: str = "catalog") -> None:
@@ -348,6 +437,7 @@ class ResolvedJob:
     alert: str
     resources: Resources
     group: str | None
+    job_class: str = "batch"
 
 
 class Catalog(CatalogModel):
@@ -368,7 +458,6 @@ class Catalog(CatalogModel):
 
     @model_validator(mode="after")
     def validate_references(self) -> "Catalog":
-        max_deadline = self.global_settings.max_deadline
         for name, job in self.jobs.items():
             if job.profile not in self.profiles:
                 raise ValueError(
@@ -379,8 +468,9 @@ class Catalog(CatalogModel):
                     f"jobs.{name}.group references unknown group {job.group!r}"
                 )
             deadline = job.deadline or self.defaults.deadline
-            if deadline > max_deadline:
-                raise ValueError(f"jobs.{name}.deadline exceeds global.max_deadline")
+            cap_name, cap = self.global_settings.deadline_cap(job.job_class)
+            if deadline > cap:
+                raise ValueError(f"jobs.{name}.deadline exceeds global.{cap_name}")
             for schedule in job.schedules:
                 self._validate_schedule_seasons(schedule, f"jobs.{name}.schedules")
             if job.on_event and _required_params(job):
@@ -440,7 +530,12 @@ class Catalog(CatalogModel):
             alert=job.alert or defaults.alert,
             resources=job.resources or defaults.resources,
             group=job.group,
+            job_class=job.job_class,
         )
+
+    def service_jobs(self) -> list[str]:
+        """The names of the service jobs, which the pod cap doesn't count."""
+        return [name for name, job in self.jobs.items() if job.job_class == "service"]
 
     def group_jobs(self, group: str) -> list[str]:
         """The names of the jobs in a concurrency group."""

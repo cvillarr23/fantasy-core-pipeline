@@ -6,23 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kubernetes import client as k8s_client
-from kubernetes.config.config_exception import ConfigException
-
-from src.api.draft import K8S_REQUEST_TIMEOUT_SECONDS, PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
+from src.launcher.runs import JobRun
 
 
 @contextmanager
 def _fake_db_cursor(cursor=None):
     yield cursor or MagicMock()
-
-
-def _k8s_patches():
-    """Common patch set so no real kubeconfig/in-cluster config is ever touched."""
-    return (
-        patch("src.k8s_client.config.load_incluster_config", side_effect=ConfigException("no cluster")),
-        patch("src.k8s_client.config.load_kube_config"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -161,786 +150,9 @@ def test_set_draft_config_db_failure(client):
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/draft/start
+# Listener status and Redis cleanup helpers (/start, /stop and practice routes on launcher
+# runs are in tests/test_draft_run_routes.py)
 # ---------------------------------------------------------------------------
-def _env_config_patches():
-    return (
-        patch("src.api.draft.DRAFT_SYNC_IMAGE", "ghcr.io/example/fantasy-core-pipeline:test"),
-        patch("src.api.draft.DRAFT_SYNC_ENV_SECRET", "draft-sync-secrets"),
-        patch("src.api.draft.DRAFT_SYNC_ENV_CONFIGMAP", "draft-sync-config"),
-    )
-
-
-def test_start_draft_sync_creates_job(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    body = response.json()
-    assert body["status"] == "accepted"
-    assert body["league_id"] == "L1"
-    assert body["team_id"] == "7"
-    assert body["season"] == 2026
-    assert body["mode"] == "live"
-    assert body["already_running"] is False
-
-    mock_batch_api.create_namespaced_job.assert_called_once()
-    namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
-    assert job.metadata.name.startswith("draft-sync-l1-")
-    assert job.metadata.labels["mode"] == "live"
-    container = job.spec.template.spec.containers[0]
-    assert container.command == [
-        "python", "-m", "src.optimization.draft_matrix",
-        "--league-id", "L1", "--team-id", "7", "--season", "2026",
-    ]
-    assert container.env_from[0].config_map_ref.name == "draft-sync-config"
-    assert container.env_from[1].secret_ref.name == "draft-sync-secrets"
-
-
-def test_start_draft_sync_job_gets_db_and_connection_env(client):
-    """draft_matrix.py imports src.database, which opens a connection pool at import time -
-    without DB_PASSWORD the listener Pod crashes before consuming a single pick, so the Job
-    must carry an explicit secretKeyRef (envFrom cannot rename the Secret's own key) plus the
-    non-secret connection settings this API process is using."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    inherited = {
-        "DB_HOST": "fantasy-db.default.svc.cluster.local",
-        "DB_NAME": "fantasy_football",
-        "DB_USER": "bot_admin",
-        "REDIS_HOST": "fantasy-cache.default.svc.cluster.local",
-        "REDIS_PORT": "6379",
-        "CORE_API_BASE_URL": "http://fantasy-core-pipeline.default.svc.cluster.local:8000",
-    }
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         patch.dict(os.environ, inherited, clear=False), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    _, job = mock_batch_api.create_namespaced_job.call_args[0]
-    env = {e.name: e for e in job.spec.template.spec.containers[0].env}
-
-    db_password = env["DB_PASSWORD"]
-    assert db_password.value is None
-    assert db_password.value_from.secret_key_ref.name == "database-credentials"
-    assert db_password.value_from.secret_key_ref.key == "postgres-password"
-
-    for name, value in inherited.items():
-        assert env[name].value == value
-
-
-def test_start_draft_sync_job_omits_unset_inherited_env(client):
-    """An unset variable must not become an empty-string env var - that would override the
-    module-level default in src.database/draft_matrix with a value that cannot connect."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         patch.dict(os.environ, {}, clear=True), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    _, job = mock_batch_api.create_namespaced_job.call_args[0]
-    env_names = {e.name for e in job.spec.template.spec.containers[0].env}
-    # DRAFT_PICK_CLOCK_SECONDS and AUTO_DRAFT_DELAY_SECONDS are always set, never inherited:
-    # both are mode-derived, and a
-    # practice listener silently falling back to the 90s live default would keep retrying
-    # long after the 30s practice clock expired. DRAFT_MODE is always set too - it's read by
-    # publish_draft_target and forwarded on every draft_targets message so the click bot can
-    # tell a practice pick from a live one.
-    assert env_names == {"DB_PASSWORD", "DRAFT_PICK_CLOCK_SECONDS", "AUTO_DRAFT_DELAY_SECONDS", "DRAFT_MODE"}
-
-
-def test_start_draft_sync_creates_practice_job_with_prefixed_name(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    assert response.json()["mode"] == "practice"
-
-    namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
-    # Job *names* must be lowercase RFC 1123 DNS subdomains; the league-id label and the
-    # CLI arg passed to draft_matrix.py keep the original, unsanitized league_id.
-    assert job.metadata.name.startswith("draft-sync-practice-mock123-")
-    assert job.metadata.labels["mode"] == "practice"
-    assert job.metadata.labels["league-id"] == "MOCK123"
-    assert job.spec.template.metadata.labels["mode"] == "practice"
-    container = job.spec.template.spec.containers[0]
-    assert "MOCK123" in container.command
-    # A practice room's clock is 30s, not the 90s a real draft gets. Inheriting the live
-    # default would let the publish-retry loop run for a full minute after the clock it is
-    # meant to protect had already expired and autodrafted.
-    #
-    # 15s (not 20s) mirrors live's ~50% hold-to-clock ratio (45/90): confirmed live
-    # 2026-08-27 that 20s left only 10s of the 30s clock for the actual publish, too little
-    # to recover from a rejected SELECT before ESPN autodrafted a different player for us.
-    env = {e.name: e.value for e in container.env}
-    clock = env["DRAFT_PICK_CLOCK_SECONDS"]
-    assert clock == "30"
-    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "15"
-
-
-def test_start_draft_sync_live_job_gets_the_live_pick_clock(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    _, job = mock_batch_api.create_namespaced_job.call_args[0]
-    container = job.spec.template.spec.containers[0]
-    env = {e.name: e.value for e in container.env}
-    assert env["DRAFT_PICK_CLOCK_SECONDS"] == "90"
-    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "45"
-
-
-def test_start_draft_sync_with_publisher_creates_live_connector_job(client):
-    """Issue #66: with_publisher=true launches fantasy-browser-worker's draft_sync.js
-    alongside the listener, labeled so /stop can discover and tear it down automatically."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         patch("src.api.draft._live_publisher_job_state", return_value="Unknown"), \
-         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start", params={"with_publisher": True})
-
-    assert response.status_code == 202
-    body = response.json()
-    assert body["publisher_job_name"].startswith("live-draft-sync-l1-")
-
-    assert mock_batch_api.create_namespaced_job.call_count == 2
-    _, listener_job = mock_batch_api.create_namespaced_job.call_args_list[0][0]
-    _, publisher_job = mock_batch_api.create_namespaced_job.call_args_list[1][0]
-    assert listener_job.metadata.labels["app"] == "draft-sync"
-    assert publisher_job.metadata.labels == {"app": "live-draft-sync", "league-id": "L1"}
-    container = publisher_job.spec.template.spec.containers[0]
-    assert container.image == "ghcr.io/example/fantasy-browser-worker:test"
-    assert container.command == ["node", "src/bots/draft_sync.js"]
-    env = {e.name: e.value for e in container.env if e.value is not None}
-    assert env["ESPN_LEAGUE_ID"] == "L1"
-    assert env["ESPN_TEAM_ID"] == "7"
-    assert env["CURRENT_YEAR"] == "2026"
-
-
-def test_start_draft_sync_with_publisher_rejects_practice_mode(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
-
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start", params={"with_publisher": True})
-
-    assert response.status_code == 400
-    assert "practice" in response.json()["detail"].lower()
-
-
-def test_start_draft_sync_with_publisher_requires_browser_worker_image(client):
-    mock_cursor = MagicMock()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft.BROWSER_WORKER_IMAGE", None), \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start", params={"with_publisher": True})
-
-    assert response.status_code == 500
-    assert "BROWSER_WORKER_IMAGE" in response.json()["detail"]
-
-
-def test_start_draft_sync_with_publisher_skips_duplicate_when_already_active(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         patch("src.api.draft._live_publisher_job_state", return_value="Active"), \
-         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start", params={"with_publisher": True})
-
-    assert response.status_code == 202
-    assert response.json()["publisher_job_name"] is None
-    # The listener still gets created - only the redundant connector is skipped.
-    assert mock_batch_api.create_namespaced_job.call_count == 1
-
-
-def test_start_draft_sync_with_publisher_surfaces_publisher_creation_failure(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-    mock_batch_api.create_namespaced_job.side_effect = [None, Exception("apiserver unreachable")]
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         patch("src.api.draft._live_publisher_job_state", return_value="Unknown"), \
-         patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start", params={"with_publisher": True})
-
-    assert response.status_code == 500
-    assert "connector" in response.json()["detail"].lower()
-
-
-def test_start_draft_sync_selector_picks_named_league(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("MOCK123", "8", 2026, "practice")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start", params={"league_id": "MOCK123"})
-
-    assert response.status_code == 202
-    query, params = mock_cursor.execute.call_args[0]
-    assert "WHERE league_id = %s" in query
-    assert params == ("MOCK123",)
-
-
-def test_start_draft_sync_no_selector_falls_back_to_most_recent(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    query = mock_cursor.execute.call_args[0][0]
-    assert "ORDER BY updated_at DESC LIMIT 1" in query
-
-
-def test_start_draft_sync_requires_image_env_var(client):
-    mock_cursor = MagicMock()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft.DRAFT_SYNC_IMAGE", None):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 500
-    assert "DRAFT_SYNC_IMAGE" in response.json()["detail"]
-
-
-def test_start_draft_sync_requires_env_config_and_secret(client):
-    mock_cursor = MagicMock()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft.DRAFT_SYNC_IMAGE", "ghcr.io/example/fantasy-core-pipeline:test"), \
-         patch("src.api.draft.DRAFT_SYNC_ENV_SECRET", None), \
-         patch("src.api.draft.DRAFT_SYNC_ENV_CONFIGMAP", None):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 500
-    assert "DRAFT_SYNC_ENV_SECRET" in response.json()["detail"]
-
-
-def test_start_draft_sync_requires_config_stored_first(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = None
-
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 400
-    assert "draft config" in response.json()["detail"].lower()
-
-
-def test_start_draft_sync_is_idempotent_when_same_league_already_active(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Active"), \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    assert response.json()["already_running"] is True
-    assert response.json()["status"] == "accepted"
-
-
-def test_start_draft_sync_conflicts_when_another_league_listener_is_active(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L2", "live")]), \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 409
-    assert "L2" in response.json()["detail"]
-
-
-def _fake_listener_job(league_id, mode, name=None):
-    job = MagicMock()
-    job.metadata.name = name or f"draft-sync-{league_id}"
-    job.metadata.labels = {"app": "draft-sync", "league-id": league_id, "mode": mode}
-    return job
-
-
-def test_start_draft_sync_reclaims_stale_practice_listener(client):
-    """A new practice room must not be blocked by the listener the last practice run left
-    behind - that made every second practice draft unstartable."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L2", "practice")]), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=["draft-sync-L2"]) as mock_delete, \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    mock_delete.assert_called_once_with(except_league_id="L1")
-    assert mock_batch_api.create_namespaced_job.called
-
-
-def test_start_draft_sync_never_reclaims_a_live_listener(client):
-    """Practice cleanup must never take down a real draft that is in progress."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
-
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L9", "live")]), \
-         patch("src.api.draft._delete_practice_listener_jobs") as mock_delete, \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 409
-    assert "L9" in response.json()["detail"]
-    mock_delete.assert_not_called()
-
-
-def test_start_draft_sync_clears_the_previous_runs_stale_board(client):
-    """The board outlives its run, so a fresh start over the same league would otherwise
-    inherit the last run's listener error and top picks until a real pick overwrote them."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 202
-    # Board only: the room connector is already running and may have published picks into the
-    # Stream before the listener came up.
-    mock_clear.assert_called_once_with("L1")
-
-
-def test_start_draft_sync_leaves_a_running_listeners_board_alone(client):
-    """The idempotent path adopts a run that is already in progress. Clearing its board would
-    wipe the live recommendation out from under the UI."""
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Active"), \
-         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         image_patch, secret_patch, configmap_patch:
-        response = client.post("/v1/draft/start")
-
-    assert response.json()["already_running"] is True
-    mock_clear.assert_not_called()
-
-
-def test_start_draft_sync_k8s_failure(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "live")
-    mock_batch_api = MagicMock()
-    mock_batch_api.create_namespaced_job.side_effect = Exception("apiserver unreachable")
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._job_state", return_value="Unknown"), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[]), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 500
-
-
-# ---------------------------------------------------------------------------
-# POST /v1/draft/stop
-# ---------------------------------------------------------------------------
-def test_stop_draft_deletes_job_and_clears_redis(client):
-    mock_batch_api = MagicMock()
-    fake_job = MagicMock()
-    fake_job.metadata.name = "draft-sync-L1-1234"
-    # First call (the initial listing) finds the Job; the termination-poll call after
-    # deletion finds it gone; the third call is the live-publisher lookup (issue #66),
-    # which finds nothing for this league.
-    mock_batch_api.list_namespaced_job.side_effect = [
-        MagicMock(items=[fake_job]),
-        MagicMock(items=[]),
-        MagicMock(items=[]),
-    ]
-
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = ["draft:L1:pause:3"]
-    mock_redis.delete.return_value = 2
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft.time.sleep"):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body == {
-        "status": "stopped",
-        "league_id": "L1",
-        "job_deleted": True,
-        "publisher_job_deleted": False,
-        "redis_keys_cleared": 2,
-        "pick_stream_cleared": False,
-    }
-
-    mock_batch_api.delete_namespaced_job.assert_called_once_with(
-        name="draft-sync-L1-1234", namespace="default", propagation_policy="Foreground",
-        grace_period_seconds=5, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-    )
-    selectors = [call.kwargs["label_selector"] for call in mock_batch_api.list_namespaced_job.call_args_list]
-    assert selectors == [
-        "app=draft-sync,league-id=L1",
-        "app=draft-sync,league-id=L1",
-        "app=live-draft-sync,league-id=L1",
-    ]
-    mock_redis.delete.assert_called_once_with(
-        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft", "draft:L1:pause:3"
-    )
-
-
-def test_stop_draft_confirm_publisher_stopped_clears_pick_stream(client):
-    """confirm_publisher_stopped=True opts into the same pick-ledger/Stream clear practice
-    teardown does automatically once it can prove the connector is gone (issue #77) - the
-    caller is asserting that proof by other means for a live league, since core-pipeline has
-    no Job of its own to wait out for the external publisher."""
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
-
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-    mock_redis.delete.return_value = 4
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.post(
-            "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
-        )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["redis_keys_cleared"] == 4
-    assert body["pick_stream_cleared"] is True
-    mock_redis.delete.assert_called_once_with(
-        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft",
-        "draft:L1:picks", "draft:L1:health", "draft_picks:L1"
-    )
-
-
-def test_stop_draft_confirm_publisher_stopped_redis_failure_returns_500(client):
-    """The confirmed clear must fail hard, not swallow the error like _clear_league_draft_state's
-    default tolerance - silently keeping the stale ledger/Stream here is exactly the bug #77
-    exists to fix, so a Redis hiccup mid-clear must surface rather than report false success."""
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
-
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-    mock_redis.delete.side_effect = Exception("redis unreachable")
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.post(
-            "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
-        )
-
-    assert response.status_code == 500
-
-
-def test_stop_draft_no_job_still_clears_redis_and_returns_200(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = []
-
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-    mock_redis.delete.return_value = 1
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["job_deleted"] is False
-    mock_batch_api.delete_namespaced_job.assert_not_called()
-
-
-def test_stop_draft_times_out_waiting_for_termination(client):
-    """A Job that never disappears (wedged finalizer, apiserver hiccup) must not be treated
-    as a successful stop - Redis must stay untouched so a later /stop retry can still find
-    and clear it."""
-    mock_batch_api = MagicMock()
-    fake_job = MagicMock()
-    fake_job.metadata.name = "draft-sync-L1-1234"
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[fake_job])
-
-    mock_redis = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft.time.sleep"):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 504
-    mock_redis.delete.assert_not_called()
-
-
-def test_stop_draft_k8s_failure_returns_500(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.side_effect = Exception("apiserver unreachable")
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 500
-
-
-def test_stop_draft_redis_failure_returns_500(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = []
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 500
-
-
-def test_stop_draft_does_not_touch_draft_config(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = []
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-
-    def _raising_db_cursor():
-        raise AssertionError("stop_draft must not touch draft_config")
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft.get_db_cursor", _raising_db_cursor):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 200
-
-
-def test_stop_draft_confirmed_live_publisher_gone_clears_pick_stream_automatically(client):
-    """Issue #66: a live connector launched via /start?with_publisher=true carries
-    LIVE_SYNC_APP_LABEL, so /stop can discover, delete, and wait it out itself - once
-    confirmed gone, the pick ledger/Stream clear no longer needs a manual
-    confirm_publisher_stopped=true."""
-    mock_batch_api = MagicMock()
-    fake_listener = MagicMock()
-    fake_listener.metadata.name = "draft-sync-L1-1234"
-    fake_publisher = MagicMock()
-    fake_publisher.metadata.name = "live-draft-sync-l1-5678"
-    mock_batch_api.list_namespaced_job.side_effect = [
-        MagicMock(items=[fake_listener]),  # initial listener list
-        MagicMock(items=[]),               # listener termination poll
-        MagicMock(items=[fake_publisher]), # initial live-publisher list
-        MagicMock(items=[]),               # live-publisher termination poll
-    ]
-
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-    mock_redis.delete.return_value = 5
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft.time.sleep"):
-        response = client.post("/v1/draft/stop", params={"league_id": "L1"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["job_deleted"] is True
-    assert body["publisher_job_deleted"] is True
-    assert body["pick_stream_cleared"] is True
-
-    publisher_delete_calls = [
-        call for call in mock_batch_api.delete_namespaced_job.call_args_list
-        if call.kwargs["name"] == "live-draft-sync-l1-5678"
-    ]
-    assert len(publisher_delete_calls) == 1
-    assert publisher_delete_calls[0].kwargs["grace_period_seconds"] == PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
-    mock_redis.delete.assert_called_once_with(
-        "draft:L1:board", "draft:L1:suggested", "draft:L1:selecting", "draft:L1:autodraft",
-        "draft:L1:picks", "draft:L1:health", "draft_picks:L1"
-    )
-
-
-def test_stop_draft_live_publisher_timeout_leaves_redis_untouched(client):
-    """A live connector that outlives its own termination poll must never have its pick
-    ledger/Stream cleared, even with confirm_publisher_stopped=true - this call just disproved
-    the very thing that flag asserts."""
-    mock_batch_api = MagicMock()
-    fake_publisher = MagicMock()
-    fake_publisher.metadata.name = "live-draft-sync-l1-5678"
-    mock_batch_api.list_namespaced_job.side_effect = [
-        MagicMock(items=[]),                # no listener
-        MagicMock(items=[fake_publisher]),  # initial live-publisher list
-    ] + [MagicMock(items=[fake_publisher])] * 20  # never terminates
-
-    mock_redis = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft.time.sleep"):
-        response = client.post(
-            "/v1/draft/stop", params={"league_id": "L1", "confirm_publisher_stopped": True}
-        )
-
-    assert response.status_code == 504
-    mock_redis.delete.assert_not_called()
-
-
-def test_job_state_scopes_query_to_draft_sync_app_label():
-    from src.api.draft import _job_state
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = []
-
-    with patch("src.api.draft._batch_v1_api", return_value=mock_batch_api):
-        state = _job_state("L1")
-
-    assert state == "Unknown"
-    assert mock_batch_api.list_namespaced_job.call_args.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
-
-
 def test_listener_status_reports_failed_when_k8s_job_failed_even_if_redis_says_active():
     from src.api.draft import _listener_status
 
@@ -1029,14 +241,16 @@ def test_clear_league_draft_state_fails_soft_when_redis_is_unreachable():
 
 
 # ---------------------------------------------------------------------------
-def _fake_status_job(phase="Active"):
-    """A draft-sync Job for _latest_listener_job, whose phase _build_status reads. Distinct
-    from _fake_listener_job, which models the conflict-detection path."""
-    job = MagicMock()
-    job.status.active = 1 if phase == "Active" else 0
-    job.status.succeeded = 1 if phase == "Succeeded" else 0
-    job.status.failed = 1 if phase == "Failed" else 0
-    return job
+@contextmanager
+def _listener(phase="Active", ok=True, status="running", end_reason=None):
+    """The league's listener run as _build_status sees it: `phase` is its k8s Job phase, and
+    None means no run (with `ok=False`, an unreadable run_log)."""
+    run = None
+    if phase is not None:
+        run = JobRun("run-1", "practice-draft-listener", status, {"league_id": "L1"}, datetime(2026, 8, 21), end_reason)
+    with patch("src.api.draft._listener_run", return_value=(run, ok)), \
+         patch("src.api.draft.draft_run_service.run_job_state", return_value=phase or "Unknown"):
+        yield run
 
 
 # GET /v1/draft/status
@@ -1092,7 +306,7 @@ def test_get_draft_status_aggregates_expected_shape(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1142,7 +356,7 @@ def test_draft_status_surfaces_auto_publish_enabled_and_disabled_by(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1213,7 +427,7 @@ def test_get_draft_status_team_rosters_are_unbounded_grouped_and_keep_null_playe
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1272,7 +486,7 @@ def test_get_draft_status_team_ids_includes_zero_pick_teams_in_slot_order(client
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1298,7 +512,7 @@ def test_get_draft_status_team_ids_empty_when_draft_slots_unsynced(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1343,7 +557,7 @@ def test_get_draft_status_picks_carry_current_weekly_stats_value_fields(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1400,7 +614,7 @@ def test_get_draft_status_picks_carry_was_autodrafted_flag(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1460,7 +674,7 @@ def test_get_draft_status_team_aggregates_totals_and_position_counts(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1516,7 +730,7 @@ def test_get_draft_status_value_alert_fires_only_past_the_round_threshold(client
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1563,7 +777,7 @@ def test_get_draft_status_team_aggregates_skip_value_alert_when_team_count_unkno
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1604,7 +818,7 @@ def test_get_draft_status_reports_failed_clicker_action(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1625,7 +839,7 @@ def test_get_draft_status_drops_a_dead_runs_recommendation_when_no_listener_exis
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(None, True)):
+         _listener(None):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     body = response.json()
@@ -1642,7 +856,7 @@ def test_get_draft_status_keeps_the_recommendation_when_the_job_lookup_failed(cl
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(None, False)):
+         _listener(None, ok=False):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     body = response.json()
@@ -1659,7 +873,7 @@ def test_get_draft_status_defaults_mode_to_live_when_config_row_missing(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1683,7 +897,7 @@ def test_get_draft_status_decodes_top_candidates_json(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1701,7 +915,7 @@ def test_get_draft_status_handles_malformed_top_candidates_json(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1742,7 +956,7 @@ def test_get_draft_status_includes_espn_suggestion_with_vorp_match(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1778,7 +992,7 @@ def test_get_draft_status_espn_suggestion_falls_back_when_unmatched(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1802,7 +1016,7 @@ def test_get_draft_status_omits_espn_suggestion_when_absent(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1821,7 +1035,7 @@ def test_get_draft_status_drops_malformed_espn_suggestion_json(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1846,7 +1060,7 @@ def test_get_draft_status_drops_non_object_espn_suggestion_json(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1885,7 +1099,7 @@ def test_get_draft_status_drops_non_object_vorp_by_espn_id_json(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1933,7 +1147,7 @@ def test_get_draft_status_omits_espn_suggestion_once_draft_is_complete(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Succeeded"), True)):
+         _listener("Succeeded"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     body = response.json()
@@ -1951,7 +1165,7 @@ def test_get_draft_status_degraded_when_job_not_active(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(None, True)):
+         _listener(None):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -1973,7 +1187,7 @@ def test_get_draft_status_returns_200_degraded_when_db_unavailable(client):
 
     with patch("src.api.draft.get_db_cursor", _broken_cursor), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -1997,7 +1211,7 @@ def test_get_draft_status_returns_200_degraded_when_redis_unavailable(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -2015,7 +1229,7 @@ def test_get_draft_status_degraded_when_listener_stale_while_active(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=2000):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -2058,7 +1272,7 @@ def test_get_draft_status_complete_is_healthy_not_degraded(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Succeeded"), True)):
+         _listener("Succeeded"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -2082,7 +1296,7 @@ def test_get_draft_status_listener_state_stays_complete_once_the_job_is_gone(cli
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(None, True)):
+         _listener(None):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -2098,7 +1312,7 @@ def test_get_draft_status_waiting_before_the_first_pick(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -2117,7 +1331,7 @@ def test_get_draft_status_includes_connector_health_when_present(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -2142,7 +1356,7 @@ def test_get_draft_status_connector_health_is_none_when_key_missing(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -2163,7 +1377,7 @@ def test_get_draft_status_connector_health_is_none_when_malformed(client):
 
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)):
+         _listener("Active"):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
     assert response.status_code == 200
@@ -2184,7 +1398,7 @@ def test_get_draft_status_connector_health_failure_does_not_affect_pipeline_heal
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft._connector_health", side_effect=Exception("boom")), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 
@@ -2384,197 +1598,9 @@ def test_stream_draft_status_carries_draft_state_through(client):
 # ---------------------------------------------------------------------------
 # POST/GET/DELETE /v1/draft/practice/sync-job
 # ---------------------------------------------------------------------------
-def test_start_practice_sync_job_creates_job(client):
-    mock_batch_api = MagicMock()
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft?leagueId=123"})
-
-    assert response.status_code == 202
-    body = response.json()
-    assert body["status"] == "accepted"
-    assert body["job_name"].startswith("practice-draft-sync-")
-
-    mock_batch_api.create_namespaced_job.assert_called_once()
-    namespace, job = mock_batch_api.create_namespaced_job.call_args[0]
-    assert namespace == "default"
-    assert job.metadata.labels == {"app": "practice-draft-sync", "league-id": "123"}
-    assert job.spec.template.metadata.labels == {"app": "practice-draft-sync", "league-id": "123"}
-    container = job.spec.template.spec.containers[0]
-    assert container.image == "ghcr.io/example/fantasy-browser-worker:test"
-    assert container.command == ["node", "src/bots/draft_sync.js"]
-    env_by_name = {e.name: e for e in container.env}
-    assert env_by_name["DRAFT_ROOM_URL"].value == "https://fantasy.espn.com/football/draft?leagueId=123"
-    assert env_by_name["ESPN_S2"].value_from.secret_key_ref.name == "espn-session-secrets"
-    assert env_by_name["ESPN_S2"].value_from.secret_key_ref.key == "espn_s2"
-    assert env_by_name["SWID"].value_from.secret_key_ref.key == "swid"
-    # Temporary (issue #71 follow-up): debug tracing enabled for the silent-forever-reconnect
-    # investigation - see the matching comment at the env var's definition in draft.py.
-    assert env_by_name["LOG_LEVEL"].value == "debug"
-    # Without this the kubelet 401s pulling the private GHCR image and the Pod sits in
-    # ImagePullBackOff forever - job_state still reports "Active" the whole time (the Job
-    # controller considers it pending, not failed), so this silently looks like it's
-    # working from /status alone. Regression coverage for that exact incident.
-    assert job.spec.template.spec.image_pull_secrets == [k8s_client.V1LocalObjectReference(name="ghcr-pull-secret")]
-
-
-def test_start_practice_sync_job_omits_league_label_when_missing(client):
-    mock_batch_api = MagicMock()
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 202
-    _, job = mock_batch_api.create_namespaced_job.call_args[0]
-    assert job.metadata.labels == {"app": "practice-draft-sync"}
-    assert job.spec.template.metadata.labels == {"app": "practice-draft-sync"}
-
-
 def test_start_practice_sync_job_rejects_non_https_url(client):
     response = client.post("/v1/draft/practice/sync-job", json={"room_url": "http://fantasy.espn.com/football/draft"})
     assert response.status_code == 422
-
-
-def test_start_practice_sync_job_requires_image_env_var(client):
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", None):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 500
-    assert "BROWSER_WORKER_IMAGE" in response.json()["detail"]
-
-
-def test_start_practice_sync_job_rejects_when_already_active(client):
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Active"):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 409
-    assert "already Active" in response.json()["detail"]
-
-
-def test_start_practice_sync_job_force_tears_down_the_existing_run_first(client):
-    """The escape hatch for a wedged run. Without it the 409 tells the user to end the run
-    first, and ending it is exactly what is failing - a dead end with no way out of the UI."""
-    mock_batch_api = MagicMock()
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Active") as mock_state, \
-         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": ["draft-listener-1"], "connector_gone": True}) as mock_teardown, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 202
-    # strict_cleanup: a force start that proceeds after a failed Redis delete hands the new
-    # connector the old run's ledger to seed from.
-    mock_teardown.assert_called_once_with(strict_cleanup=True)
-    # The Active guard must not even be consulted when forcing, or a run wedged Active would
-    # still 409 after being torn down.
-    mock_state.assert_not_called()
-    mock_batch_api.create_namespaced_job.assert_called_once()
-
-
-def test_start_practice_sync_job_force_surfaces_a_failed_teardown(client):
-    """Silently starting a second connector against a still-live one would double-publish
-    picks into the same Redis Stream."""
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._teardown_practice_run", side_effect=Exception("apiserver unreachable")), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=MagicMock()) as mock_api:
-        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 500
-    assert "tear down" in response.json()["detail"]
-    mock_api.return_value.create_namespaced_job.assert_not_called()
-
-
-def test_start_practice_sync_job_force_refuses_when_the_old_connector_is_still_alive(client):
-    """Teardown reports success once the listener is retired, even if the connector outlived
-    its termination poll. Starting a replacement then would leave two connectors publishing
-    into the same draft Stream - force has to be stricter than DELETE about this."""
-    mock_batch_api = MagicMock()
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._teardown_practice_run", return_value={"job_name": "practice-draft-sync-1", "listener_jobs_deleted": [], "connector_gone": False}), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 409
-    assert "has not terminated" in response.json()["detail"]
-    mock_batch_api.create_namespaced_job.assert_not_called()
-
-
-def test_start_practice_sync_job_force_refuses_when_redis_cleanup_fails(client):
-    """Redis cleanup is best-effort everywhere else on purpose - refusing to start a draft over
-    leftover state is worse than starting with it. Force is the exception: it creates a connector
-    that seeds its ledger from draft:{league}:picks, so proceeding after a failed delete would
-    silently resurrect the previous run's picks and drop the real ones as duplicates."""
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-    mock_redis.delete.side_effect = Exception("redis unreachable")
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    connector = _mock_practice_job(state="Active", league_id="L9")
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = datetime(2026, 1, 1)
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[connector]), MagicMock(items=[])]
-        response = client.post("/v1/draft/practice/sync-job?force=true", json={"room_url": "https://fantasy.espn.com/football/draft?leagueId=L9"})
-
-    assert response.status_code == 500
-    assert "could not be" in response.json()["detail"]
-    mock_batch_api.create_namespaced_job.assert_not_called()
-
-
-def test_start_practice_sync_job_refuses_a_concurrent_start(client):
-    """Teardown and create are separated by seconds of termination polling, so two concurrent
-    starts could both find the room empty and then both create a connector - two publishers on
-    one Stream, the thing every other guard here exists to prevent."""
-    mock_redis = MagicMock()
-    mock_redis.set.return_value = False  # someone else holds the lock
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 409
-    assert "already in progress" in response.json()["detail"]
-
-
-def test_practice_start_lock_ttl_covers_the_worst_case_start(client):
-    """A lease shorter than the operation expires mid-start, letting a second request acquire the
-    lock and create a connector alongside the first - the overlap the lock exists to prevent,
-    reintroduced by its own timeout. Two full termination waits can run (connector and listener),
-    each a bounded apiserver call plus a sleep per poll."""
-    from src.api.draft import (
-        K8S_REQUEST_TIMEOUT_SECONDS as k8s_timeout,
-        PRACTICE_START_LOCK_TTL_SECONDS,
-        STOP_JOB_TERMINATION_MAX_POLLS,
-        STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS,
-    )
-
-    worst_case_wait = STOP_JOB_TERMINATION_MAX_POLLS * (k8s_timeout + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
-    assert PRACTICE_START_LOCK_TTL_SECONDS >= 2 * worst_case_wait
 
 
 def test_redis_client_delegates_to_the_shared_database_client():
@@ -2588,44 +1614,6 @@ def test_redis_client_delegates_to_the_shared_database_client():
 
     mock_get_client.assert_called_once_with()
     assert result is mock_get_client.return_value
-
-
-def test_start_practice_sync_job_proceeds_when_the_lock_is_unavailable(client):
-    """An unreachable lock service must not become a hard dependency of starting a draft - the
-    k8s-side Active check still catches the ordinary case."""
-    mock_batch_api = MagicMock()
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
-         patch("src.api.draft._redis_client", side_effect=Exception("redis unreachable")), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 202
-    mock_batch_api.create_namespaced_job.assert_called_once()
-
-
-def test_start_practice_sync_job_releases_the_lock_on_failure(client):
-    """A lock leaked by a failed start would block every retry for its full TTL - exactly the
-    wedged-and-no-way-out state this PR is about."""
-    mock_redis = MagicMock()
-    mock_redis.set.return_value = True
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Active"), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 409
-    # Compare-and-delete, not a plain DELETE: after a lease expiry the key belongs to a
-    # DIFFERENT request, and dropping it would create the double-start the lock prevents.
-    mock_redis.eval.assert_called_once()
-    args = mock_redis.eval.call_args[0]
-    assert args[1] == 1 and args[2] == "draft:practice:start-lock"
-    # Released with the same token it acquired with.
-    assert args[3] == mock_redis.set.call_args[0][1]
 
 
 def test_practice_start_lock_renews_the_lease_while_the_start_is_running():
@@ -2668,307 +1656,6 @@ def test_practice_start_lock_renews_the_lease_while_the_start_is_running():
     assert "del" in release_call.args[0]
 
 
-def test_teardown_practice_run_deletes_every_connector_not_just_the_newest(client):
-    """Normally there is one connector, but concurrent starts or a manual kubectl apply during
-    recovery can leave more. Retiring only the newest would report connector_gone=True while an
-    older publisher was still writing to the same Stream - and ?force=true starts a replacement
-    on the strength of that flag."""
-    from src.api.draft import _teardown_practice_run
-
-    older = _mock_practice_job(state="Active", league_id="111")
-    older.metadata.name = "practice-draft-sync-100"
-    older.metadata.creation_timestamp = datetime(2026, 1, 1)
-    newer = _mock_practice_job(state="Active", league_id="222")
-    newer.metadata.name = "practice-draft-sync-200"
-    newer.metadata.creation_timestamp = datetime(2026, 1, 2)
-
-    mock_batch_api = MagicMock()
-    # Deleted Jobs are gone on the first poll.
-    mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[])]
-    mock_redis = MagicMock()
-    mock_redis.scan_iter.return_value = []
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        result = _teardown_practice_run()
-
-    deleted = {c[0][0] for c in mock_batch_api.delete_namespaced_job.call_args_list}
-    assert deleted == {"practice-draft-sync-100", "practice-draft-sync-200"}
-    assert result["connector_gone"] is True
-    assert result["job_name"] == "practice-draft-sync-200"
-    # Both leagues get cleared, not just the newest connector's.
-    cleared = {c[0][0] for c in mock_redis.delete.call_args_list if c[0]}
-    assert any("111" in k for k in cleared) and any("222" in k for k in cleared)
-
-
-def test_teardown_practice_run_reports_not_gone_if_an_older_connector_survives(client):
-    """The whole point of the flag: an older connector outliving the poll must veto force-start."""
-    from src.api.draft import _teardown_practice_run
-
-    older = _mock_practice_job(state="Active", league_id="111")
-    older.metadata.name = "practice-draft-sync-100"
-    older.metadata.creation_timestamp = datetime(2026, 1, 1)
-    newer = _mock_practice_job(state="Active", league_id="222")
-    newer.metadata.name = "practice-draft-sync-200"
-    newer.metadata.creation_timestamp = datetime(2026, 1, 2)
-
-    mock_batch_api = MagicMock()
-    # The older one never disappears from the selector.
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[older])
-    mock_redis = MagicMock()
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft.STOP_JOB_TERMINATION_MAX_POLLS", 1), \
-         patch("src.api.draft.STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS", 0), \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        mock_batch_api.list_namespaced_job.side_effect = [MagicMock(items=[older, newer]), MagicMock(items=[older])]
-        result = _teardown_practice_run()
-
-    assert result["connector_gone"] is False
-    # And nothing is cleared, since the survivor may still be publishing into it.
-    mock_redis.delete.assert_not_called()
-
-
-def test_teardown_practice_run_does_not_raise_when_nothing_is_running(client):
-    """Only the DELETE endpoint turns "nothing running" into a 404; ?force=true on a clean
-    cluster must be a no-op, not a failure."""
-    from src.api.draft import _teardown_practice_run
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api), \
-         patch("src.api.draft._redis_client", return_value=MagicMock()):
-        result = _teardown_practice_run()
-
-    assert result["job_name"] is None
-    assert result["listener_jobs_deleted"] == []
-    # Nothing to terminate counts as gone, or ?force=true on a clean cluster would 409.
-    assert result["connector_gone"] is True
-
-
-def test_every_kubernetes_call_is_bounded_by_a_timeout():
-    """The kubernetes client defaults to NO timeout, and every one of these calls sits in a
-    synchronous FastAPI endpoint on a bounded threadpool. One hung apiserver read parks a
-    worker forever; enough of them and the whole API - liveness probe included - wedges.
-    That is not hypothetical: it is exactly how a degraded control plane took the app down."""
-    import ast
-    import inspect
-
-    import src.api.draft as draft_module
-
-    source = inspect.getsource(draft_module)
-    tree = ast.parse(source)
-
-    # Matched by shape, not by an allowlist of the methods that happen to exist today. An
-    # allowlist would silently skip a future patch_namespaced_job or read_namespaced_pod - the
-    # regression guard would keep passing while the hang it exists to prevent came back.
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and "_namespaced_" in node.func.attr
-    ]
-    # If this ever hits zero the matcher has drifted and the assert below is vacuously true.
-    assert calls, "found no kubernetes *_namespaced_* calls - the matcher is broken, not the code"
-
-    unbounded = [f"{c.func.attr} at line {c.lineno}" for c in calls if not any(kw.arg == "_request_timeout" for kw in c.keywords)]
-    assert unbounded == [], f"unbounded kubernetes calls: {unbounded}"
-
-
-def test_start_practice_sync_job_k8s_failure(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.create_namespaced_job.side_effect = Exception("apiserver unreachable")
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with patch("src.api.draft.BROWSER_WORKER_IMAGE", "ghcr.io/example/fantasy-browser-worker:test"), \
-         patch("src.api.draft._practice_sync_job_state", return_value="Unknown"), \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/practice/sync-job", json={"room_url": "https://fantasy.espn.com/football/draft"})
-
-    assert response.status_code == 500
-
-
-def _mock_practice_job(*, state: str, league_id: str = "123", room_url: str = "https://fantasy.espn.com/football/draft#room-xyz"):
-    job = MagicMock()
-    job.metadata.labels = {"app": "practice-draft-sync", "league-id": league_id}
-    status = MagicMock()
-    status.active = 1 if state == "Active" else None
-    status.succeeded = 1 if state == "Succeeded" else None
-    status.failed = 1 if state == "Failed" else None
-    job.status = status
-    env_var = MagicMock()
-    env_var.name = "DRAFT_ROOM_URL"
-    env_var.value = room_url
-    container = MagicMock()
-    container.env = [env_var]
-    pod_spec = MagicMock()
-    pod_spec.containers = [container]
-    template = MagicMock()
-    template.spec = pod_spec
-    spec = MagicMock()
-    spec.template = template
-    job.spec = spec
-    return job
-
-
-def test_get_practice_sync_job_status(client):
-    mock_redis = MagicMock()
-    mock_redis.exists.return_value = 1
-    with patch("src.api.draft._latest_practice_sync_job", return_value=_mock_practice_job(state="Active", league_id="123")), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.get("/v1/draft/practice/sync-job/status")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "job_state": "Active",
-        "pod_active": True,
-        "room_connected": True,
-        "room_handshake_complete": True,
-        "active_league_id": "123",
-        "room_identifier": "room-xyz",
-    }
-
-
-def test_get_practice_sync_job_status_room_not_connected(client):
-    mock_redis = MagicMock()
-    mock_redis.exists.return_value = 0
-    with patch("src.api.draft._latest_practice_sync_job", return_value=_mock_practice_job(state="Active", league_id="123")), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.get("/v1/draft/practice/sync-job/status")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "job_state": "Active",
-        "pod_active": True,
-        "room_connected": False,
-        "room_handshake_complete": False,
-        "active_league_id": "123",
-        "room_identifier": "room-xyz",
-    }
-
-
-def test_get_practice_sync_job_status_not_active_skips_redis(client):
-    mock_redis = MagicMock()
-    with patch("src.api.draft._latest_practice_sync_job", return_value=_mock_practice_job(state="Succeeded", league_id="123")), \
-         patch("src.api.draft._redis_client", return_value=mock_redis):
-        response = client.get("/v1/draft/practice/sync-job/status")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "job_state": "Succeeded",
-        "pod_active": False,
-        "room_connected": False,
-        "room_handshake_complete": False,
-        "active_league_id": "123",
-        "room_identifier": "room-xyz",
-    }
-    mock_redis.exists.assert_not_called()
-
-
-def test_end_practice_sync_job_deletes_latest(client):
-    from src.api.draft import PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
-
-    older = MagicMock()
-    older.metadata.name = "practice-draft-sync-100"
-    older.metadata.creation_timestamp = datetime(2026, 8, 21, 10, 0, 0)
-    newer = MagicMock()
-    newer.metadata.name = "practice-draft-sync-200"
-    newer.metadata.creation_timestamp = datetime(2026, 8, 21, 11, 0, 0)
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = [older, newer]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    assert response.json()["job_name"] == "practice-draft-sync-200"
-    # Foreground: the connector publishes the pick ledger and Stream that teardown deletes, so
-    # it must actually be gone first, not merely marked for deletion.
-    mock_batch_api.delete_namespaced_job.assert_any_call(
-        "practice-draft-sync-200", "default", propagation_policy="Foreground",
-        grace_period_seconds=PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS,
-        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-    )
-
-
-def test_end_practice_sync_job_clears_the_pick_stream_once_the_connector_is_gone(client):
-    """The connector is the publisher for the ledger and Stream, so teardown may only drop
-    them after its Pod has actually terminated."""
-    connector = MagicMock()
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = 1
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = [connector]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]) as mock_delete, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    assert mock_delete.call_args.kwargs["clear_pick_stream"] is True
-
-
-def test_end_practice_sync_job_clears_the_connectors_league_even_with_no_listener_left(client):
-    """The listener carries ttl_seconds_after_finished, so it can already be GC'd while the
-    connector is still up. Deriving cleanup only from listener Jobs would then clear nothing."""
-    connector = MagicMock()
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = 1
-    connector.metadata.labels = {"app": "practice-draft-sync", "league-id": "L7"}
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = [connector]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=[]), \
-         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    mock_clear.assert_called_once_with("L7", include_pick_stream=True, raise_on_error=False)
-
-
-def test_end_practice_sync_job_leaves_the_connectors_league_alone_if_it_wont_die(client):
-    connector = MagicMock()
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = 1
-    connector.metadata.labels = {"app": "practice-draft-sync", "league-id": "L7"}
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = [connector]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]), \
-         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    mock_clear.assert_not_called()
-
-
 def test_clear_league_draft_state_escapes_glob_metacharacters_in_the_league_id():
     """league_id is an arbitrary string from DraftConfigPayload. Unescaped, a value of `*`
     would scan draft:*:pause:* and delete every league's pause flags, a live draft's included."""
@@ -2981,126 +1668,6 @@ def test_clear_league_draft_state_escapes_glob_metacharacters_in_the_league_id()
         _clear_league_draft_state("*")
 
     assert mock_redis.scan_iter.call_args.kwargs["match"] == "draft:\\*:pause:*"
-
-
-def test_end_practice_sync_job_keeps_the_pick_stream_if_the_connector_wont_die(client):
-    """Still retire the listener - leaking it is the bug this endpoint exists to prevent - but
-    leave the keys a possibly-still-running publisher owns."""
-    connector = MagicMock()
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = 1
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = [connector]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
-         patch("src.api.draft._delete_practice_listener_jobs", return_value=["l1"]) as mock_delete, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    assert mock_delete.call_args.kwargs["clear_pick_stream"] is False
-
-
-def test_end_practice_sync_job_also_deletes_the_listener(client):
-    """The room connector and the listener are separate Jobs. Deleting only the connector
-    leaves a Redis consumer blocking forever, which blocks the next practice run entirely."""
-    connector = MagicMock()
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = 1
-    listener = _fake_listener_job("L2", "practice", name="draft-sync-practice-L2-1")
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.side_effect = [
-        MagicMock(items=[connector]),
-        MagicMock(items=[listener]),
-    ]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    assert response.json()["listener_jobs_deleted"] == ["draft-sync-practice-L2-1"]
-    selectors = [c.kwargs["label_selector"] for c in mock_batch_api.list_namespaced_job.call_args_list]
-    assert "app=draft-sync,mode=practice" in selectors
-    deleted = [c.args[0] for c in mock_batch_api.delete_namespaced_job.call_args_list]
-    assert deleted == ["practice-draft-sync-1", "draft-sync-practice-L2-1"]
-
-
-def test_end_practice_sync_job_forces_a_short_connector_grace_period(client):
-    """Without an explicit grace period the connector gets Kubernetes' 30s default, which is
-    the whole termination poll budget - and since it ignores SIGTERM it only dies at the
-    kubelet's SIGKILL, so the wait times out on every room switch."""
-    from src.api.draft import PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS, \
-        STOP_JOB_TERMINATION_MAX_POLLS, STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS
-
-    connector = MagicMock()
-    connector.metadata.name = "practice-draft-sync-1"
-    connector.metadata.creation_timestamp = 1
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.side_effect = [
-        MagicMock(items=[connector]),
-        MagicMock(items=[]),
-    ]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    kwargs = mock_batch_api.delete_namespaced_job.call_args_list[0].kwargs
-    assert kwargs["grace_period_seconds"] == PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS
-    assert kwargs["propagation_policy"] == "Foreground"
-    assert PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS < \
-        STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS
-
-
-def test_delete_practice_listener_jobs_never_touches_live_listeners(client):
-    """The label selector is the only thing standing between practice cleanup and an
-    in-progress real draft."""
-    from src.api.draft import _delete_practice_listener_jobs
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[])
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        _delete_practice_listener_jobs()
-
-    assert mock_batch_api.list_namespaced_job.call_args.kwargs["label_selector"] == "app=draft-sync,mode=practice"
-
-
-def test_end_practice_sync_job_no_job_exists(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value.items = []
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 404
-
-
-def test_end_practice_sync_job_k8s_failure(client):
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.side_effect = Exception("apiserver unreachable")
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 500
 
 
 # ---------------------------------------------------------------------------
@@ -3162,42 +1729,6 @@ def test_on_the_clock_team_id_is_none_once_draft_is_complete():
     cursor.execute.assert_not_called()
 
 
-def test_delete_practice_listener_jobs_propagates_delete_failure(client):
-    """Swallowing this made /start create a second listener alongside the one it failed to
-    reclaim, and /practice/sync-job report a 200 teardown with the listener still running."""
-    from src.api.draft import _delete_practice_listener_jobs
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[_fake_listener_job("L2", "practice")])
-    mock_batch_api.delete_namespaced_job.side_effect = Exception("apiserver unreachable")
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        with pytest.raises(Exception, match="apiserver unreachable"):
-            _delete_practice_listener_jobs()
-
-
-def test_start_draft_sync_aborts_when_stale_listener_cannot_be_reclaimed(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._latest_listener_job", return_value=(None, True)), \
-         patch("src.api.draft._active_listeners_on_other_leagues", return_value=[_fake_listener_job("L2", "practice")]), \
-         patch("src.api.draft._delete_practice_listener_jobs", side_effect=Exception("apiserver unreachable")), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 500
-    assert not mock_batch_api.create_namespaced_job.called
-
-
 def test_recent_picks_survive_a_null_internal_player_id(client):
     from src.api.draft import DraftPickSummary
 
@@ -3209,263 +1740,9 @@ def test_recent_picks_survive_a_null_internal_player_id(client):
     assert summary.espn_player_id == "-16033"
 
 
-def test_end_practice_sync_job_cleans_listener_after_connector_is_gc_d(client):
-    """The connector carries ttl_seconds_after_finished; the listener blocks forever. Once
-    Kubernetes collects the connector, gating cleanup on it would strand the listener with
-    no way to reach it - reintroducing the exact leak this endpoint exists to prevent."""
-    listener = _fake_listener_job("L2", "practice", name="draft-sync-practice-L2-1")
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.side_effect = [
-        MagicMock(items=[]),          # connector already garbage-collected
-        MagicMock(items=[listener]),  # listener still running
-    ]
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.delete("/v1/draft/practice/sync-job")
-
-    assert response.status_code == 200
-    assert response.json()["job_name"] is None
-    assert response.json()["listener_jobs_deleted"] == ["draft-sync-practice-L2-1"]
-
-
-def test_delete_practice_listener_jobs_waits_for_the_pod_to_actually_go():
-    """Background deletion returns before the Pod dies, and /start creates the replacement
-    the moment this returns - the old and new listeners would briefly share a Redis consumer
-    group and split the pick stream between them."""
-    from src.api.draft import _delete_practice_listener_jobs
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[_fake_listener_job("L2", "practice")])
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True) as mock_wait, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        _delete_practice_listener_jobs()
-
-    assert mock_batch_api.delete_namespaced_job.call_args.kwargs["propagation_policy"] == "Foreground"
-    mock_wait.assert_called_once()
-
-
-def test_delete_practice_listener_jobs_clears_the_board_of_every_league_it_retired():
-    """Deleting the Job leaves its un-TTL'd board behind, so the retired league keeps
-    reporting its final listener error to anyone still watching that league's status."""
-    from src.api.draft import _delete_practice_listener_jobs
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(
-        items=[_fake_listener_job("L2", "practice", name="j2"), _fake_listener_job("L3", "practice", name="j3")]
-    )
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=True), \
-         patch("src.api.draft._clear_league_draft_state") as mock_clear, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        _delete_practice_listener_jobs()
-
-    assert [c.args[0] for c in mock_clear.call_args_list] == ["L2", "L3"]
-    # Off by default: the /start reclaim path cannot quiesce the other league's connector, so
-    # only end_practice_sync_job - which waits for it - may opt in.
-    assert not any(c.kwargs["include_pick_stream"] for c in mock_clear.call_args_list)
-
-
-def test_delete_practice_listener_jobs_raises_if_the_pod_never_terminates():
-    from src.api.draft import _delete_practice_listener_jobs
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[_fake_listener_job("L2", "practice")])
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.api.draft._wait_for_jobs_gone", return_value=False), \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        with pytest.raises(RuntimeError, match="did not terminate"):
-            _delete_practice_listener_jobs()
-
-
-def test_active_listeners_query_fails_closed_on_a_kubernetes_error():
-    """An unreadable listener state is not "no conflicts": failing open lets a transient
-    apiserver blip slip a second listener past the duplicate guard."""
-    from src.api.draft import _active_listeners_on_other_leagues
-
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.side_effect = Exception("apiserver unreachable")
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        with pytest.raises(Exception, match="apiserver unreachable"):
-            _active_listeners_on_other_leagues("L1")
-
-
-def test_start_draft_sync_refuses_to_start_when_listener_state_is_unreadable(client):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ("L1", "7", 2026, "practice")
-    mock_batch_api = MagicMock()
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    image_patch, secret_patch, configmap_patch = _env_config_patches()
-    with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
-         patch("src.api.draft._latest_listener_job", return_value=(None, True)), \
-         patch("src.api.draft._active_listeners_on_other_leagues", side_effect=Exception("apiserver unreachable")), \
-         image_patch, secret_patch, configmap_patch, \
-         incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.BatchV1Api", return_value=mock_batch_api):
-        response = client.post("/v1/draft/start")
-
-    assert response.status_code == 500
-    assert not mock_batch_api.create_namespaced_job.called
-
-
-def test_wait_for_jobs_gone_ignores_jobs_it_was_not_asked_about():
-    """The reclaim path deliberately spares the target league's own Job. A selector-based
-    wait would keep seeing that spared Job and time out every single reclaim."""
-    from src.api.draft import _wait_for_jobs_gone
-
-    spared = _fake_listener_job("L1", "practice", name="draft-sync-practice-L1-1")
-    mock_batch_api = MagicMock()
-    mock_batch_api.list_namespaced_job.return_value = MagicMock(items=[spared])
-
-    assert _wait_for_jobs_gone(mock_batch_api, "app=draft-sync,mode=practice", ["draft-sync-practice-L2-1"]) is True
-    assert mock_batch_api.list_namespaced_job.call_count == 1
-
-
 # ---------------------------------------------------------------------------
-# GET /v1/draft/logs (#68)
+# GET /v1/draft/status: ESPN ownership
 # ---------------------------------------------------------------------------
-def _fake_pod(name, created, phase="Running", exit_code=None, reason=None):
-    pod = MagicMock()
-    pod.metadata.name = name
-    pod.metadata.creation_timestamp = created
-    pod.status.phase = phase
-    if exit_code is None and reason is None:
-        pod.status.container_statuses = [MagicMock(state=MagicMock(terminated=None))]
-    else:
-        terminated = MagicMock(exit_code=exit_code, reason=reason)
-        pod.status.container_statuses = [MagicMock(state=MagicMock(terminated=terminated))]
-    return pod
-
-
-def test_get_draft_logs_for_listener(client):
-    pod = _fake_pod("draft-sync-l1-1700000000", datetime(2026, 1, 1))
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
-    mock_core_api.read_namespaced_pod_log.return_value = "line one\nDB_PASSWORD=hunter2 leaked\n"
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["pod_name"] == "draft-sync-l1-1700000000"
-    assert body["job"] == "listener"
-    assert body["lines"] == ["line one", "DB_PASSWORD=[REDACTED] leaked"]
-    assert body["container_exit_code"] is None
-    assert body["container_reason"] is None
-
-    assert mock_core_api.list_namespaced_pod.call_args.kwargs["label_selector"] == "app=draft-sync,league-id=L1"
-
-
-def test_get_draft_logs_for_room_sync_ignores_league_id_in_selector(client):
-    """The room-sync Job only carries a league-id label when the practice room URL happened
-    to include one - every other room-sync query in this file treats it as a global
-    singleton instead, and /logs must match that or it silently finds no pod."""
-    pod = _fake_pod("practice-draft-sync-1700000000", datetime(2026, 1, 1))
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
-    mock_core_api.read_namespaced_pod_log.return_value = "connected to room\n"
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "room-sync"})
-
-    assert response.status_code == 200
-    selector = mock_core_api.list_namespaced_pod.call_args.kwargs["label_selector"]
-    assert selector == "app=practice-draft-sync"
-
-
-def test_get_draft_logs_picks_the_most_recent_pod(client):
-    older = _fake_pod("draft-sync-l1-1", datetime(2026, 1, 1))
-    newer = _fake_pod("draft-sync-l1-2", datetime(2026, 1, 2))
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[older, newer])
-    mock_core_api.read_namespaced_pod_log.return_value = "latest attempt\n"
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
-
-    assert response.json()["pod_name"] == "draft-sync-l1-2"
-
-
-def test_get_draft_logs_surfaces_terminated_container_state(client):
-    """The whole point of #68: the listener's crash reason must be readable after the pod
-    has already terminated, not just while it's still Running."""
-    pod = _fake_pod("draft-sync-l1-1", datetime(2026, 1, 1), phase="Failed", exit_code=1, reason="Error")
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
-    mock_core_api.read_namespaced_pod_log.return_value = "DB_PASSWORD environment variable is missing!\n"
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
-
-    body = response.json()
-    assert body["pod_phase"] == "Failed"
-    assert body["container_exit_code"] == 1
-    assert body["container_reason"] == "Error"
-    mock_core_api.read_namespaced_pod_log.assert_called_once()
-    assert mock_core_api.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == 200
-
-
-def test_get_draft_logs_no_pod_found_is_404(client):
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[])
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
-
-    assert response.status_code == 404
-
-
-def test_get_draft_logs_k8s_list_failure_is_500(client):
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.side_effect = RuntimeError("apiserver unreachable")
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener"})
-
-    assert response.status_code == 500
-
-
-def test_get_draft_logs_tail_is_clamped_to_the_max(client):
-    pod = _fake_pod("draft-sync-l1-1", datetime(2026, 1, 1))
-    mock_core_api = MagicMock()
-    mock_core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
-    mock_core_api.read_namespaced_pod_log.return_value = ""
-
-    incluster_patch, kubeconfig_patch = _k8s_patches()
-    with incluster_patch, kubeconfig_patch, \
-         patch("src.k8s_client.client.CoreV1Api", return_value=mock_core_api):
-        response = client.get("/v1/draft/logs", params={"league_id": "L1", "job": "listener", "tail": 999999})
-
-    assert response.status_code == 200
-    assert mock_core_api.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == 1000
-
-
 def test_get_draft_status_attaches_espn_ownership_to_picks_and_candidates(client):
     from src.schemas.espn_ownership import EspnOwnership
 
@@ -3488,7 +1765,7 @@ def test_get_draft_status_attaches_espn_ownership_to_picks_and_candidates(client
     with patch("src.api.draft.get_db_cursor", lambda: _fake_db_cursor(mock_cursor)), \
          patch("src.api.draft._redis_client", return_value=mock_redis), \
          patch("src.api.draft.load_espn_ownership", fake_loader), \
-         patch("src.api.draft._latest_listener_job", return_value=(_fake_status_job("Active"), True)), \
+         _listener("Active"), \
          patch("src.api.draft.time.time", return_value=1005):
         response = client.get("/v1/draft/status", params={"league_id": "L1", "season": 2026})
 

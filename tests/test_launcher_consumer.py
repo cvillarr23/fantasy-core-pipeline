@@ -92,9 +92,11 @@ class FakeStore:
             for r in self.rows.values()
         )
 
-    def running_pods(self):
+    def running_pods(self, exclude_jobs=()):
         return sum(
-            r["status"] == "running" and r["executor"] == "pod"
+            r["status"] == "running"
+            and r["executor"] == "pod"
+            and r["job"] not in exclude_jobs
             for r in self.rows.values()
         )
 
@@ -294,6 +296,41 @@ def test_full_cap_waits_then_launches_when_a_slot_frees(store, consumer, launch_
     store.rows["a"]["status"] = "success"
     assert consumer.drain() == ["r1"]
     launch_pod.assert_called_once()
+
+
+LISTENER_PARAMS = {
+    "league_id": "42",
+    "team_id": "7",
+    "season": 2026,
+    "mode": "practice",
+    "pick_clock_seconds": 30,
+    "auto_draft_delay_seconds": 15,
+}
+
+
+def test_service_run_starts_with_the_pod_cap_full(store, consumer, launch_pod):
+    store.add("a", "trade-scan", status="running", executor="pod")
+    store.add("b", "trade-inbox", status="running", executor="pod")
+    queue_run(store, consumer, "draft", job="practice-draft-listener", params=LISTENER_PARAMS)
+    assert consumer.drain() == ["draft"]
+    (k8s_job,) = launch_pod.call_args.args
+    (container,) = k8s_job.spec.template.spec.containers
+    assert container.command == [
+        "python", "-m", "src.optimization.draft_matrix",
+        "--league-id", "42", "--team-id", "7", "--season", "2026",
+    ]
+    env = {e.name: e.value for e in container.env}
+    assert env["DRAFT_MODE"] == "practice"
+    assert env["DRAFT_PICK_CLOCK_SECONDS"] == "30"
+    assert env["AUTO_DRAFT_DELAY_SECONDS"] == "15"
+
+
+def test_running_service_runs_leave_the_pod_cap_to_batch_jobs(store, consumer, launch_pod):
+    store.add("listener", "practice-draft-listener", status="running", executor="pod")
+    store.add("connector", "practice-draft-connector", status="running", executor="pod")
+    store.add("a", "trade-scan", status="running", executor="pod")
+    queue_run(store, consumer, "r1")
+    assert consumer.drain() == ["r1"]
 
 
 def test_full_cap_expires_the_run_at_its_queue_ttl(store, clock, consumer, launch_pod):
