@@ -3,10 +3,19 @@
 The run_log row is the source of truth for overlap and admission. This watcher turns
 Kubernetes terminal states, cancellation, and lost Jobs into durable row transitions so no
 stale run can hold those limits indefinitely.
+
+A service job may declare a `health` key (a practice draft's `draft:{league_id}:health`, the
+room connector's heartbeat, with a 1-hour TTL). A running run older than its grace whose key is
+gone is retired as `timeout`/`unhealthy`: an abandoned practice room otherwise runs until its
+deadline. A Redis error leaves the run alone, since a missed retirement costs only pod time.
+
+Between the 60s reconciles it checks every few seconds for a cancelled run whose workload is
+still up, and reconciles at once: the draft endpoints cancel a run and wait for its pod to go.
 """
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 
 from kubernetes.client.rest import ApiException
@@ -17,49 +26,84 @@ from src.k8s_client import (
     batch_v1_api,
     core_v1_api,
 )
-from src.launcher.catalog import UnknownJobError
+from src.database import get_redis_client
+from src.launcher.catalog import UnknownJobError, health_key
 from src.launcher.runs import RETRYABLE_STATUSES, RunStore
 
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 60
+CANCEL_POLL_SECONDS = 5
 ORPHAN_GRACE_SECONDS = 10 * 60
 
 
+def _redis_key_exists(key):
+    return bool(get_redis_client().exists(key))
+
+
 class Watcher:
-    def __init__(self, catalog, store=None, inline_runner=None, api=None, clock=None):
+    def __init__(
+        self,
+        catalog,
+        store=None,
+        inline_runner=None,
+        api=None,
+        clock=None,
+        key_exists=None,
+    ):
         self.catalog = catalog
         self.store = store or RunStore()
         self.inline_runner = inline_runner
         self.api = api or batch_v1_api()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.key_exists = key_exists or _redis_key_exists
 
     def run(self, stop: threading.Event):
         while not stop.is_set():
-            try:
-                k8s_jobs = self.api.list_namespaced_job(
+            self._reconcile_cluster()
+            self._wait_for_next_pass(stop)
+
+    def _wait_for_next_pass(self, stop):
+        """Waits up to POLL_SECONDS, ending early once a cancelled run needs its workload
+        stopped."""
+        deadline = time.monotonic() + POLL_SECONDS
+        while not stop.wait(CANCEL_POLL_SECONDS):
+            if time.monotonic() >= deadline or self._cancel_pending():
+                return
+
+    def _cancel_pending(self):
+        try:
+            return self.store.has_unreconciled_cancels()
+        except Exception:
+            logger.exception("Could not check for cancelled runs; waiting for the next pass")
+            return False
+
+    def _reconcile_cluster(self):
+        """One reconcile against a fresh list of launcher k8s Jobs and pods."""
+        try:
+            k8s_jobs = self.api.list_namespaced_job(
+                K8S_NAMESPACE,
+                label_selector="fantasy.run-id",
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+            ).items
+            pods = (
+                core_v1_api()
+                .list_namespaced_pod(
                     K8S_NAMESPACE,
                     label_selector="fantasy.run-id",
                     _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-                ).items
-                pods = (
-                    core_v1_api()
-                    .list_namespaced_pod(
-                        K8S_NAMESPACE,
-                        label_selector="fantasy.run-id",
-                        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    .items
                 )
-                self.reconcile(k8s_jobs, pods)
-            except Exception:
-                logger.exception("Launcher run reconciliation failed; will retry")
-            stop.wait(POLL_SECONDS)
+                .items
+            )
+            self.reconcile(k8s_jobs, pods)
+        except Exception:
+            logger.exception("Launcher run reconciliation failed; will retry")
 
     def reconcile(self, k8s_jobs, pods=None):
         """Apply one snapshot of launcher k8s Jobs to current active/cancelled run rows."""
         by_run = _k8s_jobs_by_run(k8s_jobs)
         pending_k8s_job_names = _pending_k8s_job_names(pods or [])
+        heartbeats = {}
         for run in self.store.watched_runs(set(by_run), self._max_attempts()):
             run_k8s_jobs = by_run.get(run.run_id, [])
             if run.status == "cancelled":
@@ -71,8 +115,45 @@ class Watcher:
                 continue
             if run.executor == "inline":
                 self._reconcile_inline(run)
+            elif self._unhealthy(run, run_k8s_jobs, heartbeats):
+                self._retire_unhealthy(run, run_k8s_jobs)
             else:
                 self._reconcile_pod(run, run_k8s_jobs, pending_k8s_job_names)
+
+    def _unhealthy(self, run, k8s_jobs, heartbeats):
+        """Whether a running service run is past its health grace with its key gone. A run
+        whose k8s Job already finished is left to record that outcome instead."""
+        if run.status != "running":
+            return False
+        try:
+            job = self.catalog.resolve(run.job_name).job
+        except UnknownJobError:
+            return False
+        key = health_key(job, getattr(run, "params", None) or {})
+        if key is None or self._age(run) <= job.health.grace.total_seconds():
+            return False
+        if any(_k8s_job_outcome(k8s_job) is not None for k8s_job in k8s_jobs):
+            return False
+        if key not in heartbeats:
+            heartbeats[key] = self._heartbeat_alive(key)
+        return not heartbeats[key]
+
+    def _heartbeat_alive(self, key):
+        """Whether the health key exists; True when Redis can't say."""
+        try:
+            return self.key_exists(key)
+        except Exception as exc:
+            logger.warning("Could not read health key %s; leaving its runs alone: %s", key, exc)
+            return True
+
+    def _retire_unhealthy(self, run, k8s_jobs):
+        """Stops the run's k8s Job, then records it. A failed delete is retried next pass."""
+        if not all(self._delete(k8s_job) for k8s_job in k8s_jobs):
+            return
+        logger.warning(
+            "Retiring run %s of %s: its health key is gone", run.run_id, run.job_name
+        )
+        self._finish_or_retry(run, "timeout", "unhealthy")
 
     def _max_attempts(self):
         return {

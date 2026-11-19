@@ -7,29 +7,21 @@ internationally on the actual draft day. Sits alongside the hot path (browser-wo
 draft_matrix -> /trigger/draft-pick -> RabbitMQ -> click bot) as an out-of-band control/
 observability layer, not part of it.
 
-Two known gaps, both flagged rather than guessed at:
-  - /start's Job image and its DB/Redis/API env config come from required env vars with no
-    defaults - the real image ref and Secret/ConfigMap names live in fantasy-infra, out of
-    this repo's scope, same "flag the stale/missing default instead of guessing" pattern as
-    CORE_API_BASE_URL.
-  - execution_log has no `mode` column, but `_recent_execution_errors`/`_last_clicker_action`
-    are both scoped by `league_id` (and `_last_clicker_action` by `season` too) - since
-    practice/live configs always live under distinct league_ids (see CORE-18), a practice
-    run's rows are naturally excluded from a live league's /status the same way its k8s Job
-    and Redis keys already are, without needing a dedicated column.
+The listener and the draft-room connector (fantasy-browser-worker's draft_sync.js) run through
+the job launcher: /start, /stop and /practice/sync-job request and cancel catalog runs via
+src/services/draft_run_service.py, and the launcher creates and stops their pods. This API only
+reads k8s (Job phase for /status, pods and logs for /logs). The watcher retires a practice run
+whose connector heartbeat has lapsed, which a separate stale-draft sweeper CronJob used to do.
 
-GET /logs (#68) calls CoreV1Api.list_namespaced_pod/read_namespaced_pod_log, which needs
-`pods`/`pods/log` read RBAC on this API's service account - the fantasy-infra-managed
-`draft-sync-orchestrator` Role already grants both (verified live against the cluster, not
-guessed), so this is not a gap; no RBAC follow-up needed.
+execution_log has no `mode` column, but `_recent_execution_errors`/`_last_clicker_action` are
+both scoped by `league_id` (and `_last_clicker_action` by `season` too) - since practice/live
+configs always live under distinct league_ids (see CORE-18), a practice run's rows are naturally
+excluded from a live league's /status the same way its runs and Redis keys already are, without
+needing a dedicated column.
 
-Also hosts /practice/sync-job (cvillarr23/fantasy-web-ui#9): creates fantasy-browser-worker's
-draft_sync.js Job (the actual ESPN draft-room connector) against a practice/mock room URL a
-human joined by hand - replacing the manual `kubectl apply` of
-fantasy-browser-worker/k8s/test-draft-sync-job.yaml. This is a *different* Job than /start's
-own draft_matrix.py listener above, and is independent of CORE-18's practice-mode work on
-/start (cvillarr23/fantasy-core-pipeline#47) - it reuses the same BatchV1Api Job-creation
-pattern rather than depending on that ticket landing first.
+Also hosts /practice/sync-job (cvillarr23/fantasy-web-ui#9): starts the connector against a
+practice/mock room URL a human joined by hand. This is a *different* run than /start's
+draft_matrix.py listener above.
 """
 import asyncio
 import json
@@ -49,19 +41,14 @@ import redis
 from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from kubernetes import client
 from pydantic import BaseModel, Field, field_validator
 
 from src.database import get_db_cursor, get_redis_client
 from src.schemas.espn_ownership import EspnOwnership
+from src.services import draft_run_service
+from src.services.draft_run_service import DraftLauncherUnavailableError
 from src.services.espn_ownership import load_espn_ownership
-from src.k8s_client import (
-    K8S_NAMESPACE,
-    K8S_REQUEST_TIMEOUT_SECONDS,
-    batch_v1_api as _batch_v1_api,
-    core_v1_api as _core_v1_api,
-    dns1123_slug as _dns1123_slug,
-)
+from src.k8s_client import K8S_REQUEST_TIMEOUT_SECONDS
 from src.ingestion.sync_kicker_dst import ESPN_TO_INTERNAL_TEAM
 from src.optimization.draft_matrix import (
     _set_auto_publish_enabled,
@@ -75,46 +62,16 @@ from src.optimization.draft_matrix import (
 logger = logging.getLogger("DraftControlPlane")
 draft_router = APIRouter()
 
-REDIS_HOST = os.getenv("REDIS_HOST", "fantasy-cache.default.svc.cluster.local")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-DRAFT_SYNC_IMAGE = os.getenv("DRAFT_SYNC_IMAGE")
-# Names of the k8s Secret/ConfigMap supplying the draft-sync Job's ESPN session and league
-# config. These intentionally do NOT carry the database/cache connection settings - those
-# are set explicitly by _draft_sync_env() below, because envFrom cannot rename a Secret's
-# own key into the DB_PASSWORD name src/database.py reads. No defaults: the actual
-# Secret/ConfigMap names are fantasy-infra's to define, not this repo's to guess.
-DRAFT_SYNC_ENV_SECRET = os.getenv("DRAFT_SYNC_ENV_SECRET")
-DRAFT_SYNC_ENV_CONFIGMAP = os.getenv("DRAFT_SYNC_ENV_CONFIGMAP")
-# DB_PASSWORD cannot ride envFrom: the k8s Secret that holds it stores it under its own
-# key name (postgres-password), and envFrom would surface it under that key rather than
-# the DB_PASSWORD name src/database.py actually reads. So it needs an explicit
-# secretKeyRef mapping - the same one this API's own Deployment uses. Overridable because
-# the Secret/key names are fantasy-infra's to own, defaulted so a correct cluster works
-# without extra wiring.
-DRAFT_SYNC_DB_SECRET_NAME = os.getenv("DRAFT_SYNC_DB_SECRET_NAME", "database-credentials")
-DRAFT_SYNC_DB_SECRET_KEY = os.getenv("DRAFT_SYNC_DB_SECRET_KEY", "postgres-password")
-# Non-secret connection settings the listener Pod needs. Propagated from this API process
-# so the Job always talks to the same database/cache/API this process does, instead of
-# silently falling back to src.database / draft_matrix module defaults that may not match
-# the cluster it is actually running in.
-DRAFT_SYNC_INHERITED_ENV_VARS = (
-    "DB_HOST",
-    "DB_NAME",
-    "DB_USER",
-    "REDIS_HOST",
-    "REDIS_PORT",
-    "CORE_API_BASE_URL",
-)
 # The real ESPN league (sync_league.py's ESPN_LEAGUE_ID) that practice/mock-draft-room
 # configs must never collide with. Optional: if unset, practice-mode validation is skipped
-# with a logged warning rather than guessed at - same idiom as DRAFT_SYNC_IMAGE above.
+# with a logged warning rather than guessed at.
 ESPN_LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
 # Draft-sync listener defaults to week 1 preseason projections (matches draft_matrix.py's
 # own --week CLI default) - draft config doesn't track a week, since a draft has none.
 DRAFT_SYNC_WEEK = 1
 # The publish-retry deadline in draft_matrix.hold_and_publish is bounded by the pick clock,
 # and the two modes do not share one: ESPN practice rooms run 30s while real drafts are 90s+.
-# Passed explicitly per Job rather than left to the module default, because the failure is
+# Passed explicitly per run rather than left to the module default, because the failure is
 # silent in the dangerous direction - a practice listener inheriting the 90s live default
 # keeps retrying for a full minute after the clock it was protecting expired and autodrafted.
 DRAFT_PICK_CLOCK_SECONDS_BY_MODE = {
@@ -135,74 +92,28 @@ SSE_POLL_INTERVAL_SECONDS = 2
 DRAFT_STATUS_STALENESS_SECONDS = int(os.getenv("DRAFT_STATUS_STALENESS_SECONDS", "15"))
 RECENT_ERRORS_LIMIT = 5
 
-# fantasy-browser-worker's draft_sync.js image ref - no default, same "fail fast on
-# missing infra-owned config" pattern as DRAFT_SYNC_IMAGE above.
-BROWSER_WORKER_IMAGE = os.getenv("BROWSER_WORKER_IMAGE")
-# Real Secret name, not env-configurable: fantasy-browser-worker/k8s/test-draft-sync-job.yaml
-# already references this exact name directly (not via an env-configurable Secret ref), so
-# there's nothing to guess here the way there is for DRAFT_SYNC_ENV_SECRET/CONFIGMAP.
-ESPN_SESSION_SECRET_NAME = "espn-session-secrets"
-PRACTICE_SYNC_APP_LABEL = "practice-draft-sync"
-# Mirrors PRACTICE_SYNC_APP_LABEL, but for a live league's draft_sync.js connector (issue #66,
-# fantasy-browser-worker). Unlike practice, a live connector needs no manually-joined room URL
-# (it navigates straight to ESPN_LEAGUE_ID/ESPN_TEAM_ID), so /start can create it directly
-# instead of needing its own POST endpoint the way practice does.
-LIVE_SYNC_APP_LABEL = "live-draft-sync"
-
 # GET /logs (#68) caps how much pod log a client can pull in one request - a crash traceback
 # is a handful of lines, not a reason to let a browser tab request an unbounded log dump.
 DRAFT_LOGS_DEFAULT_TAIL_LINES = 200
 DRAFT_LOGS_MAX_TAIL_LINES = 1000
+
+STOP_TIMEOUT_SECONDS = (
+    draft_run_service.TERMINATION_MAX_POLLS * draft_run_service.TERMINATION_POLL_INTERVAL_SECONDS
+)
 
 
 def _redis_client() -> redis.Redis:
     return get_redis_client()
 
 
-def _draft_sync_env(mode: str = "live") -> list:
-    """Explicit env for the draft-sync Job's Pod.
-
-    The Job's Pod does not inherit this API Pod's environment, and draft_matrix.py imports
-    src.database, which builds a connection pool at import time - so a missing DB_PASSWORD
-    is not a degraded listener, it is an immediate crash before any pick is ever consumed.
-    """
-    env = [
-        client.V1EnvVar(
-            name="DB_PASSWORD",
-            value_from=client.V1EnvVarSource(
-                secret_key_ref=client.V1SecretKeySelector(
-                    name=DRAFT_SYNC_DB_SECRET_NAME,
-                    key=DRAFT_SYNC_DB_SECRET_KEY,
-                )
-            ),
-        ),
-        client.V1EnvVar(
-            name="DRAFT_PICK_CLOCK_SECONDS",
-            value=str(DRAFT_PICK_CLOCK_SECONDS_BY_MODE.get(mode, DRAFT_PICK_CLOCK_SECONDS_BY_MODE["live"])),
-        ),
-        client.V1EnvVar(
-            name="AUTO_DRAFT_DELAY_SECONDS",
-            value=str(AUTO_DRAFT_DELAY_SECONDS_BY_MODE.get(mode, AUTO_DRAFT_DELAY_SECONDS_BY_MODE["live"])),
-        ),
-        # Read by draft_matrix.py's publish_draft_target and forwarded on every draft_targets
-        # message, so fantasy-browser-worker's click bot knows practice vs live without guessing.
-        client.V1EnvVar(name="DRAFT_MODE", value=mode),
-    ]
-    for name in DRAFT_SYNC_INHERITED_ENV_VARS:
-        value = os.getenv(name)
-        if value:
-            env.append(client.V1EnvVar(name=name, value=value))
-    return env
-
-
 # ------------------------------------------------------------------------------
 # PYDANTIC DATA TRANSFER OBJECTS (SCHEMAS)
 # ------------------------------------------------------------------------------
 class DraftConfigPayload(BaseModel):
-    league_id: str = Field(..., description="ESPN league identifier the draft-sync Job should target")
+    league_id: str = Field(..., description="ESPN league identifier the draft listener run should target")
     team_id: str = Field(..., description="Our own team_id within that league")
     season: int = Field(..., description="Season year, e.g. 2026")
-    mode: Literal["live", "practice"] = Field("live", description="'practice' for ESPN mock draft rooms; tags the Job/status so a practice run is never mistaken for the real Draft Day")
+    mode: Literal["live", "practice"] = Field("live", description="'practice' for ESPN mock draft rooms; tags the run/status so a practice run is never mistaken for the real Draft Day")
     auto_publish_enabled: bool = Field(True, description="Manual kill switch (#108/#109) for hold_and_publish's auto-publish. Defaults True so existing callers that never send this field see no behavior change.")
 
 
@@ -254,7 +165,7 @@ class DraftStatusResponse(BaseModel):
     mode: str = Field(..., description="'live' or 'practice', sourced from the draft_config row for this league")
     auto_publish_enabled: bool = Field(True, description="Manual kill switch (#108/#109) for hold_and_publish's auto-publish; True (fail-open) when the draft_config row is unavailable")
     auto_publish_disabled_by: Optional[str] = Field(None, description="'manual' if an operator disabled auto-publish via POST /v1/draft/auto-publish, 'circuit_breaker' if a future automatic safety net tripped it, null if auto-publish has never been disabled for this league")
-    job_state: str = Field(..., description="Active/Succeeded/Failed/Unknown, from the k8s Job's own status")
+    job_state: str = Field(..., description="Active/Succeeded/Failed/Unknown, from the listener run's k8s Job, or its run_log row once the Job is gone")
     recommendation: dict = Field(..., description="Latest recommendation from CORE-08's solver (draft:{league_id}:board), empty if none yet")
     last_clicker_action: Optional[str] = Field(None, description="Human-readable outcome of WORKER-06's most recent click for this league (e.g. 'Drafted Breece Hall at 14:32:05', or a failure message), sourced from execution_log; null until the click bot has confirmed a pick")
     recent_picks: List[DraftPickSummary]
@@ -273,7 +184,7 @@ class DraftStatusResponse(BaseModel):
     on_the_clock_team_id: Optional[str] = Field(None, description="fantasy-browser-worker's live SELECTING WS frame when available (real-time, no chicken-and-egg gap for a team's own round-1 pick); falls back to our own snake-draft derivation, which is null until every team's round-1 slot is known, and again once the draft is complete - there is no next pick to be on the clock for")
     autodraft_active_team_id: Optional[str] = Field(None, description="Team whose ESPN autodraft is currently toggled on, from fantasy-browser-worker's live AUTODRAFT WS frame. Null if no team currently has it active or the signal hasn't been seen yet - this is a live toggle state, not a history of past autodrafted picks")
     draft_state: Literal["waiting", "active", "complete"] = Field(..., description="'waiting' before the first pick, 'active' while picks remain, 'complete' once picks_seen reaches every team's full roster (#82) - independent of pipeline_health, so a finished draft is never rendered as a degraded connection")
-    pipeline_health: str = Field(..., description="'healthy' iff Postgres/Redis both respond and, while the draft is still active, the draft-sync Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its Job is expected to have exited, else 'degraded'")
+    pipeline_health: str = Field(..., description="'healthy' iff Postgres/Redis both respond and, while the draft is still active, the listener run's Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its run is expected to have exited, else 'degraded'")
     connector_health: Optional[dict] = Field(
         None,
         description=(
@@ -319,121 +230,35 @@ class PracticeSyncJobRequest(BaseModel):
 # ------------------------------------------------------------------------------
 # Status aggregation (shared by GET /status and GET /stream)
 # ------------------------------------------------------------------------------
-def _job_phase(job_status) -> str:
-    if job_status.active:
-        return "Active"
-    if job_status.succeeded:
-        return "Succeeded"
-    if job_status.failed:
-        return "Failed"
-    return "Unknown"
-
-
-def _latest_listener_job(league_id: str):
-    """(latest draft-sync Job for the league or None, whether the query actually succeeded).
+def _listener_run(league_id: str):
+    """(the league's newest listener run or None, whether the lookup actually succeeded).
 
     Absent and unreadable have to stay distinguishable. Callers use absence to decide that
-    leftover Redis state describes a finished run; treating an apiserver failure the same way
+    leftover Redis state describes a finished run; treating a database failure the same way
     would suppress a live run's error banner exactly when something is already wrong.
     """
     try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app=draft-sync,league-id={league_id}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+        return draft_run_service.latest_listener(league_id), True
     except Exception as e:
-        logger.error(f"Failed to query draft-sync Job status for league {league_id}: {e}")
+        logger.error(f"Failed to look up the draft listener run for league {league_id}: {e}")
         return None, False
 
-    items = getattr(jobs, "items", []) or []
-    if not items:
-        return None, True
-    # Most recently created Job for this league is the one we care about.
-    return max(items, key=lambda j: j.metadata.creation_timestamp), True
+
+def _listeners_on_other_leagues(target_league_id: str) -> list:
+    """The active listener runs (either mode) watching some *other* league.
+
+    Never fails open. An unreadable run_log is not "no conflicts" - treating it as such lets a
+    transient blip slip a second listener past the duplicate guard, and two consumers on one
+    Redis group split the pick stream between them."""
+    return [
+        run
+        for run in draft_run_service.active_listeners()
+        if run.params.get("league_id") != target_league_id
+    ]
 
 
-def _job_state(league_id: str) -> str:
-    job, _query_ok = _latest_listener_job(league_id)
-    if job is None:
-        return "Unknown"
-    return _job_phase(job.status)
-
-
-def _live_publisher_job_state(league_id: str) -> str:
-    """Same shape as _job_state, but for the live connector Job (LIVE_SYNC_APP_LABEL) rather
-    than the listener - used by /start to avoid creating a second connector for a league whose
-    first one is still Active."""
-    try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={LIVE_SYNC_APP_LABEL},league-id={league_id}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.error(f"Failed to query live connector Job status for league {league_id}: {e}")
-        return "Unknown"
-
-    items = getattr(jobs, "items", []) or []
-    if not items:
-        return "Unknown"
-    latest = max(items, key=lambda j: j.metadata.creation_timestamp)
-    return _job_phase(latest.status)
-
-
-def _practice_sync_job_state() -> str:
-    try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.error(f"Failed to query practice draft-sync Job status: {e}")
-        return "Unknown"
-
-    if not jobs.items:
-        return "Unknown"
-    latest = max(jobs.items, key=lambda j: j.metadata.creation_timestamp)
-    return _job_phase(latest.status)
-
-
-def _latest_practice_sync_job():
-    try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.error(f"Failed to query practice draft-sync Job status: {e}")
-        return None
-    items = getattr(jobs, "items", []) or []
-    if not isinstance(items, list) or not items:
-        return None
-    return max(items, key=lambda j: j.metadata.creation_timestamp)
-
-
-def _practice_sync_job_league_id() -> Optional[str]:
-    latest = _latest_practice_sync_job()
-    if latest is None:
-        return None
-    return (latest.metadata.labels or {}).get("league-id")
-
-
-def _active_listeners_on_other_leagues(target_league_id: str) -> list:
-    """Returns the active draft-sync listener Jobs watching some *other* league.
-
-    More than one can exist: every practice run before this fix left its listener behind, so
-    a long-lived cluster accumulates them."""
-    # Never fails open. An unreadable listener state is not "no conflicts" - treating it as
-    # such lets a transient apiserver blip slip a second listener past the duplicate guard,
-    # and two consumers on one Redis group split the pick stream between them.
-    batch_api = _batch_v1_api()
-    try:
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.error(f"Failed to query active draft-sync listeners: {e}")
-        raise
-    items = getattr(jobs, "items", []) or []
-    if not isinstance(items, list):
-        raise RuntimeError(f"Unexpected response listing draft-sync Jobs: items was {type(items).__name__}, not a list.")
-    conflicting = []
-    for job in items:
-        if _job_phase(job.status) != "Active":
-            continue
-        job_league_id = (job.metadata.labels or {}).get("league-id")
-        if job_league_id and job_league_id != target_league_id:
-            conflicting.append(job)
-    return conflicting
+def _run_ids(runs) -> list:
+    return [run.run_id for run in runs]
 
 
 def _redis_glob_escape(value: str) -> str:
@@ -504,89 +329,41 @@ def _clear_league_draft_state(league_id: str, include_pick_stream: bool = False,
         return 0
 
 
-def _wait_for_jobs_gone(batch_api: client.BatchV1Api, label_selector: str, job_names: list) -> bool:
-    """Like _wait_for_job_termination, but waits for specific Jobs rather than for the whole
-    selector to empty - the caller may be intentionally leaving other matching Jobs in place."""
-    remaining = set(job_names)
-    for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-        present = {j.metadata.name for j in (getattr(jobs, "items", []) or [])}
-        if not (remaining & present):
-            return True
-        time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
-    return False
+def _retire_practice_listeners(except_league_id: Optional[str] = None, clear_pick_stream: bool = False) -> list:
+    """Cancels practice listener runs, optionally sparing one league's, and waits for their pods.
 
-
-def _delete_practice_listener_jobs(except_league_id: Optional[str] = None, clear_pick_stream: bool = False) -> list:
-    """Deletes practice draft-sync listener Jobs, optionally sparing one league's.
-
-    Listeners are Redis Stream consumers that block forever, so nothing ever retires one on
-    its own. Left running, a stale listener both consumes a league nobody is drafting and
-    blocks the next practice run from starting at all (start_draft_sync refuses to run two
-    listeners at once). Only practice listeners are ever touched here - a live draft's
+    Listeners are Redis Stream consumers that block until the draft completes, so a practice
+    room nobody finished keeps its listener. Left running, a stale listener both consumes a
+    league nobody is drafting and blocks the next practice run (start_draft_sync refuses to run
+    two listeners at once). Only practice listeners are ever touched here - a live draft's
     listener must never be collected as a side effect of practice cleanup.
 
     clear_pick_stream additionally drops each retired league's pick ledger and Stream. It is
     off by default because it is only safe once the league's *publisher* is also gone: the
     room connector writes to those keys, and deleting them underneath a running connector
-    either loses picks or lets it immediately recreate them. Only end_practice_sync_job, which
-    waits for the connector Pod to terminate first, may pass True."""
-    try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector="app=draft-sync,mode=practice", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.error(f"Failed to list practice draft-sync listener Jobs: {e}")
-        raise
+    either loses picks or lets it immediately recreate them. Only _teardown_practice_run, which
+    waits for the connector to stop first, may pass True.
 
-    deleted = []
-    deleted_league_ids = []
-    for job in getattr(jobs, "items", []) or []:
-        labels = job.metadata.labels or {}
-        if except_league_id is not None and labels.get("league-id") == except_league_id:
-            continue
-        try:
-            batch_api.delete_namespaced_job(
-                job.metadata.name,
-                K8S_NAMESPACE,
-                # Foreground, matching /stop: Background returns before the Pod is gone, and
-                # /start creates the replacement the moment this returns. The old and new
-                # listeners would then briefly share a Redis consumer group and split the
-                # pick stream between them - the very overlap this reclaim exists to avoid.
-                propagation_policy="Foreground",
-                # grace_period_seconds=5, not Kubernetes' 30s default: draft_matrix.py's main
-                # loop reads via a Redis consumer group specifically so a killed-mid-entry pick
-                # is redelivered and reprocessed from the backlog on the next run - nothing here
-                # needs a graceful flush. Without this, the pod's default 30s grace period was
-                # racing _wait_for_jobs_gone's own ~30s poll budget below (fantasy-core-pipeline#103).
-                grace_period_seconds=5,
-                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-            )
-            deleted.append(job.metadata.name)
-            if labels.get("league-id"):
-                deleted_league_ids.append(labels["league-id"])
-        except Exception as e:
-            # Never swallow this. A caller that treats failed cleanup as success either
-            # starts a second listener alongside the one it failed to reclaim, or reports a
-            # 200 teardown while the listener is still consuming.
-            logger.error(f"Failed to delete practice draft-sync listener Job {job.metadata.name}: {e}")
-            raise
-
-    # Waits on the deleted names specifically, not the label selector. The selector also
-    # matches the target league's own Job, which except_league_id deliberately spared - a
-    # completed or failed one lingers there indefinitely, so a selector-based wait would
-    # never see an empty list and every reclaim would time out into a 500.
-    if deleted and not _wait_for_jobs_gone(batch_api, "app=draft-sync,mode=practice", deleted):
+    Returns the cancelled run ids. Raises when a run can't be cancelled or outlives the wait:
+    a caller that treats failed cleanup as success either starts a second listener alongside
+    the one it failed to reclaim, or reports a 200 teardown while the listener still consumes."""
+    runs = [
+        run
+        for run in draft_run_service.active_practice_listeners()
+        if except_league_id is None or run.params.get("league_id") != except_league_id
+    ]
+    if runs and not draft_run_service.cancel_and_wait(_run_ids(runs)):
         raise RuntimeError(
-            f"Practice draft-sync listener Job(s) {', '.join(deleted)} did not terminate within "
-            f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s."
+            f"Practice draft-sync listener run(s) {', '.join(_run_ids(runs))} did not stop "
+            f"within {STOP_TIMEOUT_SECONDS}s."
         )
-    if deleted:
-        logger.info(f"Deleted stale practice draft-sync listener Jobs: {', '.join(deleted)}")
-    # The Job is only half the run's footprint. Its board outlives it with no TTL, so leaving
-    # it behind is what makes a dead run's error and recommendation keep surfacing as current.
-    for dead_league_id in deleted_league_ids:
-        _clear_league_draft_state(dead_league_id, include_pick_stream=clear_pick_stream)
-    return deleted
+    if runs:
+        logger.info(f"Cancelled stale practice draft-sync listener runs: {', '.join(_run_ids(runs))}")
+    # The run is only half the footprint. Its board outlives it with no TTL, so leaving it
+    # behind is what makes a dead run's error and recommendation keep surfacing as current.
+    for league_id in {run.params.get("league_id") for run in runs} - {None}:
+        _clear_league_draft_state(league_id, include_pick_stream=clear_pick_stream)
+    return _run_ids(runs)
 
 
 def _to_iso_timestamp(value) -> Optional[str]:
@@ -635,21 +412,14 @@ def _listener_status(job_state: str, recommendation: dict, listener_job_absent: 
     return listener_state, listener_last_event_at, listener_error
 
 
-def _practice_room_identifier(job) -> Optional[str]:
-    containers = getattr(getattr(getattr(job, "spec", None), "template", None), "spec", None)
-    if containers is None:
+def _practice_room_identifier(run) -> Optional[str]:
+    room_url = (run.params or {}).get("room_url") if run is not None else None
+    if not room_url:
         return None
-    for container in getattr(containers, "containers", []) or []:
-        for env_var in getattr(container, "env", []) or []:
-            if env_var.name != "DRAFT_ROOM_URL" or env_var.value is None:
-                continue
-            parsed = urlparse(env_var.value)
-            if parsed.fragment:
-                return parsed.fragment
-            draft_room_id = parse_qs(parsed.query).get("draftRoomId", [None])[0]
-            if draft_room_id:
-                return draft_room_id
-    return None
+    parsed = urlparse(room_url)
+    if parsed.fragment:
+        return parsed.fragment
+    return parse_qs(parsed.query).get("draftRoomId", [None])[0]
 
 
 def _room_connected(league_id: Optional[str]) -> bool:
@@ -1167,9 +937,9 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
     must surface as pipeline_health="degraded" in a normal 200 response (so the browser can
     make the documented auto-picker fallback decision), not escape as an unhandled
     exception that turns the whole endpoint into a 500."""
-    # One apiserver read serves both: the Job's phase, and whether a listener exists at all.
-    listener_job, listener_job_query_ok = _latest_listener_job(league_id)
-    job_state = _job_phase(listener_job.status) if listener_job is not None else "Unknown"
+    # One lookup serves both: the run's Job phase, and whether a listener describes the board.
+    listener_run, listener_query_ok = _listener_run(league_id)
+    job_state = draft_run_service.run_job_state(listener_run)
 
     redis_ok = True
     recommendation: dict = {}
@@ -1283,7 +1053,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
         recommendation.pop("espn_suggestion", None)
     else:
         pipeline_health = "healthy" if job_state == "Active" and db_ok and redis_ok and not _is_stale(job_state, recommendation) else "degraded"
-    listener_job_absent = listener_job_query_ok and listener_job is None
+    listener_job_absent = listener_query_ok and draft_run_service.ended_without_outcome(listener_run)
     listener_state, listener_last_event_at, listener_error = _listener_status(
         job_state,
         recommendation,
@@ -1328,7 +1098,7 @@ def _build_status(league_id: str, season: int, limit: int) -> dict:
 # ------------------------------------------------------------------------------
 @draft_router.post("/config", status_code=status.HTTP_200_OK)
 def set_draft_config(payload: DraftConfigPayload):
-    """Stores league_id/team_id/season/mode so /start's draft-sync Job can read it at launch."""
+    """Stores league_id/team_id/season/mode so /start can launch the listener run from it."""
     if payload.mode == "practice":
         if ESPN_LEAGUE_ID is None:
             logger.warning(f"ESPN_LEAGUE_ID is not configured - skipping the real-league collision check for practice config league_id={payload.league_id}.")
@@ -1375,27 +1145,8 @@ def get_draft_config():
     return {"league_id": league_id, "team_id": team_id, "season": season, "mode": mode}
 
 
-@draft_router.post("/start", status_code=status.HTTP_202_ACCEPTED)
-def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = False):
-    """Creates the draft-sync Job (a wrapper around draft_matrix.py's listener) from a
-    stored /config, replacing the manual `kubectl apply` step. If `league_id` is omitted,
-    falls back to the most recently stored config (today's behavior, unchanged) - pass it
-    explicitly to pick a specific stored config, e.g. to launch a practice room without
-    disturbing whichever config was updated last.
-
-    with_publisher=True additionally launches fantasy-browser-worker's draft_sync.js as a
-    LIVE_SYNC_APP_LABEL-labeled connector Job alongside the listener (issue #66) - only valid
-    for a live config, since practice already has its own dedicated launch path
-    (/practice/sync-job) for the room URL a human has to join by hand first. Without this,
-    a live league's connector has no discoverable Job, and /stop has no lifecycle signal to
-    key an automatic pick-ledger/Stream clear off of."""
-    if not DRAFT_SYNC_IMAGE:
-        raise HTTPException(status_code=500, detail="DRAFT_SYNC_IMAGE is not configured - the draft-sync container image ref must be supplied via env var.")
-    if not DRAFT_SYNC_ENV_SECRET or not DRAFT_SYNC_ENV_CONFIGMAP:
-        raise HTTPException(status_code=500, detail="DRAFT_SYNC_ENV_SECRET and DRAFT_SYNC_ENV_CONFIGMAP must both be configured - the Job's Pod does not inherit this API Pod's own DB/Redis/API environment.")
-    if with_publisher and not BROWSER_WORKER_IMAGE:
-        raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
-
+def _stored_draft_config(league_id: Optional[str]) -> tuple:
+    """(league_id, team_id, season, mode) of that league's config, or the newest one."""
     try:
         with get_db_cursor() as cursor:
             if league_id is not None:
@@ -1404,14 +1155,19 @@ def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = Fal
                 cursor.execute("SELECT league_id, team_id, season, mode FROM draft_config ORDER BY updated_at DESC LIMIT 1;")
             row = cursor.fetchone()
     except Exception as e:
-        logger.error(f"Failed to read draft config before starting draft-sync Job: {e}")
+        logger.error(f"Failed to read draft config before starting the draft listener: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to read draft config: {str(e)}")
-
     if row is None:
         raise HTTPException(status_code=400, detail="No draft config stored yet - POST /v1/draft/config first.")
-    league_id, team_id, season, mode = row
+    return row
 
-    if with_publisher and mode == "practice":
+
+def _check_publisher_request(with_publisher: bool, league_id: str, mode: str) -> None:
+    """with_publisher is live-only, and the live connector reads its league from ESPN_LEAGUE_ID
+    (the worker's espn env bundle), so it can only serve that league."""
+    if not with_publisher:
+        return
+    if mode == "practice":
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1419,25 +1175,24 @@ def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = Fal
                 "manually-joined room URL, so use POST /v1/draft/practice/sync-job instead."
             ),
         )
+    if ESPN_LEAGUE_ID and str(league_id) != ESPN_LEAGUE_ID:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"with_publisher starts the connector for ESPN_LEAGUE_ID ({ESPN_LEAGUE_ID}), "
+                f"not league {league_id}."
+            ),
+        )
 
-    # A second listener for the same league would share the browser-worker's Redis Stream
-    # consumer name (draft-matrix-{team_id}) but keep an entirely separate in-process
-    # pending_state - a newer pick handled by one process can't cancel the other's pending
-    # delayed publish, so two Active Jobs for one league can race and double-publish a
-    # stale draft target. Reject rather than silently creating a duplicate.
-    existing_state = _job_state(league_id)
-    if existing_state == "Active":
-        return {
-            "status": "accepted",
-            "already_running": True,
-            "league_id": league_id,
-            "team_id": team_id,
-            "season": season,
-            "mode": mode,
-        }
 
+def _reclaim_or_refuse_other_listeners(league_id: str, mode: str) -> None:
+    """Refuses (409) while a listener runs on another league, except that a practice start
+    retires stale *practice* listeners: practice is a singleton by design (one room
+    connector, one config row), so a new practice room simply replaces the old one. A live
+    listener is never collected this way - drafting for real is never something to interrupt
+    on an implicit signal."""
     try:
-        conflicting = _active_listeners_on_other_leagues(league_id)
+        conflicting = _listeners_on_other_leagues(league_id)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1446,156 +1201,123 @@ def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = Fal
                 f"league {league_id} rather than risk a second listener splitting the pick stream."
             ),
         )
-    if conflicting:
-        # A practice run starting while stale *practice* listeners linger is the normal case,
-        # not a conflict: the user has simply opened a new practice room, and practice is a
-        # singleton by design (one room connector, one config row). Reclaim them so the run
-        # can proceed. A live listener is never collected this way - drafting for real is
-        # never something to interrupt on an implicit signal, so that still fails loudly.
-        live_conflicts = [j for j in conflicting if (j.metadata.labels or {}).get("mode") != "practice"]
-        if mode == "practice" and not live_conflicts:
-            try:
-                _delete_practice_listener_jobs(except_league_id=league_id)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"Could not reclaim the stale practice draft-sync listener: {e}. Starting league "
-                        f"{league_id} anyway would leave two listeners running."
-                    ),
-                )
-        else:
-            conflicting_league_id = (live_conflicts or conflicting)[0].metadata.labels.get("league-id")
+    if not conflicting:
+        return
+    live_conflicts = [run for run in conflicting if run.job_name != draft_run_service.LISTENER_JOBS["practice"]]
+    if mode == "practice" and not live_conflicts:
+        try:
+            _retire_practice_listeners(except_league_id=league_id)
+        except Exception as e:
             raise HTTPException(
-                status_code=409,
+                status_code=500,
                 detail=(
-                    f"A draft-sync Job is already Active for league {conflicting_league_id}; "
-                    f"stop it before starting league {league_id}."
+                    f"Could not reclaim the stale practice draft-sync listener: {e}. Starting league "
+                    f"{league_id} anyway would leave two listeners running."
                 ),
             )
-
-    job_prefix = "draft-sync-practice" if mode == "practice" else "draft-sync"
-    job_name = f"{job_prefix}-{_dns1123_slug(league_id)}-{int(time.time())}"
-
-    # Reached only when a new listener is genuinely being created - the already_running branch
-    # returned long before this. A previous run for this league leaves its board behind with no
-    # TTL, so without this the new run opens showing the old one's recommendation, its
-    # last-processed pick number and, if it died, its error. Clearing before the Job is created
-    # means the listener's own "Starting" write is the first thing on a fresh board.
-    _clear_league_draft_state(league_id)
-
-    job_labels = {"app": "draft-sync", "league-id": league_id, "mode": mode}
-    job = client.V1Job(
-        metadata=client.V1ObjectMeta(name=job_name, labels=job_labels),
-        spec=client.V1JobSpec(
-            backoff_limit=0,
-            template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels=job_labels),
-                spec=client.V1PodSpec(
-                    restart_policy="Never",
-                    containers=[
-                        client.V1Container(
-                            name="draft-sync",
-                            image=DRAFT_SYNC_IMAGE,
-                            command=[
-                                "python", "-m", "src.optimization.draft_matrix",
-                                "--league-id", str(league_id),
-                                "--team-id", str(team_id),
-                                "--season", str(season),
-                            ],
-                            env_from=[
-                                client.V1EnvFromSource(config_map_ref=client.V1ConfigMapEnvSource(name=DRAFT_SYNC_ENV_CONFIGMAP)),
-                                client.V1EnvFromSource(secret_ref=client.V1SecretEnvSource(name=DRAFT_SYNC_ENV_SECRET)),
-                            ],
-                            env=_draft_sync_env(mode),
-                        )
-                    ],
-                ),
-            ),
+        return
+    conflicting_league_id = (live_conflicts or conflicting)[0].params.get("league_id")
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"A draft-sync listener is already Active for league {conflicting_league_id}; "
+            f"stop it before starting league {league_id}."
         ),
     )
 
-    try:
-        batch_api = _batch_v1_api()
-        batch_api.create_namespaced_job(K8S_NAMESPACE, job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        logger.error(f"Failed to create draft-sync Job for league {league_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create draft-sync Job: {str(e)}")
 
-    publisher_job_name = None
-    if with_publisher:
-        # Defensive: the listener's own Active check above already returned early in the
-        # overwhelmingly common case, but the listener and connector aren't a single unit - a
-        # listener that already exited (or was never started) doesn't prove the connector is
-        # gone too. Skip rather than double-publish into the same league's pick Stream.
-        if _live_publisher_job_state(league_id) == "Active":
-            logger.info(f"Live connector already Active for league {league_id}; not starting a second one.")
-        else:
-            publisher_job_name = f"live-draft-sync-{_dns1123_slug(league_id)}-{int(time.time())}"
-            publisher_labels = {"app": LIVE_SYNC_APP_LABEL, "league-id": league_id}
-            publisher_job = client.V1Job(
-                metadata=client.V1ObjectMeta(name=publisher_job_name, labels=publisher_labels),
-                spec=client.V1JobSpec(
-                    backoff_limit=0,
-                    template=client.V1PodTemplateSpec(
-                        metadata=client.V1ObjectMeta(labels=publisher_labels),
-                        spec=client.V1PodSpec(
-                            restart_policy="Never",
-                            image_pull_secrets=[client.V1LocalObjectReference(name="ghcr-pull-secret")],
-                            containers=[
-                                client.V1Container(
-                                    name="draft-sync",
-                                    image=BROWSER_WORKER_IMAGE,
-                                    command=["node", "src/bots/draft_sync.js"],
-                                    env=[
-                                        # Live mode navigates straight to the league/team, unlike
-                                        # practice's DRAFT_ROOM_URL - see enterDraftRoom's live
-                                        # branch in fantasy-browser-worker's draft_sync.js.
-                                        client.V1EnvVar(name="ESPN_LEAGUE_ID", value=str(league_id)),
-                                        client.V1EnvVar(name="ESPN_TEAM_ID", value=str(team_id)),
-                                        client.V1EnvVar(name="CURRENT_YEAR", value=str(season)),
-                                        client.V1EnvVar(name="REDIS_HOST", value=REDIS_HOST),
-                                        client.V1EnvVar(name="REDIS_PORT", value=str(REDIS_PORT)),
-                                        client.V1EnvVar(
-                                            name="ESPN_S2",
-                                            value_from=client.V1EnvVarSource(
-                                                secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="espn_s2")
-                                            ),
-                                        ),
-                                        client.V1EnvVar(
-                                            name="SWID",
-                                            value_from=client.V1EnvVarSource(
-                                                secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="swid")
-                                            ),
-                                        ),
-                                    ],
-                                )
-                            ],
-                        ),
-                    ),
-                ),
-            )
-            try:
-                batch_api.create_namespaced_job(K8S_NAMESPACE, publisher_job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-            except Exception as e:
-                # Not rolled back: the listener above is already live and consuming a Stream
-                # that has a connector on the way one way or another. Surfacing this loudly (not
-                # silently returning "accepted") is what lets the caller retry just the
-                # connector instead of tearing down and restarting the whole league.
-                logger.error(f"Listener started but failed to create live connector Job for league {league_id}: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"draft-sync listener {job_name} started, but the live connector Job could not be "
-                        f"created: {e}. Retry with with_publisher=true, or launch it manually."
-                    ),
-                )
+def _start_listener_run(league_id: str, team_id: str, season: int, mode: str) -> dict:
+    try:
+        return draft_run_service.start_listener(
+            mode,
+            league_id=league_id,
+            team_id=team_id,
+            season=season,
+            week=DRAFT_SYNC_WEEK,
+            pick_clock_seconds=DRAFT_PICK_CLOCK_SECONDS_BY_MODE[mode],
+            auto_draft_delay_seconds=AUTO_DRAFT_DELAY_SECONDS_BY_MODE[mode],
+        )
+    except DraftLauncherUnavailableError as e:
+        logger.error(f"Job launcher cannot start the draft listener for league {league_id}: {e}")
+        raise HTTPException(status_code=503, detail=f"Job launcher cannot start the draft listener: {e}")
+    except Exception as e:
+        logger.error(f"Failed to request the draft listener run for league {league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to request the draft listener run: {str(e)}")
+
+
+def _start_live_connector_run(league_id: str, listener: dict) -> Optional[dict]:
+    """The live connector run, or None when one is already active for the league.
+
+    The listener and connector aren't a single unit - a listener that already exited (or was
+    never started) doesn't prove the connector is gone too, so check rather than
+    double-publish into the same league's pick Stream. A failure is not rolled back: the
+    listener is already queued for a Stream that has a connector on the way one way or
+    another, and surfacing it loudly lets the caller retry just the connector."""
+    try:
+        if draft_run_service.active_live_connectors(league_id):
+            logger.info(f"Live connector already active for league {league_id}; not starting a second one.")
+            return None
+        return draft_run_service.start_live_connector(league_id)
+    except Exception as e:
+        logger.error(f"Listener requested but the live connector run failed for league {league_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"draft-sync listener run {listener['run_id']} was requested, but the live connector run could "
+                f"not be: {e}. Retry with with_publisher=true."
+            ),
+        )
+
+
+@draft_router.post("/start", status_code=status.HTTP_202_ACCEPTED)
+def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = False):
+    """Requests the draft listener run (draft_matrix.py's listener, a `class: service` job in
+    the launcher's catalog) from a stored /config. If `league_id` is omitted, falls back to the
+    most recently stored config - pass it explicitly to pick a specific stored config, e.g. to
+    launch a practice room without disturbing whichever config was updated last.
+
+    with_publisher=True additionally requests fantasy-browser-worker's draft_sync.js as the
+    live connector run (issue #66) - only valid for a live config, since practice has its own
+    launch path (/practice/sync-job) for the room URL a human has to join by hand first.
+
+    A second listener for the same league would share the browser-worker's Redis Stream
+    consumer name (draft-matrix-{team_id}) but keep an entirely separate in-process
+    pending_state - a newer pick handled by one process can't cancel the other's pending
+    delayed publish, so two listeners for one league can race and double-publish a stale draft
+    target. An active one is reported as already_running instead of duplicated."""
+    league_id, team_id, season, mode = _stored_draft_config(league_id)
+    _check_publisher_request(with_publisher, league_id, mode)
+
+    listener_run, listener_query_ok = _listener_run(league_id)
+    if not listener_query_ok:
+        raise HTTPException(status_code=500, detail=f"Could not look up the draft listener run for league {league_id}.")
+    if draft_run_service.is_active(listener_run):
+        return {
+            "status": "accepted",
+            "already_running": True,
+            "run_id": listener_run.run_id,
+            "league_id": league_id,
+            "team_id": team_id,
+            "season": season,
+            "mode": mode,
+        }
+
+    _reclaim_or_refuse_other_listeners(league_id, mode)
+    # A previous run for this league leaves its board behind with no TTL, so without this the
+    # new run opens showing the old one's recommendation, its last-processed pick number and,
+    # if it died, its error. Clearing before the run is requested means the listener's own
+    # "Starting" write is the first thing on a fresh board.
+    _clear_league_draft_state(league_id)
+    listener = _start_listener_run(league_id, team_id, season, mode)
+    publisher = _start_live_connector_run(league_id, listener) if with_publisher else None
 
     return {
         "status": "accepted",
         "already_running": False,
-        "job_name": job_name,
-        "publisher_job_name": publisher_job_name,
+        "run_id": listener["run_id"],
+        "job_name": listener["job_name"],
+        "publisher_run_id": publisher["run_id"] if publisher else None,
+        "publisher_job_name": publisher["job_name"] if publisher else None,
         "league_id": league_id,
         "team_id": team_id,
         "season": season,
@@ -1603,128 +1325,49 @@ def start_draft_sync(league_id: Optional[str] = None, with_publisher: bool = Fal
     }
 
 
-STOP_JOB_TERMINATION_MAX_POLLS = 15
-STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS = 2
-
-# Kubernetes' default pod grace period is 30s, which is the *entire* termination budget the
-# polls above allow - so a connector that ignores SIGTERM (the browser worker runs Node as PID
-# 1 with no SIGTERM handler, so it only dies on the kubelet's SIGKILL at the end of the grace
-# period) reliably outlives the poll and trips the "did not terminate in time" path on every
-# room switch. The connector holds nothing that needs a graceful flush, so cut the grace period
-# well under the poll budget and let it be SIGKILLed instead.
-PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS = 5
-
-
-def _wait_for_job_termination(batch_api: client.BatchV1Api, label_selector: str) -> bool:
-    """Foreground-propagation deletion doesn't complete synchronously - the Job object (and
-    its dependent Pods) can still be terminating for a few seconds after delete_namespaced_job
-    returns. Poll until it's actually gone, bounded so a wedged finalizer/apiserver hiccup
-    can't hang this request forever. Returns False on timeout - callers must not treat that
-    as a successful stop."""
-    for _ in range(STOP_JOB_TERMINATION_MAX_POLLS):
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-        if not jobs.items:
-            return True
-        time.sleep(STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
-    return False
+def _stop_timed_out(what: str, league_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=504,
+        detail=f"{what} for league {league_id} did not stop within {STOP_TIMEOUT_SECONDS}s - "
+               "Redis state was NOT cleared; retry /stop or check the run manually.",
+    )
 
 
 @draft_router.post("/stop", status_code=status.HTTP_200_OK)
 def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
-    """Tears down a draft-sync Job and its Redis state for one league - mode-agnostic
-    (works for both live and practice). Does NOT delete the draft_config row: /status and
-    a later /start re-launch both still need it, and there is no other stored copy of
-    team_id/season/mode for that league once it's gone.
+    """Cancels a league's listener and connector runs and clears its Redis state -
+    mode-agnostic (works for both live and practice). Does NOT delete the draft_config row:
+    /status and a later /start re-launch both still need it, and there is no other stored copy
+    of team_id/season/mode for that league once it's gone.
 
-    Scoped to app=draft-sync (not just league-id) so this can never delete some other
-    workload that happens to share the league-id label. Waits for the Job's Pods to fully
-    terminate (Foreground propagation + polling) before clearing Redis - a still-running
-    listener could otherwise recreate the recommendation board or publish a target after
-    this endpoint has already reported "stopped".
+    Waits for each cancelled run's pod to be gone before clearing Redis - a still-running
+    listener could otherwise recreate the recommendation board or publish a target after this
+    endpoint has already reported "stopped". The listener goes first, then the connector.
 
-    That wait proves *this repo's own* listener Job is gone, and - since issue #66 - the same
-    wait now also covers a live league's connector (fantasy-browser-worker's draft_sync.js), if
-    it was launched via /start?with_publisher=true and so carries the LIVE_SYNC_APP_LABEL this
-    endpoint can discover. A connector started out-of-band instead (a manual `kubectl apply` of
-    fantasy-browser-worker/k8s/test-draft-sync-job.yaml) carries no such label and is invisible
-    here, exactly like before #66. So draft:{league}:picks/health and draft_picks:{league} are
-    only cleared automatically when this call itself found and confirmed the connector's death;
-    otherwise clearing them while an unknown connector might still be running risks losing a
-    live pick or letting it recreate the keys right after this endpoint clears them.
-    confirm_publisher_stopped=True remains the fallback for that out-of-band case: the caller
-    manually asserting - by whatever means they verified it outside this API - that the
+    draft:{league}:picks/health and draft_picks:{league} are only cleared automatically when this
+    call itself found the connector run and confirmed its pod is gone. A connector started
+    out-of-band (a manual `kubectl apply`) is invisible here, and clearing those keys while it
+    might still run risks losing a live pick or letting it recreate them right after.
+    confirm_publisher_stopped=True remains the fallback for that case: the caller asserting the
     publisher is truly stopped. Without one or the other, restarting a listener against a
     reused live league id replays the previous draft's picks and silently drops the new ones
     as duplicates."""
-    label_selector = f"app=draft-sync,league-id={league_id}"
-    publisher_label_selector = f"app={LIVE_SYNC_APP_LABEL},league-id={league_id}"
-    deleted_job = False
-    publisher_found = False
-    publisher_gone = True
     try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-        for job in jobs.items:
-            batch_api.delete_namespaced_job(
-                name=job.metadata.name,
-                namespace=K8S_NAMESPACE,
-                propagation_policy="Foreground",  # blocks the Job's own deletion until its Pods are gone
-                # See the matching comment in _delete_practice_listener_jobs: draft_matrix.py's
-                # consumer-group read tolerates a kill mid-entry, so there's nothing to wait 30s
-                # (Kubernetes' default grace period) for here.
-                grace_period_seconds=5,
-                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-            )
-            deleted_job = True
-
-        if deleted_job and not _wait_for_job_termination(batch_api, label_selector):
-            raise HTTPException(
-                status_code=504,
-                detail=f"draft-sync Job for league {league_id} did not terminate within "
-                       f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s - "
-                       "Redis state was NOT cleared; retry /stop or check the Job manually.",
-            )
-
-        publisher_jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=publisher_label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
-        deleted_publishers = []
-        for job in publisher_jobs.items:
-            batch_api.delete_namespaced_job(
-                name=job.metadata.name,
-                namespace=K8S_NAMESPACE,
-                propagation_policy="Foreground",  # same reasoning as _teardown_practice_run: the
-                # connector is the publisher for draft:{league}:picks/draft_picks:{league}, and
-                # Background would let it keep publishing into (or recreate) those keys right
-                # after the clear below.
-                grace_period_seconds=PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS,
-                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-            )
-            deleted_publishers.append(job.metadata.name)
-
-        if deleted_publishers:
-            publisher_found = True
-            publisher_gone = _wait_for_jobs_gone(batch_api, publisher_label_selector, deleted_publishers)
-            if not publisher_gone:
-                # Unlike the listener's own timeout above, this must not fall through to a
-                # confirm_publisher_stopped-gated clear below - a live connector we ourselves
-                # just tried (and failed) to kill is the exact case that flag can't safely
-                # override, since the caller who set it can't have verified a state we just
-                # disproved.
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"Live connector Job for league {league_id} did not terminate within "
-                           f"{STOP_JOB_TERMINATION_MAX_POLLS * STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS}s - "
-                           "Redis state was NOT cleared; retry /stop or check the Job manually.",
-                )
+        listeners, connectors = draft_run_service.active_league_runs(league_id)
+        if listeners and not draft_run_service.cancel_and_wait(_run_ids(listeners)):
+            raise _stop_timed_out("The draft-sync listener", league_id)
+        # Unlike a pick-stream clear gated on confirm_publisher_stopped, a connector this call
+        # just failed to stop must not fall through: the caller who set that flag can't have
+        # verified a state this call just disproved.
+        if connectors and not draft_run_service.cancel_and_wait(_run_ids(connectors)):
+            raise _stop_timed_out("The draft room connector", league_id)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete draft-sync Job(s) for league {league_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete draft-sync Job: {str(e)}")
+        logger.error(f"Failed to stop draft runs for league {league_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop draft runs: {str(e)}")
 
-    # A connector this call found, deleted, and confirmed gone is proof enough on its own -
-    # confirm_publisher_stopped stays available as the fallback for one started out-of-band,
-    # which this call has no way to see at all (publisher_found stays False for it).
-    pick_stream_cleared = confirm_publisher_stopped or (publisher_found and publisher_gone)
+    pick_stream_cleared = confirm_publisher_stopped or bool(connectors)
     try:
         cleared_keys = _clear_league_draft_state(
             league_id, include_pick_stream=pick_stream_cleared, raise_on_error=True
@@ -1736,8 +1379,9 @@ def stop_draft(league_id: str, confirm_publisher_stopped: bool = False):
     return {
         "status": "stopped",
         "league_id": league_id,
-        "job_deleted": deleted_job,
-        "publisher_job_deleted": publisher_found,
+        "job_deleted": bool(listeners),
+        "publisher_job_deleted": bool(connectors),
+        "cancelled_run_ids": _run_ids(listeners) + _run_ids(connectors),
         "redis_keys_cleared": cleared_keys,
         "pick_stream_cleared": pick_stream_cleared,
     }
@@ -1901,53 +1545,50 @@ def _redact_log_line(line: str) -> str:
     return line
 
 
+def _log_run(league_id: str, job: str):
+    """The run whose pod log /logs reads: the league's newest listener, or the newest practice
+    room connector (a global singleton, so league_id is ignored for it)."""
+    try:
+        if job == "listener":
+            return draft_run_service.latest_listener(league_id)
+        return draft_run_service.latest_practice_connector()
+    except Exception as e:
+        logger.error(f"Failed to look up the {job} run for logs (league {league_id}): {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to look up the {job} run: {str(e)}")
+
+
 @draft_router.get("/logs")
 def get_draft_logs(league_id: str, job: Literal["listener", "room-sync"], tail: int = DRAFT_LOGS_DEFAULT_TAIL_LINES):
-    """Tail of the spawned Job's pod log, for diagnosing a crash without cluster access.
+    """Tail of the run's pod log, for diagnosing a crash without cluster access.
 
-    Resolves the pod via the same label selectors /status and /practice/sync-job/status
-    already use, then reads its log directly - this works even after the pod has
-    terminated (both Jobs run with backoff_limit=0/restart_policy=Never, so there is no
-    live-vs-previous-container ambiguity), as long as the pod object itself hasn't been
-    garbage-collected. The listener Job sets no ttl_seconds_after_finished, so its pod (and
-    log) sticks around indefinitely; the room-sync Job sets ttl_seconds_after_finished=3600
-    (see PracticeSyncJobRequest handling below), so its log becomes unavailable an hour
-    after it finishes - an infra-level tradeoff, not something this endpoint can work around.
+    Finds the run (the league's newest listener, or the newest practice room connector), then
+    its pod by the launcher's `fantasy.run-id` label, and reads the log directly - this works
+    even after the pod has terminated (service runs have one attempt and restart_policy=Never,
+    so there is no live-vs-previous-container ambiguity), as long as the pod hasn't been
+    garbage-collected: the launcher's Jobs carry ttl_seconds_after_finished of a day.
 
-    job="room-sync" intentionally ignores league_id when resolving the pod: the room-sync
-    Job only carries a league-id label when the practice room URL happened to include a
-    leagueId query param, and every other room-sync query in this file (job state, delete)
-    already treats it as a global singleton instead - _practice_sync_job_state() is checked
-    before /practice/sync-job creates a new one, forbidding more than one Active room-sync
-    Job at a time. league_id stays a required query param for
-    consistency with job="listener", where it's the only way to find the right pod.
+    job="room-sync" intentionally ignores league_id: the connector run only carries a
+    league_id when the practice room URL included a leagueId query param, and practice is a
+    singleton (/practice/sync-job refuses a second active connector). league_id stays a
+    required query param for consistency with job="listener", where it is the only way to find
+    the right run.
     """
     tail = max(1, min(tail, DRAFT_LOGS_MAX_TAIL_LINES))
-    label_selector = (
-        f"app=draft-sync,league-id={league_id}" if job == "listener"
-        else f"app={PRACTICE_SYNC_APP_LABEL}"
-    )
+    run = _log_run(league_id, job)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"No {job} run found for league {league_id}")
 
     try:
-        core_api = _core_v1_api()
-        pods = core_api.list_namespaced_pod(K8S_NAMESPACE, label_selector=label_selector, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+        pods = draft_run_service.run_pods(run.run_id)
     except Exception as e:
         logger.error(f"Failed to list pods for {job} logs (league {league_id}): {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list pods for {job}: {str(e)}")
-
-    items = getattr(pods, "items", []) or []
-    if not items:
+    if not pods:
         raise HTTPException(status_code=404, detail=f"No {job} pod found for league {league_id}")
-    pod = max(items, key=lambda p: p.metadata.creation_timestamp)
+    pod = max(pods, key=lambda p: p.metadata.creation_timestamp)
 
     try:
-        raw_log = core_api.read_namespaced_pod_log(
-            pod.metadata.name,
-            K8S_NAMESPACE,
-            tail_lines=tail,
-            timestamps=True,
-            _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-        )
+        raw_log = draft_run_service.read_pod_log(pod.metadata.name, tail)
     except Exception as e:
         logger.error(f"Failed to read log for pod {pod.metadata.name} ({job}, league {league_id}): {e}")
         raise HTTPException(status_code=500, detail=f"Failed to read pod log: {str(e)}")
@@ -1973,12 +1614,13 @@ def get_draft_logs(league_id: str, job: Literal["listener", "room-sync"], tail: 
 # ------------------------------------------------------------------------------
 PRACTICE_START_LOCK_KEY = "draft:practice:start-lock"
 # Derived from the real worst case, not guessed. A start can run two full termination waits (the
-# connector's and the listener's), each STOP_JOB_TERMINATION_MAX_POLLS iterations of a bounded
-# apiserver call plus a sleep, then the create. A lease shorter than that expires mid-start, which
-# lets a second request acquire the lock and create a connector alongside the first - the overlap
+# connector's and the listener's), each TERMINATION_MAX_POLLS iterations of a bounded apiserver
+# call plus a sleep, then the run requests. A lease shorter than that expires mid-start, which
+# lets a second request acquire the lock and start a connector alongside the first - the overlap
 # the lock exists to prevent, reintroduced by the timeout.
 PRACTICE_START_LOCK_TTL_SECONDS = int(
-    2 * STOP_JOB_TERMINATION_MAX_POLLS * (K8S_REQUEST_TIMEOUT_SECONDS + STOP_JOB_TERMINATION_POLL_INTERVAL_SECONDS)
+    2 * draft_run_service.TERMINATION_MAX_POLLS
+    * (K8S_REQUEST_TIMEOUT_SECONDS + draft_run_service.TERMINATION_POLL_INTERVAL_SECONDS)
     + 4 * K8S_REQUEST_TIMEOUT_SECONDS
 )
 PRACTICE_START_LOCK_RENEW_INTERVAL_SECONDS = max(1, PRACTICE_START_LOCK_TTL_SECONDS // 4)
@@ -2004,15 +1646,14 @@ return 0
 @contextmanager
 def _practice_start_lock():
     """Serialises teardown-then-create so two concurrent starts cannot both find the room empty
-    and then both create a connector.
+    and then both start a connector.
 
-    The check and the create are separated by minutes of termination polling, so the window is
-    wide, and two connectors publishing into the same Stream is exactly what every other guard
-    here exists to prevent. Job names are second-resolution, so colliding requests do not even
-    collide on name.
+    The check and the run request are separated by up to a minute of termination polling, so
+    the window is wide, and two connectors publishing into the same Stream is exactly what every
+    other guard here exists to prevent.
 
     Best-effort by design: if Redis is unreachable we proceed unlocked rather than refusing to
-    start a draft, since the k8s-side Active check still catches the common case and an
+    start a draft, since the active-run check still catches the common case and an
     unavailable lock service must not be a hard dependency of starting a run. That fail-open only
     holds because _redis_client() now has finite socket timeouts - without them an unresponsive
     Redis would hang here forever instead of raising."""
@@ -2064,240 +1705,208 @@ def _practice_start_lock():
 
 @draft_router.post("/practice/sync-job", status_code=status.HTTP_202_ACCEPTED)
 def start_practice_sync_job(payload: PracticeSyncJobRequest, force: bool = False):
-    """Creates fantasy-browser-worker's draft_sync.js Job pointed at a manually-joined
-    ESPN mock/practice draft room - replacing the manual `kubectl apply` of
-    k8s/test-draft-sync-job.yaml. Distinct from /start's own draft-sync Job; see module
-    docstring.
+    """Requests fantasy-browser-worker's draft_sync.js as the practice room connector run,
+    pointed at a manually-joined ESPN mock/practice draft room. Distinct from /start's
+    listener run; see module docstring.
 
     force=true retires whatever practice run is already there instead of refusing. Without it
-    a wedged run - a Job stuck Terminating, or one stranded by a control plane that stopped
-    answering - is a dead end: the 409 tells the user to end the run first, and ending it is
+    a wedged run is a dead end: the 409 tells the user to end the run first, and ending it is
     exactly what is failing. This is the escape hatch."""
-    if not BROWSER_WORKER_IMAGE:
-        raise HTTPException(status_code=500, detail="BROWSER_WORKER_IMAGE is not configured - the browser-worker container image ref must be supplied via env var.")
-
     with _practice_start_lock():
         return _start_practice_sync_job_locked(payload, force)
 
 
-def _start_practice_sync_job_locked(payload: PracticeSyncJobRequest, force: bool):
-    """The body of the endpoint, held under the start lock so the Active check / teardown and the
-    create cannot be interleaved by a concurrent request."""
-    if force:
-        try:
-            teardown = _teardown_practice_run(strict_cleanup=True)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Could not tear down the existing practice run: {e}")
-        # Teardown reports success as long as the listener was retired, even when the connector
-        # outlived its termination poll. Starting a replacement then would leave two connectors
-        # publishing into draft_picks:{league} at once - precisely the overlap this guard exists
-        # to prevent - so force has to insist on a positive result where DELETE does not.
-        if not teardown["connector_gone"]:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"The existing practice room connector ({teardown['job_name']}) was deleted but has not "
-                    "terminated yet. Starting another now would let two connectors publish into the same "
-                    "draft Stream. Retry in a few seconds."
-                ),
-            )
-    elif _practice_sync_job_state() == "Active":
-        raise HTTPException(status_code=409, detail="A practice draft-sync Job is already Active - end it before starting another, or retry with force=true.")
+def _force_teardown_for_start() -> None:
+    """Retires the existing practice run for ?force=true, insisting the connector is gone.
 
-    parsed_room_url = urlparse(payload.room_url)
-    room_league_id = parse_qs(parsed_room_url.query).get("leagueId", [None])[0]
-    job_name = f"practice-draft-sync-{int(time.time())}"
-    job_labels = {"app": PRACTICE_SYNC_APP_LABEL}
-    if room_league_id is not None:
-        job_labels["league-id"] = room_league_id
-    job = client.V1Job(
-        metadata=client.V1ObjectMeta(name=job_name, labels=job_labels),
-        spec=client.V1JobSpec(
-            backoff_limit=0,
-            ttl_seconds_after_finished=3600,
-            template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels=job_labels),
-                spec=client.V1PodSpec(
-                    restart_policy="Never",
-                    image_pull_secrets=[client.V1LocalObjectReference(name="ghcr-pull-secret")],
-                    containers=[
-                        client.V1Container(
-                            name="draft-sync",
-                            image=BROWSER_WORKER_IMAGE,
-                            command=["node", "src/bots/draft_sync.js"],
-                            env=[
-                                client.V1EnvVar(name="DRAFT_ROOM_URL", value=payload.room_url),
-                                client.V1EnvVar(name="REDIS_HOST", value=REDIS_HOST),
-                                client.V1EnvVar(name="REDIS_PORT", value=str(REDIS_PORT)),
-                                client.V1EnvVar(
-                                    name="ESPN_S2",
-                                    value_from=client.V1EnvVarSource(
-                                        secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="espn_s2")
-                                    ),
-                                ),
-                                client.V1EnvVar(
-                                    name="SWID",
-                                    value_from=client.V1EnvVarSource(
-                                        secret_key_ref=client.V1SecretKeySelector(name=ESPN_SESSION_SECRET_NAME, key="swid")
-                                    ),
-                                ),
-                                # TEMPORARY (issue #71 follow-up): connector-goes-silent-forever
-                                # investigation needs draft_sync.js's new debug-level tracing
-                                # (openSockets/isDead() operands, context "page" reassignment,
-                                # delegated-command state) captured on the next live/practice
-                                # reproduction. Revert once that capture is in hand - this is not a
-                                # permanent logging default for the practice connector.
-                                client.V1EnvVar(name="LOG_LEVEL", value="debug"),
-                            ],
-                        )
-                    ],
-                ),
-            ),
-        ),
-    )
-
+    Teardown reports success as long as the listener was retired, even when the connector
+    outlived its wait. Starting a replacement then would leave two connectors publishing into
+    draft_picks:{league} at once - precisely the overlap this guard exists to prevent."""
     try:
-        batch_api = _batch_v1_api()
-        batch_api.create_namespaced_job(K8S_NAMESPACE, job, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+        teardown = _teardown_practice_run(strict_cleanup=True)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to create practice draft-sync Job: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create practice draft-sync Job: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Could not tear down the existing practice run: {e}")
+    if not teardown["connector_gone"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The existing practice room connector ({teardown['job_name']}) was cancelled but has not "
+                "stopped yet. Starting another now would let two connectors publish into the same "
+                "draft Stream. Retry in a few seconds."
+            ),
+        )
 
-    return {"status": "accepted", "job_name": job_name}
+
+def _refuse_while_practice_active() -> None:
+    try:
+        active = draft_run_service.active_practice_connectors()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not check for an active practice run: {e}")
+    if active:
+        raise HTTPException(status_code=409, detail="A practice draft-sync run is already active - end it before starting another, or retry with force=true.")
+
+
+def _clear_room_league_for_new_connector(room_league_id: Optional[str]) -> None:
+    """Clears the room league's pick ledger and Stream before a new connector seeds from them.
+
+    No connector is running at this point, so this is the one safe moment, and it covers a run
+    the watcher retired (lapsed heartbeat) without anyone calling DELETE. It's skipped while a
+    practice listener still consumes that league - a connector restarted mid-draft should pick
+    up where the old one left off - and fails closed, since a new connector seeding from the
+    previous run's ledger drops the real picks as duplicates."""
+    if room_league_id is None:
+        return
+    try:
+        listening = any(
+            run.params.get("league_id") == room_league_id
+            for run in draft_run_service.active_practice_listeners()
+        )
+        if not listening:
+            _clear_league_draft_state(room_league_id, include_pick_stream=True, raise_on_error=True)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not clear the previous practice run's Redis state for league {room_league_id} "
+                f"({e}). Starting a connector now would let it seed from that run's pick ledger."
+            ),
+        )
+
+
+def _start_practice_sync_job_locked(payload: PracticeSyncJobRequest, force: bool):
+    """The body of the endpoint, held under the start lock so the active check / teardown and
+    the run request cannot be interleaved by a concurrent request."""
+    if force:
+        _force_teardown_for_start()
+    else:
+        _refuse_while_practice_active()
+
+    room_league_id = parse_qs(urlparse(payload.room_url).query).get("leagueId", [None])[0]
+    _clear_room_league_for_new_connector(room_league_id)
+    try:
+        started = draft_run_service.start_practice_connector(payload.room_url, room_league_id)
+    except DraftLauncherUnavailableError as e:
+        logger.error(f"Job launcher cannot start the practice room connector: {e}")
+        raise HTTPException(status_code=503, detail=f"Job launcher cannot start the practice room connector: {e}")
+    except Exception as e:
+        logger.error(f"Failed to request the practice room connector run: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to request the practice room connector run: {str(e)}")
+
+    return {"status": "accepted", **started}
 
 
 @draft_router.get("/practice/sync-job/status")
 def get_practice_sync_job_status():
-    job = _latest_practice_sync_job()
-    job_state = _job_phase(job.status) if job is not None else "Unknown"
-    active_league_id = (job.metadata.labels or {}).get("league-id") if job is not None else None
-    room_identifier = _practice_room_identifier(job) if job is not None else None
-    room_connected = False
-    if job_state == "Active":
-        room_connected = _room_connected(active_league_id)
+    try:
+        run = draft_run_service.latest_practice_connector()
+    except Exception as e:
+        logger.error(f"Failed to look up the practice room connector run: {e}")
+        run = None
+    job_state = draft_run_service.run_job_state(run)
+    active_league_id = run.params.get("league_id") if run is not None else None
+    room_connected = job_state == "Active" and _room_connected(active_league_id)
     return {
         "job_state": job_state,
         "pod_active": job_state == "Active",
         "room_connected": room_connected,
         "room_handshake_complete": room_connected,
         "active_league_id": active_league_id,
-        "room_identifier": room_identifier,
+        "room_identifier": _practice_room_identifier(run),
+        "run_id": run.run_id if run is not None else None,
     }
+
+
+def _clear_connector_leagues(league_ids: list, strict_cleanup: bool) -> None:
+    """Clears each retired connector's league. _retire_practice_listeners only clears leagues
+    it found a *listener* for, and the listener may have finished already while the connector
+    was still up. Idempotent, so re-clearing a league costs a no-op DELETE."""
+    for league_id in league_ids:
+        try:
+            _clear_league_draft_state(league_id, include_pick_stream=True, raise_on_error=strict_cleanup)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"The practice run was retired but its Redis state for league {league_id} could not be "
+                    f"cleared ({e}). Starting a replacement now would let it seed from the previous run's "
+                    "pick ledger, so it has been stopped instead. Retry once Redis is reachable."
+                ),
+            )
 
 
 def _teardown_practice_run(strict_cleanup: bool = False) -> dict:
     """Retires the practice room connector and its listener, and clears their Redis state.
 
-    Split out of the DELETE endpoint so POST ?force=true can reuse it. Returns the connector
-    name (None if there was none), the listener Jobs deleted, and whether the connector
-    actually terminated. Deliberately does NOT treat "nothing was running" as an error - only
-    the endpoint decides whether that deserves a 404.
+    Split out of the DELETE endpoint so POST ?force=true can reuse it. Returns the connector's
+    k8s Job name (None if there was none), the listener runs cancelled, and whether the
+    connector actually stopped. Deliberately does NOT treat "nothing was running" as an error -
+    only the endpoint decides whether that deserves a 404.
 
-    connector_gone=False means the connector outlived its termination poll and may still be
-    publishing. That is tolerable for DELETE, whose job is to retire the listener, but NOT for
-    ?force=true, which goes on to start a second connector against the same Redis Stream.
+    Every active connector run, not just the newest: there is normally one, but concurrent
+    starts can leave more, and retiring only the newest would report connector_gone=True while
+    an older publisher was still writing to the same Stream - exactly the guarantee
+    ?force=true relies on before starting a replacement.
+
+    connector_gone=False means a connector outlived the wait and may still be publishing. That
+    is tolerable for DELETE, whose job is to retire the listener too, but NOT for ?force=true.
+    The listener is retired either way (the connector is only half the run, and nothing else
+    stops a listener mid-draft); only the pick-stream cleanup, the part the connector can race,
+    is skipped.
 
     strict_cleanup makes a failed Redis delete fatal rather than logged. Redis cleanup is
-    best-effort everywhere else on purpose, but a force start that proceeds after it failed hands
-    the new connector the old run's ledger to seed from."""
+    best-effort everywhere else on purpose, but a force start that proceeds after it failed
+    hands the new connector the old run's ledger to seed from."""
     try:
-        batch_api = _batch_v1_api()
-        jobs = batch_api.list_namespaced_job(K8S_NAMESPACE, label_selector=f"app={PRACTICE_SYNC_APP_LABEL}", _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS)
+        connectors = draft_run_service.active_practice_connectors()
     except Exception as e:
-        logger.error(f"Failed to list practice draft-sync Jobs for teardown: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list practice draft-sync Jobs: {str(e)}")
+        logger.error(f"Failed to list practice room connector runs for teardown: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list practice room connector runs: {str(e)}")
 
-    # The connector is only half the run: the listener that consumes its Redis Stream is a
-    # separate Job, and nothing else ever stops it - it blocks on the stream forever.
-    #
-    # Crucially the listener is NOT gated on the connector still existing. The connector
-    # carries ttl_seconds_after_finished, so Kubernetes garbage-collects it an hour after it
-    # exits, while the listener is still running. Returning 404 in that window would leave
-    # the leaked listener in place with no way to reach it - the exact failure this endpoint
-    # is meant to prevent, reintroduced by the ordering.
-    # Every connector, not just the newest. There is normally one, but concurrent starts or a
-    # manual `kubectl apply` during recovery can leave more, and retiring only the newest would
-    # report connector_gone=True while an older publisher was still writing to the same Stream -
-    # which is exactly the guarantee ?force=true relies on before starting a replacement.
     connector_name = None
-    connector_league_ids = []
     connector_gone = True
-    if jobs.items:
-        ordered = sorted(jobs.items, key=lambda j: j.metadata.creation_timestamp, reverse=True)
-        connector_name = ordered[0].metadata.name
-        deleted_connectors = []
-        for job in ordered:
-            try:
-                # Foreground, not Background: the connector is the publisher for
-                # draft:{league}:picks and draft_picks:{league}, and the cleanup below deletes
-                # them. Background returns while the Pod is still running, so it could publish
-                # into - or recreate - those keys after they were cleared, contaminating the next
-                # run with the previous one's picks.
-                batch_api.delete_namespaced_job(
-                    job.metadata.name,
-                    K8S_NAMESPACE,
-                    propagation_policy="Foreground",
-                    grace_period_seconds=PRACTICE_CONNECTOR_DELETE_GRACE_PERIOD_SECONDS,
-                    _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-                )
-            except Exception as e:
-                logger.error(f"Failed to delete practice draft-sync Job {job.metadata.name}: {e}")
-                raise HTTPException(status_code=500, detail=f"Failed to delete practice draft-sync Job: {str(e)}")
-            deleted_connectors.append(job.metadata.name)
-            league_id = (job.metadata.labels or {}).get("league-id")
-            if league_id and league_id not in connector_league_ids:
-                connector_league_ids.append(league_id)
-        # One wait for the whole set rather than per Job, so the polls overlap instead of
-        # summing - N connectors would otherwise take N x the termination budget.
-        connector_gone = _wait_for_jobs_gone(batch_api, f"app={PRACTICE_SYNC_APP_LABEL}", deleted_connectors)
+    if connectors:
+        connector_name = draft_run_service.k8s_job_name(connectors[0].job_name, connectors[0].run_id)
+        try:
+            connector_gone = draft_run_service.cancel_and_wait(_run_ids(connectors))
+        except Exception as e:
+            logger.error(f"Failed to cancel practice room connector runs: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to cancel the practice room connector: {str(e)}")
         if not connector_gone:
-            # Not fatal: the listener still has to be retired, and reporting failure here
-            # would leave it leaked - the exact bug this endpoint exists to prevent. Only the
-            # pick-stream cleanup is skipped, since that is the part the connector can race.
             logger.warning(
-                f"Practice room connector(s) {', '.join(deleted_connectors)} did not terminate in time; retiring the "
-                "listener anyway but leaving the pick ledger and Stream in place, since the connector "
-                "may still be publishing to them."
+                f"Practice room connector run(s) {', '.join(_run_ids(connectors))} did not stop in time; "
+                "retiring the listener anyway but leaving the pick ledger and Stream in place, since the "
+                "connector may still be publishing to them."
             )
 
     try:
-        deleted_listeners = _delete_practice_listener_jobs(clear_pick_stream=connector_gone)
+        cancelled_listeners = _retire_practice_listeners(clear_pick_stream=connector_gone)
     except Exception as e:
         detail = (
-            f"Room connector {connector_name} was deleted, but the draft-sync listener could not be: {e}"
+            f"Room connector {connector_name} was cancelled, but the draft-sync listener could not be: {e}"
             if connector_name
-            else f"Failed to delete the practice draft-sync listener: {e}"
+            else f"Failed to cancel the practice draft-sync listener: {e}"
         )
         raise HTTPException(status_code=500, detail=detail)
 
-    # _delete_practice_listener_jobs only clears leagues it found a *listener* for. The listener
-    # carries ttl_seconds_after_finished and can already be gone while the connector is still up,
-    # in which case nothing above would clear this league at all. Idempotent, so re-clearing a
-    # league the listener sweep already handled costs a no-op DELETE.
     if connector_gone:
-        for league_id in connector_league_ids:
-            try:
-                _clear_league_draft_state(league_id, include_pick_stream=True, raise_on_error=strict_cleanup)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"The practice run was retired but its Redis state for league {league_id} could not be "
-                        f"cleared ({e}). Starting a replacement now would let it seed from the previous run's "
-                        "pick ledger, so it has been stopped instead. Retry once Redis is reachable."
-                    ),
-                )
+        league_ids = list(dict.fromkeys(run.params["league_id"] for run in connectors if run.params.get("league_id")))
+        _clear_connector_leagues(league_ids, strict_cleanup)
 
-    return {"job_name": connector_name, "listener_jobs_deleted": deleted_listeners, "connector_gone": connector_gone}
+    return {
+        "job_name": connector_name,
+        "connector_run_ids": _run_ids(connectors),
+        "listener_runs_cancelled": cancelled_listeners,
+        "connector_gone": connector_gone,
+    }
 
 
 @draft_router.delete("/practice/sync-job", status_code=status.HTTP_200_OK)
 def end_practice_sync_job():
-    """Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere
-    with a later run - the cleanup concern the issue explicitly calls out."""
+    """Ends the practice run so leftover runs/Redis state can't interfere with a later run -
+    the cleanup concern the issue explicitly calls out."""
     result = _teardown_practice_run()
-    if result["job_name"] is None and not result["listener_jobs_deleted"]:
-        raise HTTPException(status_code=404, detail="No practice draft-sync Job exists.")
+    if result["job_name"] is None and not result["listener_runs_cancelled"]:
+        raise HTTPException(status_code=404, detail="No practice draft-sync run exists.")
     return {"status": "deleted", **result}

@@ -1,4 +1,4 @@
-"""Kubernetes API clients shared by the draft control plane, the sweeper and the job launcher."""
+"""Kubernetes API clients shared by the draft control plane (read-only) and the job launcher."""
 
 import os
 import re
@@ -18,10 +18,8 @@ K8S_REQUEST_TIMEOUT_SECONDS = 10
 
 
 def dns1123_slug(value: str) -> str:
-    """Job `metadata.name` must be a lowercase RFC 1123 DNS subdomain - league_id itself
-    doesn't have to be (it's an opaque ESPN identifier, and practice-room IDs aren't under
-    our control), so this only sanitizes the Job *name*, never the `league-id` label value
-    (labels allow uppercase/mixed case) or the CLI arg passed to draft_matrix.py."""
+    """Job `metadata.name` must be a lowercase RFC 1123 DNS subdomain, and a catalog job name
+    or other caller-chosen string doesn't have to be one, so this sanitizes only the name."""
     slug = re.sub(r"[^a-z0-9-]", "-", value.lower()).strip("-")
     return slug or "league"
 

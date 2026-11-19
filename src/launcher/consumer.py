@@ -21,7 +21,8 @@ waiting for its job's previous run doesn't hold up other jobs:
   any run, except that their parent and siblings don't count as an overlap
 - pod cap full, or the inline runner busy -> waits. The pod cap counts the launcher's
   `running` pod rows plus the active k8s Jobs matching the catalog's `counted_k8s_jobs`
-  (the KEDA browser worker), so both share one pod budget
+  (the KEDA browser worker), so both share one pod budget. A `class: service` run (a draft
+  listener, running for hours) neither waits on the cap nor counts toward it
 - its concurrency group full (`limit` runs of the group's jobs `running`) -> waits, even under
   `forbid`: another job holds the shared resource, so this run isn't a duplicate
 - otherwise `running`, then the k8s Job is created or the inline runner takes it
@@ -47,6 +48,7 @@ from src.launcher.catalog import (
     UnknownJobError,
     fans_out,
     params_to_args,
+    split_params,
     validate_run_params,
 )
 from src.launcher.inline import InlineRun
@@ -163,7 +165,8 @@ class Consumer:
             with self.store.admission() as admission:
                 self._fail_queued(admission, command, "invalid_command", exc)
             return None
-        argv = [*resolved.job.command, *params_to_args(params)]
+        argv_params, param_env = split_params(resolved.job, params)
+        argv = [*resolved.job.command, *params_to_args(argv_params)]
         with self.store.admission() as admission:
             if not self._is_current_attempt(
                 command, *admission.run_state(command.run_id)
@@ -215,7 +218,7 @@ class Consumer:
             k8s_job = None
             if resolved.executor != "inline":
                 k8s_job = self._build_k8s_job_or_fail(
-                    admission, command, resolved, argv
+                    admission, command, resolved, argv, param_env
                 )
                 if k8s_job is None:
                     return None
@@ -225,7 +228,7 @@ class Consumer:
                 k8s_job.metadata.name if k8s_job else None,
             ):
                 return None
-        return resolved, argv, k8s_job
+        return resolved, argv, k8s_job, param_env
 
     @staticmethod
     def _is_current_attempt(command, status, attempt):
@@ -329,10 +332,12 @@ class Consumer:
 
     def _capacity_full(self, admission, resolved):
         """Whether the run's executor has no room: the inline runner is busy, or the pod
-        cap is reached."""
+        cap is reached. A service run is exempt, and service runs don't count toward it."""
         if resolved.executor == "inline":
             return self.inline_runner.busy
-        pods = admission.running_pods() + self._external_pods()
+        if resolved.job_class == "service":
+            return False
+        pods = admission.running_pods(self.catalog.service_jobs()) + self._external_pods()
         return pods >= self.catalog.global_settings.max_concurrent_pods
 
     def _external_pods(self):
@@ -350,11 +355,11 @@ class Consumer:
                 self._external_pods_this_pass = 0
         return self._external_pods_this_pass
 
-    def _build_k8s_job_or_fail(self, admission, command, resolved, argv):
+    def _build_k8s_job_or_fail(self, admission, command, resolved, argv, param_env):
         """The run's k8s Job, or None after failing the run when the launcher's own
         config can't build it."""
         try:
-            return k8s.build_job(command, resolved, argv)
+            return k8s.build_job(command, resolved, argv, param_env)
         except k8s.LaunchConfigError as exc:
             self._fail_queued(admission, command, "launch_failed", exc)
             return None
@@ -369,7 +374,7 @@ class Consumer:
         admission.end_queued(command.run_id, "failure", end_reason, str(exc))
         logger.error("Run %s of %s failed: %s", command.run_id, command.job, exc)
 
-    def _launch(self, command, resolved, argv, k8s_job):
+    def _launch(self, command, resolved, argv, k8s_job, param_env=None):
         context = propagate.extract(
             {"traceparent": command.traceparent} if command.traceparent else {}
         )
@@ -380,7 +385,7 @@ class Consumer:
         ):
             try:
                 if k8s_job is None:
-                    self._start_inline(command, resolved, argv)
+                    self._start_inline(command, resolved, argv, param_env)
                 else:
                     self._start_pod(k8s_job)
             except Exception as exc:
@@ -397,13 +402,13 @@ class Consumer:
             command.attempt,
         )
 
-    def _start_inline(self, command, resolved, argv):
+    def _start_inline(self, command, resolved, argv, param_env=None):
         self.inline_runner.submit(
             InlineRun(
                 run_id=command.run_id,
                 job=command.job,
                 argv=argv,
-                env=command.launch_env(),
+                env={**command.launch_env(), **(param_env or {})},
                 deadline_seconds=resolved.deadline.total_seconds(),
                 attempt=command.attempt,
             )

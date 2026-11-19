@@ -1082,13 +1082,13 @@
             "type": "boolean"
           },
           "league_id": {
-            "description": "ESPN league identifier the draft-sync Job should target",
+            "description": "ESPN league identifier the draft listener run should target",
             "title": "League Id",
             "type": "string"
           },
           "mode": {
             "default": "live",
-            "description": "'practice' for ESPN mock draft rooms; tags the Job/status so a practice run is never mistaken for the real Draft Day",
+            "description": "'practice' for ESPN mock draft rooms; tags the run/status so a practice run is never mistaken for the real Draft Day",
             "enum": [
               "live",
               "practice"
@@ -1461,7 +1461,7 @@
             "type": "string"
           },
           "job_state": {
-            "description": "Active/Succeeded/Failed/Unknown, from the k8s Job's own status",
+            "description": "Active/Succeeded/Failed/Unknown, from the listener run's k8s Job, or its run_log row once the Job is gone",
             "title": "Job State",
             "type": "string"
           },
@@ -1535,7 +1535,7 @@
             "title": "On The Clock Team Id"
           },
           "pipeline_health": {
-            "description": "'healthy' iff Postgres/Redis both respond and, while the draft is still active, the draft-sync Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its Job is expected to have exited, else 'degraded'",
+            "description": "'healthy' iff Postgres/Redis both respond and, while the draft is still active, the listener run's Job is Active and the listener's last-processed timestamp is fresh; a 'complete' draft only requires Postgres/Redis, since its run is expected to have exited, else 'degraded'",
             "title": "Pipeline Health",
             "type": "string"
           },
@@ -9877,7 +9877,7 @@
         "summary": "Get Draft Config"
       },
       "post": {
-        "description": "Stores league_id/team_id/season/mode so /start's draft-sync Job can read it at launch.",
+        "description": "Stores league_id/team_id/season/mode so /start can launch the listener run from it.",
         "operationId": "set_draft_config_v1_draft_config_post",
         "requestBody": {
           "content": {
@@ -9914,7 +9914,7 @@
     },
     "/v1/draft/logs": {
       "get": {
-        "description": "Tail of the spawned Job's pod log, for diagnosing a crash without cluster access.\n\nResolves the pod via the same label selectors /status and /practice/sync-job/status\nalready use, then reads its log directly - this works even after the pod has\nterminated (both Jobs run with backoff_limit=0/restart_policy=Never, so there is no\nlive-vs-previous-container ambiguity), as long as the pod object itself hasn't been\ngarbage-collected. The listener Job sets no ttl_seconds_after_finished, so its pod (and\nlog) sticks around indefinitely; the room-sync Job sets ttl_seconds_after_finished=3600\n(see PracticeSyncJobRequest handling below), so its log becomes unavailable an hour\nafter it finishes - an infra-level tradeoff, not something this endpoint can work around.\n\njob=\"room-sync\" intentionally ignores league_id when resolving the pod: the room-sync\nJob only carries a league-id label when the practice room URL happened to include a\nleagueId query param, and every other room-sync query in this file (job state, delete)\nalready treats it as a global singleton instead - _practice_sync_job_state() is checked\nbefore /practice/sync-job creates a new one, forbidding more than one Active room-sync\nJob at a time. league_id stays a required query param for\nconsistency with job=\"listener\", where it's the only way to find the right pod.",
+        "description": "Tail of the run's pod log, for diagnosing a crash without cluster access.\n\nFinds the run (the league's newest listener, or the newest practice room connector), then\nits pod by the launcher's `fantasy.run-id` label, and reads the log directly - this works\neven after the pod has terminated (service runs have one attempt and restart_policy=Never,\nso there is no live-vs-previous-container ambiguity), as long as the pod hasn't been\ngarbage-collected: the launcher's Jobs carry ttl_seconds_after_finished of a day.\n\njob=\"room-sync\" intentionally ignores league_id: the connector run only carries a\nleague_id when the practice room URL included a leagueId query param, and practice is a\nsingleton (/practice/sync-job refuses a second active connector). league_id stays a\nrequired query param for consistency with job=\"listener\", where it is the only way to find\nthe right run.",
         "operationId": "get_draft_logs_v1_draft_logs_get",
         "parameters": [
           {
@@ -10012,7 +10012,7 @@
     },
     "/v1/draft/practice/sync-job": {
       "delete": {
-        "description": "Tears down the practice draft-sync Job so leftover Job/Redis state can't interfere\nwith a later run - the cleanup concern the issue explicitly calls out.",
+        "description": "Ends the practice run so leftover runs/Redis state can't interfere with a later run -\nthe cleanup concern the issue explicitly calls out.",
         "operationId": "end_practice_sync_job_v1_draft_practice_sync_job_delete",
         "responses": {
           "200": {
@@ -10027,7 +10027,7 @@
         "summary": "End Practice Sync Job"
       },
       "post": {
-        "description": "Creates fantasy-browser-worker's draft_sync.js Job pointed at a manually-joined\nESPN mock/practice draft room - replacing the manual `kubectl apply` of\nk8s/test-draft-sync-job.yaml. Distinct from /start's own draft-sync Job; see module\ndocstring.\n\nforce=true retires whatever practice run is already there instead of refusing. Without it\na wedged run - a Job stuck Terminating, or one stranded by a control plane that stopped\nanswering - is a dead end: the 409 tells the user to end the run first, and ending it is\nexactly what is failing. This is the escape hatch.",
+        "description": "Requests fantasy-browser-worker's draft_sync.js as the practice room connector run,\npointed at a manually-joined ESPN mock/practice draft room. Distinct from /start's\nlistener run; see module docstring.\n\nforce=true retires whatever practice run is already there instead of refusing. Without it\na wedged run is a dead end: the 409 tells the user to end the run first, and ending it is\nexactly what is failing. This is the escape hatch.",
         "operationId": "start_practice_sync_job_v1_draft_practice_sync_job_post",
         "parameters": [
           {
@@ -10129,7 +10129,7 @@
     },
     "/v1/draft/start": {
       "post": {
-        "description": "Creates the draft-sync Job (a wrapper around draft_matrix.py's listener) from a\nstored /config, replacing the manual `kubectl apply` step. If `league_id` is omitted,\nfalls back to the most recently stored config (today's behavior, unchanged) - pass it\nexplicitly to pick a specific stored config, e.g. to launch a practice room without\ndisturbing whichever config was updated last.\n\nwith_publisher=True additionally launches fantasy-browser-worker's draft_sync.js as a\nLIVE_SYNC_APP_LABEL-labeled connector Job alongside the listener (issue #66) - only valid\nfor a live config, since practice already has its own dedicated launch path\n(/practice/sync-job) for the room URL a human has to join by hand first. Without this,\na live league's connector has no discoverable Job, and /stop has no lifecycle signal to\nkey an automatic pick-ledger/Stream clear off of.",
+        "description": "Requests the draft listener run (draft_matrix.py's listener, a `class: service` job in\nthe launcher's catalog) from a stored /config. If `league_id` is omitted, falls back to the\nmost recently stored config - pass it explicitly to pick a specific stored config, e.g. to\nlaunch a practice room without disturbing whichever config was updated last.\n\nwith_publisher=True additionally requests fantasy-browser-worker's draft_sync.js as the\nlive connector run (issue #66) - only valid for a live config, since practice has its own\nlaunch path (/practice/sync-job) for the room URL a human has to join by hand first.\n\nA second listener for the same league would share the browser-worker's Redis Stream\nconsumer name (draft-matrix-{team_id}) but keep an entirely separate in-process\npending_state - a newer pick handled by one process can't cancel the other's pending\ndelayed publish, so two listeners for one league can race and double-publish a stale draft\ntarget. An active one is reported as already_running instead of duplicated.",
         "operationId": "start_draft_sync_v1_draft_start_post",
         "parameters": [
           {
@@ -10242,7 +10242,7 @@
     },
     "/v1/draft/stop": {
       "post": {
-        "description": "Tears down a draft-sync Job and its Redis state for one league - mode-agnostic\n(works for both live and practice). Does NOT delete the draft_config row: /status and\na later /start re-launch both still need it, and there is no other stored copy of\nteam_id/season/mode for that league once it's gone.\n\nScoped to app=draft-sync (not just league-id) so this can never delete some other\nworkload that happens to share the league-id label. Waits for the Job's Pods to fully\nterminate (Foreground propagation + polling) before clearing Redis - a still-running\nlistener could otherwise recreate the recommendation board or publish a target after\nthis endpoint has already reported \"stopped\".\n\nThat wait proves *this repo's own* listener Job is gone, and - since issue #66 - the same\nwait now also covers a live league's connector (fantasy-browser-worker's draft_sync.js), if\nit was launched via /start?with_publisher=true and so carries the LIVE_SYNC_APP_LABEL this\nendpoint can discover. A connector started out-of-band instead (a manual `kubectl apply` of\nfantasy-browser-worker/k8s/test-draft-sync-job.yaml) carries no such label and is invisible\nhere, exactly like before #66. So draft:{league}:picks/health and draft_picks:{league} are\nonly cleared automatically when this call itself found and confirmed the connector's death;\notherwise clearing them while an unknown connector might still be running risks losing a\nlive pick or letting it recreate the keys right after this endpoint clears them.\nconfirm_publisher_stopped=True remains the fallback for that out-of-band case: the caller\nmanually asserting - by whatever means they verified it outside this API - that the\npublisher is truly stopped. Without one or the other, restarting a listener against a\nreused live league id replays the previous draft's picks and silently drops the new ones\nas duplicates.",
+        "description": "Cancels a league's listener and connector runs and clears its Redis state -\nmode-agnostic (works for both live and practice). Does NOT delete the draft_config row:\n/status and a later /start re-launch both still need it, and there is no other stored copy\nof team_id/season/mode for that league once it's gone.\n\nWaits for each cancelled run's pod to be gone before clearing Redis - a still-running\nlistener could otherwise recreate the recommendation board or publish a target after this\nendpoint has already reported \"stopped\". The listener goes first, then the connector.\n\ndraft:{league}:picks/health and draft_picks:{league} are only cleared automatically when this\ncall itself found the connector run and confirmed its pod is gone. A connector started\nout-of-band (a manual `kubectl apply`) is invisible here, and clearing those keys while it\nmight still run risks losing a live pick or letting it recreate them right after.\nconfirm_publisher_stopped=True remains the fallback for that case: the caller asserting the\npublisher is truly stopped. Without one or the other, restarting a listener against a\nreused live league id replays the previous draft's picks and silently drops the new ones\nas duplicates.",
         "operationId": "stop_draft_v1_draft_stop_post",
         "parameters": [
           {

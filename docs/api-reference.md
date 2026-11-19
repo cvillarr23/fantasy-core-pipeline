@@ -72,15 +72,15 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `POST` | `/v1/draft/auto-publish` | Turn draft auto-publish on or off. | No |  |
 | `GET` | `/v1/draft/config` | Read the stored live draft config. | No |  |
 | `POST` | `/v1/draft/config` | Store the league, team, season and mode for the draft listener. | No |  |
-| `GET` | `/v1/draft/logs` | Tail the draft-sync pod log. | No |  |
+| `GET` | `/v1/draft/logs` | Tail the listener or room connector pod log. | No |  |
 | `POST` | `/v1/draft/pause` | Pause the auto-publish for a pick. | No |  |
-| `DELETE` | `/v1/draft/practice/sync-job` | Delete the practice Job and its Redis state. | No |  |
-| `POST` | `/v1/draft/practice/sync-job` | Create a draft-sync Job for a practice room. | No |  |
-| `GET` | `/v1/draft/practice/sync-job/status` | Show the practice Job's state. | No |  |
+| `DELETE` | `/v1/draft/practice/sync-job` | Cancel the practice runs and clear their Redis state. | No |  |
+| `POST` | `/v1/draft/practice/sync-job` | Request the room connector run for a practice room. | No |  |
+| `GET` | `/v1/draft/practice/sync-job/status` | Show the practice connector run's state. | No |  |
 | `POST` | `/v1/draft/resume` | Recompute and republish the recommendation. | No |  |
-| `POST` | `/v1/draft/start` | Create the draft-sync Kubernetes Job. | No |  |
-| `GET` | `/v1/draft/status` | Show draft board, Job and listener state. | No |  |
-| `POST` | `/v1/draft/stop` | Delete a draft-sync Job and its Redis state. | No |  |
+| `POST` | `/v1/draft/start` | Request the draft listener run from the job launcher. | No |  |
+| `GET` | `/v1/draft/status` | Show draft board, run and listener state. | No |  |
+| `POST` | `/v1/draft/stop` | Cancel a league's draft runs and clear its Redis state. | No |  |
 | `GET` | `/v1/draft/stream` | Stream draft status as server-sent events. | No |  |
 
 ### Activity

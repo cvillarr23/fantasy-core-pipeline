@@ -23,7 +23,7 @@ with the browser worker's `db/run_log.js`; the statuses below are shared with it
 import json
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.database import get_db_cursor
@@ -63,6 +63,20 @@ class WatchedRun:
     # max_duration), or a fan-out child whose parent is not: its failure is final, since a
     # retry must not restart an ended chain or fan-out.
     group_running: bool = True
+    # The run's params (`trigger.params`), which a service job's health key is formatted from.
+    params: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class JobRun:
+    """A run of a catalog job, as the draft endpoints look runs up by param."""
+
+    run_id: str
+    job_name: str
+    status: str
+    params: dict
+    started_at: datetime
+    end_reason: str | None = None
 
 
 class Runs:
@@ -121,9 +135,44 @@ class Runs:
         row = self.c.fetchone()
         return row[0] if row else None
 
-    def running_pods(self):
+    def running_pods(self, exclude_jobs=()):
+        """Running pod rows, for the pod cap. Service jobs are passed in `exclude_jobs`: they
+        run for hours and are exempt from the cap."""
         self.c.execute(
-            "SELECT count(*) FROM run_log WHERE status='running' AND executor='pod'"
+            """SELECT count(*) FROM run_log WHERE status='running' AND executor='pod'
+            AND NOT job_name=ANY(%s)""",
+            (list(exclude_jobs),),
+        )
+        return self.c.fetchone()[0]
+
+    def active_runs(self, jobs, param=None, value=None):
+        """Queued and running runs of these catalog jobs, newest first, optionally only those
+        whose `param` is `value`."""
+        return self._job_runs(jobs, param, value, "AND status IN ('queued','running')")
+
+    def latest_run(self, jobs, param=None, value=None):
+        """The newest run of these catalog jobs in any status, or None."""
+        runs = self._job_runs(jobs, param, value, "", limit=1)
+        return runs[0] if runs else None
+
+    def _job_runs(self, jobs, param, value, status_filter, limit=None):
+        query = f"""SELECT id,job_name,status,COALESCE(trigger->'params','{{}}'::jsonb),started_at,
+            end_reason FROM run_log WHERE job_name=ANY(%s) {status_filter}"""
+        args = [list(jobs)]
+        if param is not None:
+            query += " AND trigger->'params'->>%s=%s"
+            args += [param, str(value)]
+        query += " ORDER BY started_at DESC, id DESC"
+        if limit is not None:
+            query += f" LIMIT {int(limit)}"
+        self.c.execute(query, args)
+        return [JobRun(*row) for row in self.c.fetchall()]
+
+    def has_unreconciled_cancels(self):
+        """Whether a cancelled launcher run still has its workload to stop."""
+        self.c.execute(
+            f"""SELECT EXISTS(SELECT 1 FROM run_log WHERE status='cancelled'
+            AND cancel_reconciled_at IS NULL AND {LAUNCHER_RUN} AND executor<>'{FAN_OUT}')"""
         )
         return self.c.fetchone()[0]
 
@@ -160,7 +209,8 @@ class Runs:
             f"""SELECT r.id,r.job_name,r.status,r.attempt,r.started_at,r.chain_root_id,
             r.executor,r.k8s_job,COALESCE(
               (r.chain_root_id IS NULL OR root.status='running')
-              AND (fan.id IS NULL OR fan.status='running'),false)
+              AND (fan.id IS NULL OR fan.status='running'),false),
+            COALESCE(r.trigger->'params','{{}}'::jsonb)
             FROM run_log r LEFT JOIN run_log root ON root.id=r.chain_root_id
             LEFT JOIN run_log fan ON fan.id=r.parent_run_id AND fan.executor='{FAN_OUT}'
             WHERE r.{LAUNCHER_RUN} AND r.executor<>'{FAN_OUT}'
@@ -477,6 +527,18 @@ class RunStore:
 
     def mark_cancel_reconciled(self, run_id):
         self._with_runs(lambda runs: runs.mark_cancel_reconciled(run_id))
+
+    def has_unreconciled_cancels(self):
+        return self._with_runs(lambda runs: runs.has_unreconciled_cancels())
+
+    def active_runs(self, jobs, param=None, value=None):
+        return self._with_runs(lambda runs: runs.active_runs(jobs, param, value))
+
+    def latest_run(self, jobs, param=None, value=None):
+        return self._with_runs(lambda runs: runs.latest_run(jobs, param, value))
+
+    def cancel(self, run_id):
+        return self._with_runs(lambda runs: runs.cancel(run_id))
 
     def requeue_attempt(self, run_id, attempt, expected_attempt=None):
         return self._with_runs(

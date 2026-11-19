@@ -86,10 +86,24 @@ The Redis board records recommendation, candidates, VORP lookup and listener/tim
 Backlog processing does not restart the clock. A recommendation, queued target and landed ESPN pick are separate evidence; uncertainty does not authorize choosing another player.
 :::
 
+## How do the listener and room connector run?
+
+Both run through the job launcher as `class: service` catalog jobs. The draft endpoints request and cancel those runs; they never create Kubernetes Jobs themselves.
+
+| Endpoint | Run |
+| --- | --- |
+| `POST /v1/draft/start` | `draft-listener` or `practice-draft-listener`; with `with_publisher`, also `draft-connector` |
+| `POST /v1/draft/practice/sync-job` | `practice-draft-connector` for the room URL |
+| `POST /v1/draft/stop`, `DELETE /v1/draft/practice/sync-job` | Cancel the runs, wait for their pods, then clear Redis |
+
+Service runs don't count toward or wait on the launcher's pod cap, and their deadline is capped by `max_service_deadline` instead of `max_deadline`. The draft clock and mode reach the listener as env vars through the catalog's `param_env`.
+
+A practice run is retired automatically once the connector's `draft:{league_id}:health` heartbeat has been gone for longer than the job's grace: the watcher records it as `timeout` with reason `unhealthy`. Live runs have no health key, so only their deadline or `/stop` ends them.
+
 <details>
 <summary>Listener CLI arguments</summary>
 
-The API normally provisions the listener Job. For a direct invocation, IDs must name the intended draft.
+The launcher normally starts the listener. For a direct invocation, IDs must name the intended draft.
 
 | Argument | Requirement |
 | --- | --- |

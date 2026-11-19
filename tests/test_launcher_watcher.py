@@ -22,6 +22,7 @@ def run(**overrides):
         "executor": "pod",
         "k8s_job": "job-r1-a1",
         "group_running": True,
+        "params": {},
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -77,12 +78,19 @@ class Store:
         self.cancelled_reconciled.append(run_id)
 
 
-def make_watcher(runs, *, catalog=CATALOG, now=NOW, api=None, inline=None):
+def make_watcher(
+    runs, *, catalog=CATALOG, now=NOW, api=None, inline=None, health_keys=None
+):
     store = Store(runs)
     api = api or MagicMock()
     inline = inline or MagicMock()
     watcher = Watcher(
-        catalog, store=store, inline_runner=inline, api=api, clock=lambda: now
+        catalog,
+        store=store,
+        inline_runner=inline,
+        api=api,
+        clock=lambda: now,
+        key_exists=health_keys if health_keys is not None else (lambda key: True),
     )
     return watcher, store, api, inline
 
@@ -231,3 +239,117 @@ def test_failed_step_of_a_running_chain_still_retries():
     watcher.reconcile([k8s_job(active=0, failed=1)])
     assert store.retried == [("r1", 2, 1)]
     assert store.finished == []
+
+
+def practice_run(run_id="p1", job="practice-draft-listener", minutes=11, **overrides):
+    values = {
+        "run_id": run_id,
+        "job_name": job,
+        "k8s_job": f"job-{run_id}-a1",
+        "started_at": NOW - timedelta(minutes=minutes),
+        "params": {"league_id": "42"},
+        **overrides,
+    }
+    return run(**values)
+
+
+def test_practice_runs_without_a_heartbeat_are_retired_as_unhealthy():
+    probed = []
+
+    def key_exists(key):
+        probed.append(key)
+        return False
+
+    runs = [practice_run(), practice_run("p2", "practice-draft-connector")]
+    watcher, store, api, _ = make_watcher(runs, health_keys=key_exists)
+    watcher.reconcile([k8s_job("p1", name="job-p1-a1"), k8s_job("p2", name="job-p2-a1")])
+    assert store.finished == [
+        ("p1", "timeout", "unhealthy", None, 1),
+        ("p2", "timeout", "unhealthy", None, 1),
+    ]
+    assert store.retried == []
+    assert api.delete_namespaced_job.call_count == 2
+    # The listener and connector share one key, read once per pass.
+    assert probed == ["draft:42:health"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "alive"),
+    [
+        ({}, True),  # heartbeat present
+        ({"minutes": 5}, False),  # still inside its grace period
+        ({"params": {}}, False),  # connector whose room URL named no league
+        ({"job": "draft-listener"}, False),  # live runs have no health key
+    ],
+)
+def test_practice_runs_are_kept_while_healthy_or_unchecked(overrides, alive):
+    watcher, store, api, _ = make_watcher(
+        [practice_run(**overrides)], health_keys=lambda key: alive
+    )
+    watcher.reconcile([k8s_job("p1", name="job-p1-a1")])
+    assert store.finished == []
+    api.delete_namespaced_job.assert_not_called()
+
+
+def test_unreadable_heartbeat_fails_open():
+    def key_exists(key):
+        raise ConnectionError("redis down")
+
+    watcher, store, api, _ = make_watcher([practice_run()], health_keys=key_exists)
+    watcher.reconcile([k8s_job("p1", name="job-p1-a1")])
+    assert store.finished == []
+    api.delete_namespaced_job.assert_not_called()
+
+
+def test_finished_service_job_is_recorded_rather_than_retired():
+    watcher, store, _, _ = make_watcher([practice_run()], health_keys=lambda key: False)
+    watcher.reconcile([k8s_job("p1", name="job-p1-a1", active=0, succeeded=1)])
+    assert store.finished == [("p1", "success", "completed", None, 1)]
+
+
+class FakeStop:
+    def __init__(self, waits_before_stop=100):
+        self.waited = []
+        self.left = waits_before_stop
+
+    def is_set(self):
+        return self.left <= 0
+
+    def wait(self, seconds):
+        self.waited.append(seconds)
+        self.left -= 1
+        return self.left <= 0
+
+
+def test_pending_cancel_ends_the_wait_between_reconciles():
+    watcher, store, _, _ = make_watcher([])
+    answers = iter([False, False, True])
+    store.has_unreconciled_cancels = lambda: next(answers)
+    stop = FakeStop()
+    watcher._wait_for_next_pass(stop)
+    assert stop.waited == [watcher_module.CANCEL_POLL_SECONDS] * 3
+
+
+def test_wait_between_reconciles_ends_at_the_poll_interval(monkeypatch):
+    watcher, store, _, _ = make_watcher([])
+    store.has_unreconciled_cancels = lambda: False
+    clock = iter(range(0, 1000, watcher_module.CANCEL_POLL_SECONDS))
+    monkeypatch.setattr(watcher_module.time, "monotonic", lambda: next(clock))
+    stop = FakeStop()
+    watcher._wait_for_next_pass(stop)
+    expected = watcher_module.POLL_SECONDS // watcher_module.CANCEL_POLL_SECONDS
+    assert len(stop.waited) == expected
+
+
+def test_unreadable_cancel_check_keeps_waiting_for_the_poll_interval(monkeypatch):
+    watcher, store, _, _ = make_watcher([])
+
+    def broken():
+        raise RuntimeError("db down")
+
+    store.has_unreconciled_cancels = broken
+    clock = iter(range(0, 1000, watcher_module.CANCEL_POLL_SECONDS))
+    monkeypatch.setattr(watcher_module.time, "monotonic", lambda: next(clock))
+    stop = FakeStop()
+    watcher._wait_for_next_pass(stop)
+    assert len(stop.waited) == watcher_module.POLL_SECONDS // watcher_module.CANCEL_POLL_SECONDS

@@ -11,9 +11,11 @@ from src.launcher.catalog import (
     Catalog,
     UnknownJobError,
     fans_out,
+    health_key,
     load_catalog,
     load_catalog_from_env,
     params_to_args,
+    split_params,
     validate_run_params,
 )
 
@@ -39,7 +41,6 @@ def catalog_data() -> dict:
 CRONJOB_SCHEDULES = {
     ("rumor-syncer", "*/30 * * * *"),
     ("rapid-status-syncer", "*/10 * * * 4,0,1"),
-    ("stale-draft-job-sweeper", "*/15 * * * *"),
     ("projections-refresh", "0 18 * * *"),
     ("rumor-action-trigger", "45 21 * * *"),
     ("sync-actual-scores", "0 10 * * 5"),
@@ -176,10 +177,9 @@ def test_params_reject_unknown_types(type_name):
         Catalog.model_validate(raw)
 
 
-@pytest.mark.parametrize("field", ["class", "approval"])
-def test_v2_fields_fail_with_not_implemented_error(field):
+def test_approval_fails_with_not_implemented_error():
     raw = catalog_data()
-    raw["jobs"]["one"][field] = True
+    raw["jobs"]["one"]["approval"] = True
     with pytest.raises(ValueError, match="not implemented"):
         Catalog.model_validate(raw)
 
@@ -349,3 +349,133 @@ def test_counted_k8s_jobs_defaults_empty_and_accepts_label_selectors():
     data["global"]["counted_k8s_jobs"] = ["scaledjob.keda.sh/name=worker"]
     catalog = Catalog.model_validate(data)
     assert catalog.global_settings.counted_k8s_jobs == ["scaledjob.keda.sh/name=worker"]
+
+
+def service_catalog(**job) -> dict:
+    raw = catalog_data()
+    raw["global"]["max_service_deadline"] = "8h"
+    raw["jobs"]["draft"] = {
+        "profile": "core",
+        "command": ["python", "-m", "listener"],
+        "class": "service",
+        "deadline": "6h",
+        **job,
+    }
+    return raw
+
+
+def test_service_jobs_resolve_with_their_class_and_own_deadline_cap():
+    catalog = Catalog.model_validate(service_catalog())
+    assert catalog.resolve("draft").job_class == "service"
+    assert catalog.resolve("draft").deadline == timedelta(hours=6)
+    assert catalog.resolve("one").job_class == "batch"
+    assert catalog.service_jobs() == ["draft"]
+
+
+def test_service_deadline_is_capped_by_max_service_deadline():
+    with pytest.raises(ValidationError, match="max_service_deadline"):
+        Catalog.model_validate(service_catalog(deadline="9h"))
+
+
+def test_service_deadline_cap_defaults_to_max_deadline():
+    raw = service_catalog()
+    raw["global"].pop("max_service_deadline")
+    with pytest.raises(ValidationError, match="max_service_deadline"):
+        Catalog.model_validate(raw)
+
+
+def test_batch_deadline_is_still_capped_by_max_deadline():
+    raw = service_catalog()
+    raw["jobs"]["one"]["deadline"] = "3h"
+    with pytest.raises(ValidationError, match="exceeds global.max_deadline"):
+        Catalog.model_validate(raw)
+
+
+def test_unknown_class_is_rejected():
+    with pytest.raises(ValidationError, match="class"):
+        Catalog.model_validate(service_catalog(**{"class": "daemon"}))
+
+
+@pytest.mark.parametrize(
+    ("job", "message"),
+    [
+        ({"executor": "inline"}, "pod executor"),
+        (
+            {"params": {"week": "int?"}, "fan_out": {"param": "week", "values": [1]}},
+            "cannot fan out",
+        ),
+    ],
+)
+def test_service_jobs_run_as_single_pods(job, message):
+    with pytest.raises(ValidationError, match=message):
+        Catalog.model_validate(service_catalog(**job))
+
+
+def test_param_env_moves_params_out_of_argv():
+    catalog = Catalog.model_validate(
+        service_catalog(
+            params={"league_id": "str", "room_url": "str", "clock": "int?"},
+            param_env={"room_url": "DRAFT_ROOM_URL", "clock": "DRAFT_PICK_CLOCK_SECONDS"},
+        )
+    )
+    job = catalog.jobs["draft"]
+    argv_params, env = split_params(
+        job, {"league_id": "42", "room_url": "https://x/y", "clock": 30}
+    )
+    assert argv_params == {"league_id": "42"}
+    assert env == {"DRAFT_ROOM_URL": "https://x/y", "DRAFT_PICK_CLOCK_SECONDS": "30"}
+    assert params_to_args(argv_params) == ["--league-id", "42"]
+    assert split_params(job, {"league_id": "42", "room_url": "u"})[1] == {
+        "DRAFT_ROOM_URL": "u"
+    }
+
+
+@pytest.mark.parametrize(
+    ("param_env", "message"),
+    [
+        ({"missing": "X"}, "not one of the job's params"),
+        ({"room_url": "lower"}, "env var name"),
+    ],
+)
+def test_param_env_must_name_params_and_valid_env_vars(param_env, message):
+    with pytest.raises(ValidationError, match=message):
+        Catalog.model_validate(
+            service_catalog(params={"room_url": "str"}, param_env=param_env)
+        )
+
+
+def test_health_key_formats_from_params_and_skips_runs_without_them():
+    catalog = Catalog.model_validate(
+        service_catalog(
+            params={"league_id": "str?"},
+            health={"key": "draft:{league_id}:health", "grace": "10m"},
+        )
+    )
+    job = catalog.jobs["draft"]
+    assert job.health.grace == timedelta(minutes=10)
+    assert health_key(job, {"league_id": "42"}) == "draft:42:health"
+    assert health_key(job, {}) is None
+    assert health_key(catalog.jobs["one"], {"league_id": "42"}) is None
+
+
+@pytest.mark.parametrize(
+    ("job", "message"),
+    [
+        (
+            {"params": {"league_id": "str"}, "health": {"key": "draft:{team}:x", "grace": "1m"}},
+            "not one of the job's params",
+        ),
+        (
+            {
+                "class": "batch",
+                "deadline": "1h",
+                "params": {"league_id": "str"},
+                "health": {"key": "draft:{league_id}", "grace": "1m"},
+            },
+            "only service jobs",
+        ),
+    ],
+)
+def test_health_must_use_job_params_on_a_service_job(job, message):
+    with pytest.raises(ValidationError, match=message):
+        Catalog.model_validate(service_catalog(**job))

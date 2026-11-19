@@ -391,3 +391,62 @@ def test_running_in_jobs_counts_running_launcher_runs_of_the_group(postgres):
         assert admission.running_in_jobs(["trade-scan", "trade-inbox"]) == 2
         assert admission.running_in_jobs(["rumor-syncer"]) == 1
         assert admission.running_in_jobs([]) == 0
+
+
+DRAFT_PARAMS = {
+    "team_id": "7",
+    "season": 2026,
+    "mode": "practice",
+    "pick_clock_seconds": 30,
+    "auto_draft_delay_seconds": 15,
+}
+
+
+def test_running_pods_leaves_out_excluded_service_jobs(postgres):
+    claimed("practice-draft-listener", params={"league_id": "42", **DRAFT_PARAMS})
+    claimed()
+    with RunStore().admission() as admission:
+        assert admission.running_pods() == 2
+        assert admission.running_pods(CATALOG.service_jobs()) == 1
+
+
+def test_active_and_latest_runs_look_runs_up_by_param(postgres):
+    store = RunStore()
+    jobs = ["practice-draft-listener", "draft-listener"]
+    old = claimed("practice-draft-listener", params={"league_id": "42", **DRAFT_PARAMS})
+    store.cancel(old)
+    current = claimed("practice-draft-listener", params={"league_id": "42", **DRAFT_PARAMS})
+    other = queue("practice-draft-listener", params={"league_id": "43", **DRAFT_PARAMS})
+    claimed()
+
+    assert [r.run_id for r in store.active_runs(jobs, "league_id", "42")] == [current]
+    assert [r.run_id for r in store.active_runs(jobs)] == [other, current]
+    latest = store.latest_run(jobs, "league_id", "42")
+    assert (latest.run_id, latest.job_name, latest.status) == (
+        current,
+        "practice-draft-listener",
+        "running",
+    )
+    assert latest.params["league_id"] == "42"
+    assert store.latest_run(jobs, "league_id", "nope") is None
+    store.cancel(current)
+    assert store.latest_run(jobs, "league_id", "42").status == "cancelled"
+
+
+def test_unreconciled_cancels_are_only_claimed_runs_still_to_stop(postgres):
+    store = RunStore()
+    assert store.has_unreconciled_cancels() is False
+    store.cancel(queue())  # never claimed: nothing to stop
+    assert store.has_unreconciled_cancels() is False
+    running = claimed(k8s_job="rumor-syncer-x-a1")
+    store.cancel(running)
+    assert store.has_unreconciled_cancels() is True
+    store.mark_cancel_reconciled(running)
+    assert store.has_unreconciled_cancels() is False
+
+
+def test_watched_runs_carry_their_params(postgres):
+    identity = claimed("practice-draft-listener", params={"league_id": "42", **DRAFT_PARAMS})
+    (watched,) = RunStore().watched_runs()
+    assert watched.run_id == identity
+    assert watched.params["league_id"] == "42"

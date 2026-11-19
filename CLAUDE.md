@@ -110,7 +110,7 @@
   service and just mock the DB underneath it.
 - Known follow-up, not yet migrated to this pattern: `src/api/routes.py` (AMQP publish +
   Redis idempotency logic inline in the `/trigger/*` handlers) and `src/api/draft.py`
-  (Kubernetes Job orchestration, Redis draft state, and SQL all inline) — both mix in
+  (Redis draft state and SQL inline; its runs go through `draft_run_service`) — both mix in
   non-SQL orchestration concerns, not just SQL-behind-a-service, so migrating them needs
   its own design pass rather than a mechanical extraction. Tracked as separate issues.
 - `src/api/routes.py`'s three `/v1/trigger/*` routes (`lineup`, `waiver`, `draft-pick`)
@@ -520,7 +520,23 @@
   (`Runs.running_in_jobs`, under the admission lock). A full group always waits, never skips or
   409s. Fan-out parents and executor-less rows (CronJob-era, browser worker) don't count, so KEDA
   worker pods aren't in a group until the worker runs under the launcher.
-- `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s. A
+- `class: service` jobs (the four draft jobs) run for hours: they never wait on or count toward
+  `max_concurrent_pods` (`Runs.running_pods(catalog.service_jobs())`), their deadline is capped
+  by `global.max_service_deadline` (defaults to `max_deadline`), they must use the pod executor
+  and can't fan out, and their pods get a 5s termination grace and a `fantasy.class: service`
+  label. `param_env` passes listed params as env vars instead of flags (`split_params`; k8s
+  escapes `$` as `$$`). A service job's `health: {key, grace}` names a Redis key formatted from
+  its params; the watcher retires a `running` run past `grace` whose key is gone as
+  `timeout`/`unhealthy` (a Redis error leaves it alone). That replaced the stale-draft sweeper.
+- Draft endpoints (`src/api/draft.py`) start and cancel runs through
+  `src/services/draft_run_service.py` and find them by their `league_id` param
+  (`Runs.active_runs`/`latest_run`). The API's k8s access is read-only: a cancelled run's Job
+  (`fantasy.run-id` label) must be gone before `/stop` clears Redis, `/status` reads the Job
+  phase, `/logs` reads the pod. The connectors pass `league_id` as `DRAFT_LEAGUE_ID`, which
+  draft_sync.js ignores; the live one serves only `ESPN_LEAGUE_ID` (the espn bundle).
+- `src/launcher/watcher.py` turns k8s Job outcomes into run_log transitions every 60s, and
+  reconciles at once when `has_unreconciled_cancels` (checked every 5s) finds a cancelled run
+  still to stop, since the draft endpoints wait on it. A
   failure or timeout with attempts left requeues the same row at the next attempt
   (`RunStore.requeue_attempt`), and each attempt only ever acts on its own k8s Job. A run
   whose pod hasn't started within `start_timeout` fails (`start_timeout`); one still
