@@ -206,3 +206,14 @@ def test_list_shows_each_offer_once_at_its_latest_status(postgres):
     assert [o for o in awaiting if o["offer_key"] == key] == []
     submitted = service.list_offers("submitted")["offers"]
     assert [o["offer_key"] for o in submitted] == [key]
+
+
+def test_dismissed_offer_leaves_the_list_and_cannot_be_approved(postgres):
+    _, key, _ = postgres
+    assert service.dismiss_offer(key, "conor")["duplicate"] is False
+    awaiting = service.list_offers("awaiting_approval")["offers"]
+    assert [o for o in awaiting if o["offer_key"] == key] == []
+    assert [o["offer_key"] for o in service.list_offers("dismissed")["offers"]] == [key]
+    with pytest.raises(service.OfferConflict):
+        service.approve_offer(key, "conor")
+    assert service.dismiss_offer(key, "conor")["duplicate"] is True

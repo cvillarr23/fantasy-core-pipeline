@@ -40,6 +40,8 @@ from src.schemas.trade import (
     OfferStatus,
     TradeApprovalRequest,
     TradeApprovalResponse,
+    TradeDismissRequest,
+    TradeDismissResponse,
     TradeOfferList,
 )
 from src.services import trade_offer_service
@@ -267,6 +269,19 @@ def approve_trade_offer(
     if result["duplicate"]:
         response.status_code = 200
     return result
+
+
+@trade_router.post("/offers/{offer_key}/dismiss", response_model=TradeDismissResponse)
+def dismiss_trade_offer(
+    payload: TradeDismissRequest,
+    offer_key: str = Path(pattern=r"^[0-9a-f]{64}$"),
+):
+    try:
+        return trade_offer_service.dismiss_offer(offer_key, payload.dismissed_by)
+    except trade_offer_service.OfferNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except trade_offer_service.OfferConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @trade_router.post(

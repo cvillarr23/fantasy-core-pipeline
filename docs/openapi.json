@@ -7916,6 +7916,61 @@
         "title": "TradeContextTeam",
         "type": "object"
       },
+      "TradeDismissRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "dismissed_by": {
+            "description": "Self-reported dismisser; trade routes have no application-layer authentication.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Dismissed By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dismissed_by"
+        ],
+        "title": "TradeDismissRequest",
+        "type": "object"
+      },
+      "TradeDismissResponse": {
+        "properties": {
+          "dismissed_at": {
+            "format": "date-time",
+            "title": "Dismissed At",
+            "type": "string"
+          },
+          "dismissed_by": {
+            "title": "Dismissed By",
+            "type": "string"
+          },
+          "duplicate": {
+            "default": false,
+            "title": "Duplicate",
+            "type": "boolean"
+          },
+          "offer_key": {
+            "title": "Offer Key",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "manual",
+              "replaced_by_scan"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "offer_key",
+          "reason",
+          "dismissed_by",
+          "dismissed_at"
+        ],
+        "title": "TradeDismissResponse",
+        "type": "object"
+      },
       "TradeEvaluationRequest": {
         "properties": {
           "incoming_player_ids": {
@@ -8570,6 +8625,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -12259,6 +12321,7 @@
                 "approval_pending",
                 "approved",
                 "superseded",
+                "dismissed",
                 "submit_blocked",
                 "dry_run_filled",
                 "submitting",
@@ -12398,6 +12461,56 @@
           }
         },
         "summary": "Approve Trade Offer"
+      }
+    },
+    "/v1/trade/offers/{offer_key}/dismiss": {
+      "post": {
+        "operationId": "dismiss_trade_offer_v1_trade_offers__offer_key__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "offer_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Offer Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TradeDismissRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TradeDismissResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Trade Offer"
       }
     },
     "/v1/trade/offers/{offer_key}/resolution": {

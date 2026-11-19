@@ -185,6 +185,58 @@ def resolve_offer(key, outcome, resolved_at=None, espn_transaction_id=None):
     return dict(offer_key=key, duplicate=False, **resolution)
 
 
+def _dismissal_audit(dismissed_by):
+    return dict(
+        reason="manual",
+        dismissed_by=dismissed_by,
+        dismissed_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def _save_dismissal(cursor, row_id, dismissal):
+    cursor.execute(
+        "UPDATE execution_log SET status = 'dismissed', outcome_details = "
+        "COALESCE(outcome_details, '{}'::jsonb) || jsonb_build_object('dismissal', %s::jsonb) "
+        "WHERE id = %s",
+        (json.dumps(dismissal), row_id),
+    )
+
+
+def _stored_dismissal(rows):
+    """The audit of an earlier dismissal of this key, or None."""
+    return next(
+        (
+            (row["outcome_details"] or {}).get("dismissal")
+            for row in rows
+            if row["status"] == "dismissed"
+        ),
+        None,
+    )
+
+
+def dismiss_offer(key, dismissed_by):
+    """Retires an unapproved proposal so it leaves the approval list.
+
+    Every awaiting copy of the key is dismissed, not only the newest: approval falls back to
+    any awaiting row, so a leftover copy would keep the offer approvable.
+    """
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+        rows = _read_offers(cursor, key)
+        if not rows:
+            raise OfferNotFound("Offer not found.")
+        awaiting = [row for row in rows if row["status"] == "awaiting_approval"]
+        if not awaiting:
+            stored = _stored_dismissal(rows)
+            if stored is None:
+                raise OfferConflict("Offer is no longer awaiting approval.")
+            return dict(offer_key=key, duplicate=True, **stored)
+        dismissal = _dismissal_audit(dismissed_by)
+        for row in awaiting:
+            _save_dismissal(cursor, row["id"], dismissal)
+    return dict(offer_key=key, duplicate=False, **dismissal)
+
+
 def committed_outgoing_players(league_id, season):
     """ESPN ids we have promised in unresolved outgoing offers, mapped to their offer keys."""
     hours = int(os.getenv("OUTGOING_COMMIT_HOURS", DEFAULT_COMMIT_HOURS))
