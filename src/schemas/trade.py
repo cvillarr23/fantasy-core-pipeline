@@ -56,6 +56,9 @@ class TradeApprovalResponse(BaseModel):
     tracking_id: str
     approved_by: str
     approved_at: datetime
+    # The trade-submit launcher run that sends the offer; null for approvals made before
+    # approval started a run.
+    run_id: str | None = None
     duplicate: bool = False
 
 

@@ -28,7 +28,7 @@ flowchart LR
     T --> OB[(activity_outbox)]
     TR --> OB2[(execution_log)]
     OB -->|lineup_updates<br/>waiver_actions<br/>draft_targets| MQ[(RabbitMQ)]
-    TR -->|trade_submissions<br/>trade_responses<br/>trade_negotiations| MQ
+    TR -->|job_runs: trade-submit<br/>trade_responses<br/>trade_negotiations| MQ
     MQ --> W[fantasy-browser-worker]
 ```
 
@@ -60,8 +60,8 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `POST` | `/v1/trade/incoming/{espn_transaction_id}/decision/retry` | Queue the same response again after a rejected or unknown attempt. | Yes | `trade_responses` |
 | `GET` | `/v1/trade/incoming/{espn_transaction_id}/thread` | Show one offer's negotiation thread. | No |  |
 | `POST` | `/v1/trade/incoming/{espn_transaction_id}/triage` | Dismiss or snooze an incoming offer. | Yes |  |
-| `GET` | `/v1/trade/offers` | List generated trade proposals with their stored score evidence. | No |  |
-| `POST` | `/v1/trade/offers/{offer_key}/approve` | Approve a staged proposal and queue it. | No | `trade_submissions` |
+| `GET` | `/v1/trade/offers` | List generated trade proposals with their stored score evidence, or look one up by offer_key. | No |  |
+| `POST` | `/v1/trade/offers/{offer_key}/approve` | Approve a staged proposal and start its trade-submit run. | No | `job_runs` |
 | `POST` | `/v1/trade/offers/{offer_key}/dismiss` | Retire an unapproved proposal so it leaves the approval list. | No |  |
 | `POST` | `/v1/trade/offers/{offer_key}/resolution` | Record how ESPN resolved a sent offer, freeing its players for new trades. | Yes |  |
 | `POST` | `/v1/trade/score` | Compute the schedule-aware trade score. | No |  |

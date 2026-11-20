@@ -50,12 +50,13 @@ AREAS = [
 ]
 
 # Queue each endpoint publishes to, checked against src/api/routes.py,
-# src/services/trade_offer_service.py and src/services/trade_inbox_service.py.
+# src/services/trade_offer_service.py (job_runs, through jobs_service.start_run) and
+# src/services/trade_inbox_service.py.
 QUEUES = {
     "POST /v1/trigger/lineup": "lineup_updates",
     "POST /v1/trigger/waiver": "waiver_actions",
     "POST /v1/trigger/draft-pick": "draft_targets",
-    "POST /v1/trade/offers/{offer_key}/approve": "trade_submissions",
+    "POST /v1/trade/offers/{offer_key}/approve": "job_runs",
     "POST /v1/trade/incoming/{espn_transaction_id}/decision": "trade_responses",
     "POST /v1/trade/incoming/{espn_transaction_id}/decision/retry": "trade_responses",
     "POST /v1/trade/incoming/{espn_transaction_id}/counter": "trade_negotiations",
@@ -76,8 +77,8 @@ DESCRIPTIONS = {
     "POST /v1/trade/incoming/{espn_transaction_id}/decision/retry": "Queue the same response again after a rejected or unknown attempt.",
     "POST /v1/trade/incoming/{espn_transaction_id}/counter": "Queue a counter offer for an incoming offer.",
     "POST /v1/trade/incoming/{espn_transaction_id}/triage": "Dismiss or snooze an incoming offer.",
-    "GET /v1/trade/offers": "List generated trade proposals with their stored score evidence.",
-    "POST /v1/trade/offers/{offer_key}/approve": "Approve a staged proposal and queue it.",
+    "GET /v1/trade/offers": "List generated trade proposals with their stored score evidence, or look one up by offer_key.",
+    "POST /v1/trade/offers/{offer_key}/approve": "Approve a staged proposal and start its trade-submit run.",
     "POST /v1/trade/offers/{offer_key}/dismiss": "Retire an unapproved proposal so it leaves the approval list.",
     "POST /v1/trade/offers/{offer_key}/resolution": "Record how ESPN resolved a sent offer, freeing its players for new trades.",
     "POST /v1/trade/evaluate":"Compute raw VORP delta for a trade.",

@@ -78,6 +78,13 @@
   display-only: keep it out of `compute_offer_key`, `_validated_offer` and the approval
   payload, since approval binds what the other manager receives, not our reasoning. An
   unknown version or invalid payload becomes `null` with a warning instead of failing the list.
+- Approving an outgoing offer (`trade_offer_service.approve_offer`) commits the
+  `approval_pending` claim, then queues a `trade-submit` launcher run via
+  `jobs_service.start_run` (params `{offer_key}`, parent `counter_offer.scan_run_id`, dedupe
+  `trade-submit@<offer_key>`), then marks `approved`. Never queue the run inside the claim's
+  transaction. Approving a pending claim again resumes it with the original approver; the
+  dedupe key keeps it to one run. The run reads the offer back with
+  `GET /v1/trade/offers?offer_key=`, which without `status` sees any status.
 - The incoming inbox uses `trade_inbox_service` and `schemas/trade_inbox.py`;
   all four inbox writes require the existing `X-API-Key` guard. Core publication
   claims live in `outcome_details.incoming_publications`, separate from worker-owned

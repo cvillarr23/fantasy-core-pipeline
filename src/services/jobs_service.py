@@ -205,7 +205,15 @@ def start_run(
     requested_by: str | None = None,
     downstream: bool = False,
     trigger: Literal["manual", "cli", "mcp"] = "manual",
+    parent_run_id: str | None = None,
+    dedupe_key: str | None = None,
 ) -> dict[str, str]:
+    """Queues a run of a job, or with `downstream` a chain from that step.
+
+    `parent_run_id` and `dedupe_key` are for in-process callers such as trade approval, which
+    links the send to the scan that staged it and keys it on the offer so a repeat approval
+    returns the same run. A chain start ignores both.
+    """
     catalog = _catalog()
     try:
         job = catalog.resolve(name).job
@@ -234,6 +242,8 @@ def start_run(
         trigger=trigger,
         params=params,
         requested_by=requested_by,
+        dedupe_key=dedupe_key,
+        parent_run_id=parent_run_id,
         downstream=False,
     )
 

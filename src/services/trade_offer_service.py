@@ -1,4 +1,4 @@
-"""Human approvals of immutable ESPN offers; durable, fail-closed publish claims."""
+"""Human approvals of immutable ESPN offers; durable, fail-closed claims that queue the send."""
 
 import hashlib
 import json
@@ -7,11 +7,12 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from pydantic import ValidationError
 
-from src.queue_contracts import TRADE_SUBMISSIONS
 from src.database import get_db_cursor
+from src.services import jobs_service
 from src.services.espn_ownership import load_espn_ownership
 from src.schemas.trade import ProposalEvaluation
 
@@ -46,6 +47,26 @@ class OfferNotFound(ValueError):
 
 class PublishUnavailable(RuntimeError):
     pass
+
+
+# The launcher job that sends an approved offer to ESPN (trade_builder.js --offer-key).
+SUBMIT_JOB = "trade-submit"
+# start_run raises these before it writes a run_log row, so nothing was queued.
+PRE_WRITE_START_ERRORS = (
+    jobs_service.CatalogUnavailableError,
+    jobs_service.JobNotFoundError,
+    jobs_service.RunOverlapError,
+    ValueError,
+)
+
+
+class Claim(NamedTuple):
+    """A committed `approval_pending` claim whose trade-submit run is still to be queued."""
+
+    row: dict
+    offer: dict
+    approval: dict
+    resumed: bool = False
 
 
 def compute_offer_key(offer):
@@ -266,6 +287,7 @@ def _response(key, approval, duplicate=False):
         tracking_id=approval["tracking_id"],
         approved_by=approval["approved_by"],
         approved_at=approval["approved_at"],
+        run_id=approval.get("run_id"),
         duplicate=duplicate,
     )
 
@@ -294,22 +316,35 @@ def _edited_offer_key(row, offer, message):
     return compute_offer_key(_offer_key_fields(row, offer, message))
 
 
+def _stored_approval(row):
+    approval = (row["outcome_details"] or {}).get("approval", {})
+    if not all(approval.get(k) for k in ("tracking_id", "approved_by", "approved_at")):
+        raise OfferConflict("Approval audit metadata is missing.")
+    return approval
+
+
 def _duplicate_receipt(rows, key, message):
-    if any(row["status"] == "approval_pending" for row in rows):
-        raise OfferConflict(
-            "Approval is pending or its publish outcome is unknown; reconcile before retrying."
-        )
     for row in rows:
         if row["status"] == "approved":
             offer = _validated_offer(row, key)
             if message is not None and message != offer.get("message"):
                 raise OfferConflict("An approved offer cannot be edited.")
-            approval = (row["outcome_details"] or {}).get("approval", {})
-            if not all(
-                approval.get(k) for k in ("tracking_id", "approved_by", "approved_at")
-            ):
-                raise OfferConflict("Approval audit metadata is missing.")
-            return _response(key, approval, duplicate=True)
+            return _response(key, _stored_approval(row), duplicate=True)
+    return None
+
+
+def _pending_claim(rows, key, message):
+    """The committed claim of an approval whose send may not be queued yet, or None.
+
+    Approving it again resumes that claim, keeping its approver and tracking id: the
+    trade-submit dedupe key means the retry finds the run if the first attempt queued it.
+    """
+    for row in rows:
+        if row["status"] == "approval_pending":
+            offer = _validated_offer(row, key)
+            if message is not None and message != offer.get("message"):
+                raise OfferConflict("A pending approval cannot be edited.")
+            return Claim(row, offer, _stored_approval(row), resumed=True)
     return None
 
 
@@ -338,8 +373,12 @@ def _save_edited_offer(cursor, row, rows, offer):
     return edited_row
 
 
-def approve_offer(key, approved_by, message=None):
-    # Imported lazily: routes owns the established AMQP/audit conventions.
+def _claim_approval(key, approved_by, message):
+    """Locks the offer and commits an `approval_pending` claim plus its audit.
+
+    Returns the stored receipt for an offer that is already approved, else the Claim to send.
+    """
+    # Imported lazily: routes owns the established bot_decisions audit conventions.
     from src.api import routes
 
     with get_db_cursor() as cursor:
@@ -396,7 +435,10 @@ def approve_offer(key, approved_by, message=None):
             ):
                 raise OfferConflict("This offer has already been edited.")
         # Check the entire key, not only the latest dry fill. A new staged row must not
-        # hide an earlier pending/confirmed publish or an actual worker submission.
+        # hide an earlier pending/confirmed approval or an actual worker submission.
+        pending = _pending_claim(rows, key, message)
+        if pending is not None:
+            return pending
         receipt = _duplicate_receipt(rows, key, message)
         if receipt is not None:
             return receipt
@@ -458,6 +500,7 @@ def approve_offer(key, approved_by, message=None):
         )
         if offer.get("message") is not None:
             payload["message"] = offer["message"]
+        # The approved send, kept as audit; the trade-submit run rebuilds it from the offer.
         # The worker recomputes the key from these, so a counter must keep its link.
         for field in ("related_transaction_id", "thread_root_id"):
             if offer.get(field) is not None:
@@ -475,47 +518,63 @@ def approve_offer(key, approved_by, message=None):
             ),
             cursor=cursor,
         )
-    # The claim and audit are committed before any broker access. Never enclose publish
-    # in the claiming transaction: rollback after a successful send would permit replay.
-    connection = None
-    attempted = False
-    try:
-        params = routes.pika.URLParameters(routes.AMQP_URL)
-        params.socket_timeout = routes.BROKER_SOCKET_TIMEOUT_SECONDS
-        params.blocked_connection_timeout = routes.BROKER_SOCKET_TIMEOUT_SECONDS
-        connection = routes.pika.BlockingConnection(params)
-        channel = connection.channel()
-        channel.confirm_delivery()
-        # Worker-owned durable queue: declaring also bootstraps KEDA on a fresh broker.
-        channel.queue_declare(queue=TRADE_SUBMISSIONS, durable=True)
-        carrier = {}
-        routes.propagate.inject(carrier)
-        body = json.dumps({**payload, "traceparent": carrier.get("traceparent")})
-        attempted = True
-        channel.basic_publish(
-            exchange="",
-            routing_key=TRADE_SUBMISSIONS,
-            body=body,
-            mandatory=True,
-            properties=routes.pika.BasicProperties(
-                delivery_mode=2, content_type="application/json", headers=carrier
-            ),
-        )
-    except Exception as error:
-        if not attempted or isinstance(error, routes.PRE_WRITE_BROKER_ERRORS):
-            approval["publish_error"] = (
-                "Failed before publication; approval may be retried."
-            )
-            with get_db_cursor() as cursor:
-                _save_approval(cursor, row["id"], "awaiting_approval", approval)
-        raise PublishUnavailable(
-            "Publication failed. Pending approvals require reconciliation before retrying."
-        ) from error
-    finally:
-        routes._close_broker_connection(connection)
+    return Claim(row, offer, approval)
+
+
+def approve_offer(key, approved_by, message=None):
+    claimed = _claim_approval(key, approved_by, message)
+    if not isinstance(claimed, Claim):
+        return claimed
+    # The claim and audit are committed before the run is queued. Never queue it in the
+    # claiming transaction: a rollback after the run started would permit a second send.
+    approval = {**claimed.approval, "run_id": _start_submit_run(claimed)}
     with get_db_cursor() as cursor:
-        _save_approval(cursor, row["id"], "approved", approval)
-    return _response(key, approval)
+        _save_approval(cursor, claimed.row["id"], "approved", approval)
+    return _response(approval["offer_key"], approval)
+
+
+def _scan_run_id(offer):
+    """The run of the scan that staged the offer (worker-written), so the send is its child."""
+    run_id = offer.get("scan_run_id")
+    return run_id if isinstance(run_id, str) and run_id.strip() else None
+
+
+def _start_submit_run(claim):
+    """Queues the trade-submit launcher run for a committed claim; returns its run id.
+
+    The dedupe key is the offer key, so however often a claim is resumed it maps to one
+    run. A failure that provably wrote nothing releases a fresh claim for re-approval;
+    any other failure leaves it `approval_pending` for an approve retry to resume.
+    """
+    key = claim.approval["offer_key"]
+    try:
+        started = jobs_service.start_run(
+            SUBMIT_JOB,
+            params={"offer_key": key},
+            requested_by=claim.approval["approved_by"],
+            parent_run_id=_scan_run_id(claim.offer),
+            dedupe_key=f"{SUBMIT_JOB}@{key}",
+        )
+    except PRE_WRITE_START_ERRORS as error:
+        if not claim.resumed:
+            _release_claim(claim)
+        raise PublishUnavailable(
+            "The send could not be queued; approval may be retried."
+        ) from error
+    except Exception as error:
+        raise PublishUnavailable(
+            "Queuing the send had an unknown outcome; approve again to reconcile."
+        ) from error
+    return started["run_id"]
+
+
+def _release_claim(claim):
+    approval = {
+        **claim.approval,
+        "publish_error": "Failed before the send was queued; approval may be retried.",
+    }
+    with get_db_cursor() as cursor:
+        _save_approval(cursor, claim.row["id"], "awaiting_approval", approval)
 
 
 EVALUATION_VERSION = "proposal-evaluation-v1"
@@ -557,18 +616,32 @@ def _stored_evaluation(row, offer):
         return None
 
 
+def _list_conditions(status, offer_key, league_id, season):
+    """WHERE terms on each offer's latest row. Without a status, one offer_key's lookup
+    (the trade-submit run reading its offer back) sees that row whatever its status, so it
+    can tell an offer that isn't approved from an unknown key."""
+    if status is None and offer_key is None:
+        status = "awaiting_approval"
+    conditions, params = [], []
+    for column, value in (
+        ("status", status),
+        ("counter_offer->>'offer_key'", offer_key),
+        ("league_id", league_id),
+        ("season", season),
+    ):
+        if value is not None:
+            conditions.append(f"{column} = %s")
+            params.append(value)
+    return conditions, params
+
+
 def list_offers(
-    status="awaiting_approval", league_id=None, season=None, limit=50, offset=0
+    status=None, league_id=None, season=None, limit=50, offset=0, *, offer_key=None
 ):
     # execution_log keeps one row per lifecycle step, so status is filtered on each
     # offer's latest row, never on any row: an offer already submitted must not still
     # list as awaiting approval because its earlier staged row says so.
-    conditions = ["status = %s"]
-    params = [status]
-    for field, value in (("league_id", league_id), ("season", season)):
-        if value is not None:
-            conditions.append(f"{field} = %s")
-            params.append(value)
+    conditions, params = _list_conditions(status, offer_key, league_id, season)
     offer_group = "COALESCE(counter_offer->>'offer_key', id::text)"
     with get_db_cursor() as cursor:
         cursor.execute(

@@ -172,6 +172,26 @@ def test_start_run_records_the_requested_trigger(catalog, monkeypatch, trigger):
     assert published.call_args.kwargs["trigger"] == trigger
 
 
+def test_start_run_passes_parent_and_dedupe_key(catalog, monkeypatch):
+    """Trade approval parents its send to the scan and keys it on the offer."""
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)
+    published = Mock(return_value={"run_id": "r1", "status": "duplicate"})
+    monkeypatch.setattr(jobs_service, "publish_run", published)
+
+    result = jobs_service.start_run(
+        "sample-job",
+        params={"count": 1},
+        requested_by="example-reviewer",
+        parent_run_id="scan-run",
+        dedupe_key="sample-job@offer",
+    )
+
+    assert result == {"run_id": "r1", "status": "duplicate"}
+    assert published.call_args.kwargs["parent_run_id"] == "scan-run"
+    assert published.call_args.kwargs["dedupe_key"] == "sample-job@offer"
+
+
 def test_downstream_start_passes_the_requested_trigger(catalog, monkeypatch):
     monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
     monkeypatch.setattr(jobs_service, "overlap_refuses", lambda *_: False)

@@ -14,8 +14,8 @@ flowchart LR
     S -->|eligible scores| R[Worker ranking]
     R -->|winning evidence| P[Grounded pitch]
     P -->|offer and evaluation| A[Stage for human approval]
-    A -->|approved offer key| Q[trade_submissions queue]
-    Q -->|execution gates| W[Worker and ESPN]
+    A -->|approved offer key| Q[trade-submit launcher run]
+    Q -->|trade_builder.js --offer-key, execution gates| W[Worker and ESPN]
 ```
 
 ## Which evaluation do you need?
@@ -81,10 +81,10 @@ Editing the message at approval creates a new key over the exact edited text. Co
 stateDiagram-v2
     awaiting_approval --> superseded: Edited approval creates replacement offer
     awaiting_approval --> approval_pending: Lock and commit claim plus audit
-    approval_pending --> approved: Broker confirms publication
-    approval_pending --> awaiting_approval: Proven pre-publication failure
+    approval_pending --> approved: trade-submit run queued
+    approval_pending --> awaiting_approval: Run provably not queued
     approved --> approved: Duplicate returns original receipt
-    approval_pending --> approval_pending: Ambiguous outcome stays blocked
+    approval_pending --> approved: Approve again resumes the claim
 ```
 
 | Rule | Behavior |
@@ -95,16 +95,31 @@ stateDiagram-v2
 | Authentication | No application-layer auth; deployment trust boundary applies |
 | Lock | Read all rows for key under PostgreSQL advisory lock |
 | Eligible state | `awaiting_approval` |
-| Blocking history | Pending, submitting or submitted row prevents new publication |
+| Blocking history | A submitting or submitted row prevents a new send; a pending row is resumed |
 | Committed before send | Exact payload, approver, time, tracking ID and `bot_decisions` audit |
-| New confirmed publication | 202, `approved` |
-| Duplicate approval | 200, original receipt, no send |
+| Send | A `trade-submit` launcher run, params `{offer_key}`, `requested_by` the approver, parent the staging scan's run (`counter_offer.scan_run_id`) |
+| Run dedupe key | `trade-submit@<offer_key>`: one run per key, however often it is approved |
+| Run queued | 202, `approved`, with the receipt's `run_id` |
+| Duplicate approval | 200, original receipt, no new run |
+
+The run is queued through the Jobs API's `publish_run` (a `job_runs` command), in its own
+transaction after the claim commits. If it provably wrote nothing (catalog unmounted, job
+missing from the catalog), the claim goes back to `awaiting_approval` with a
+`publish_error`, and anyone may approve again. Any other failure leaves
+`approval_pending` and returns 503. Approving again resumes that claim, keeping its
+approver and tracking ID; the dedupe key returns the run the first attempt queued, if it
+did, so a retry can't send twice. A changed message on a pending claim is 409.
+
+The run reads the offer back with `GET /v1/trade/offers?offer_key=<key>`. With `offer_key`
+and no `status`, that returns the key's latest row in any status, so the worker can tell
+an offer that isn't approved from an unknown key.
 
 An omitted or null `message`, or text exactly equal to the staged message, keeps the
 original key and approval behavior. For changed text, core creates a replacement row,
 marks all staged copies of the original key `superseded`, and commits the replacement
-claim and audit in the same transaction. The published payload contains the edited
-`message` and approval for the new key; the response's `offer_key` is that new key.
+claim and audit in the same transaction. The approved payload contains the edited
+`message` and approval for the new key, and the run is queued for that key; the response's
+`offer_key` is that new key.
 An existing offer under the edited key returns 409 rather than merging histories.
 
 ## How is an offer resolved?
@@ -123,20 +138,20 @@ Until resolved, the offer's outgoing players are committed (see [trade context](
 text, which can be null) and `message_edited: true` on edited rows. Unedited rows return
 `drafted_message: null`, `message_edited: false` and `edited_by: null`. Edited rows expose
 `edited_by`, the self-reported label of the person who changed the message.
-`approval.approved_by` identifies the latest successful approver; after a proven failed
-publish, a different person may re-approve without changing the editor.
+`approval.approved_by` identifies the latest successful approver; after a run that
+provably wasn't queued, a different person may re-approve without changing the editor.
 `evaluation.pitch` remains the generated, evidence-backed draft. Human edits are not
 validated against score evidence and do not change the stored evaluation.
 
 Repeating the same edited approval through either the original or new key returns 200
 with `duplicate: true`, the new key and the original receipt. Omitting the message on
 either key also returns that receipt. A different message after approval returns 409.
-Pending or ambiguous publication remains blocked. A proven pre-publication failure can
-retry the same edited offer through either key; the original draft stays superseded.
+A pending claim resumes on either key. A run that provably wasn't queued can be retried
+for the same edited offer through either key; the original draft stays superseded.
 Echoing the original draft through the original key also returns the replacement receipt,
 even when that draft exceeds 1000 characters. Confirmed duplicate receipts through the
 original key do not require the edited-key lock, so a worker claim does not block them.
-A busy edited-key lock still returns retryable 409 when a new publication is needed.
+A busy edited-key lock still returns retryable 409 when a new run is needed.
 If a later scan stages the original key again, its live staged row takes precedence over
 the historical redirect and can be approved independently.
 
@@ -144,8 +159,8 @@ The 1000-character limit is a fallback pending the ESPN request capture in
 [fantasy-browser-worker#124](https://github.com/cvillarr23/fantasy-browser-worker/issues/124).
 Blank or oversized text returns 422 before changing any rows.
 
-:::warning[An approved receipt is a broker receipt]
-Worker enable, dry-run, approval and execution gates still apply. For an ambiguous send or crash, reconcile broker, worker and ESPN evidence before releasing the indefinitely pending claim.
+:::warning[An approved receipt is a queued run, not an ESPN send]
+Worker enable, dry-run, approval and execution gates still apply, and the run waits behind other `espn-session` runs. `trade-submit` never retries (`max_attempts: 1`): if its run fails or ESPN's outcome is unknown, check the run on the Runs tab and ESPN's pending trades before sending the offer again.
 :::
 
 ## Related
