@@ -1,5 +1,5 @@
 """
-Stores ESPN's league-wide market signal - percent owned, percent started, the 7-day change
+Stores ESPN's league-wide market signal - percent owned, percent started, the 24h change
 in percent owned, and positional rank - per player per week in `espn_player_ownership`.
 
 Same ESPN auth and raw `kona_player_info` request as sync_skill_position_crosswalk, sorted
