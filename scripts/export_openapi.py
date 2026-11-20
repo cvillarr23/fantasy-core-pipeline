@@ -78,6 +78,7 @@ DESCRIPTIONS = {
     "POST /v1/trade/incoming/{espn_transaction_id}/triage": "Dismiss or snooze an incoming offer.",
     "GET /v1/trade/offers": "List generated trade proposals with their stored score evidence.",
     "POST /v1/trade/offers/{offer_key}/approve": "Approve a staged proposal and queue it.",
+    "POST /v1/trade/offers/{offer_key}/dismiss": "Retire an unapproved proposal so it leaves the approval list.",
     "POST /v1/trade/offers/{offer_key}/resolution": "Record how ESPN resolved a sent offer, freeing its players for new trades.",
     "POST /v1/trade/evaluate":"Compute raw VORP delta for a trade.",
     "POST /v1/trade/score": "Compute the schedule-aware trade score.",

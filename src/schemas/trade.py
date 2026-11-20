@@ -12,6 +12,7 @@ OfferStatus = Literal[
     "approval_pending",
     "approved",
     "superseded",
+    "dismissed",
     "submit_blocked",
     "dry_run_filled",
     "submitting",
@@ -55,6 +56,31 @@ class TradeApprovalResponse(BaseModel):
     tracking_id: str
     approved_by: str
     approved_at: datetime
+    duplicate: bool = False
+
+
+class TradeDismissRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dismissed_by: str = Field(
+        min_length=1,
+        max_length=200,
+        description="Self-reported dismisser; trade routes have no application-layer authentication.",
+    )
+
+    @field_validator("dismissed_by")
+    @classmethod
+    def nonempty_dismisser(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("dismissed_by must not be blank")
+        return value
+
+
+class TradeDismissResponse(BaseModel):
+    offer_key: str
+    reason: Literal["manual", "replaced_by_scan"]
+    dismissed_by: str
+    dismissed_at: datetime
     duplicate: bool = False
 
 
