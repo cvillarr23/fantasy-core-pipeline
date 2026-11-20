@@ -550,6 +550,18 @@
   and the consumer skips a still-queued step as `chain_ended` instead of starting it.
 - `src/launcher/heartbeat.py` writes `launcher_heartbeat` (time plus `job_runs` and its DLQ
   depths) every 15s on its own thread, for `GET /v1/launcher/health`.
+- Two launcher replicas run. Only the holder of the `fantasy-job-launcher` k8s Lease
+  (`src/launcher/leader.py`) runs anything past catalog validation, heartbeat included, so a
+  stalled leader still trips the heartbeat alert. A killed leader is replaced in about 17s,
+  inside the scheduler's 2-minute `SLOT_GRACE`. SIGTERM releases the Lease after the inline
+  runner has stopped, so the standby takes over at once. A lost Lease exits 1 within the Lease
+  duration, so the process never has to restart threads in place. On taking over, the new
+  leader first fails every `running` inline row as `launcher_lost`: inline runs are children of
+  the launcher that started them, and an unended one would hold `overlap: forbid` until it
+  orphaned. The watcher retries them. Keep all launcher state in Postgres or k8s, never in
+  memory, or a failover loses it. `tests/conftest.py` stubs `k8s_client._load_config`, since
+  a test that forgets to inject a k8s API would otherwise reach the real cluster through the
+  local kubeconfig.
 - `run_log_service.adopt_run` keeps the launcher's catalog `job_name` (`lineup-optimizer`).
   The entrypoint's own name goes to `summary.entrypoint`. Overlap, the cap and run_log alerts
   key on catalog names.

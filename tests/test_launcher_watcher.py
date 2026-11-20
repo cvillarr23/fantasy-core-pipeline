@@ -353,3 +353,14 @@ def test_unreadable_cancel_check_keeps_waiting_for_the_poll_interval(monkeypatch
     stop = FakeStop()
     watcher._wait_for_next_pass(stop)
     assert len(stop.waited) == watcher_module.POLL_SECONDS // watcher_module.CANCEL_POLL_SECONDS
+
+
+def test_inline_run_failed_at_takeover_is_retried_while_attempts_remain():
+    lost = run(
+        job_name="rumor-syncer", status="failure", executor="inline", k8s_job=None
+    )
+    watcher, store, _, inline = make_watcher([lost])
+    inline.is_running.return_value = False
+    watcher.reconcile([])
+    assert store.retried == [("r1", 2, 1)]
+    assert store.finished == []

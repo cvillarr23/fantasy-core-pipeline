@@ -203,6 +203,8 @@ def test_launcher_consumes_events_into_the_scheduler():
         patch.object(launcher, "load_catalog_from_env"),
         patch.object(launcher.k8s, "validate_catalog"),
         patch.object(launcher.signal, "signal"),
+        patch.object(launcher, "LeaseElector") as elector,
+        patch.object(launcher, "RunStore"),
         patch.object(launcher, "InlineRunner"),
         patch.object(launcher, "PostgresSchedulerState"),
         patch.object(launcher, "Watcher"),
@@ -212,6 +214,7 @@ def test_launcher_consumes_events_into_the_scheduler():
         patch.object(launcher, "EventConsumer") as consumer,
         patch.object(launcher.threading, "Thread") as thread,
     ):
+        elector.return_value.lost = threading.Event()
         assert launcher.main() == 0
     consumer.assert_called_once_with(scheduler.return_value.handle_event)
     targets = {c.kwargs["name"]: c.kwargs["target"] for c in thread.call_args_list}

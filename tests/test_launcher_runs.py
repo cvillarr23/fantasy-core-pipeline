@@ -171,3 +171,12 @@ def test_run_store_admission_takes_the_advisory_lock_first(monkeypatch):
     assert cursor.queries == [
         ("SELECT pg_advisory_xact_lock(%s)", (runs.ADMISSION_LOCK_KEY,))
     ]
+
+
+def test_fail_running_inline_ends_only_running_inline_rows():
+    cursor = Cursor([("r1",), ("r2",)])
+    assert Runs(cursor).fail_running_inline("launcher_lost") == ["r1", "r2"]
+    query, params = cursor.queries[0]
+    assert "status='failure'" in query and "end_reason=%s" in query
+    assert "executor='inline' AND status='running'" in query
+    assert params == ("launcher_lost",)
