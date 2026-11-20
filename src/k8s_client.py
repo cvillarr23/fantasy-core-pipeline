@@ -41,3 +41,9 @@ def core_v1_api() -> client.CoreV1Api:
     """Same in-cluster/kubeconfig fallback as batch_v1_api, for pod (not Job) reads."""
     _load_config()
     return client.CoreV1Api()
+
+
+def coordination_v1_api() -> client.CoordinationV1Api:
+    """For the launcher's leader-election Lease."""
+    _load_config()
+    return client.CoordinationV1Api()

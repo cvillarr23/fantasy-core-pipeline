@@ -450,3 +450,15 @@ def test_watched_runs_carry_their_params(postgres):
     (watched,) = RunStore().watched_runs()
     assert watched.run_id == identity
     assert watched.params["league_id"] == "42"
+
+
+def test_fail_running_inline_leaves_pod_and_finished_rows_alone(postgres):
+    inline = claimed(executor="inline")
+    pod = claimed("trade-scan", k8s_job="trade-scan-x-a1")
+    done = claimed("lineup-optimizer", executor="inline")
+    run_log.finish_run(done, "success")
+    assert RunStore().fail_running_inline("launcher_lost") == [inline]
+    assert row(postgres, inline)[:2] == ("failure", "launcher_lost")
+    assert row(postgres, inline, "finished_at")[0] is not None
+    assert row(postgres, pod)[:2] == ("running", None)
+    assert row(postgres, done)[:2] == ("success", None)

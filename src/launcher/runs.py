@@ -367,6 +367,18 @@ class Runs:
             (status, end_reason, error, run_id, *guard_params),
         )
 
+    def fail_running_inline(self, end_reason):
+        """Fails every `running` inline row, returning their ids. Called by a launcher that
+        just became leader, before its inline runner starts: such a row's process was a child
+        of a launcher that is gone, so it would otherwise hold overlap until it orphaned.
+        The watcher retries the ones with attempts left."""
+        self.c.execute(
+            """UPDATE run_log SET status='failure', end_reason=%s, finished_at=now()
+            WHERE executor='inline' AND status='running' RETURNING id""",
+            (end_reason,),
+        )
+        return [row[0] for row in self.c.fetchall()]
+
     def finish_chain_root(self, root_id, status, end_reason):
         self.c.execute(
             """UPDATE run_log SET status=%s, end_reason=%s, finished_at=now()
@@ -519,6 +531,9 @@ class RunStore:
                 run_id, status, end_reason, error, force, expected_attempt
             )
         )
+
+    def fail_running_inline(self, end_reason):
+        return self._with_runs(lambda runs: runs.fail_running_inline(end_reason))
 
     def watched_runs(self, run_ids_with_k8s_job=(), max_attempts=None):
         return self._with_runs(

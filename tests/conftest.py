@@ -153,3 +153,16 @@ def no_live_nfl_bye_schedule():
     with patch("src.nfl_byes.load_schedule", side_effect=RuntimeError("no live NFL schedule in tests")):
         yield
     nfl_byes.load_bye_weeks.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def no_live_kubernetes(monkeypatch):
+    """`src.k8s_client` falls back to the local kubeconfig, which on a dev machine points at
+    the real cluster: a test that forgets to inject a k8s API would read or write it. Tests
+    inject fakes instead; this turns a missed injection into an error."""
+    from src import k8s_client
+
+    def unavailable():
+        raise RuntimeError("no live Kubernetes in tests")
+
+    monkeypatch.setattr(k8s_client, "_load_config", unavailable)
