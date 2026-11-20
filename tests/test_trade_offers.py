@@ -244,6 +244,22 @@ def test_send_is_parented_to_the_staging_scan(client, boundary, scan_run_id, par
     assert start_run.call_args.kwargs["parent_run_id"] == parent
 
 
+def test_edited_send_keeps_the_staging_scan(client, boundary):
+    rows, start_run, _ = boundary
+    rows[0]["counter_offer"]["scan_run_id"] = "scan-7"
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = client.post(
+        f"/v1/trade/offers/{key}/approve",
+        json={"approved_by": "conor", "message": "My own pitch"},
+    )
+    assert response.status_code == 202, response.text
+    assert rows[-1]["counter_offer"]["scan_run_id"] == "scan-7"
+    assert start_run.call_args.kwargs["parent_run_id"] == "scan-7"
+    assert start_run.call_args.kwargs["params"] == {
+        "offer_key": response.json()["offer_key"]
+    }
+
+
 def test_pending_claim_without_audit_is_rejected(client, boundary):
     rows, start_run, _ = boundary
     rows[0]["status"] = "approval_pending"
