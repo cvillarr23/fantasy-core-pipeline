@@ -237,13 +237,20 @@ def evaluate_trade_endpoint(payload: TradeEvaluationRequest):
 
 @trade_router.get("/offers", response_model=TradeOfferList)
 def list_trade_offers(
-    status: OfferStatus = "awaiting_approval",
+    status: OfferStatus | None = Query(
+        None,
+        description="Status of each offer's latest row. Defaults to awaiting_approval, "
+        "or to any status when offer_key is given.",
+    ),
+    offer_key: str | None = Query(None, pattern=r"^[0-9a-f]{64}$"),
     league_id: str | None = None,
     season: int | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    return trade_offer_service.list_offers(status, league_id, season, limit, offset)
+    return trade_offer_service.list_offers(
+        status, league_id, season, limit, offset, offer_key=offer_key
+    )
 
 
 @trade_router.post(

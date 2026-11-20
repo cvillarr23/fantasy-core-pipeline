@@ -12,7 +12,6 @@ from src.api import routes
 from src.launcher.events import emit_event
 from src.queue_contracts import PUBLISHED_EXCHANGES, PUBLISHED_QUEUES
 from src.services import activity_service, activity_runner
-from tests.test_trade_offers import boundary as offer_boundary, staged_counter
 from tests.test_trade_inbox import (
     boundary,
     reviewed,
@@ -185,36 +184,6 @@ def test_injury_alert_publisher():
     sent = connection.channel.return_value.basic_publish.call_args.kwargs
     assert sent["routing_key"] in SPEC["channels"]
     validate("InjuryAlert", json.loads(sent["body"]))
-
-
-def test_trade_submission(client, offer_boundary):
-    rows, channel, _ = offer_boundary
-    rows[0] = staged_counter()
-    rows[0]["counter_offer"]["message"] = "Example counter"
-    from src.services import trade_offer_service
-
-    offer = rows[0]["counter_offer"]
-    key_input = dict(
-        leagueId=rows[0]["league_id"],
-        seasonId=str(rows[0]["season"]),
-        fromTeamId=offer["from_team_id"],
-        toTeamId=offer["to_team_id"],
-        incomingPlayerIds=offer["incoming_player_ids"],
-        outgoingPlayerIds=offer["outgoing_player_ids"],
-        message=offer["message"],
-        relatedTransactionId=offer["related_transaction_id"],
-    )
-    offer["offer_key"] = trade_offer_service.compute_offer_key(key_input)
-    key = rows[0]["counter_offer"]["offer_key"]
-    assert (
-        client.post(
-            f"/v1/trade/offers/{key}/approve", json={"approved_by": "example-reviewer"}
-        ).status_code
-        == 202
-    )
-    sent = channel.basic_publish.call_args.kwargs
-    assert sent["routing_key"] == "trade_submissions"
-    validate("TradeSubmission", json.loads(sent["body"]))
 
 
 @pytest.mark.parametrize(

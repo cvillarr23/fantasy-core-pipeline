@@ -51,20 +51,6 @@ channels:
           exclusive: false
           autoDelete: false
         bindingVersion: 0.3.0
-  trade_submissions:
-    address: trade_submissions
-    messages:
-      TradeSubmission:
-        $ref: '#/components/messages/TradeSubmission'
-    bindings:
-      amqp:
-        is: queue
-        queue:
-          name: trade_submissions
-          durable: true
-          exclusive: false
-          autoDelete: false
-        bindingVersion: 0.3.0
   trade_responses:
     address: trade_responses
     messages:
@@ -141,12 +127,6 @@ operations:
       $ref: '#/channels/draft_targets'
     messages:
     - $ref: '#/channels/draft_targets/messages/DraftTarget'
-  publish_trade_submissions:
-    action: send
-    channel:
-      $ref: '#/channels/trade_submissions'
-    messages:
-    - $ref: '#/channels/trade_submissions/messages/TradeSubmission'
   publish_trade_responses:
     action: send
     channel:
@@ -257,29 +237,6 @@ components:
           name: Example Player
           team: XYZ
           new_injury_status: Out
-    TradeSubmission:
-      name: TradeSubmission
-      title: TradeSubmission
-      summary: Submit a human-approved staged offer using ESPN player IDs. approval binds the stored offer
-        key; a counter preserves related_transaction_id and thread_root_id.
-      contentType: application/json
-      payload:
-        $ref: '#/components/schemas/TradeSubmission'
-      examples:
-      - name: placeholder IDs
-        payload:
-          tracking_id: 00000000-0000-4000-8000-000000000001
-          traceparent: null
-          season: 2030
-          to_team_id: example-team
-          incoming_player_ids:
-          - example-espn-incoming
-          outgoing_player_ids:
-          - example-espn-outgoing
-          source: proposal
-          approval:
-            offer_key: example-offer-key
-            approved_by: example-reviewer
     TradeResponse:
       name: TradeResponse
       title: TradeResponse
@@ -558,62 +515,6 @@ components:
       - name
       - team
       - new_injury_status
-    TradeSubmission:
-      type: object
-      additionalProperties: false
-      properties:
-        tracking_id:
-          type: string
-        traceparent:
-          type:
-          - string
-          - 'null'
-        season:
-          type: integer
-        to_team_id:
-          type: string
-        incoming_player_ids:
-          type: array
-          items:
-            type: string
-          minItems: 1
-        outgoing_player_ids:
-          type: array
-          items:
-            type: string
-          minItems: 1
-        source:
-          type: string
-          enum:
-          - counter_offer
-          - proposal
-          - manual
-        approval:
-          type: object
-          additionalProperties: false
-          properties:
-            offer_key:
-              type: string
-            approved_by:
-              type: string
-          required:
-          - offer_key
-          - approved_by
-        message:
-          type: string
-        related_transaction_id:
-          type: string
-        thread_root_id:
-          type: string
-      required:
-      - tracking_id
-      - traceparent
-      - season
-      - to_team_id
-      - incoming_player_ids
-      - outgoing_player_ids
-      - source
-      - approval
     TradeResponse:
       type: object
       additionalProperties: false

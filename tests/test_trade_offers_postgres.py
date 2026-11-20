@@ -11,8 +11,9 @@ from psycopg2 import sql
 import pytest
 
 from src import migrations
+from src.services import jobs_service
 from src.services import trade_offer_service as service
-from tests.test_trade_offers import staged
+from tests.test_trade_offers import fake_start_run, staged
 
 
 @pytest.fixture
@@ -31,7 +32,7 @@ def postgres(monkeypatch):
 
     @contextmanager
     def cursor_context():
-        # A separate connection lets the publisher observe only committed claims.
+        # A separate connection lets the run starter observe only committed claims.
         transaction = psycopg2.connect(dsn, options=f"-c search_path={schema}")
         try:
             with transaction, transaction.cursor() as cursor:
@@ -43,7 +44,7 @@ def postgres(monkeypatch):
         migrations.run_migrations()
     with (
         patch.object(service, "get_db_cursor", cursor_context),
-        patch("src.api.routes.pika.BlockingConnection") as connection,
+        patch.object(jobs_service, "start_run", fake_start_run()) as start_run,
     ):
         original = staged("  Fair deal?  ")
         with cursor_context() as cursor:
@@ -58,9 +59,7 @@ def postgres(monkeypatch):
                     ),
                 )
         try:
-            yield cursor_context, original["counter_offer"][
-                "offer_key"
-            ], connection.return_value.channel.return_value
+            yield cursor_context, original["counter_offer"]["offer_key"], start_run
         finally:
             conn.rollback()
             with conn, conn.cursor() as cursor:
@@ -70,25 +69,26 @@ def postgres(monkeypatch):
             conn.close()
 
 
-def test_edited_claim_and_audit_committed_before_publish(postgres):
-    db, key, channel = postgres
+def test_edited_claim_and_audit_committed_before_the_run_starts(postgres):
+    db, key, start_run = postgres
+    start = start_run.side_effect
 
-    def publish(**kwargs):
-        sent = json.loads(kwargs["body"])
+    def check_committed(name, **kwargs):
         with db() as cursor:
             cursor.execute(
                 "SELECT status, counter_offer FROM execution_log ORDER BY id"
             )
             originals, older, edited = cursor.fetchall()
             assert originals[0] == older[0] == "superseded"
-            assert originals[1]["superseded_by"] == sent["approval"]["offer_key"]
+            assert originals[1]["superseded_by"] == kwargs["params"]["offer_key"]
             assert edited[0] == "approval_pending"
-            assert edited[1]["message"] == sent["message"] == "Edited pitch"
+            assert edited[1]["message"] == "Edited pitch"
             assert edited[1]["drafted_message"] == "  Fair deal?  "
             cursor.execute("SELECT inputs FROM bot_decisions")
             assert cursor.fetchone()[0]["payload"]["message"] == "Edited pitch"
+        return start(name, **kwargs)
 
-    channel.basic_publish.side_effect = publish
+    start_run.side_effect = check_committed
     first = service.approve_offer(key, "conor", "Edited pitch")
     assert first["offer_key"] != key
     second = service.approve_offer(key, "other", "Edited pitch")
@@ -98,11 +98,11 @@ def test_edited_claim_and_audit_committed_before_publish(postgres):
     with db() as cursor:
         cursor.execute("SELECT status FROM execution_log ORDER BY id")
         assert cursor.fetchall() == [("superseded",), ("superseded",), ("approved",)]
-    channel.basic_publish.assert_called_once()
+    start_run.assert_called_once()
 
 
 def test_failed_audit_rolls_back_edit_and_supersession(postgres):
-    db, key, channel = postgres
+    db, key, start_run = postgres
     with patch(
         "src.api.routes._record_bot_decision", side_effect=RuntimeError("audit failed")
     ):
@@ -116,13 +116,13 @@ def test_failed_audit_rolls_back_edit_and_supersession(postgres):
         ]
         cursor.execute("SELECT count(*) FROM bot_decisions")
         assert cursor.fetchone() == (0,)
-    channel.basic_publish.assert_not_called()
+    start_run.assert_not_called()
 
 
 def test_duplicate_receipt_while_worker_holds_replacement_lock(postgres):
     from concurrent.futures import ThreadPoolExecutor
 
-    db, key, channel = postgres
+    db, key, start_run = postgres
     first = service.approve_offer(key, "editor", "Edited pitch")
     with db() as cursor:
         cursor.execute(
@@ -140,7 +140,7 @@ def test_duplicate_receipt_while_worker_holds_replacement_lock(postgres):
             finally:
                 # Release locks even if a regression causes the retry to wait.
                 cursor.connection.commit()
-    channel.basic_publish.assert_called_once()
+    start_run.assert_called_once()
 
 
 @pytest.mark.parametrize("dry_run", [True, False, None])
@@ -174,7 +174,7 @@ def test_offer_key_expression_index_is_migrated_idempotently(postgres):
 
 
 def test_restaged_original_is_not_hidden_by_redirect(postgres):
-    db, key, channel = postgres
+    db, key, start_run = postgres
     service.approve_offer(key, "editor", "Edited pitch")
     with db() as cursor:
         cursor.execute(
@@ -187,7 +187,7 @@ def test_restaged_original_is_not_hidden_by_redirect(postgres):
     result = service.approve_offer(key, "new approver", "  Fair deal?  ")
     assert result["offer_key"] == key
     assert service.approve_offer(key, "retry") == {**result, "duplicate": True}
-    assert channel.basic_publish.call_count == 2
+    assert start_run.call_count == 2
 
 
 def test_list_shows_each_offer_once_at_its_latest_status(postgres):

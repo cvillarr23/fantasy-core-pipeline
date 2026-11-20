@@ -7492,6 +7492,17 @@
             "title": "Offer Key",
             "type": "string"
           },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
           "status": {
             "const": "approved",
             "title": "Status",
@@ -12304,25 +12315,50 @@
         "operationId": "list_trade_offers_v1_trade_offers_get",
         "parameters": [
           {
+            "description": "Status of each offer's latest row. Defaults to awaiting_approval, or to any status when offer_key is given.",
             "in": "query",
             "name": "status",
             "required": false,
             "schema": {
-              "default": "awaiting_approval",
-              "enum": [
-                "awaiting_approval",
-                "approval_pending",
-                "approved",
-                "superseded",
-                "dismissed",
-                "submit_blocked",
-                "dry_run_filled",
-                "submitting",
-                "submitted",
-                "failure"
+              "anyOf": [
+                {
+                  "enum": [
+                    "awaiting_approval",
+                    "approval_pending",
+                    "approved",
+                    "superseded",
+                    "dismissed",
+                    "submit_blocked",
+                    "dry_run_filled",
+                    "submitting",
+                    "submitted",
+                    "failure"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "title": "Status",
-              "type": "string"
+              "description": "Status of each offer's latest row. Defaults to awaiting_approval, or to any status when offer_key is given.",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offer_key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Offer Key"
             }
           },
           {

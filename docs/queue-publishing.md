@@ -32,7 +32,7 @@ sequenceDiagram
 
 Trigger queues go through the **outbox**. The API saves the action and the message in one transaction, publishes immediately, and leaves retries to the activity runner. A saved message is never lost if the broker is down.
 
-The trade queues skip the outbox. They claim the offer in `execution_log` first, then publish, and reconcile by hand if the result is uncertain.
+The trade queues skip the outbox. They claim the offer in `execution_log` first, then publish, and reconcile by hand if the result is uncertain. An approved outgoing offer is the exception: its claim queues a `trade-submit` launcher run through `job_runs`, keyed `trade-submit@<offer_key>`, so approving a pending claim again resumes it instead of needing a hand reconcile.
 
 ## What queues are there?
 
@@ -41,11 +41,10 @@ The trade queues skip the outbox. They claim the offer in `execution_log` first,
 | `lineup_updates` | Outbox | `POST /v1/trigger/lineup` | `lineup-<team>-<hash>` |
 | `waiver_actions` | Outbox | `POST /v1/trigger/waiver` | `waiver-<team>-<hash>` |
 | `draft_targets` | Outbox | `POST /v1/trigger/draft-pick` | `<league>:<pick_number>:<espn_id>` |
-| `trade_submissions` | Direct from API | `POST /v1/trade/offers/{offer_key}/approve` | `offer_key` |
 | `trade_responses` | Direct from API | `POST /v1/trade/incoming/{id}/decision` and `.../decision/retry` | `decision_key` |
 | `trade_negotiations` | Direct from API | `POST /v1/trade/incoming/{id}/counter` | Publication key in `outcome_details` |
 | `waiver_actions` (alerts) | Ingestor | `sync_players` | None |
-| `job_runs` | Run outbox | `launcher.publish.publish_run` (Jobs API, scheduler) | `run_log.dedupe_key` |
+| `job_runs` | Run outbox | `launcher.publish.publish_run` (Jobs API, scheduler, `POST /v1/trade/offers/{offer_key}/approve`) | `run_log.dedupe_key` |
 
 The outboxes publish with a passive queue declaration, so `lineup_updates`, `waiver_actions`, `draft_targets` and `job_runs` must already exist on the broker. The trade queues are declared durable on publish.
 
