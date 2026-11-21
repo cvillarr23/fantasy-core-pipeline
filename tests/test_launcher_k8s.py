@@ -254,6 +254,45 @@ def test_validate_catalog_accepts_fixture_and_rejects_unknown_names(monkeypatch)
     assert "WORKER_IMAGE" in message
 
 
+ARMING_ENV = {"TRADE_DRY_RUN": "false", "TRADE_SUBMIT_ENABLED": "true"}
+
+
+def _env_values(job):
+    (container,) = job["spec"]["template"]["spec"]["containers"]
+    return {e["name"]: e.get("value") for e in container["env"]}
+
+
+def _armed_catalog():
+    catalog = CATALOG.model_copy(deep=True)
+    armed = catalog.profiles["worker"].model_copy(deep=True)
+    armed.secrets.append("trade-arming")
+    catalog.profiles["worker-submit"] = armed
+    catalog.jobs["trade-submit"] = catalog.jobs["trade-scan"].model_copy(
+        update={"profile": "worker-submit"}
+    )
+    return catalog
+
+
+def test_trade_arming_bundle_arms_only_its_profile():
+    catalog = _armed_catalog()
+    k8s.validate_catalog(catalog)
+    resolved = catalog.resolve("trade-submit")
+    job = k8s.build_job(command("trade-submit"), resolved, list(resolved.job.command))
+    armed = _env_values(ApiClient().sanitize_for_serialization(job))
+    assert {name: armed[name] for name in ARMING_ENV} == ARMING_ENV
+    pod_jobs = [n for n in CATALOG.jobs if CATALOG.resolve(n).executor == "pod"]
+    assert "trade-scan" in pod_jobs
+    for name in pod_jobs:
+        assert not set(ARMING_ENV) & set(_env_values(build(name))), name
+
+
+def test_only_the_arming_bundle_sets_arming_env():
+    for name, bundle in k8s.BUNDLES.items():
+        env, _ = bundle()
+        names = {e.name for e in env}
+        assert bool(names & set(ARMING_ENV)) == (name == "trade-arming"), name
+
+
 def test_create_job_treats_already_exists_as_launched():
     api = MagicMock()
     api.create_namespaced_job.side_effect = ApiException(status=409)

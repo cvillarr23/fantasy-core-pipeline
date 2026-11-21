@@ -107,7 +107,19 @@ BUNDLES = {
         ],
     ),
     "league-config": lambda: ([], [_config_map_from("fantasy-league-config")]),
+    "trade-arming": lambda: (_trade_arming_env(), []),
 }
+
+
+def _trade_arming_env():
+    """Arms trade_builder.js to send for real. Literal values, never a Secret or ConfigMap, so
+    the pod spec alone shows the run is armed; as `env` they also win over any envFrom.
+    Only fantasy-infra's `worker-submit` profile (the `trade-submit` job) may name this bundle:
+    the shared ConfigMaps stay unarmed because trade-scan and trade-inbox import them."""
+    return [
+        client.V1EnvVar(name="TRADE_DRY_RUN", value="false"),
+        client.V1EnvVar(name="TRADE_SUBMIT_ENABLED", value="true"),
+    ]
 
 # Each volume returns (volume, mount, env).
 VOLUMES = {
