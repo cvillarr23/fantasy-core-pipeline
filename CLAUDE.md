@@ -576,7 +576,10 @@
   fantasy-infra's Secret, ConfigMap and key names, and change only with its manifests.
   Non-secret values (DB_HOST, REDIS_HOST, CORE_API_BASE_URL, OTLP endpoints) and the
   `CORE_IMAGE`/`WORKER_IMAGE` image refs come from the launcher's own env. `validate_catalog`
-  rejects unknown names at startup. `tests/test_launcher_k8s.py` snapshots the built Jobs
+  rejects unknown names at startup. `trade-arming` sets literal `TRADE_DRY_RUN=false` and
+  `TRADE_SUBMIT_ENABLED=true` and reads no Secret or ConfigMap; only infra's `worker-submit`
+  profile (the `trade-submit` job) names it, and no other bundle sets either var.
+  `tests/test_launcher_k8s.py` snapshots the built Jobs
   against CronJob specs vendored in `tests/fixtures/cronjobs/`. Its allowlist of extra env is
   exact, so update it deliberately.
 - `python -m src.cli jobs ...` and the MCP tools (`list_jobs`, `run_job`, `get_run`, `cancel_run`,
