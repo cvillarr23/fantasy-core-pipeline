@@ -87,6 +87,7 @@ from croniter import croniter
 from src.launcher.approvals import start_then
 from src.launcher.catalog import ApprovalStep, Catalog, Chain, ChainStep, Schedule, Season
 from src.launcher.runs import FAN_OUT, WAITING, ApprovalRun, Runs
+from src.services import trade_offer_expiry
 
 if TYPE_CHECKING:
     from src.launcher.events import JobEvent
@@ -1154,8 +1155,13 @@ class PostgresSchedulerState:
         )
 
     def expire_approvals(self, now: datetime) -> list[str]:
+        """Expires due approvals and, in the same transaction, the trade offers they gate."""
         with self._cursor() as c:
-            return Runs(c).expire_approvals(now)
+            trade_offer_expiry.lock_expiring_offers(c, now)
+            expired = Runs(c).expire_approvals(now)
+            for key in trade_offer_expiry.dismiss_expired_offers(c, expired):
+                logger.info("Trade offer %s expired unapproved", key)
+            return expired
 
     def approved_without_then(self, since: datetime) -> list[ApprovalRun]:
         with self._cursor() as c:

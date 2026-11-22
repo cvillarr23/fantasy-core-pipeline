@@ -34,6 +34,10 @@ DEFAULT_APPROVAL_TTL = timedelta(hours=24)
 MAX_APPROVAL_TTL = timedelta(days=7)
 # The job_name of an approval a process opened. A chain step's approval uses the step name.
 APPROVAL_JOB_NAME = APPROVAL
+# Approvals whose `then` job only a domain route may decide, mapped to that route's page. A
+# trade offer's approve route edits the message, recomputes the offer key and writes the
+# bot_decisions audit in the same transaction, so `/v1/runs/{id}/approve` must not skip it.
+DOMAIN_DECIDED_JOBS = {"trade-submit": "the Trades page"}
 
 
 class ApprovalNotFoundError(Exception):
@@ -46,6 +50,10 @@ class ApprovalResolvedError(Exception):
     def __init__(self, run_id: str, status: str):
         self.status = status
         super().__init__(f"Approval {run_id} is {status}, not waiting")
+
+
+class ApprovalDecidedElsewhereError(Exception):
+    """The approval is decided through its domain's own route, not the generic one."""
 
 
 class ApprovalRequesterNotRunningError(Exception):
@@ -131,6 +139,7 @@ def _decide(run_id: str, outcome: str, decided_by: str) -> dict[str, Any]:
     """Resolves the approval in its own transaction, then starts its `then` run. A failed
     start is logged and left to the scheduler, which retries it."""
     with get_db_cursor() as cursor:
+        _require_generic(Runs(cursor).approval(run_id))
         resolve_approval(cursor, run_id, outcome, decided_by)
     response: dict[str, Any] = {
         "run_id": run_id,
@@ -141,6 +150,16 @@ def _decide(run_id: str, outcome: str, decided_by: str) -> dict[str, Any]:
     if outcome == "approved":
         response["then_run_id"] = _start_then_logged(run_id)
     return response
+
+
+def _require_generic(approval) -> None:
+    """Refuses an approval whose `then` job a domain route decides (`DOMAIN_DECIDED_JOBS`)."""
+    then = approval.then if approval else None
+    page = DOMAIN_DECIDED_JOBS.get(then["job"]) if then else None
+    if page:
+        raise ApprovalDecidedElsewhereError(
+            f"Approval {approval.run_id} is decided on {page}"
+        )
 
 
 def _start_then_logged(run_id: str) -> str | None:

@@ -375,7 +375,13 @@ class Runs:
         expires_at,
         chain_root_id=None,
     ):
-        """A `waiting` approval run. Returns its id, or None when `dedupe_key` was used."""
+        """A `waiting` approval run. Returns its id, or None when `dedupe_key` was used.
+
+        Second writer: the worker's `db/run_log.js` `openApproval` inserts trade-offer
+        approvals with these columns and `approval_service`'s dedupe key and trigger shape,
+        and only ever moves them waiting -> superseded. Mirror any change there;
+        tests/test_approval_postgres.py pins the shared contract.
+        """
         run_id = str(uuid.uuid4())
         self.c.execute(
             """INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,status,
@@ -512,6 +518,19 @@ class Runs:
             return True
         current = self.approval(run_id)
         return current.status if current else None
+
+    def retarget_approval_then(self, run_id, params):
+        """Replaces a `waiting` approval's `then.params`. Returns whether it changed.
+
+        Approving a trade offer with an edited message changes its offer key, and the run
+        the approval starts must send the offer that was approved.
+        """
+        self.c.execute(
+            """UPDATE run_log SET trigger=jsonb_set(trigger,'{then,params}',%s::jsonb)
+            WHERE id=%s AND executor=%s AND status=%s AND trigger ? 'then' RETURNING id""",
+            (json.dumps(params), run_id, APPROVAL, WAITING),
+        )
+        return self.c.fetchone() is not None
 
     def expire_approvals(self, now):
         """Ends every approval still `waiting` at its `expires_at` as `skipped (expired)`, and
@@ -680,43 +699,6 @@ class RunStore:
 
     def latest_run(self, jobs, param=None, value=None):
         return self._with_runs(lambda runs: runs.latest_run(jobs, param, value))
-
-    def resolve_approval(self, run_id, outcome, decided_by):
-        """Ends a `waiting` approval with `outcome` (an `APPROVAL_OUTCOMES` key), recording who
-        decided as `requested_by`. An approval past its `expires_at` can still be dismissed or
-        superseded but no longer approved, even before the scheduler's sweep reaches it.
-
-        Returns True when resolved, else the row's current status, or None for no such
-        approval.
-        """
-        self.c.execute(
-            """UPDATE run_log SET status=%s, end_reason=%s, requested_by=%s, finished_at=now()
-            WHERE id=%s AND executor=%s AND status=%s
-            AND (%s<>'approved' OR expires_at IS NULL OR expires_at>now()) RETURNING id""",
-            (
-                APPROVAL_OUTCOMES[outcome],
-                outcome,
-                decided_by,
-                run_id,
-                APPROVAL,
-                WAITING,
-                outcome,
-            ),
-        )
-        if self.c.fetchone() is not None:
-            return True
-        current = self.approval(run_id)
-        return current.status if current else None
-
-    def expire_approvals(self, now):
-        """Ends every approval still `waiting` at its `expires_at` as `skipped (expired)`, and
-        returns their ids."""
-        self.c.execute(
-            """UPDATE run_log SET status='skipped', end_reason='expired', finished_at=now()
-            WHERE executor=%s AND status=%s AND expires_at<=%s RETURNING id""",
-            (APPROVAL, WAITING, now),
-        )
-        return [row[0] for row in self.c.fetchall()]
 
     def cancel(self, run_id):
         return self._with_runs(lambda runs: runs.cancel(run_id))

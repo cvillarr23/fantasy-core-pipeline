@@ -1,4 +1,11 @@
-"""Human approvals of immutable ESPN offers; durable, fail-closed claims that queue the send."""
+"""Human approvals of immutable ESPN offers; durable, fail-closed claims that queue the send.
+
+A staged offer normally has a `waiting` approval run, opened by the worker's trade scan
+(dedupe `approval@<scan_run_id>#<offer_key>`, `then` = trade-submit). Approving resolves it
+in the claim's transaction and the send starts from it; dismissing resolves it `dismissed`.
+An offer with no approval run (staged before them, or by a scan outside the launcher) is
+sent by starting trade-submit directly.
+"""
 
 import hashlib
 import json
@@ -12,7 +19,8 @@ from typing import NamedTuple
 from pydantic import ValidationError
 
 from src.database import get_db_cursor
-from src.services import jobs_service
+from src.launcher.runs import Runs
+from src.services import approval_service, jobs_service
 from src.services.espn_ownership import load_espn_ownership
 from src.schemas.trade import ProposalEvaluation
 
@@ -255,6 +263,8 @@ def dismiss_offer(key, dismissed_by):
         dismissal = _dismissal_audit(dismissed_by)
         for row in awaiting:
             _save_dismissal(cursor, row["id"], dismissal)
+        for run_id in _approval_runs(cursor, awaiting, key):
+            _end_approval_quietly(cursor, run_id, "dismissed", dismissed_by)
     return dict(offer_key=key, duplicate=False, **dismissal)
 
 
@@ -462,6 +472,12 @@ def _claim_approval(key, approved_by, message):
                     "thread_root_id"
                 ):
                     raise OfferConflict("Staged copies disagree on counter thread.")
+        approval_run_id = _approval_run_id(cursor, row, key)
+        superseded_runs = [
+            run_id
+            for run_id in _approval_runs(cursor, rows, key)
+            if run_id != approval_run_id
+        ]
         if message is not None and message != offer.get("message"):
             if offer.get("message_edited"):
                 raise OfferConflict("This offer has already been edited.")
@@ -489,6 +505,11 @@ def _claim_approval(key, approved_by, message):
             approved_at=datetime.now(timezone.utc).isoformat(),
             tracking_id=tracking_id,
         )
+        if approval_run_id is not None:
+            _approve_run(cursor, approval_run_id, key, approved_by)
+            approval["approval_run_id"] = approval_run_id
+        for run_id in superseded_runs:
+            _end_approval_quietly(cursor, run_id, "superseded", approved_by)
         payload = dict(
             tracking_id=tracking_id,
             season=row["season"],
@@ -527,7 +548,7 @@ def approve_offer(key, approved_by, message=None):
         return claimed
     # The claim and audit are committed before the run is queued. Never queue it in the
     # claiming transaction: a rollback after the run started would permit a second send.
-    approval = {**claimed.approval, "run_id": _start_submit_run(claimed)}
+    approval = {**claimed.approval, "run_id": _start_send(claimed)}
     with get_db_cursor() as cursor:
         _save_approval(cursor, claimed.row["id"], "approved", approval)
     return _response(approval["offer_key"], approval)
@@ -537,6 +558,84 @@ def _scan_run_id(offer):
     """The run of the scan that staged the offer (worker-written), so the send is its child."""
     run_id = offer.get("scan_run_id")
     return run_id if isinstance(run_id, str) and run_id.strip() else None
+
+
+def _approval_run_id(cursor, row, key):
+    """The approval run the worker's scan opened for this staged copy, or None (a legacy
+    offer, staged before approval runs or outside a launcher run)."""
+    scan_run_id = _scan_run_id(row["counter_offer"] or {})
+    if scan_run_id is None:
+        return None
+    dedupe_key = approval_service.approval_dedupe_key(scan_run_id, key)
+    return Runs(cursor).run_id_for_dedupe_key(dedupe_key)
+
+
+def _approval_runs(cursor, rows, key):
+    """The approval runs of these rows' awaiting copies, one per scan that staged one."""
+    found = []
+    for row in rows:
+        if row["status"] != "awaiting_approval":
+            continue
+        run_id = _approval_run_id(cursor, row, key)
+        if run_id is not None and run_id not in found:
+            found.append(run_id)
+    return found
+
+
+def _approve_run(cursor, run_id, key, approved_by):
+    """Approves the offer's approval run in the claim's transaction.
+
+    Its `then` is pointed at `key` first: an edited message changes the offer key, and the
+    trade-submit run it starts must send the offer that was approved.
+    """
+    Runs(cursor).retarget_approval_then(run_id, {"offer_key": key})
+    try:
+        approval_service.resolve_approval(cursor, run_id, "approved", approved_by)
+    except approval_service.ApprovalResolvedError as error:
+        raise OfferConflict(
+            f"The offer's approval is {error.status}; it can no longer be approved."
+        ) from error
+    except approval_service.ApprovalNotFoundError as error:
+        raise OfferConflict("The offer's approval run is missing.") from error
+
+
+def _end_approval_quietly(cursor, run_id, outcome, decided_by):
+    """Ends an approval whose offer copy is being retired. One that already ended (expired,
+    or superseded by a newer scan) needs nothing more."""
+    try:
+        approval_service.resolve_approval(cursor, run_id, outcome, decided_by)
+    except (
+        approval_service.ApprovalResolvedError,
+        approval_service.ApprovalNotFoundError,
+    ) as error:
+        logger.info("Approval %s left as is: %s", run_id, error)
+
+
+def _start_send(claim):
+    """Queues the send of a committed claim: through its approval run when the scan opened
+    one, else directly (offers staged before approval runs)."""
+    run_id = claim.approval.get("approval_run_id")
+    if run_id is None:
+        return _start_submit_run(claim)
+    return _start_approved_send(run_id)
+
+
+def _start_approved_send(approval_run_id):
+    """Starts the approved approval run's trade-submit run; returns its run id.
+
+    The claim is never released here: its approval already ended `success`, and the
+    scheduler starts a `then` run that didn't start. Approving again resumes the claim, and
+    the `trade-submit@<approval id>` dedupe key finds the run if it was queued.
+    """
+    try:
+        started = approval_service.start_approved_run(approval_run_id)
+    except Exception as error:
+        raise PublishUnavailable(
+            "Queuing the send had an unknown outcome; approve again to reconcile."
+        ) from error
+    if started is None:
+        raise PublishUnavailable(f"Approval {approval_run_id} was not approved.")
+    return started["run_id"]
 
 
 def _start_submit_run(claim):

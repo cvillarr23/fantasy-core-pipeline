@@ -280,6 +280,7 @@ Stored under the `approval` key when a human approves an offer.
 | `tracking_id` | UUID shared with `bot_decisions`. |
 | `payload` | The approved send: the fields the `trade-submit` run rebuilds from the offer. |
 | `run_id` | The `trade-submit` launcher run that sends it (absent on approvals made before approval started a run). |
+| `approval_run_id` | The offer's approval run (`run_log`, executor `approval`), which the send starts from. Absent for legacy offers with none. |
 | `publish_error` | Set when the run provably wasn't queued, so the approval can be retried. |
 
 The row's `status` moves `awaiting_approval` → `approval_pending` → `approved`, where
@@ -289,6 +290,9 @@ An edited approval moves original staged copies from `awaiting_approval` → `su
 with `counter_offer.superseded_by` pointing to the replacement key. The replacement keeps
 the original `dry_run` and stores `drafted_message`, `message_edited: true` and `edited_by`;
 the editor remains unchanged when another approver retries after a run that provably wasn't queued.
+Dismissal is stored under the `dismissal` key: `{reason, dismissed_by, dismissed_at}`, with
+`reason` `manual` (the Trades page), `replaced_by_scan` (the next scan) or `expired` (the
+offer's approval run expired; `dismissed_by: "expired"`, plus `approval_run_id`).
 A partial expression index on `counter_offer->>'offer_key'` for `trade_offer_submit` rows
 supports approval lookups.
 </details>

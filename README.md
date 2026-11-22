@@ -289,20 +289,26 @@ request. The stored offer must match the worker's SHA-256 contract and configure
 `ESPN_LEAGUE_ID`/`ESPN_TEAM_ID`. IDs inside this trade JSON are explicitly **ESPN**
 IDs, including negative D/ST IDs; do not translate them as internal player IDs.
 
-Successful publication returns 202 (`status: approved` means enqueued, not sent in
-ESPN). A repeated confirmed approval returns 200 and the original tracking ID,
-without another publish. Unknown keys return 404; invalid/edited offers and
+Successful approval returns 202 (`status: approved` means a `trade-submit` launcher
+run is queued, not that ESPN has the offer). A repeated confirmed approval returns 200
+and the original tracking ID, without another run. Unknown keys return 404; invalid/edited offers and
 non-approvable states return 409. Blank approvers and extra body fields return 422.
 The worker still enforces its dry-run, trade-enable, approval, and selector gates.
 
 Approval uses PostgreSQL locking across all rows for an offer key, with the
 approver, timestamp, tracking ID, and exact payload persisted under
 `execution_log.outcome_details.approval`. A `bot_decisions` entry with action
-`trade_offer` commits in the same transaction. The `approval_pending` claim commits
-**before** AMQP publication; only a confirmed publish changes it to `approved`.
-Failures proven to precede publication release the claim. An ambiguous failure or
-process crash leaves it pending indefinitely, so retries cannot enqueue twice.
-There is no automatic retry or expiry for uncertain publications.
+`trade_offer` commits in the same transaction, and so does the `approved` outcome of
+the offer's approval run, which the worker's trade scan opened when it staged the offer.
+The `approval_pending` claim commits **before** the `trade-submit` run is queued from
+that approval run; only a queued run changes it to `approved`. If queuing fails, the
+scheduler starts the run itself, and approving again resumes the claim; the run's
+dedupe key keeps it to one send. An unapproved offer expires at the next scheduled
+scan or after 72h, whichever is sooner, and is then dismissed with
+`dismissed_by: "expired"`. Offers staged without an approval run (before approval
+runs existed) queue the run directly, and a failure proven to precede queuing releases
+their claim. See
+[outgoing offers](docs/decision-pipelines/outgoing-trades.md#what-waits-for-your-approval).
 
 For a stuck pending approval, reconcile its tracking ID with broker/worker logs
 and the worker's `submitting`/`submitted` rows (and ESPN outcome when necessary).
