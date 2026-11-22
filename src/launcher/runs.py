@@ -380,7 +380,7 @@ class Runs:
         Second writer: the worker's `db/run_log.js` `openApproval` inserts trade-offer
         approvals with these columns and `approval_service`'s dedupe key and trigger shape,
         and only ever moves them waiting -> superseded. Mirror any change there;
-        tests/test_approval_postgres.py pins the shared contract.
+        tests/test_trade_approval_postgres.py pins the shared contract.
         """
         run_id = str(uuid.uuid4())
         self.c.execute(

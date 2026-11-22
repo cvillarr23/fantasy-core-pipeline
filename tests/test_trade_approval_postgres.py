@@ -31,7 +31,8 @@ ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id"""
 # The worker's supersedeApprovals, inside its locked retire transaction.
 WORKER_SUPERSEDE_SQL = """UPDATE run_log SET status='skipped', end_reason='superseded',
   requested_by='trade_scan', finished_at=now()
-WHERE executor='approval' AND status='waiting' AND trigger->>'key'=%s AND started_at<%s
+WHERE executor='approval' AND status='waiting' AND trigger->'then'->>'job'='trade-submit'
+  AND trigger->>'key'=%s AND started_at<%s
 RETURNING id"""
 
 
