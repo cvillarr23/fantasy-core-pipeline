@@ -6,7 +6,24 @@ import re
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "default")
+SERVICE_ACCOUNT_NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+
+def _default_namespace() -> str:
+    """The env override, else the pod's own namespace (mounted with its service account token),
+    else `default`. Pods the launcher starts carry no K8S_NAMESPACE, so without the file they
+    would look for Jobs in `default` on an install in any other namespace."""
+    configured = os.getenv("K8S_NAMESPACE")
+    if configured:
+        return configured
+    try:
+        with open(SERVICE_ACCOUNT_NAMESPACE_FILE) as f:
+            return f.read().strip() or "default"
+    except OSError:
+        return "default"
+
+
+K8S_NAMESPACE = _default_namespace()
 
 # Kubernetes calls are made from synchronous FastAPI endpoints (a bounded threadpool) and from
 # the launcher's single consumer loop. The kubernetes client applies no timeout of its own, so a

@@ -343,3 +343,17 @@ def test_count_active_jobs_without_selectors_never_calls_the_api():
     with patch.object(k8s, "batch_v1_api") as api:
         assert k8s.count_active_jobs([]) == 0
     api.assert_not_called()
+
+
+def test_core_url_bundle_passes_launcher_url_without_the_api_key():
+    env, env_from = k8s.BUNDLES["core-url"]()
+    assert [(e.name, e.value) for e in env] == [
+        ("CORE_PIPELINE_URL", LAUNCHER_ENV["CORE_API_BASE_URL"])
+    ]
+    assert env_from == []
+
+
+def test_core_url_bundle_needs_the_launcher_url(monkeypatch):
+    monkeypatch.delenv("CORE_API_BASE_URL")
+    with pytest.raises(k8s.LaunchConfigError):
+        k8s.BUNDLES["core-url"]()

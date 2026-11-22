@@ -88,6 +88,8 @@ BUNDLES = {
         ],
         [],
     ),
+    # Worker bots read the core API at CORE_PIPELINE_URL. Not `trigger-api`: workers get no key.
+    "core-url": lambda: ([_core_url_env()], []),
     "amqp": lambda: ([_secret("AMQP_URL", "rabbitmq-credentials", "amqp-url")], []),
     "llm": lambda: (
         [
@@ -109,6 +111,11 @@ BUNDLES = {
     "league-config": lambda: ([], [_config_map_from("fantasy-league-config")]),
     "trade-arming": lambda: (_trade_arming_env(), []),
 }
+
+
+def _core_url_env():
+    """The launcher's own core API URL, under the name the browser worker reads."""
+    return client.V1EnvVar(name="CORE_PIPELINE_URL", value=_inherited("CORE_API_BASE_URL").value)
 
 
 def _trade_arming_env():
