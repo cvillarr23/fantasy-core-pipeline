@@ -177,10 +177,50 @@ def test_params_reject_unknown_types(type_name):
         Catalog.model_validate(raw)
 
 
-def test_approval_fails_with_not_implemented_error():
+def test_a_job_level_approval_key_is_rejected():
     raw = catalog_data()
     raw["jobs"]["one"]["approval"] = True
-    with pytest.raises(ValueError, match="not implemented"):
+    with pytest.raises(ValidationError, match="approval"):
+        Catalog.model_validate(raw)
+
+
+def approval_chain(step="confirm") -> dict:
+    raw = catalog_data()
+    raw["jobs"]["two"] = dict(raw["jobs"]["one"])
+    raw["jobs"]["three"] = dict(raw["jobs"]["one"])
+    raw["chains"] = {
+        "daily": {
+            "max_duration": "6h",
+            "steps": {
+                "one": {},
+                step: {
+                    "approval": {"timeout": "2h", "title": "Go ahead?"},
+                    "after": [{"step": "one"}],
+                },
+                "two": {"after": [{"step": step}]},
+            },
+        }
+    }
+    return raw
+
+
+def test_an_approval_step_parses():
+    catalog = Catalog.model_validate(approval_chain())
+    approval = catalog.chains["daily"].steps["confirm"].approval
+    assert approval.timeout == timedelta(hours=2)
+    assert approval.title == "Go ahead?"
+    assert catalog.chains["daily"].steps["one"].approval is None
+
+
+def test_an_approval_step_cannot_share_a_job_name():
+    with pytest.raises(ValidationError, match="can't share a job's name"):
+        Catalog.model_validate(approval_chain(step="three"))
+
+
+def test_a_step_without_approval_must_still_name_a_job():
+    raw = approval_chain()
+    del raw["chains"]["daily"]["steps"]["confirm"]["approval"]
+    with pytest.raises(ValidationError, match="unknown job 'confirm'"):
         Catalog.model_validate(raw)
 
 

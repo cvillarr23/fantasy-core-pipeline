@@ -46,6 +46,15 @@ nothing:
   the next event or the job's schedule. A paused job records one ``skipped`` run per window,
   and so does an event older than its debounce (``expired``), such as one replayed after a
   launcher outage.
+- **Approvals.** A chain step with ``approval: {timeout, title}`` runs no job: once its edges
+  are met it opens an approval run (``waiting``, executor ``approval``, dedupe key
+  ``step@<root id>``) expiring after ``timeout``, but never past the chain's ``max_duration``.
+  Approving it makes the step ``success``; dismissal or expiry makes it ``skipped``, so its
+  ``on: success`` edges skip as ``dependency_failed``. Those are a person's decisions, not
+  failures: a root whose only unsuccessful steps were declined, or skipped because of a
+  declined step, ends ``success``. Each tick first ends approvals past ``expires_at``
+  (``skipped (expired)``), then starts any approved approval's ``trigger.then`` run that the
+  approve path didn't (``launcher.approvals.start_then``).
 - **Manual runs.** ``start_chain`` runs one step with ``downstream`` semantics: a root
   scoped to that step and its descendants. A manual run without ``downstream`` has no
   ``chain_root_id``, so no edges are ever evaluated for it.
@@ -75,8 +84,9 @@ from zoneinfo import ZoneInfo
 import polars as pl
 from croniter import croniter
 
-from src.launcher.catalog import Catalog, Chain, ChainStep, Schedule, Season
-from src.launcher.runs import FAN_OUT, Runs
+from src.launcher.approvals import start_then
+from src.launcher.catalog import ApprovalStep, Catalog, Chain, ChainStep, Schedule, Season
+from src.launcher.runs import FAN_OUT, WAITING, ApprovalRun, Runs
 
 if TYPE_CHECKING:
     from src.launcher.events import JobEvent
@@ -94,6 +104,8 @@ NEXT_RUN_HORIZON = timedelta(days=366)
 POLL_SECONDS = 15
 FINAL_STATUSES = frozenset({"success", "failure", "timeout", "skipped", "cancelled"})
 RETRYABLE_STATUSES = frozenset({"failure", "timeout"})
+# How an approval step ends without being approved: a person's decision, not a failure.
+DECLINED_REASONS = frozenset({"dismissed", "superseded", "expired"})
 
 # publish_run's signature: (catalog, job, *, trigger, dedupe_key, ...) -> {run_id, status}.
 Publisher = Callable[..., dict[str, str]]
@@ -113,6 +125,7 @@ class RunRow:
     executor: str | None = None
     started_at: datetime | None = None
     dedupe_key: str | None = None
+    end_reason: str | None = None
 
 
 class SchedulerState(Protocol):
@@ -161,6 +174,20 @@ class SchedulerState(Protocol):
     def finish_fan_out(
         self, parent_id: str, status: str, end_reason: str | None
     ) -> None: ...
+
+    def open_step_approval(
+        self,
+        *,
+        step: str,
+        title: str,
+        root_id: str,
+        dedupe_key: str,
+        expires_at: datetime,
+    ) -> RunRow | None: ...
+
+    def expire_approvals(self, now: datetime) -> list[str]: ...
+
+    def approved_without_then(self, since: datetime) -> list[ApprovalRun]: ...
 
 
 def slot_key(name: str, slot: datetime) -> str:
@@ -297,9 +324,12 @@ class Scheduler:
                 )
 
     def tick(self, now: datetime | None = None) -> None:
-        """Fire due chain slots, advance fan-outs and then chains (so a fan-out step that
-        ends lets its chain move on in the same tick), then fire due job slots."""
+        """End expired approvals and start approved ones' runs, fire due chain slots, advance
+        fan-outs and then chains (so a fan-out step that ends lets its chain move on in the
+        same tick), then fire due job slots."""
         now = now or self.clock()
+        self._guard("approval expiry", self._expire_approvals, now)
+        self._guard("approved runs", self._start_approved, now)
         for name, chain in self.catalog.chains.items():
             if chain.schedule:
                 self._guard(f"chain {name} slot", self._chain_slot, name, chain, now)
@@ -461,6 +491,23 @@ class Scheduler:
         """Whether ``schedule`` fires from ``start`` up to, but not at, ``end``."""
         slot = next_slot(schedule, start - timedelta(seconds=1))
         return slot < end and self._in_season(schedule, slot)
+
+    def _expire_approvals(self, now: datetime) -> None:
+        for run_id in self.state.expire_approvals(now):
+            logger.info("Approval run %s expired", run_id)
+
+    def _start_approved(self, now: datetime) -> None:
+        """Starts approved approvals' runs that weren't started, within the window a manual
+        run would still be worth starting."""
+        since = now - self.catalog.global_settings.manual_queue_ttl
+        for approval in self.state.approved_without_then(since):
+            self._guard(
+                f"approval run {approval.run_id}",
+                start_then,
+                self.catalog,
+                approval,
+                self.publish,
+            )
 
     def _guard(self, what: str, func: Callable[..., None], *args: Any) -> None:
         # One bad schedule or chain run must not stop every other slot in the tick.
@@ -626,6 +673,11 @@ class Scheduler:
             if self._step_paused(step_name, from_step, now):
                 runs[step_name] = self._skip_step(step_name, key, root, now, "paused")
                 continue
+            if step.approval is not None:
+                runs[step_name] = self._open_step_approval(
+                    step_name, step.approval, key, root, chain, now
+                )
+                continue
             run_id = self._publish(
                 step_name,
                 trigger="chain",
@@ -636,6 +688,29 @@ class Scheduler:
             )
             runs[step_name] = RunRow(run_id, step_name, "queued", chain_root_id=root.id)
         self._end_root_if_done(root, chain, scope, runs, expired)
+
+    def _open_step_approval(
+        self,
+        step: str,
+        approval: ApprovalStep,
+        key: str,
+        root: RunRow,
+        chain: Chain,
+        now: datetime,
+    ) -> RunRow:
+        """Opens the step's approval run, expiring by the chain's max_duration at the latest
+        so the sweep ends it before the root times out."""
+        assert root.scheduled_for is not None
+        expires_at = min(now + approval.timeout, root.scheduled_for + chain.max_duration)
+        row = self.state.open_step_approval(
+            step=step,
+            title=approval.title,
+            root_id=root.id,
+            dedupe_key=key,
+            expires_at=expires_at,
+        )
+        logger.info("Chain step %s is waiting for approval until %s", key, expires_at)
+        return row or RunRow("", step, WAITING, chain_root_id=root.id)
 
     def _advance_fan_out(self, parent: RunRow) -> None:
         """Publishes the parent's missing children, then ends it once none is pending."""
@@ -713,17 +788,41 @@ class Scheduler:
         expired: bool,
     ) -> None:
         """Ends the root ``timeout`` past max_duration, or ``success``/``failure`` once no
-        step in scope is pending."""
+        step in scope is pending. Declined steps (see ``_declined``) count as succeeded."""
         if expired:
             logger.warning(
                 "Chain run %s exceeded max_duration %s", root.id, chain.max_duration
             )
             self.state.finish_chain_root(root.id, "timeout", "max_duration")
         elif all(self._outcome(runs.get(step)) != "pending" for step in scope):
-            succeeded = all(runs[step].status == "success" for step in scope)
+            declined = self._declined(root, chain, scope, runs)
+            succeeded = all(
+                runs[step].status == "success" or step in declined for step in scope
+            )
             self.state.finish_chain_root(
                 root.id, "success" if succeeded else "failure", None
             )
+
+    def _declined(
+        self, root: RunRow, chain: Chain, scope: set[str], runs: dict[str, RunRow]
+    ) -> set[str]:
+        """Steps that didn't run only because a person declined: an approval step dismissed,
+        superseded or expired, and a step skipped ``dependency_failed`` whose failed
+        ``on: success`` parents were all declined."""
+        declined: set[str] = set()
+        for step_name in self._order[root.trigger.get("chain") or root.job_name]:
+            run = runs.get(step_name)
+            if step_name not in scope or run is None or run.status != "skipped":
+                continue
+            step = chain.steps[step_name]
+            if step.approval is not None and run.end_reason in DECLINED_REASONS:
+                declined.add(step_name)
+            elif run.end_reason == "dependency_failed" and all(
+                parent in declined
+                for parent in _failed_parents(step, scope, runs, self._outcome)
+            ):
+                declined.add(step_name)
+        return declined
 
     def _latest_at(
         self, chain: Chain, step: ChainStep, root_time: datetime
@@ -771,7 +870,7 @@ class Scheduler:
             chain_root_id=root.id,
         )
         logger.info("Skipped chain step %s (%s)", key, reason)
-        return RunRow("", step, "skipped", chain_root_id=root.id)
+        return RunRow("", step, "skipped", chain_root_id=root.id, end_reason=reason)
 
     def _publish(
         self,
@@ -814,6 +913,22 @@ def _parents_failed(edges: list[tuple[str, str]]) -> bool:
     return any(on == "success" and outcome == "finished" for on, outcome in edges)
 
 
+def _failed_parents(
+    step: ChainStep,
+    scope: set[str],
+    runs: dict[str, RunRow],
+    outcome: Callable[[RunRow | None], str],
+) -> list[str]:
+    """The step's ``on: success`` parents in scope that finished without succeeding."""
+    return [
+        dep.step
+        for dep in step.after
+        if dep.step in scope
+        and dep.on == "success"
+        and outcome(runs.get(dep.step)) == "finished"
+    ]
+
+
 def _parents_ready(edges: list[tuple[str, str]]) -> bool:
     """Whether every parent satisfies its edge: succeeded, or finished for ``on: finish``."""
     return all(
@@ -850,7 +965,7 @@ def _window(schedule: Schedule) -> timedelta:
 
 _ROW_COLUMNS = (
     "id,job_name,status,attempt,scheduled_for,chain_root_id,trigger,"
-    "parent_run_id,trigger_type,executor,started_at,dedupe_key"
+    "parent_run_id,trigger_type,executor,started_at,dedupe_key,end_reason"
 )
 
 
@@ -871,6 +986,7 @@ def _row(values: tuple) -> RunRow:
         executor=values[9],
         started_at=values[10],
         dedupe_key=values[11],
+        end_reason=values[12],
     )
 
 
@@ -1004,3 +1120,43 @@ class PostgresSchedulerState:
     ) -> None:
         with self._cursor() as c:
             Runs(c).finish_fan_out(parent_id, status, end_reason)
+
+    def open_step_approval(
+        self,
+        *,
+        step: str,
+        title: str,
+        root_id: str,
+        dedupe_key: str,
+        expires_at: datetime,
+    ) -> RunRow | None:
+        with self._cursor() as c:
+            run_id = Runs(c).insert_approval(
+                job=step,
+                trigger_type="chain",
+                trigger={"title": title},
+                parent_run_id=root_id,
+                chain_root_id=root_id,
+                dedupe_key=dedupe_key,
+                expires_at=expires_at,
+            )
+        if run_id is None:
+            return None
+        return RunRow(
+            run_id,
+            step,
+            WAITING,
+            chain_root_id=root_id,
+            parent_run_id=root_id,
+            trigger_type="chain",
+            executor="approval",
+            dedupe_key=dedupe_key,
+        )
+
+    def expire_approvals(self, now: datetime) -> list[str]:
+        with self._cursor() as c:
+            return Runs(c).expire_approvals(now)
+
+    def approved_without_then(self, since: datetime) -> list[ApprovalRun]:
+        with self._cursor() as c:
+            return Runs(c).approved_without_then(since)

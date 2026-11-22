@@ -4,9 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from src.api.routes import require_trigger_api_key
 from src.schemas.jobs import (
+    ApprovalDecisionResponse,
+    ApprovalResponse,
     CancelRunResponse,
     JobsResponse,
     LauncherHealthResponse,
+    OpenApprovalRequest,
     PauseRequest,
     PauseResponse,
     ResourceSuggestionsResponse,
@@ -15,7 +18,7 @@ from src.schemas.jobs import (
     UnpauseResponse,
 )
 from src.schemas.run_log import RunDetail
-from src.services import jobs_service
+from src.services import approval_service, jobs_service
 
 jobs_router = APIRouter()
 
@@ -31,10 +34,19 @@ def _raise_http(error: Exception):
             jobs_service.JobNotFoundError,
             jobs_service.RunNotFoundError,
             jobs_service.PauseNotFoundError,
+            approval_service.ApprovalNotFoundError,
         ),
     ):
         raise HTTPException(404, str(error)) from error
-    if isinstance(error, (jobs_service.RunOverlapError, jobs_service.RunNotCancellableError)):
+    if isinstance(
+        error,
+        (
+            jobs_service.RunOverlapError,
+            jobs_service.RunNotCancellableError,
+            approval_service.ApprovalRequesterNotRunningError,
+            approval_service.ApprovalResolvedError,
+        ),
+    ):
         raise HTTPException(409, str(error)) from error
     if isinstance(error, ValueError):
         raise HTTPException(422, str(error)) from error
@@ -100,6 +112,51 @@ def cancel_run(identity: str):
     """The watcher deletes the k8s Job or stops the inline process for a cancelled row."""
     try:
         return jobs_service.cancel_run(identity)
+    except Exception as error:
+        _raise_http(error)
+
+
+@jobs_router.post(
+    "/runs/{run_id}/approvals",
+    response_model=ApprovalResponse,
+    status_code=202,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def open_approval(run_id: str, payload: OpenApprovalRequest):
+    """A running process asks a person to approve `then` (or just to confirm)."""
+    try:
+        return approval_service.open_approval(
+            run_id,
+            key=payload.key,
+            title=payload.title,
+            then=payload.then.model_dump() if payload.then else None,
+            link=payload.link,
+            expires_at=payload.expires_at,
+        )
+    except Exception as error:
+        _raise_http(error)
+
+
+@jobs_router.post(
+    "/runs/{identity}/approve",
+    response_model=ApprovalDecisionResponse,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def approve_run(identity: str, request: Request):
+    try:
+        return approval_service.approve(identity, _user(request))
+    except Exception as error:
+        _raise_http(error)
+
+
+@jobs_router.post(
+    "/runs/{identity}/dismiss",
+    response_model=ApprovalDecisionResponse,
+    dependencies=[Depends(require_trigger_api_key)],
+)
+def dismiss_run(identity: str, request: Request):
+    try:
+        return approval_service.dismiss(identity, _user(request))
     except Exception as error:
         _raise_http(error)
 

@@ -71,7 +71,7 @@ def bots():
 @activity_router.get("/runs", response_model=RunList)
 def runs(
     job: str | None = None,
-    status: str | None = Query(None, pattern="^(running|success|failure)$"),
+    status: run_log_service.RunStatus | None = None,
     trigger: run_log_service.TriggerType | None = None,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),

@@ -297,6 +297,27 @@ def test_runs_list_rejects_an_unknown_trigger(client):
     assert _listed_trigger(client, "cron") == (422, None)
 
 
+def _listed_status(client, status):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+    cursor.description = []
+    with patch.object(run_log, "get_db_cursor") as get_cursor:
+        get_cursor.return_value.__enter__.return_value = cursor
+        response = client.get("/v1/activity/runs", params={"status": status})
+    sent = cursor.execute.call_args[0][1]["status"] if cursor.execute.called else None
+    return response.status_code, sent
+
+
+@pytest.mark.parametrize("status", run_log.STATUSES)
+def test_runs_list_filters_by_every_status_including_waiting(client, status):
+    assert _listed_status(client, status) == (200, status)
+    assert "waiting" in run_log.STATUSES
+
+
+def test_runs_list_rejects_an_unknown_status(client):
+    assert _listed_status(client, "paused") == (422, None)
+
+
 def test_adopted_run_records_its_resource_usage(recorded, monkeypatch):
     monkeypatch.setenv("RUN_ID", "launcher-run")
     monkeypatch.setenv("RUN_ATTEMPT", "3")

@@ -63,6 +63,7 @@ UPDATE run_log SET executor=COALESCE(trigger->>'executor', executor),
  WHERE trigger ?| array['executor','expires_at','cancel_reconciled'];
 CREATE INDEX IF NOT EXISTS run_log_running_executor ON run_log(executor, started_at) WHERE status='running';
 CREATE INDEX IF NOT EXISTS run_log_cancel_unreconciled ON run_log(id) WHERE status='cancelled' AND executor IS NOT NULL AND cancel_reconciled_at IS NULL;
+CREATE INDEX IF NOT EXISTS run_log_approvals ON run_log(status, finished_at) WHERE executor='approval';
 CREATE INDEX IF NOT EXISTS run_log_retryable ON run_log(job_name) WHERE status IN ('failure','timeout') AND executor IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS run_log_dedupe_key ON run_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS run_log_recent ON run_log(started_at DESC);
@@ -93,20 +94,24 @@ CREATE TABLE IF NOT EXISTS launcher_heartbeat (
 """
 
 # The launcher's trigger types, defined here so the launcher can import them without every
-# job's run_scope importing the launcher. TRIGGER_TYPES adds the ones other writers record.
+# job's run_scope importing the launcher. TRIGGER_TYPES adds the ones other writers record;
+# `approval` is an approval run a running process opened (`approval_service.open_approval`).
 LauncherTrigger = Literal["schedule", "chain", "event", "manual", "cli", "mcp"]
-TriggerType = Literal[LauncherTrigger, "queue", "http"]
+TriggerType = Literal[LauncherTrigger, "queue", "http", "approval"]
 LAUNCHER_TRIGGERS = get_args(LauncherTrigger)
 TRIGGER_TYPES = get_args(TriggerType)
-STATUSES = (
+# `waiting` is an approval run's status until it is decided (`launcher.runs.WAITING`).
+RunStatus = Literal[
     "queued",
+    "waiting",
     "skipped",
     "cancelled",
     "timeout",
     "running",
     "success",
     "failure",
-)
+]
+STATUSES = get_args(RunStatus)
 REF_TYPES = ("raw_signal", "rumor_signal", "llm_session", "activity_action")
 ROLES = ("input", "output")
 RUN_ID_HEADER = "X-Run-Id"

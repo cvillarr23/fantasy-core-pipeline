@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class StartRunRequest(BaseModel):
@@ -13,6 +13,40 @@ class StartRunRequest(BaseModel):
     downstream: bool = False
     # Who is asking. Scheduler-owned triggers (schedule, chain, event) are not claimable.
     trigger: Literal["manual", "cli", "mcp"] = "manual"
+
+
+class ApprovalThen(BaseModel):
+    """The run an approval starts once approved."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class OpenApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Unique per asking run: a repeat with the same key returns the existing approval.
+    key: str = Field(min_length=1, max_length=200)
+    then: ApprovalThen | None = None
+    expires_at: AwareDatetime | None = None
+    title: str = Field(min_length=1, max_length=200)
+    # Where a person reviews it, e.g. `/trades?offer=<key>`.
+    link: str | None = Field(None, max_length=500)
+
+
+class ApprovalResponse(BaseModel):
+    run_id: str
+    status: str
+
+
+class ApprovalDecisionResponse(BaseModel):
+    run_id: str
+    status: str
+    end_reason: str
+    # The run an approval started, or null (it gates nothing, or the scheduler will start it).
+    then_run_id: str | None = None
 
 
 class RunStartResponse(BaseModel):
@@ -80,9 +114,16 @@ class JobInfo(BaseModel):
     pause: PauseInfo | None = None
 
 
+class ApprovalStepInfo(BaseModel):
+    title: str
+    timeout_seconds: int
+
+
 class ChainStepInfo(BaseModel):
     after: list[dict[str, Any]]
     latest: str | None = None
+    # Set for a step that waits for a person instead of running a job.
+    approval: ApprovalStepInfo | None = None
     last_run: LastRun | None = None
 
 

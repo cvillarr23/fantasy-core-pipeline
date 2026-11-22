@@ -429,6 +429,9 @@ def test_mutating_routes_require_api_key_dependency():
         ("POST", "/runs/{identity}/cancel"),
         ("PUT", "/jobs/{name}/pause"),
         ("DELETE", "/jobs/{name}/pause"),
+        ("POST", "/runs/{run_id}/approvals"),
+        ("POST", "/runs/{identity}/approve"),
+        ("POST", "/runs/{identity}/dismiss"),
     }
     protected = {
         (method, route.path)
@@ -495,3 +498,131 @@ def test_launcher_health_counts_only_runs_with_executor_trigger(monkeypatch):
     assert health.running_count == 1
     assert health.queued_count == 2
     assert "status='running' AND executor IS NOT NULL" in cursor.queries[1]
+
+
+# Approval routes: the service is covered against Postgres in tests/test_approval_postgres.py.
+
+
+def test_open_approval_passes_the_request_through(monkeypatch):
+    from src.schemas.jobs import OpenApprovalRequest
+    from src.services import approval_service
+
+    opened = Mock(return_value={"run_id": "approval-1", "status": "waiting"})
+    monkeypatch.setattr(approval_service, "open_approval", opened)
+    payload = OpenApprovalRequest(
+        key="offer-1",
+        title="Send offer?",
+        link="/trades?offer=offer-1",
+        then={"job": "trade-submit", "params": {"offer_key": "offer-1"}},
+    )
+    assert jobs_api.open_approval("scan-1", payload) == {
+        "run_id": "approval-1",
+        "status": "waiting",
+    }
+    opened.assert_called_once_with(
+        "scan-1",
+        key="offer-1",
+        title="Send offer?",
+        then={"job": "trade-submit", "params": {"offer_key": "offer-1"}},
+        link="/trades?offer=offer-1",
+        expires_at=None,
+    )
+
+
+def test_open_approval_request_needs_an_aware_expiry_and_no_extra_fields():
+    from pydantic import ValidationError
+
+    from src.schemas.jobs import OpenApprovalRequest
+
+    with pytest.raises(ValidationError):
+        OpenApprovalRequest(key="k", title="t", expires_at=datetime(2026, 11, 22))
+    with pytest.raises(ValidationError):
+        OpenApprovalRequest(key="k", title="t", approve=True)
+    with pytest.raises(ValidationError):
+        OpenApprovalRequest(key="k", title="t", then={"job": "j", "extra": 1})
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        ("ApprovalNotFoundError", 404),
+        ("ApprovalRequesterNotRunningError", 409),
+        ("ApprovalResolvedError", 409),
+    ],
+)
+def test_approval_errors_map_to_http_statuses(error, status):
+    from src.services import approval_service
+
+    cls = getattr(approval_service, error)
+    exc = cls("run-1", "success") if error == "ApprovalResolvedError" else cls("x")
+    with pytest.raises(HTTPException) as raised:
+        jobs_api._raise_http(exc)
+    assert raised.value.status_code == status
+
+
+@pytest.mark.parametrize(
+    ("route", "service"), [("approve_run", "approve"), ("dismiss_run", "dismiss")]
+)
+def test_approve_and_dismiss_record_the_user(monkeypatch, route, service):
+    from src.services import approval_service
+
+    decided = Mock(
+        return_value={"run_id": "a-1", "status": "success", "end_reason": "approved"}
+    )
+    monkeypatch.setattr(approval_service, service, decided)
+    assert getattr(jobs_api, route)("a-1", request())["run_id"] == "a-1"
+    decided.assert_called_once_with("a-1", "operator")
+
+
+def test_approving_logs_and_leaves_a_failed_start_to_the_scheduler(monkeypatch):
+    from src.services import approval_service
+
+    resolve = Mock()
+    monkeypatch.setattr(approval_service, "resolve_approval", resolve)
+    monkeypatch.setattr(approval_service, "get_db_cursor", lambda: db_cursor(Cursor()))
+    monkeypatch.setattr(
+        approval_service, "start_approved_run", Mock(side_effect=RuntimeError("down"))
+    )
+    assert approval_service.approve("a-1", "operator") == {
+        "run_id": "a-1",
+        "status": "success",
+        "end_reason": "approved",
+        "then_run_id": None,
+    }
+    assert resolve.call_args[0][1:] == ("a-1", "approved", "operator")
+
+
+def test_chain_info_exposes_an_approval_step(monkeypatch):
+    catalog = Catalog.model_validate(
+        {
+            "version": 1,
+            "global": {
+                "max_concurrent_pods": 2,
+                "max_deadline": "2h",
+                "start_timeout": "10m",
+                "manual_queue_ttl": "30m",
+            },
+            "profiles": {"core": {"image": "core:test"}},
+            "jobs": {"act": {"profile": "core", "command": ["python", "-m", "act"]}},
+            "chains": {
+                "nightly": {
+                    "max_duration": "6h",
+                    "steps": {
+                        "confirm": {"approval": {"timeout": "2h", "title": "Go?"}},
+                        "act": {"after": [{"step": "confirm"}]},
+                    },
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(jobs_service, "_catalog", lambda: catalog)
+    monkeypatch.setattr(jobs_service, "_last_runs", Mock(return_value={}))
+    monkeypatch.setattr(jobs_service, "_pause_overrides", Mock(return_value={}))
+    response = jobs_service.list_jobs()
+    (chain,) = response.chains
+    assert chain.steps["confirm"].approval.model_dump() == {
+        "title": "Go?",
+        "timeout_seconds": 7200,
+    }
+    assert chain.steps["act"].approval is None
+    assert jobs_service._last_runs.call_args[0][0] == ["act", "confirm"]
