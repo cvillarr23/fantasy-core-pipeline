@@ -9,8 +9,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.launcher.runs import APPROVAL_OUTCOMES
 from src.schemas.trade_score import TradeScore
-from src.services import jobs_service
+from src.services import approval_service, jobs_service
 from src.services import trade_offer_service as service
 from tests.test_trade_score_service import context  # noqa: F401
 from tests.test_trade_score_service import score as shape_score
@@ -120,6 +121,83 @@ def approved_payload(rows):
     return row["outcome_details"]["approval"]["payload"]
 
 
+class Boundary(tuple):
+    """`rows, start_run, audit`, plus `approvals`: the fake run_log approval runs."""
+
+    approvals: dict
+
+
+class FakeApprovals:
+    """The approval runs a scan opened (by dedupe key), behind Runs and approval_service."""
+
+    def __init__(self):
+        self.runs = {}
+        self.started = []
+
+    def open(self, row, approval_id="approval-1", scan_run_id="scan-7", **state):
+        """Stages `row` by a scan that opened an approval run for it."""
+        row["counter_offer"]["scan_run_id"] = scan_run_id
+        key = row["counter_offer"]["offer_key"]
+        self.runs[approval_id] = dict(
+            dedupe_key=approval_service.approval_dedupe_key(scan_run_id, key),
+            status="waiting",
+            end_reason=None,
+            requested_by=None,
+            expired=False,
+            then={"job": "trade-submit", "params": {"offer_key": key}},
+        )
+        self.runs[approval_id].update(state)
+        return approval_id
+
+    def snapshot(self):
+        return copy.deepcopy(self.runs)
+
+    def restore(self, runs):
+        self.runs = runs
+
+    def runs_class(self):
+        approvals = self
+
+        class FakeRuns:
+            def __init__(self, cursor):
+                pass
+
+            def run_id_for_dedupe_key(self, dedupe_key):
+                return next(
+                    (i for i, r in approvals.runs.items() if r["dedupe_key"] == dedupe_key),
+                    None,
+                )
+
+            def retarget_approval_then(self, run_id, params):
+                run = approvals.runs[run_id]
+                if run["status"] != "waiting":
+                    return False
+                run["then"]["params"] = params
+                return True
+
+        return FakeRuns
+
+    def resolve(self, cursor, run_id, outcome, decided_by):
+        run = self.runs.get(run_id)
+        if run is None:
+            raise approval_service.ApprovalNotFoundError(run_id)
+        if run["status"] != "waiting":
+            raise approval_service.ApprovalResolvedError(run_id, run["status"])
+        if outcome == "approved" and run["expired"]:
+            raise approval_service.ApprovalResolvedError(run_id, "expired")
+        run.update(
+            status=APPROVAL_OUTCOMES[outcome], end_reason=outcome, requested_by=decided_by
+        )
+
+    def start(self, run_id):
+        """start_approved_run: one trade-submit run per approval (its dedupe key)."""
+        run = self.runs[run_id]
+        if run["status"] != "success":
+            return None
+        self.started.append((run_id, copy.deepcopy(run["then"])))
+        return {"run_id": f"submit-{run_id}", "status": "queued"}
+
+
 @pytest.fixture
 def boundary(monkeypatch):
     monkeypatch.setenv("ESPN_LEAGUE_ID", "123456789")
@@ -127,15 +205,18 @@ def boundary(monkeypatch):
     rows = [staged()]
     lock = threading.Lock()
     cursor = MagicMock()
+    approvals = FakeApprovals()
 
     @contextmanager
     def transaction():
         with lock:
             original = copy.deepcopy(rows)
+            original_approvals = approvals.snapshot()
             try:
                 yield cursor
             except Exception:
                 rows[:] = original
+                approvals.restore(original_approvals)
                 raise
 
     def read(cur, key, **kwargs):
@@ -169,8 +250,15 @@ def boundary(monkeypatch):
         patch.object(service, "_save_approval", side_effect=update),
         patch("src.api.routes._record_bot_decision") as audit,
         patch.object(jobs_service, "start_run", fake_start_run()) as start_run,
+        patch.object(service, "Runs", approvals.runs_class()),
+        patch.object(approval_service, "resolve_approval", side_effect=approvals.resolve),
+        patch.object(
+            approval_service, "start_approved_run", side_effect=approvals.start
+        ),
     ):
-        yield rows, start_run, audit
+        bound = Boundary((rows, start_run, audit))
+        bound.approvals = approvals
+        yield bound
 
 
 @pytest.mark.parametrize("fixture", FIXTURES)
@@ -1259,3 +1347,135 @@ def test_stored_evaluation_accepts_candidate_target_and_unknown_ranking_fields(
         result = service._stored_evaluation(row, row["counter_offer"])
     assert result is not None and result.target.team_id == "2"
     assert not caplog.records
+
+
+# ---- approval runs: the scan opens one per staged offer (worker), core resolves it ----
+
+
+def approve(client, key, **body):
+    return client.post(
+        f"/v1/trade/offers/{key}/approve", json={"approved_by": "conor", **body}
+    )
+
+
+def test_approving_resolves_the_approval_run_and_sends_through_it(client, boundary):
+    rows, start_run, audit = boundary
+    approval_id = boundary.approvals.open(rows[0])
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = approve(client, key)
+    assert response.status_code == 202, response.text
+    run = boundary.approvals.runs[approval_id]
+    assert (run["status"], run["end_reason"], run["requested_by"]) == (
+        "success",
+        "approved",
+        "conor",
+    )
+    assert boundary.approvals.started == [
+        (approval_id, {"job": "trade-submit", "params": {"offer_key": key}})
+    ]
+    start_run.assert_not_called()
+    stored = rows[0]["outcome_details"]["approval"]
+    assert rows[0]["status"] == "approved"
+    assert stored["approval_run_id"] == approval_id
+    assert stored["run_id"] == response.json()["run_id"] == f"submit-{approval_id}"
+    assert audit.call_args.kwargs["decision_inputs"]["approval_run_id"] == approval_id
+
+
+def test_a_failed_start_keeps_the_claim_and_approving_again_resumes_it(
+    client, boundary
+):
+    rows, start_run, _ = boundary
+    approval_id = boundary.approvals.open(rows[0])
+    key = rows[0]["counter_offer"]["offer_key"]
+    real_start = approval_service.start_approved_run.side_effect
+    approval_service.start_approved_run.side_effect = RuntimeError("broker down")
+    assert approve(client, key).status_code == 503
+    # The approval already ended success; the scheduler would start the run itself.
+    assert boundary.approvals.runs[approval_id]["status"] == "success"
+    assert rows[0]["status"] == "approval_pending"
+    approval_service.start_approved_run.side_effect = real_start
+    response = approve(client, key, approved_by="someone-else")
+    assert response.status_code == 202, response.text
+    assert rows[0]["status"] == "approved"
+    assert rows[0]["outcome_details"]["approval"]["approved_by"] == "conor"
+    assert [started for started, _ in boundary.approvals.started] == [approval_id]
+    start_run.assert_not_called()
+
+
+def test_an_edited_message_points_the_approval_at_the_edited_offer(client, boundary):
+    rows, _, _ = boundary
+    approval_id = boundary.approvals.open(rows[0])
+    response = approve(client, rows[0]["counter_offer"]["offer_key"], message="New note")
+    assert response.status_code == 202, response.text
+    edited_key = response.json()["offer_key"]
+    assert edited_key == rows[-1]["counter_offer"]["offer_key"] != rows[0][
+        "counter_offer"
+    ]["offer_key"]
+    assert boundary.approvals.started == [
+        (approval_id, {"job": "trade-submit", "params": {"offer_key": edited_key}})
+    ]
+    assert rows[-1]["outcome_details"]["approval"]["approval_run_id"] == approval_id
+
+
+@pytest.mark.parametrize(
+    "state",
+    [{"expired": True}, {"status": "skipped", "end_reason": "superseded"}],
+)
+def test_an_expired_or_ended_approval_refuses_the_offer(client, boundary, state):
+    rows, start_run, audit = boundary
+    approval_id = boundary.approvals.open(rows[0], **state)
+    before = boundary.approvals.snapshot()
+    response = approve(client, rows[0]["counter_offer"]["offer_key"])
+    assert response.status_code == 409
+    assert rows[0]["status"] == "awaiting_approval"
+    assert boundary.approvals.runs == before
+    assert boundary.approvals.runs[approval_id]["status"] != "success"
+    start_run.assert_not_called()
+    audit.assert_not_called()
+
+
+def test_approving_one_copy_supersedes_another_scans_approval(client, boundary):
+    rows, _, _ = boundary
+    newer = boundary.approvals.open(rows[0], "approval-new", scan_run_id="scan-9")
+    older_row = staged(row_id=2)
+    older = boundary.approvals.open(older_row, "approval-old", scan_run_id="scan-7")
+    rows.append(older_row)
+    assert approve(client, rows[0]["counter_offer"]["offer_key"]).status_code == 202
+    assert boundary.approvals.runs[newer]["status"] == "success"
+    assert boundary.approvals.runs[older]["end_reason"] == "superseded"
+
+
+def test_a_scan_run_without_an_approval_is_a_legacy_offer(client, boundary):
+    """Offers staged before approval runs (or by a scan outside the launcher) still send
+    by starting trade-submit directly, parented to the scan."""
+    rows, start_run, _ = boundary
+    rows[0]["counter_offer"]["scan_run_id"] = "scan-7"
+    key = rows[0]["counter_offer"]["offer_key"]
+    response = approve(client, key)
+    assert response.status_code == 202, response.text
+    assert start_run.call_args.kwargs["dedupe_key"] == f"trade-submit@{key}"
+    assert start_run.call_args.kwargs["parent_run_id"] == "scan-7"
+    assert boundary.approvals.started == []
+    assert "approval_run_id" not in rows[0]["outcome_details"]["approval"]
+
+
+def dismissing(rows):
+    def save(cursor, row_id, dismissal):
+        row = next(r for r in rows if r["id"] == row_id)
+        row["status"] = "dismissed"
+        row["outcome_details"]["dismissal"] = dismissal
+
+    return patch.object(service, "_save_dismissal", side_effect=save)
+
+
+@pytest.mark.parametrize(
+    "state,end_reason",
+    [({}, "dismissed"), ({"status": "skipped", "end_reason": "expired"}, "expired")],
+)
+def test_dismissing_the_offer_dismisses_its_approval(boundary, state, end_reason):
+    rows, _, _ = boundary
+    approval_id = boundary.approvals.open(rows[0], **state)
+    with dismissing(rows):
+        service.dismiss_offer(rows[0]["counter_offer"]["offer_key"], "conor")
+    assert rows[0]["status"] == "dismissed"
+    assert boundary.approvals.runs[approval_id]["end_reason"] == end_reason

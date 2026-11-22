@@ -45,6 +45,7 @@ def _raise_http(error: Exception):
             jobs_service.RunNotCancellableError,
             approval_service.ApprovalRequesterNotRunningError,
             approval_service.ApprovalResolvedError,
+            approval_service.ApprovalDecidedElsewhereError,
         ),
     ):
         raise HTTPException(409, str(error)) from error

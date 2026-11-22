@@ -9,6 +9,7 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
+from src import models
 from src.launcher import heartbeat, publish, runs as store_module
 from src.launcher.consumer import Consumer
 from src.launcher.publish import publish_run
@@ -35,6 +36,7 @@ def postgres():
         cursor.execute(sql.SQL("SET search_path TO {};").format(sql.Identifier(schema)))
         cursor.execute(activity.SCHEMA)
         cursor.execute(run_log.SCHEMA)
+        create_execution_log(cursor)
 
     @contextmanager
     def cursor_context():
@@ -58,6 +60,19 @@ def postgres():
                     sql.SQL("DROP SCHEMA {} CASCADE;").format(sql.Identifier(schema))
                 )
             conn.close()
+
+
+def create_execution_log(cursor):
+    """The worker's execution_log, which the scheduler's approval expiry also updates."""
+    cursor.execute(models.CREATE_EXECUTION_LOG_TABLE)
+    for ddl in (
+        models.ADD_EXECUTION_LOG_BOT_NAME_COLUMN,
+        models.ADD_EXECUTION_LOG_OUTCOME_DETAILS_COLUMN,
+        models.ADD_EXECUTION_LOG_TRACE_ID_COLUMN,
+        models.ADD_EXECUTION_LOG_DRAFT_CONTEXT_COLUMNS,
+        models.ADD_EXECUTION_LOG_TRADE_CONTEXT_COLUMNS,
+    ):
+        cursor.execute(ddl)
 
 
 def rows(conn, query, params=()):

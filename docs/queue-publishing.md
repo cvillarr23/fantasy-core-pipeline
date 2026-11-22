@@ -143,7 +143,7 @@ The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedup
 
 ### How do approval runs work?
 
-An approval run waits for a person. It is a `run_log` row with executor `approval` and status `waiting`, written by core directly, not through `job_runs`. It launches nothing and is never `running`, so it holds no pod, concurrency-group or overlap slot, and the watcher has nothing to stop when it is cancelled. Its `expires_at` is when it expires.
+An approval run waits for a person. It is a `run_log` row with executor `approval` and status `waiting`, written directly, not through `job_runs`: by core, or by the worker's trade scan for each staged offer (see below). It launches nothing and is never `running`, so it holds no pod, concurrency-group or overlap slot, and the watcher has nothing to stop when it is cancelled. Its `expires_at` is when it expires.
 
 There are two ways to open one:
 
@@ -163,6 +163,8 @@ It ends one of these ways:
 | Its chain root is cancelled | `cancelled` | Nothing |
 
 The approve and dismiss routes record the caller (`x-auth-request-user`) as `requested_by`, and answer 409 for an approval that is no longer waiting or has expired. A route that owns more state, such as trade approval, calls `approval_service.resolve_approval` on its own cursor and `start_approved_run` after its commit. If starting `then` fails, the scheduler starts it on a later tick, while the approval is younger than `manual_queue_ttl`; the dedupe key keeps it to one run. A declined approval is a decision, not a failure: a chain root whose only unsuccessful steps were declined, or skipped because of one, ends `success`.
+
+Trade offers are the one approval core doesn't open. Worker pods have no API key, so the trade scan inserts each staged offer's approval itself (the worker's `db/run_log.js` `openApproval`, mirroring `Runs.insert_approval`: dedupe `approval@<scan run>#<offer_key>`, `then = {trade-submit, {offer_key}}`, `link = /trades?offer=<key>`, `expires_at` the earlier of the next `trade-scan` slot and 72h). The only other change the worker makes is waiting → `superseded` when the next scan retires the offer. Core does everything else: the Trades page's approve and dismiss routes resolve it in their claim transaction (the generic approve and dismiss routes answer 409 for it), and the expiry sweep dismisses the offer in the same transaction (`dismissed_by: "expired"`). `tests/test_trade_approval_postgres.py` pins the shared contract. See [outgoing offers](./decision-pipelines/outgoing-trades.md#what-waits-for-your-approval).
 
 ## How do events start runs?
 

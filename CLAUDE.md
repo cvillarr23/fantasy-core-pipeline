@@ -78,12 +78,22 @@
   display-only: keep it out of `compute_offer_key`, `_validated_offer` and the approval
   payload, since approval binds what the other manager receives, not our reasoning. An
   unknown version or invalid payload becomes `null` with a warning instead of failing the list.
-- Approving an outgoing offer (`trade_offer_service.approve_offer`) commits the
-  `approval_pending` claim, then queues a `trade-submit` launcher run via
-  `jobs_service.start_run` (params `{offer_key}`, parent `counter_offer.scan_run_id`, dedupe
-  `trade-submit@<offer_key>`), then marks `approved`. Never queue the run inside the claim's
-  transaction. Approving a pending claim again resumes it with the original approver; the
-  dedupe key keeps it to one run. The run reads the offer back with
+- Each staged outgoing offer has a `waiting` approval run that the worker's trade scan inserts
+  itself (`db/run_log.js`, because worker pods have no API key): dedupe
+  `approval@<scan_run_id>#<offer_key>`, `then = {trade-submit, {offer_key}}`, expiry =
+  min(next `trade-scan` slot, 72h). The worker only inserts it and moves it waiting →
+  superseded. Core ends it every other way: `approve_offer` resolves it `approved` in the
+  claim's transaction (re-pointing `then` to an edited key), commits, then calls
+  `start_approved_run` (dedupe `trade-submit@<approval id>`) and marks `approved`;
+  `dismiss_offer` resolves it `dismissed`; the scheduler's expiry sweep dismisses the offer
+  (`dismissed_by: "expired"`) in the same transaction (`trade_offer_expiry`, which locks
+  execution_log rows before run_log, the order the claim uses). The generic
+  `/v1/runs/{id}/approve|dismiss` refuse it (409). `tests/test_trade_approval_postgres.py`
+  pins the worker's SQL. Offers with no approval run (legacy) still queue `trade-submit` via
+  `jobs_service.start_run` (parent `counter_offer.scan_run_id`, dedupe
+  `trade-submit@<offer_key>`). Never queue the run inside the claim's transaction.
+  Approving a pending claim again resumes it with the original approver; the dedupe key
+  keeps it to one run. The run reads the offer back with
   `GET /v1/trade/offers?offer_key=`, which without `status` sees any status.
 - The incoming inbox uses `trade_inbox_service` and `schemas/trade_inbox.py`;
   all four inbox writes require the existing `X-API-Key` guard. Core publication

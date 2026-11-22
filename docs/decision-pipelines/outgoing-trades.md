@@ -13,7 +13,7 @@ flowchart LR
     V -->|four-week requests| S[Core trade scorer]
     S -->|eligible scores| R[Worker ranking]
     R -->|winning evidence| P[Grounded pitch]
-    P -->|offer and evaluation| A[Stage for human approval]
+    P -->|offer and evaluation| A[Stage offer and open approval run]
     A -->|approved offer key| Q[trade-submit launcher run]
     Q -->|trade_builder.js --offer-key, execution gates| W[Worker and ESPN]
 ```
@@ -75,14 +75,44 @@ Editing the message at approval creates a new key over the exact edited text. Co
 
 </details>
 
+## What waits for your approval?
+
+Each offer the scan stages gets an *approval run*: a `run_log` row with executor `approval`
+and status `waiting`, which shows as "waiting for you" on the Runs tab and holds no pod or
+`espn-session` slot. The worker's `trade_scan.js` writes it directly, in the scan's own run,
+because worker pods have no API key for `POST /v1/runs/{run_id}/approvals`.
+
+| Field | Value |
+| --- | --- |
+| Parent | The scan's run (`counter_offer.scan_run_id`) |
+| Dedupe key | `approval@<scan_run_id>#<offer_key>`: re-staging the same offer opens nothing new |
+| `trigger` | `key` (the offer key), `title`, `link` (`/trades?offer=<key>`), `then` = `{job: trade-submit, params: {offer_key}}` |
+| `expires_at` | The next scheduled `trade-scan` slot or 72h after staging, whichever is sooner |
+
+It ends in one of four ways, and only the Trades page can approve or dismiss it: the
+generic `POST /v1/runs/{id}/approve` and `/dismiss` return 409 for an approval whose `then`
+is `trade-submit`.
+
+| Event | Approval run | Offer |
+| --- | --- | --- |
+| Approved on the Trades page | `success` / `approved`; the launcher starts `trade-submit` parented to it | `approved` |
+| Dismissed on the Trades page | `skipped` / `dismissed` | `dismissed` |
+| The next scan replaces the offer | `skipped` / `superseded` (the worker, with the offer's retirement) | `dismissed` (`replaced_by_scan`) |
+| Past `expires_at` | `skipped` / `expired` (the scheduler's sweep) | `dismissed`, `dismissed_by: "expired"`, in the same transaction |
+
+An offer with no approval run (staged before approval runs existed, or by a scan run outside
+the launcher, which has no `RUN_ID`) is approved and dismissed as before, and its send is
+started directly (the *legacy* rows below).
+
 ## What happens when you approve?
 
 ```mermaid
 stateDiagram-v2
     awaiting_approval --> superseded: Edited approval creates replacement offer
-    awaiting_approval --> approval_pending: Lock and commit claim plus audit
+    awaiting_approval --> approval_pending: Lock, approve the approval run, commit claim plus audit
+    awaiting_approval --> dismissed: Dismissed, superseded by a scan, or approval expired
     approval_pending --> approved: trade-submit run queued
-    approval_pending --> awaiting_approval: Run provably not queued
+    approval_pending --> awaiting_approval: Legacy only, run provably not queued
     approved --> approved: Duplicate returns original receipt
     approval_pending --> approved: Approve again resumes the claim
 ```
@@ -96,17 +126,21 @@ stateDiagram-v2
 | Lock | Read all rows for key under PostgreSQL advisory lock |
 | Eligible state | `awaiting_approval` |
 | Blocking history | A submitting or submitted row prevents a new send; a pending row is resumed |
-| Committed before send | Exact payload, approver, time, tracking ID and `bot_decisions` audit |
-| Send | A `trade-submit` launcher run, params `{offer_key}`, `requested_by` the approver, parent the staging scan's run (`counter_offer.scan_run_id`) |
-| Run dedupe key | `trade-submit@<offer_key>`: one run per key, however often it is approved |
+| Committed before send | Exact payload, approver, time, tracking ID, `approval_run_id`, the approval run's `approved` outcome and `bot_decisions` audit |
+| Approval run refused | 409 when the offer's approval run expired or already ended; nothing changes |
+| Send | The approval run's `then`: a `trade-submit` launcher run, params `{offer_key}`, `requested_by` the approver, parent the approval run |
+| Run dedupe key | `trade-submit@<approval run id>`: one run per approval, however often it is approved |
+| Legacy send | No approval run: started directly, parent the staging scan's run, dedupe `trade-submit@<offer_key>` |
 | Run queued | 202, `approved`, with the receipt's `run_id` |
 | Duplicate approval | 200, original receipt, no new run |
 
 The run is queued through the Jobs API's `publish_run` (a `job_runs` command), in its own
-transaction after the claim commits. If it provably wrote nothing (catalog unmounted, job
-missing from the catalog), the claim goes back to `awaiting_approval` with a
-`publish_error`, and anyone may approve again. Any other failure leaves
-`approval_pending` and returns 503. Approving again resumes that claim, keeping its
+transaction after the claim commits. With an approval run, a failure leaves
+`approval_pending` and returns 503: the approval already ended `success`, and the scheduler
+starts a `then` run that didn't start. For a legacy offer, a start that provably wrote
+nothing (catalog unmounted, job missing from the catalog) puts the claim back to
+`awaiting_approval` with a `publish_error`, and anyone may approve again; any other failure
+leaves `approval_pending` and returns 503. Approving again resumes that claim, keeping its
 approver and tracking ID; the dedupe key returns the run the first attempt queued, if it
 did, so a retry can't send twice. A changed message on a pending claim is 409.
 
@@ -117,7 +151,8 @@ an offer that isn't approved from an unknown key.
 An omitted or null `message`, or text exactly equal to the staged message, keeps the
 original key and approval behavior. For changed text, core creates a replacement row,
 marks all staged copies of the original key `superseded`, and commits the replacement
-claim and audit in the same transaction. The approved payload contains the edited
+claim and audit in the same transaction. The approval run's `then.params.offer_key` is
+pointed at the new key before it is approved. The approved payload contains the edited
 `message` and approval for the new key, and the run is queued for that key; the response's
 `offer_key` is that new key.
 An existing offer under the edited key returns 409 rather than merging histories.

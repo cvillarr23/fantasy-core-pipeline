@@ -548,6 +548,7 @@ def test_open_approval_request_needs_an_aware_expiry_and_no_extra_fields():
         ("ApprovalNotFoundError", 404),
         ("ApprovalRequesterNotRunningError", 409),
         ("ApprovalResolvedError", 409),
+        ("ApprovalDecidedElsewhereError", 409),
     ],
 )
 def test_approval_errors_map_to_http_statuses(error, status):
