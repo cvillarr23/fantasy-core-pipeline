@@ -40,6 +40,7 @@ def test_trigger_types_keep_every_value_writers_record():
         "mcp",
         "schedule",
         "queue",
+        "approval",
         "http",
         "manual",
     }

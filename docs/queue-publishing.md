@@ -141,6 +141,29 @@ Jobs that share a resource (trade-scan and trade-inbox both drive the stored ESP
 
 The pod gets `RUN_ID`, `RUN_TRIGGER`, `RUN_PARENT_ID` and `JOB_NAME=<job>@<dedupe_key>`. Its outermost `run_scope` adopts the row and keeps the catalog job name.
 
+### How do approval runs work?
+
+An approval run waits for a person. It is a `run_log` row with executor `approval` and status `waiting`, written by core directly, not through `job_runs`. It launches nothing and is never `running`, so it holds no pod, concurrency-group or overlap slot, and the watcher has nothing to stop when it is cancelled. Its `expires_at` is when it expires.
+
+There are two ways to open one:
+
+| From | How | Row |
+|---|---|---|
+| A running process | `POST /v1/runs/{run_id}/approvals {key, title, then?, link?, expires_at?}` (`X-API-Key`). `then = {job, params}` is validated against the catalog. `expires_at` defaults to 24h and is capped at 7 days | `job_name=approval`, `trigger_type=approval`, `parent_run_id` = the asking run, dedupe `approval@<run_id>#<key>`, so a repeat returns `duplicate` |
+| A chain step | `steps.<name>: {approval: {timeout, title}, after: [...]}`. The name must not be a catalog job | `job_name` = the step, `trigger_type=chain`, parented to the chain root, dedupe `<step>@<root>`. It expires after `timeout`, never past the chain's `max_duration` |
+
+It ends one of these ways:
+
+| Event | Status / `end_reason` | Then |
+|---|---|---|
+| Approved (`POST /v1/runs/{id}/approve`) | `success` / `approved` | `then` starts as a `manual` run by the approver, parented to the approval, dedupe `<job>@<approval id>`, with no chain root. A chain step's `on: success` edges run |
+| Dismissed (`POST /v1/runs/{id}/dismiss`) | `skipped` / `dismissed` | Nothing. A chain step's `on: success` edges skip as `dependency_failed` |
+| Replaced by a newer one (`approval_service.resolve_approval(..., "superseded")`) | `skipped` / `superseded` | Same as dismissed |
+| Past `expires_at` (the scheduler's sweep, every tick) | `skipped` / `expired` | Same as dismissed. An expired approval can't be approved even before the sweep reaches it |
+| Its chain root is cancelled | `cancelled` | Nothing |
+
+The approve and dismiss routes record the caller (`x-auth-request-user`) as `requested_by`, and answer 409 for an approval that is no longer waiting or has expired. A route that owns more state, such as trade approval, calls `approval_service.resolve_approval` on its own cursor and `start_approved_run` after its commit. If starting `then` fails, the scheduler starts it on a later tick, while the approval is younger than `manual_queue_ttl`; the dedupe key keeps it to one run. A declined approval is a decision, not a failure: a chain root whose only unsuccessful steps were declined, or skipped because of one, ends `success`.
+
 ## How do events start runs?
 
 An event is a fact, such as `rumor.signal_created`, that can start runs. A job subscribes through catalog `on_event`, with a `debounce`.

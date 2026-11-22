@@ -382,9 +382,23 @@ class Dependency(CatalogModel):
     on: Literal["success", "finish"] = "success"
 
 
+class ApprovalStep(CatalogModel):
+    """A chain step that waits for a person instead of running a job. Approving it makes the
+    step `success`; dismissal or expiry after `timeout` makes it `skipped`."""
+
+    timeout: timedelta
+    title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def parse_timeout(cls, value: Any) -> timedelta:
+        return _duration(value)
+
+
 class ChainStep(CatalogModel):
     after: list[Dependency] = Field(default_factory=list)
     latest: str | None = None
+    approval: ApprovalStep | None = None
 
     @field_validator("latest")
     @classmethod
@@ -403,20 +417,6 @@ class Chain(CatalogModel):
     @classmethod
     def parse_max_duration(cls, value: Any) -> timedelta:
         return _duration(value)
-
-
-_RESERVED = {"approval"}
-
-
-def _reject_reserved(value: Any, path: str = "catalog") -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in _RESERVED:
-                raise ValueError(f"{path}.{key}: not implemented (reserved for v2)")
-            _reject_reserved(child, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _reject_reserved(child, f"{path}[{index}]")
 
 
 class UnknownJobError(ValueError):
@@ -450,12 +450,6 @@ class Catalog(CatalogModel):
     jobs: dict[str, Job]
     chains: dict[str, Chain] = Field(default_factory=dict)
 
-    @model_validator(mode="before")
-    @classmethod
-    def reject_unimplemented_fields(cls, value: Any) -> Any:
-        _reject_reserved(value)
-        return value
-
     @model_validator(mode="after")
     def validate_references(self) -> "Catalog":
         for name, job in self.jobs.items():
@@ -486,10 +480,7 @@ class Catalog(CatalogModel):
             step_names = set(chain.steps)
             graph: dict[str, list[str]] = {step: [] for step in step_names}
             for step_name, step in chain.steps.items():
-                if step_name not in self.jobs:
-                    raise ValueError(
-                        f"chains.{name}.steps references unknown job {step_name!r}"
-                    )
+                _validate_step_name(self, name, step_name, step)
                 for dependency in step.after:
                     if dependency.step not in step_names:
                         raise ValueError(
@@ -545,6 +536,19 @@ class Catalog(CatalogModel):
         for season in schedule.seasons:
             if season not in self.seasons:
                 raise ValueError(f"{path}.seasons references unknown season {season!r}")
+
+
+def _validate_step_name(
+    catalog: Catalog, chain: str, step_name: str, step: ChainStep
+) -> None:
+    """A job step names a catalog job. An approval step must not: its run_log rows use the
+    step name as job_name, which would then read as runs of that job."""
+    if step.approval is not None and step_name in catalog.jobs:
+        raise ValueError(
+            f"chains.{chain}.steps.{step_name}: an approval step can't share a job's name"
+        )
+    if step.approval is None and step_name not in catalog.jobs:
+        raise ValueError(f"chains.{chain}.steps references unknown job {step_name!r}")
 
 
 def _coerce_param(name: str, base: str, value: Any) -> Any:
@@ -612,7 +616,6 @@ def load_catalog(path: str | Path) -> Catalog:
         raw = yaml.load(source, Loader=_CatalogYamlLoader)
     if not isinstance(raw, dict):
         raise ValueError("catalog must be a YAML mapping")
-    _reject_reserved(raw)
     return Catalog.model_validate(raw)
 
 

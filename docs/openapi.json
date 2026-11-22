@@ -1,6 +1,97 @@
 {
   "components": {
     "schemas": {
+      "ApprovalDecisionResponse": {
+        "properties": {
+          "end_reason": {
+            "title": "End Reason",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "then_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Then Run Id"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "end_reason"
+        ],
+        "title": "ApprovalDecisionResponse",
+        "type": "object"
+      },
+      "ApprovalResponse": {
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "title": "ApprovalResponse",
+        "type": "object"
+      },
+      "ApprovalStepInfo": {
+        "properties": {
+          "timeout_seconds": {
+            "title": "Timeout Seconds",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "timeout_seconds"
+        ],
+        "title": "ApprovalStepInfo",
+        "type": "object"
+      },
+      "ApprovalThen": {
+        "additionalProperties": false,
+        "description": "The run an approval starts once approved.",
+        "properties": {
+          "job": {
+            "minLength": 1,
+            "title": "Job",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "job"
+        ],
+        "title": "ApprovalThen",
+        "type": "object"
+      },
       "BacktestResultDetail": {
         "properties": {
           "naive_baseline_points": {
@@ -580,6 +671,16 @@
             },
             "title": "After",
             "type": "array"
+          },
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalStepInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_run": {
             "anyOf": [
@@ -4276,6 +4377,63 @@
           "offer_key"
         ],
         "title": "OfferResolutionResponse",
+        "type": "object"
+      },
+      "OpenApprovalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Key",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Link"
+          },
+          "then": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalThen"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "title"
+        ],
+        "title": "OpenApprovalRequest",
         "type": "object"
       },
       "OurCounter": {
@@ -9500,7 +9658,16 @@
             "schema": {
               "anyOf": [
                 {
-                  "pattern": "^(running|success|failure)$",
+                  "enum": [
+                    "queued",
+                    "waiting",
+                    "skipped",
+                    "cancelled",
+                    "timeout",
+                    "running",
+                    "success",
+                    "failure"
+                  ],
                   "type": "string"
                 },
                 {
@@ -9525,7 +9692,8 @@
                     "cli",
                     "mcp",
                     "queue",
-                    "http"
+                    "http",
+                    "approval"
                   ],
                   "type": "string"
                 },
@@ -11382,6 +11550,54 @@
         "summary": "Get Run"
       }
     },
+    "/v1/runs/{identity}/approve": {
+      "post": {
+        "operationId": "approve_run_v1_runs__identity__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "title": "Identity",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Run"
+      }
+    },
     "/v1/runs/{identity}/cancel": {
       "post": {
         "description": "The watcher deletes the k8s Job or stops the inline process for a cancelled row.",
@@ -11429,6 +11645,113 @@
           }
         },
         "summary": "Cancel Run"
+      }
+    },
+    "/v1/runs/{identity}/dismiss": {
+      "post": {
+        "operationId": "dismiss_run_v1_runs__identity__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "title": "Identity",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Run"
+      }
+    },
+    "/v1/runs/{run_id}/approvals": {
+      "post": {
+        "description": "A running process asks a person to approve `then` (or just to confirm).",
+        "operationId": "open_approval_v1_runs__run_id__approvals_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "title": "X-Api-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenApprovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Open Approval"
       }
     },
     "/v1/scoreboard": {

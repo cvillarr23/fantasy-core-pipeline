@@ -111,7 +111,10 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `POST` | `/v1/jobs/{name}/runs` | Queue a catalog job run for the launcher. | Yes | `job_runs` |
 | `GET` | `/v1/launcher/health` | Show launcher heartbeat age, queue depths and run counts. | No |  |
 | `GET` | `/v1/runs/{identity}` | Show one launcher run and its linked activity. | No |  |
-| `POST` | `/v1/runs/{identity}/cancel` | Cancel a queued or running launcher run. | Yes |  |
+| `POST` | `/v1/runs/{identity}/approve` | Approve a waiting approval run and start its run. | Yes |  |
+| `POST` | `/v1/runs/{identity}/cancel` | Cancel a queued, running or waiting launcher run. | Yes |  |
+| `POST` | `/v1/runs/{identity}/dismiss` | Dismiss a waiting approval run. | Yes |  |
+| `POST` | `/v1/runs/{run_id}/approvals` | Ask a person to approve a run (or confirm) for a running run. | Yes |  |
 
 ### Roster and waivers
 

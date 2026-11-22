@@ -641,5 +641,16 @@
   request's scope never measures, since its process is shared. `resource_usage_service`
   (`GET /v1/jobs/resource-suggestions`, `python -m src.cli jobs resources`) turns successful
   pod runs into suggested catalog `resources`. Its rules live in that module's docstring.
+- Approval runs (`src/services/approval_service.py`, `docs/queue-publishing.md`): a run_log row with
+  executor `approval` and status `waiting` that waits for a person. It is never `running`, so it
+  holds no pod, group or overlap slot, and `runs.NO_WORKLOAD` keeps it out of the watcher. A running
+  process opens one (`POST /v1/runs/{run_id}/approvals`, `job_name=approval`, dedupe
+  `approval@<run_id>#<key>`), or an `approval:` chain step does (`job_name` = the step, which must
+  not be a job; it expires by `max_duration` at the latest). Approved -> `success` and `trigger.then`
+  starts as a manual run parented to it (dedupe `<job>@<approval id>`, no chain root); dismissed,
+  superseded or expired -> `skipped`. The scheduler sweeps expiries and restarts a `then` run that
+  didn't start, and a root whose only unsuccessful steps were declined ends `success`.
+  `resolve_approval` takes the caller's cursor and never publishes; call `start_approved_run`
+  after committing.
 - `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
   it gets no `chain_root_id`, so it never starts downstream steps.

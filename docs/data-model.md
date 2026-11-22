@@ -122,9 +122,9 @@ erDiagram
     run_log {
         text id PK
         text job_name
-        text trigger_type "schedule | chain | event | cli | mcp (plus cutover legacy values)"
-        jsonb trigger "what asked for the run: launcher params + downstream, cronjob, queue + tracking_id"
-        text status "queued | skipped | cancelled | timeout | running | success | failure"
+        text trigger_type "schedule | chain | event | cli | mcp | approval (plus cutover legacy values)"
+        jsonb trigger "what asked for the run: launcher params + downstream, cronjob, queue + tracking_id, an approval's key/title/link/then"
+        text status "queued | waiting | skipped | cancelled | timeout | running | success | failure"
         text dedupe_key UK "nullable"
         timestamptz scheduled_for
         int attempt
@@ -132,9 +132,9 @@ erDiagram
         text chain_root_id
         text event_id
         text end_reason
-        text executor "pod | inline | fan_out, set when the launcher claims the run"
+        text executor "pod | inline | fan_out, set when the launcher claims the run; approval from insert"
         text k8s_job "the pod's Job name, for the current attempt"
-        timestamptz expires_at "when a queued run stops being worth starting"
+        timestamptz expires_at "when a queued run stops being worth starting, or a waiting approval expires"
         timestamptz cancel_reconciled_at "the watcher stopped a cancelled run's workload"
     }
     job_overrides {

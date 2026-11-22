@@ -35,6 +35,8 @@ class FakeState:
         self.runs: dict[str, RunRow] = {}
         self.meta: dict[str, dict] = {}
         self.overrides: dict[str, datetime | None] = {}
+        # What approved_without_then returns: approvals whose `then` run hasn't started.
+        self.approved: list = []
 
     def insert(self, row: RunRow, **meta) -> bool:
         key = meta.get("dedupe_key")
@@ -79,6 +81,7 @@ class FakeState:
             scheduled_for=scheduled_for,
             chain_root_id=chain_root_id,
             parent_run_id=chain_root_id,
+            end_reason=end_reason,
         )
         return self.insert(
             row,
@@ -154,6 +157,37 @@ class FakeState:
             self.meta[parent_id]["end_reason"] = end_reason
 
 
+    def open_step_approval(self, *, step, title, root_id, dedupe_key, expires_at):
+        row = RunRow(
+            str(uuid.uuid4()),
+            step,
+            "waiting",
+            chain_root_id=root_id,
+            parent_run_id=root_id,
+            trigger_type="chain",
+            executor="approval",
+            trigger={"title": title},
+        )
+        if not self.insert(row, dedupe_key=dedupe_key, expires_at=expires_at):
+            return None
+        return row
+
+    def expire_approvals(self, now):
+        expired = []
+        for row in self.runs.values():
+            if (
+                row.executor == "approval"
+                and row.status == "waiting"
+                and self.meta[row.id]["expires_at"] <= now
+            ):
+                row.status, row.end_reason = "skipped", "expired"
+                expired.append(row.id)
+        return expired
+
+    def approved_without_then(self, since):
+        return list(self.approved)
+
+
 class AlwaysInSeason:
     def in_season(self, season, day):
         return True
@@ -181,8 +215,8 @@ def fake_publish_run(state, commands):
             command["run_id"],
             job,
             "queued",
-            chain_root_id=kwargs["chain_root_id"],
-            parent_run_id=kwargs["parent_run_id"],
+            chain_root_id=kwargs.get("chain_root_id"),
+            parent_run_id=kwargs.get("parent_run_id"),
             trigger_type=kwargs["trigger"],
             trigger={"params": kwargs["params"] or {}},
         )
@@ -958,7 +992,7 @@ def test_fan_out_publishes_one_child_per_value(scheduler, state, commands):
     assert [c["params"] for c in published] == [{"week_offset": v} for v in range(4)]
     for value, command in enumerate(published):
         assert command["parent_run_id"] == parent.id
-        assert command["chain_root_id"] is None
+        assert command.get("chain_root_id") is None
         assert command["trigger"] == "schedule"
         assert command["dedupe_key"] == (
             f"projections-refresh@{parent.id}#week_offset={value}"
@@ -1057,3 +1091,189 @@ def test_fan_out_chain_step_gates_its_downstream_on_the_parent(
     scheduler.tick(ct(2026, 10, 27, 16, 40))
     assert parent.status == "success"
     assert jobs(commands, "lineup-optimizer", "chain")
+
+
+# Approvals
+
+
+APPROVAL_CATALOG = {
+    "version": 1,
+    "global": {
+        "max_concurrent_pods": 2,
+        "max_deadline": "2h",
+        "start_timeout": "10m",
+        "manual_queue_ttl": "30m",
+    },
+    "profiles": {"core": {"image": "core"}},
+    "jobs": {
+        name: {"profile": "core", "command": ["python", "-m", name]}
+        for name in ("prepare", "act", "report", "send")
+    },
+    "chains": {
+        "nightly": {
+            "max_duration": "6h",
+            "steps": {
+                "prepare": {},
+                "confirm": {
+                    "approval": {"timeout": "2h", "title": "Act on tonight's plan?"},
+                    "after": [{"step": "prepare"}],
+                },
+                "act": {"after": [{"step": "confirm"}]},
+                "report": {"after": [{"step": "confirm", "on": "finish"}]},
+            },
+        }
+    },
+}
+NIGHT = datetime(2026, 11, 20, 3, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def approval_scheduler(state, commands):
+    from src.launcher.catalog import Catalog
+
+    return Scheduler(
+        Catalog.model_validate(APPROVAL_CATALOG),
+        state,
+        fake_publish_run(state, commands),
+        seasons=AlwaysInSeason(),
+    )
+
+
+@pytest.fixture
+def nightly(approval_scheduler, state):
+    chain_root = state.create_chain_root(
+        chain="nightly", dedupe_key="nightly@1", scheduled_for=NIGHT
+    )
+    approval_scheduler.tick(NIGHT)
+    finish(state, chain_root, "prepare", "success")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=1))
+    return chain_root
+
+
+def test_an_approval_step_opens_a_waiting_run_once_its_parents_succeed(
+    nightly, state, commands
+):
+    approval = step(state, nightly, "confirm")
+    assert (approval.status, approval.executor) == ("waiting", "approval")
+    assert approval.trigger == {"title": "Act on tonight's plan?"}
+    meta = state.meta[approval.id]
+    assert meta["dedupe_key"] == f"confirm@{nightly.id}"
+    assert meta["expires_at"] == NIGHT + timedelta(minutes=1, hours=2)
+    # Nothing is launched for it, and nothing after it starts while it waits.
+    assert [c["job"] for c in commands] == ["prepare"]
+    assert nightly.status == "running"
+
+
+def test_an_approval_step_never_outlives_its_chain(approval_scheduler, state):
+    chain_root = state.create_chain_root(
+        chain="nightly", dedupe_key="nightly@1", scheduled_for=NIGHT
+    )
+    approval_scheduler.tick(NIGHT)
+    finish(state, chain_root, "prepare", "success")
+    approval_scheduler.tick(NIGHT + timedelta(hours=5))
+    approval = step(state, chain_root, "confirm")
+    assert state.meta[approval.id]["expires_at"] == NIGHT + timedelta(hours=6)
+
+
+def test_approving_runs_every_edge_and_the_root_succeeds(
+    approval_scheduler, nightly, state, commands
+):
+    finish(state, nightly, "confirm", "success")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=5))
+    assert {c["job"] for c in jobs(commands, trigger="chain")} == {
+        "prepare",
+        "act",
+        "report",
+    }
+    finish(state, nightly, "act", "success")
+    finish(state, nightly, "report", "success")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=10))
+    assert nightly.status == "success"
+
+
+@pytest.mark.parametrize("reason", ["dismissed", "superseded"])
+def test_a_declined_approval_skips_success_edges_without_failing_the_root(
+    approval_scheduler, nightly, state, commands, reason
+):
+    approval = step(state, nightly, "confirm")
+    approval.status, approval.end_reason = "skipped", reason
+    approval_scheduler.tick(NIGHT + timedelta(minutes=5))
+    act = step(state, nightly, "act")
+    assert (act.status, act.end_reason) == ("skipped", "dependency_failed")
+    assert not jobs(commands, "act")
+    assert jobs(commands, "report", "chain")
+    finish(state, nightly, "report", "success")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=10))
+    assert nightly.status == "success"
+
+
+def test_an_expired_approval_is_skipped_by_the_sweep(
+    approval_scheduler, nightly, state, commands
+):
+    approval = step(state, nightly, "confirm")
+    approval_scheduler.tick(NIGHT + timedelta(hours=1))
+    assert approval.status == "waiting"
+    approval_scheduler.tick(NIGHT + timedelta(hours=2, minutes=1))
+    assert (approval.status, approval.end_reason) == ("skipped", "expired")
+    # The sweep runs first, so the same tick already moves the chain on.
+    assert step(state, nightly, "act").end_reason == "dependency_failed"
+    assert jobs(commands, "report", "chain")
+
+
+def test_a_real_failure_still_fails_a_root_with_a_declined_approval(
+    approval_scheduler, nightly, state
+):
+    approval = step(state, nightly, "confirm")
+    approval.status, approval.end_reason = "skipped", "dismissed"
+    approval_scheduler.tick(NIGHT + timedelta(minutes=5))
+    finish(state, nightly, "report", "failure")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=10))
+    assert nightly.status == "failure"
+
+
+def test_an_approval_skipped_by_a_failed_parent_fails_the_root(
+    approval_scheduler, state
+):
+    chain_root = state.create_chain_root(
+        chain="nightly", dedupe_key="nightly@1", scheduled_for=NIGHT
+    )
+    approval_scheduler.tick(NIGHT)
+    finish(state, chain_root, "prepare", "failure")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=1))
+    approval = step(state, chain_root, "confirm")
+    assert (approval.status, approval.end_reason) == ("skipped", "dependency_failed")
+    finish(state, chain_root, "report", "success")
+    approval_scheduler.tick(NIGHT + timedelta(minutes=2))
+    assert chain_root.status == "failure"
+
+
+def test_a_chain_cancel_reaches_a_waiting_approval():
+    from src.launcher import runs
+
+    assert "waiting" in runs.CANCELLABLE_STATUSES
+
+
+def test_the_tick_starts_an_approved_run_that_never_started(
+    approval_scheduler, state, commands
+):
+    from src.launcher.runs import ApprovalRun
+
+    approval = ApprovalRun(
+        run_id="approval-1",
+        job_name="approval",
+        status="success",
+        end_reason="approved",
+        requested_by="conor",
+        trigger={"then": {"job": "send", "params": {}}},
+        expires_at=None,
+        chain_root_id=None,
+    )
+    state.approved = [approval]
+    approval_scheduler.tick(NIGHT)
+    approval_scheduler.tick(NIGHT + timedelta(seconds=15))
+    (command,) = jobs(commands, "send")
+    assert command["trigger"] == "manual"
+    assert command["requested_by"] == "conor"
+    assert command["dedupe_key"] == "send@approval-1"
+    assert command["parent_run_id"] == "approval-1"
+    assert command.get("chain_root_id") is None

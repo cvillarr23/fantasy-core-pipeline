@@ -16,6 +16,11 @@ A fan-out parent is claimed with executor `fan_out` (`FAN_OUT`) and has no k8s J
 its children (`parent_run_id` = the parent) do the work, and the scheduler ends it. Like a chain
 root it groups runs, so a cancel reaches its children and an ended parent stops their retries.
 
+An approval run (executor `approval`, `APPROVAL`) waits for a person. It is inserted `waiting`
+and is never `running`, so it holds no pod, group or overlap slot, and it has no workload for the
+watcher to stop. It ends `success` (`approved`), or `skipped` (`dismissed`, `superseded`,
+`expired`); `trigger.then` names the run an approval starts.
+
 The run's own process finishes through `run_log_service.finish_run`, which keeps its contract
 with the browser worker's `db/run_log.js`; the statuses below are shared with it.
 """
@@ -33,7 +38,9 @@ from src.database import get_db_cursor
 ADMISSION_LOCK_KEY = 343_001
 
 ACTIVE_STATUSES = ("queued", "running")
-CANCELLABLE_STATUSES = ACTIVE_STATUSES
+# An approval run's status until a person (or its expiry) decides it.
+WAITING = "waiting"
+CANCELLABLE_STATUSES = (*ACTIVE_STATUSES, WAITING)
 # A failure or timeout is final unless the run has attempts left (and its chain is still going).
 RETRYABLE_STATUSES = ("failure", "timeout")
 OUTCOME_STATUSES = ("success", *RETRYABLE_STATUSES)
@@ -45,6 +52,16 @@ REQUEUEABLE_STATUSES = ("running", *RETRYABLE_STATUSES)
 LAUNCHER_RUN = "executor IS NOT NULL"
 # The executor of a fan-out parent, which launches nothing itself.
 FAN_OUT = "fan_out"
+# The executor of an approval run, which launches nothing and waits for a person.
+APPROVAL = "approval"
+# Executors with no k8s Job or process: nothing to watch, stop or count against a cap.
+NO_WORKLOAD = (FAN_OUT, APPROVAL)
+# How an approval ends: the outcome's status and end_reason.
+APPROVAL_OUTCOMES = {
+    "approved": "success",
+    "dismissed": "skipped",
+    "superseded": "skipped",
+}
 
 
 @dataclass(frozen=True)
@@ -65,6 +82,25 @@ class WatchedRun:
     group_running: bool = True
     # The run's params (`trigger.params`), which a service job's health key is formatted from.
     params: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ApprovalRun:
+    """An approval run, with what it asks for (`trigger`: `title`, `link`, `key`, `then`)."""
+
+    run_id: str
+    job_name: str
+    status: str
+    end_reason: str | None
+    requested_by: str | None
+    trigger: dict
+    expires_at: datetime | None
+    chain_root_id: str | None
+
+    @property
+    def then(self):
+        """`{job, params}` to start once approved, or None (a chain step's approval)."""
+        return self.trigger.get("then")
 
 
 @dataclass(frozen=True)
@@ -172,7 +208,7 @@ class Runs:
         """Whether a cancelled launcher run still has its workload to stop."""
         self.c.execute(
             f"""SELECT EXISTS(SELECT 1 FROM run_log WHERE status='cancelled'
-            AND cancel_reconciled_at IS NULL AND {LAUNCHER_RUN} AND executor<>'{FAN_OUT}')"""
+            AND cancel_reconciled_at IS NULL AND {LAUNCHER_RUN} AND executor NOT IN {_in(NO_WORKLOAD)})"""
         )
         return self.c.fetchone()[0]
 
@@ -183,7 +219,7 @@ class Runs:
         """
         self.c.execute(
             f"""SELECT count(*) FROM run_log WHERE status='running' AND job_name=ANY(%s)
-            AND {LAUNCHER_RUN} AND executor<>'{FAN_OUT}'""",
+            AND {LAUNCHER_RUN} AND executor NOT IN {_in(NO_WORKLOAD)}""",
             (list(jobs),),
         )
         return self.c.fetchone()[0]
@@ -192,7 +228,7 @@ class Runs:
         """`(running launcher runs, queued runs)`, for the health endpoint."""
         self.c.execute(
             f"""SELECT count(*) FILTER (WHERE status='running' AND {LAUNCHER_RUN}
-              AND executor<>'{FAN_OUT}'),
+              AND executor NOT IN {_in(NO_WORKLOAD)}),
             count(*) FILTER (WHERE status='queued') FROM run_log"""
         )
         return self.c.fetchone()
@@ -213,7 +249,7 @@ class Runs:
             COALESCE(r.trigger->'params','{{}}'::jsonb)
             FROM run_log r LEFT JOIN run_log root ON root.id=r.chain_root_id
             LEFT JOIN run_log fan ON fan.id=r.parent_run_id AND fan.executor='{FAN_OUT}'
-            WHERE r.{LAUNCHER_RUN} AND r.executor<>'{FAN_OUT}'
+            WHERE r.{LAUNCHER_RUN} AND r.executor NOT IN {_in(NO_WORKLOAD)}
             AND (r.chain_root_id IS NULL OR r.chain_root_id<>r.id)
             AND (r.status='running'
               OR (r.status='cancelled' AND r.cancel_reconciled_at IS NULL)
@@ -328,6 +364,62 @@ class Runs:
         )
         return self.c.fetchone()
 
+    def insert_approval(
+        self,
+        *,
+        job,
+        trigger_type,
+        trigger,
+        parent_run_id,
+        dedupe_key,
+        expires_at,
+        chain_root_id=None,
+    ):
+        """A `waiting` approval run. Returns its id, or None when `dedupe_key` was used."""
+        run_id = str(uuid.uuid4())
+        self.c.execute(
+            """INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,status,
+              executor,dedupe_key,scheduled_for,chain_root_id,expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,now(),%s,%s)
+            ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id""",
+            (
+                run_id,
+                job,
+                trigger_type,
+                json.dumps(trigger),
+                parent_run_id,
+                WAITING,
+                APPROVAL,
+                dedupe_key,
+                chain_root_id,
+                expires_at,
+            ),
+        )
+        return run_id if self.c.fetchone() is not None else None
+
+    def approval(self, run_id):
+        """The approval run with this id, or None (no such run, or not an approval)."""
+        self.c.execute(
+            f"SELECT {_APPROVAL_COLUMNS} FROM run_log WHERE id=%s AND executor=%s",
+            (run_id, APPROVAL),
+        )
+        row = self.c.fetchone()
+        return _approval(row) if row else None
+
+    def approved_without_then(self, since):
+        """Approvals that succeeded after `since` and name a `then` run not yet published,
+        oldest first: the publish after approving failed, or the process died before it.
+        """
+        self.c.execute(
+            f"""SELECT {_APPROVAL_COLUMNS} FROM run_log a
+            WHERE a.executor=%s AND a.status='success' AND a.trigger ? 'then'
+            AND a.finished_at > %s AND NOT EXISTS (
+              SELECT 1 FROM run_log c WHERE c.dedupe_key={_THEN_DEDUPE_SQL})
+            ORDER BY a.finished_at""",
+            (APPROVAL, since),
+        )
+        return [_approval(row) for row in self.c.fetchall()]
+
     # ---- transitions ----------------------------------------------------------------
 
     def claim(self, run_id, executor, k8s_job=None):
@@ -393,6 +485,43 @@ class Runs:
             WHERE id=%s AND status='running' AND executor=%s""",
             (status, end_reason, parent_id, FAN_OUT),
         )
+
+    def resolve_approval(self, run_id, outcome, decided_by):
+        """Ends a `waiting` approval with `outcome` (an `APPROVAL_OUTCOMES` key), recording who
+        decided as `requested_by`. An approval past its `expires_at` can still be dismissed or
+        superseded but no longer approved, even before the scheduler's sweep reaches it.
+
+        Returns True when resolved, else the row's current status, or None for no such
+        approval.
+        """
+        self.c.execute(
+            """UPDATE run_log SET status=%s, end_reason=%s, requested_by=%s, finished_at=now()
+            WHERE id=%s AND executor=%s AND status=%s
+            AND (%s<>'approved' OR expires_at IS NULL OR expires_at>now()) RETURNING id""",
+            (
+                APPROVAL_OUTCOMES[outcome],
+                outcome,
+                decided_by,
+                run_id,
+                APPROVAL,
+                WAITING,
+                outcome,
+            ),
+        )
+        if self.c.fetchone() is not None:
+            return True
+        current = self.approval(run_id)
+        return current.status if current else None
+
+    def expire_approvals(self, now):
+        """Ends every approval still `waiting` at its `expires_at` as `skipped (expired)`, and
+        returns their ids."""
+        self.c.execute(
+            """UPDATE run_log SET status='skipped', end_reason='expired', finished_at=now()
+            WHERE executor=%s AND status=%s AND expires_at<=%s RETURNING id""",
+            (APPROVAL, WAITING, now),
+        )
+        return [row[0] for row in self.c.fetchall()]
 
     def cancel(self, run_id):
         """Cancels a queued or running run, and a chain root's or fan-out parent's queued and
@@ -552,6 +681,43 @@ class RunStore:
     def latest_run(self, jobs, param=None, value=None):
         return self._with_runs(lambda runs: runs.latest_run(jobs, param, value))
 
+    def resolve_approval(self, run_id, outcome, decided_by):
+        """Ends a `waiting` approval with `outcome` (an `APPROVAL_OUTCOMES` key), recording who
+        decided as `requested_by`. An approval past its `expires_at` can still be dismissed or
+        superseded but no longer approved, even before the scheduler's sweep reaches it.
+
+        Returns True when resolved, else the row's current status, or None for no such
+        approval.
+        """
+        self.c.execute(
+            """UPDATE run_log SET status=%s, end_reason=%s, requested_by=%s, finished_at=now()
+            WHERE id=%s AND executor=%s AND status=%s
+            AND (%s<>'approved' OR expires_at IS NULL OR expires_at>now()) RETURNING id""",
+            (
+                APPROVAL_OUTCOMES[outcome],
+                outcome,
+                decided_by,
+                run_id,
+                APPROVAL,
+                WAITING,
+                outcome,
+            ),
+        )
+        if self.c.fetchone() is not None:
+            return True
+        current = self.approval(run_id)
+        return current.status if current else None
+
+    def expire_approvals(self, now):
+        """Ends every approval still `waiting` at its `expires_at` as `skipped (expired)`, and
+        returns their ids."""
+        self.c.execute(
+            """UPDATE run_log SET status='skipped', end_reason='expired', finished_at=now()
+            WHERE executor=%s AND status=%s AND expires_at<=%s RETURNING id""",
+            (APPROVAL, WAITING, now),
+        )
+        return [row[0] for row in self.c.fetchall()]
+
     def cancel(self, run_id):
         return self._with_runs(lambda runs: runs.cancel(run_id))
 
@@ -559,6 +725,25 @@ class RunStore:
         return self._with_runs(
             lambda runs: runs.requeue_attempt(run_id, attempt, expected_attempt)
         )
+
+
+_APPROVAL_COLUMNS = (
+    "id,job_name,status,end_reason,requested_by,trigger,expires_at,chain_root_id"
+)
+# `then_dedupe_key` in SQL, for the approval aliased `a`.
+_THEN_DEDUPE_SQL = "(a.trigger->'then'->>'job') || '@' || a.id"
+
+
+def then_dedupe_key(job, approval_id):
+    """The dedupe key of the run an approval starts, so it starts at most once."""
+    return f"{job}@{approval_id}"
+
+
+def _approval(row):
+    trigger = row[5]
+    if isinstance(trigger, str):
+        trigger = json.loads(trigger)
+    return ApprovalRun(*row[:5], trigger or {}, *row[6:])
 
 
 def _in(statuses):

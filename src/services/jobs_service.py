@@ -9,6 +9,7 @@ from src.database import get_db_cursor
 from src.launcher.catalog import (
     Catalog,
     Chain,
+    ChainStep,
     ResolvedJob,
     UnknownJobError,
     load_catalog_from_env,
@@ -70,13 +71,18 @@ def _catalog() -> Catalog:
         raise CatalogUnavailableError("Job catalog is not mounted") from exc
 
 
+def catalog() -> Catalog:
+    """The mounted catalog, for other services that start runs (approval_service)."""
+    return _catalog()
+
+
 def list_jobs() -> JobsResponse:
     try:
         catalog = _catalog()
     except CatalogUnavailableError:
         return JobsResponse(jobs=[], chains=[])
 
-    last_runs = _last_runs(list(catalog.jobs))
+    last_runs = _last_runs([*catalog.jobs, *_approval_steps(catalog)])
     overrides = _pause_overrides()
     scheduler = _scheduler(catalog)
     jobs = [
@@ -168,12 +174,32 @@ def _chain_info(
             step: {
                 "after": [dependency.model_dump() for dependency in config.after],
                 "latest": config.latest,
+                "approval": _approval_step_info(config),
                 "last_run": last_runs.get(step),
             }
             for step, config in chain.steps.items()
         },
         "next_run_at": next_run_at,
         "pause": overrides.get(name),
+    }
+
+
+def _approval_steps(catalog: Catalog) -> list[str]:
+    """Approval step names, whose run_log rows use the step name as job_name."""
+    return [
+        step
+        for chain in catalog.chains.values()
+        for step, config in chain.steps.items()
+        if config.approval is not None
+    ]
+
+
+def _approval_step_info(step: ChainStep) -> dict[str, Any] | None:
+    if step.approval is None:
+        return None
+    return {
+        "title": step.approval.title,
+        "timeout_seconds": int(step.approval.timeout.total_seconds()),
     }
 
 
