@@ -9,7 +9,8 @@ Polls a small, fixed set of trusted free news/rumor sources, matches each item t
   general feed has nothing on them. Matched exactly on the article's athlete tags through
   `players.espn_id`, one row per tagged athlete.
 - `bluesky`: the original posts of the handles in `NEWS_BLUESKY_HANDLES`, read from the
-  public AppView without auth (fuzzy-matched).
+  public AppView without auth. Matched only when the player's full name appears as a
+  contiguous phrase in the post, since `token_set_ratio` pairs tokens of different people.
 
 `espn_news` and `bluesky` are display-only, for the player news feed. The worker's rumor
 digest reads only an allowlist of sources (`AUTOMATION_SOURCES` in fantasy-browser-worker's
@@ -32,7 +33,9 @@ scoring here, consistent with the fetch-normalize-store mandate above.
 import hashlib
 import logging
 import os
+import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 
 import feedparser
@@ -547,12 +550,54 @@ def match_player(raw_text: str, player_lookup: list):
     return player_id, score / 100.0
 
 
+NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
+def _words(text: str) -> list:
+    """Lowercased, accent-free alphanumeric words; punctuation is a separator."""
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return re.findall(r"[a-z0-9]+", plain.lower())
+
+
+def _name_phrase(name: str) -> str:
+    """A player's name as words with trailing suffixes (Jr., Sr., II) dropped, so the
+    name matches a post whether or not it spells the suffix out."""
+    words = _words(name)
+    while words and words[-1] in NAME_SUFFIXES:
+        words.pop()
+    return " ".join(words)
+
+
+def match_player_phrase(raw_text: str, player_lookup: list):
+    """
+    Strict match for free-form posts: a player matches only when their normalized name is a
+    whole-word, contiguous phrase of the post. `token_set_ratio` scores 100 when a name's
+    tokens come from two different people ("Brandon Staley ... Ben Johnson" -> Brandon
+    Johnson), so it isn't used here. When several players match, the one named first in the post
+    wins (the subject leads), then the longest name, then lookup order. Returns (player_id, 1.0) or (None, None).
+    """
+    post = f" {' '.join(_words(raw_text or ''))} "
+    best = None
+    for player_id, name in player_lookup:
+        phrase = _name_phrase(name or "")
+        position = post.find(f" {phrase} ") if phrase else -1
+        if position < 0:
+            continue
+        rank = (position, -len(phrase))
+        if best is None or rank < best[0]:
+            best = (rank, player_id)
+    return (best[1], 1.0) if best else (None, None)
+
+
 def _match_item(item: dict, player_lookup: list, espn_id_lookup: dict):
     """An ESPN item matches only on its athlete tag, exactly, and stays unmatched when that
-    id isn't in `players`; it is never fuzzed. Every other item goes through `match_player`."""
+    id isn't in `players`; it is never fuzzed. A bluesky item goes through
+    `match_player_phrase`, every other item through `match_player`."""
     if "espn_athlete_id" in item:
         player_id = espn_id_lookup.get(item["espn_athlete_id"]) if item["espn_athlete_id"] else None
         return (player_id, 1.0) if player_id else (None, None)
+    if item.get("source") == "bluesky":
+        return match_player_phrase(item["raw_text"], player_lookup)
     return match_player(item["raw_text"], player_lookup)
 
 
