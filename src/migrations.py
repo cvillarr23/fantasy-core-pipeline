@@ -33,6 +33,8 @@ from src.models import (
     ADD_DRAFT_PICKS_WAS_AUTODRAFTED_COLUMN,
     CREATE_DRAFT_SLOTS_TABLE,
     CREATE_RAW_SIGNALS_TABLE,
+    ADD_RAW_SIGNALS_HEADLINE_COLUMN,
+    ADD_RAW_SIGNALS_AUTHOR_COLUMN,
     CREATE_LLM_CALL_METRICS_TABLE,
     CREATE_BACKTEST_RESULTS_TABLE,
     CREATE_DEFENSE_POSITION_STRENGTH_TABLE,
@@ -129,6 +131,8 @@ def run_migrations():
             # 4d. Execute news/rumor ingestion ledger (CORE-13)
             logger.info("Validating 'raw_signals' news/rumor ingestion ledger...")
             cursor.execute(CREATE_RAW_SIGNALS_TABLE)
+            cursor.execute(ADD_RAW_SIGNALS_HEADLINE_COLUMN)
+            cursor.execute(ADD_RAW_SIGNALS_AUTHOR_COLUMN)
 
             # 4e. Execute LLM provider-call metrics ledger (WORKER-12)
             logger.info("Validating 'llm_call_metrics' provider-call ledger...")

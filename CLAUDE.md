@@ -627,6 +627,12 @@
   leading-edge in fixed windows taken from the event's `at`: dedupe key `job@key@<window start>`,
   so a redelivery is a no-op. `EVENT_KEY_PATTERN` lives in `queue_contracts` because
   `catalog.py --check` runs in fantasy-infra's CI with no database. Events pass no params.
+- `sync_rumors` also stores display-only `espn_news` (exact match on ESPN athlete tags via
+  `players.espn_id`) and `bluesky` (`NEWS_BLUESKY_HANDLES`) rows for the player news feed.
+  The worker's rumor digest reads only its `AUTOMATION_SOURCES` allowlist
+  (`rotowire_rss`, `reddit_fantasyfootball`), so new sources stay out of automation unless
+  that list changes. `rumor-syncer` runs inline, so its env (`ESPN_TEAM_ID`,
+  `ESPN_LEAGUE_ID`, `NEWS_BLUESKY_HANDLES`) comes from the launcher Deployment.
 - `rumor.signal_created` comes from the worker's digest, per `rumor_signals` row, not from
   `sync_rumors`: `rumor_action_service` reads `rumor_signals`, not `raw_signals`. A signal gets
   one look, and an event run reads the previous evening's VORP, so with `RUN_TRIGGER=event` a

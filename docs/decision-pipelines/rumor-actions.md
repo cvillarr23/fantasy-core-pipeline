@@ -47,7 +47,7 @@ Decision evidence adds signal ID, sentiment and confidence to VORP/source eviden
 | `rumor.signal_created` event | After the 11:00 digest, once the catalog subscribes the job | Held for a later run |
 | Manual or HTTP | On request | Settled |
 
-The digest emits the event because it writes `rumor_signals`, the table this job reads. `sync_rumors` only writes `raw_signals`, so it emits nothing. The schedule stays as the fallback, because an event is lost if the broker doesn't take it.
+The digest emits the event because it writes `rumor_signals`, the table this job reads. `sync_rumors` only writes `raw_signals`, so it emits nothing. The digest reads only RotoWire and Reddit rows, so the display-only `espn_news` and `bluesky` sources never reach this job. The schedule stays as the fallback, because an event is lost if the broker doesn't take it.
 
 An event run reads VORP from the previous evening's refresh, which may not reflect the news behind a signal yet. It still publishes any move that clears the normal rules. A signal with no move stays behind the watermark instead of settling, so the 21:45 run evaluates it on fresh VORP. Signals settled in the meantime aren't evaluated or published again. Once a held signal is 24 hours old, the next run settles it whatever its trigger, so a paused or missed 21:45 run can't stall the cursor. `signals_held` in the outcome details counts the signals that run held, so a second event run on the same day re-evaluates and counts the same signals again.
 

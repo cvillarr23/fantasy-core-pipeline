@@ -1,0 +1,95 @@
+{
+  "articles": [
+    {
+      "id": 50568613,
+      "type": "HeadlineNews",
+      "headline": "49ers' Nick Bosa booed heavily in Mexico after remarks about fans' cheering",
+      "description": "49ers defensive end Nick Bosa was heavily booed on Sunday night by fans at Estadio Azteca, a few days after his comments about Mexican crowd behavior during a 2022 game sparked outrage in the country.",
+      "published": "2026-11-23T02:39:14Z",
+      "lastModified": "2026-11-23T02:39:14Z",
+      "byline": null,
+      "links": {
+        "web": {
+          "href": "https://www.espn.com/nfl/story/_/id/50568613/49ers-nick-bosa-booed-heavily-mexico-fan-comments"
+        }
+      },
+      "categories": [
+        {
+          "type": "league",
+          "description": "NFL"
+        },
+        {
+          "type": "team",
+          "description": "San Francisco 49ers"
+        },
+        {
+          "type": "athlete",
+          "athleteId": 4040605,
+          "description": "Nick Bosa"
+        }
+      ]
+    },
+    {
+      "id": 50564475,
+      "type": "HeadlineNews",
+      "headline": "Steelers' DK Metcalf ejected for trying to poke Eagles' Cooper DeJean in eye",
+      "description": "Steelers wide receiver DK Metcalf was ejected in the third quarter of Sunday's game against the Eagles for unsportsmanlike conduct.",
+      "published": "2026-11-23T00:43:19Z",
+      "lastModified": "2026-11-23T00:43:19Z",
+      "byline": "Brooke Pryor",
+      "links": {
+        "web": {
+          "href": "https://www.espn.com/nfl/story/_/id/50564475/steelers-wr-dk-metcalf-ejected-game-eagles"
+        }
+      },
+      "categories": [
+        {
+          "type": "league",
+          "description": "NFL"
+        },
+        {
+          "type": "team",
+          "description": "Pittsburgh Steelers"
+        },
+        {
+          "type": "athlete",
+          "athleteId": 4047650,
+          "description": "DK Metcalf"
+        },
+        {
+          "type": "team",
+          "description": "Philadelphia Eagles"
+        },
+        {
+          "type": "athlete",
+          "athleteId": 4682618,
+          "description": "Cooper DeJean"
+        }
+      ]
+    },
+    {
+      "id": 50567915,
+      "type": "Story",
+      "headline": "Making sense of the Jaguars going for two, then kicking a field goal down eight",
+      "description": "The Jaguars made it 23-15 late vs. the Giants, but their two-point try failed. They got the ball back ... but kicked a field goal, leaving them down 23-18?",
+      "published": "2026-11-23T02:04:32Z",
+      "lastModified": "2026-11-23T02:04:32Z",
+      "byline": "Seth Walder",
+      "links": {
+        "web": {
+          "href": "https://www.espn.com/nfl/story/_/id/50567915/week-11-jaguars-analytics-decisions-two-point-field-goal"
+        }
+      },
+      "categories": [
+        {
+          "type": "league",
+          "description": "NFL"
+        },
+        {
+          "type": "team",
+          "description": "Jacksonville Jaguars"
+        }
+      ]
+    }
+  ]
+}

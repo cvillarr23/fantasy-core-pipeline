@@ -49,8 +49,23 @@ flowchart TD
 | `metrics_extractor` | nflverse play-by-play, snaps, schedule | `weekly_stats` usage and betting columns | Defaults to the last completed week. See below. |
 | `vorp_matrix` | `weekly_stats`, `league_settings` | `weekly_stats` VORP columns | Takes `--season` and `--week`. |
 | `sync_defense_strength` | nflverse, previous season | `defense_position_strength` | Only needed when `MATCHUP_WEIGHTING_ENABLED=true`. |
-| `sync_rumors` | RotoWire RSS, r/fantasyfootball | `raw_signals` | Fetch and store only. The LLM interpretation happens in the worker. |
+| `sync_rumors` | RotoWire RSS, r/fantasyfootball, ESPN news, Bluesky | `raw_signals` | Fetch and store only. The LLM interpretation happens in the worker. See [News sources](#which-news-sources-does-sync_rumors-read). |
 | `sync_actual_scores` | ESPN scoring weeks | `fantasy_*` tables, `weekly_stats.actual_points` | See [Score history](#how-is-score-history-stored). |
+
+## Which news sources does `sync_rumors` read?
+
+| `source` | Where | Matching | Rumor digest |
+|---|---|---|---|
+| `rotowire_rss` | RotoWire's NFL news RSS | Fuzzy, by name | Yes |
+| `reddit_fantasyfootball` | r/fantasyfootball, through Reddit OAuth (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`) | Fuzzy, by name | Yes |
+| `espn_news` | ESPN's NFL news feed, 50 articles. A player on our roster or this week's opponent's roster with no article about him in that feed also gets a call to his ESPN athlete page. | Exact, by the article's athlete tags through `players.espn_id`. One row per tagged athlete. | No |
+| `bluesky` | Each handle in `NEWS_BLUESKY_HANDLES` (comma-separated), read from the public AppView with no auth. Reposts and replies are skipped. | Fuzzy, by name | No |
+
+`espn_news` and `bluesky` rows are display-only, for the player news feed. The worker's rumor digest reads only the sources in `AUTOMATION_SOURCES` (fantasy-browser-worker's `src/db/rumor_signals.js`), so these two never drive a waiver or lineup move. Adding a source to automation means changing that list.
+
+Each source fails on its own: an outage logs and leaves that source empty for the run. The roster lookup needs `ESPN_TEAM_ID`, and the opponent lookup also needs `ESPN_LEAGUE_ID` and a `fantasy_matchups` row for the upcoming week. Without them, the per-athlete calls narrow to our roster or stop, and the general feed still runs. `rumor-syncer` runs inline in the launcher, so these variables come from the launcher Deployment's env. An empty `NEWS_BLUESKY_HANDLES` skips Bluesky.
+
+An article tagging more than `ESPN_COVERAGE_MAX_ATHLETES` (3) athletes, such as a recap or weekly roundup, still gets a row per athlete. It doesn't count as news about them, though, so it doesn't stand in for the athlete-page call.
 
 ## When do they run?
 

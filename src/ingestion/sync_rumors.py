@@ -1,7 +1,22 @@
 """
-Polls a small, fixed set of trusted free news/rumor sources (RotoWire's NFL news RSS feed
-and r/fantasyfootball via Reddit's OAuth API), fuzzy-matches each item to a `players` row,
-and persists the raw text + source + timestamp + matched player id to `raw_signals`.
+Polls a small, fixed set of trusted free news/rumor sources, matches each item to a
+`players` row, and persists the raw text + source + timestamp + matched player id to
+`raw_signals`:
+
+- `rotowire_rss`: RotoWire's NFL news RSS feed (fuzzy-matched).
+- `reddit_fantasyfootball`: r/fantasyfootball via Reddit's OAuth API (fuzzy-matched).
+- `espn_news`: ESPN's NFL news feed, plus each watched player's own ESPN news when the
+  general feed has nothing on them. Matched exactly on the article's athlete tags through
+  `players.espn_id`, one row per tagged athlete.
+- `bluesky`: the original posts of the handles in `NEWS_BLUESKY_HANDLES`, read from the
+  public AppView without auth (fuzzy-matched).
+
+`espn_news` and `bluesky` are display-only, for the player news feed. The worker's rumor
+digest reads only an allowlist of sources (`AUTOMATION_SOURCES` in fantasy-browser-worker's
+`src/db/rumor_signals.js`), so they never drive a waiver or lineup move. Adding a source to
+that allowlist is a separate decision.
+
+Each source fails on its own: a fetcher that can't reach its source logs and returns `[]`.
 
 Deliberately deterministic, fetch-normalize-store only - no sentiment/confidence
 interpretation happens here (that's a downstream LLM concern, WORKER-13 in
@@ -25,7 +40,10 @@ import redis
 import requests
 from rapidfuzz import fuzz, process
 
-from src.database import get_db_connection, get_redis_client
+import nflreadpy as nfl
+
+from src.database import get_db_connection, get_db_cursor, get_redis_client
+from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
 from src.services import run_log_service
 
 logger = logging.getLogger("RumorSignalSync")
@@ -39,6 +57,21 @@ REDDIT_PAGE_LIMIT = 100
 REDDIT_MAX_PAGES = 10
 REDDIT_MIN_SCORE = int(os.getenv("REDDIT_MIN_SCORE", "20"))
 REDDIT_MAX_POST_AGE_HOURS = int(os.getenv("REDDIT_MAX_POST_AGE_HOURS", "72"))
+
+ESPN_NEWS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/news"
+ESPN_NEWS_LIMIT = 50
+# The athlete page's own news list. The general feed's `athletes=` parameter is ignored, and
+# the fantasy news/players endpoint returns RotoWire blurbs that duplicate rotowire_rss.
+ESPN_ATHLETE_OVERVIEW_URL = (
+    "https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{espn_id}/overview"
+)
+
+# An article tagging more athletes than this (a recap, a weekly roundup) still gets a row per
+# athlete, but doesn't count as news about them, so it doesn't save their per-athlete call.
+ESPN_COVERAGE_MAX_ATHLETES = 3
+
+BLUESKY_AUTHOR_FEED_URL = "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed"
+BLUESKY_FEED_LIMIT = 50
 
 SYNC_LOCK_KEY = "rumors:sync:last_run"
 SYNC_LOCK_TTL_SECONDS = 15 * 60
@@ -209,6 +242,238 @@ def normalize_reddit_item(post: dict) -> dict:
     }
 
 
+def _get_json(url: str, params: dict | None = None):
+    """One GET, parsed as JSON; raises on a network error or a non-2xx status."""
+    response = requests.get(
+        url, params=params, timeout=(FETCH_CONNECT_TIMEOUT_SECONDS, FETCH_READ_TIMEOUT_SECONDS)
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _get_json_with_retries(label: str, url: str, params: dict | None = None):
+    """`_get_json` with the same retry loop as the RSS fetch. Returns None once every
+    attempt has failed, so the caller can skip its source."""
+    for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
+        try:
+            logger.info(f"Fetching {label} (attempt {attempt}/{FETCH_RETRY_ATTEMPTS})...")
+            return _get_json(url, params)
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"{label} fetch attempt {attempt} failed: {e}")
+    logger.error(f"Exhausted all {FETCH_RETRY_ATTEMPTS} attempts fetching {label}; skipping it.")
+    return None
+
+
+def _parse_timestamp(value):
+    """An ISO-8601 timestamp (ESPN's `...Z` or `...+00:00`, Bluesky's `...123Z`) as aware UTC."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _current_season() -> int:
+    return int(os.getenv("CURRENT_YEAR") or nfl.get_current_season())
+
+
+def _opponent_team_id(cursor, team_id: str):
+    """This week's fantasy opponent, from the schedule sync_actual_scores stores. None (with
+    a warning) when the league, the week or the matchup row is missing, which narrows the
+    per-athlete calls to our own roster."""
+    league_id = os.getenv("ESPN_LEAGUE_ID")
+    if not league_id:
+        logger.warning("ESPN_LEAGUE_ID is not set; fetching ESPN athlete news for our roster only.")
+        return None
+    season = _current_season()
+    try:
+        week = resolve_upcoming_week(season, attempts=1)
+    except WeekResolutionError as e:
+        logger.warning(f"Could not resolve this week ({e}); fetching ESPN athlete news for our roster only.")
+        return None
+    if week is None:
+        return None
+    cursor.execute(
+        """SELECT opponent_team_id FROM fantasy_matchups
+            WHERE league_id = %s AND season = %s AND team_id = %s AND %s = ANY(scoring_weeks);""",
+        (league_id, season, team_id, week),
+    )
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        logger.warning(f"No {season} week {week} opponent stored for team {team_id}; fetching ESPN athlete news for our roster only.")
+        return None
+    return row[0]
+
+
+def _watched_espn_ids() -> list:
+    """ESPN ids of the players on our roster and this week's opponent's roster: the players
+    whose own ESPN news is fetched when the general feed misses them."""
+    team_id = os.getenv("ESPN_TEAM_ID")
+    if not team_id:
+        logger.warning("ESPN_TEAM_ID is not set; skipping per-athlete ESPN news.")
+        return []
+    with get_db_cursor() as cursor:
+        team_ids = [team_id]
+        opponent = _opponent_team_id(cursor, team_id)
+        if opponent:
+            team_ids.append(opponent)
+        cursor.execute(
+            """SELECT DISTINCT p.espn_id FROM league_rosters r
+                 JOIN players p ON p.player_id = r.player_id
+                WHERE r.team_id = ANY(%s) AND p.espn_id IS NOT NULL
+                ORDER BY p.espn_id;""",
+            (team_ids,),
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
+def _tagged_athlete_ids(article: dict) -> list:
+    return [
+        str(category["athleteId"])
+        for category in article.get("categories") or []
+        if category.get("type") == "athlete" and category.get("athleteId")
+    ]
+
+
+def _espn_items(articles: list) -> list:
+    """One item per (article, tagged athlete), so each player's feed gets the article. An
+    article tagged with no athlete is kept once, unmatched, like any unmatched rumor."""
+    items = []
+    for article in articles:
+        athlete_ids = _tagged_athlete_ids(article) or [None]
+        items.extend({"article": article, "espn_athlete_id": athlete_id} for athlete_id in athlete_ids)
+    return items
+
+
+def _covered_athlete_ids(articles: list) -> set:
+    """Athletes the general feed has news about: tagged by an article that isn't a roundup."""
+    covered = set()
+    for article in articles:
+        athlete_ids = _tagged_athlete_ids(article)
+        if len(athlete_ids) <= ESPN_COVERAGE_MAX_ATHLETES:
+            covered.update(athlete_ids)
+    return covered
+
+
+def _athlete_news(espn_id: str) -> list:
+    """One watched player's own ESPN articles, attributed to that player only. A single
+    attempt: an HTTP error or bad body skips this player. A timeout or connection error
+    raises, so the caller stops calling a slow ESPN instead of waiting out the job deadline."""
+    try:
+        overview = _get_json(ESPN_ATHLETE_OVERVIEW_URL.format(espn_id=espn_id))
+    except (requests.HTTPError, ValueError) as e:
+        logger.warning(f"ESPN athlete news fetch for {espn_id} failed: {e}")
+        return []
+    return [{"article": article, "espn_athlete_id": espn_id} for article in overview.get("news") or []]
+
+
+def _missed_athlete_news(espn_ids: list) -> list:
+    """`_athlete_news` for each id, stopping at the first timeout or connection error."""
+    items = []
+    for espn_id in espn_ids:
+        try:
+            items.extend(_athlete_news(espn_id))
+        except requests.RequestException as e:
+            logger.warning(f"ESPN athlete news unreachable at {espn_id} ({e}); skipping the rest this run.")
+            break
+    return items
+
+
+def _watched_ids_or_empty() -> list:
+    """`_watched_espn_ids`, but a database error only costs the per-athlete calls."""
+    try:
+        return _watched_espn_ids()
+    except Exception as e:
+        logger.warning(f"Could not load watched players for ESPN athlete news: {e}")
+        return []
+
+
+def fetch_espn_athlete_news() -> list:
+    """ESPN's general NFL news feed, then each watched player's own news when the general
+    feed has none about them. Returns `{article, espn_athlete_id}` items; [] when the
+    general feed is down, since the per-athlete calls would hit the same API."""
+    general = _get_json_with_retries("ESPN NFL news", ESPN_NEWS_URL, {"limit": ESPN_NEWS_LIMIT})
+    if general is None:
+        return []
+    articles = general.get("articles") or []
+    items = _espn_items(articles)
+    covered = _covered_athlete_ids(articles)
+    items.extend(_missed_athlete_news([espn_id for espn_id in _watched_ids_or_empty() if espn_id not in covered]))
+    return items
+
+
+def normalize_espn_item(item: dict) -> dict:
+    """Maps one `{article, espn_athlete_id}` item to the common shape. `espn_athlete_id`
+    rides along so `sync_rumors` matches on it exactly instead of fuzzing the text."""
+    article = item["article"]
+    athlete_id = item.get("espn_athlete_id")
+    headline = article.get("headline") or ""
+    description = article.get("description") or ""
+    article_id = article.get("id")
+    return {
+        "source_item_id": f"{article_id}:{athlete_id}" if athlete_id else (str(article_id) if article_id else None),
+        "raw_text": headline + (f" - {description}" if description and description != headline else ""),
+        "headline": headline or None,
+        "author": article.get("byline") or "ESPN",
+        "url": ((article.get("links") or {}).get("web") or {}).get("href"),
+        "published_at": _parse_timestamp(article.get("published")),
+        "espn_athlete_id": athlete_id,
+    }
+
+
+def _bluesky_handles() -> list:
+    return [handle.strip() for handle in os.getenv("NEWS_BLUESKY_HANDLES", "").split(",") if handle.strip()]
+
+
+def _is_original_post(item: dict, handle: str) -> bool:
+    """The account's own top-level post: not a repost or pin (both carry a `reason`), not a
+    reply, and written by that handle."""
+    post = item.get("post") or {}
+    return (
+        not item.get("reason")
+        and not (post.get("record") or {}).get("reply")
+        and (post.get("author") or {}).get("handle") == handle
+    )
+
+
+def fetch_bluesky_accounts() -> list:
+    """Original posts from each `NEWS_BLUESKY_HANDLES` account, via the public AppView's
+    getAuthorFeed (no auth). Each handle fails on its own; no handles means no fetch."""
+    handles = _bluesky_handles()
+    if not handles:
+        logger.info("NEWS_BLUESKY_HANDLES is empty; skipping Bluesky.")
+        return []
+    posts = []
+    for handle in handles:
+        payload = _get_json_with_retries(
+            f"Bluesky @{handle}",
+            BLUESKY_AUTHOR_FEED_URL,
+            {"actor": handle, "limit": BLUESKY_FEED_LIMIT, "filter": "posts_no_replies"},
+        )
+        if payload is None:
+            continue
+        posts.extend(item["post"] for item in payload.get("feed") or [] if _is_original_post(item, handle))
+    return posts
+
+
+def normalize_bluesky_item(post: dict) -> dict:
+    """Maps a Bluesky post view to the common shape. The web URL is built from the handle
+    and the record key, the AT URI's last segment."""
+    uri = post.get("uri") or ""
+    author = post.get("author") or {}
+    handle = author.get("handle")
+    record = post.get("record") or {}
+    return {
+        "source_item_id": uri or None,
+        "raw_text": record.get("text", ""),
+        "headline": None,
+        "author": author.get("displayName") or handle,
+        "url": f"https://bsky.app/profile/{handle}/post/{uri.rsplit('/', 1)[-1]}" if uri and handle else None,
+        "published_at": _parse_timestamp(record.get("createdAt")),
+    }
+
+
 def _sources():
     """
     Looks up the fetch/normalize functions by module-global name at call time (rather
@@ -220,6 +485,8 @@ def _sources():
     return [
         ("rotowire_rss", fetch_rotowire_rss, normalize_rotowire_item),
         ("reddit_fantasyfootball", fetch_reddit_fantasyfootball, normalize_reddit_item),
+        ("espn_news", fetch_espn_athlete_news, normalize_espn_item),
+        ("bluesky", fetch_bluesky_accounts, normalize_bluesky_item),
     ]
 
 
@@ -237,6 +504,12 @@ def load_player_lookup(cursor) -> list:
     """Loads (player_id, name) pairs to fuzzy-match rumor text against."""
     cursor.execute("SELECT player_id, name FROM players;")
     return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def load_espn_id_lookup(cursor) -> dict:
+    """players.espn_id -> player_id, for the exact match of ESPN's athlete tags."""
+    cursor.execute("SELECT espn_id, player_id FROM players WHERE espn_id IS NOT NULL;")
+    return {row[0]: row[1] for row in cursor.fetchall()}
 
 
 def match_player(raw_text: str, player_lookup: list):
@@ -274,6 +547,15 @@ def match_player(raw_text: str, player_lookup: list):
     return player_id, score / 100.0
 
 
+def _match_item(item: dict, player_lookup: list, espn_id_lookup: dict):
+    """An ESPN item matches only on its athlete tag, exactly, and stays unmatched when that
+    id isn't in `players`; it is never fuzzed. Every other item goes through `match_player`."""
+    if "espn_athlete_id" in item:
+        player_id = espn_id_lookup.get(item["espn_athlete_id"]) if item["espn_athlete_id"] else None
+        return (player_id, 1.0) if player_id else (None, None)
+    return match_player(item["raw_text"], player_lookup)
+
+
 def persist_signals(conn, rows: list) -> list:
     """Inserts new rows and returns their ids; a dupe returns nothing, so the ids are only
     what this run actually ingested."""
@@ -281,8 +563,9 @@ def persist_signals(conn, rows: list) -> list:
         return []
     insert_query = """
         INSERT INTO raw_signals
-            (source, source_item_id, content_hash, raw_text, url, published_at, player_id, match_confidence)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source, source_item_id, content_hash, raw_text, url, published_at, player_id, match_confidence,
+             headline, author)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (source, source_item_id) DO NOTHING
         RETURNING id;
     """
@@ -292,6 +575,7 @@ def persist_signals(conn, rows: list) -> list:
             cursor.execute(insert_query, (
                 row["source"], row["source_item_id"], row["content_hash"], row["raw_text"],
                 row["url"], row["published_at"], row["player_id"], row["match_confidence"],
+                row.get("headline"), row.get("author"),
             ))
             inserted = cursor.fetchone()
             if inserted:
@@ -338,10 +622,11 @@ def sync_rumors(force: bool = False) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             player_lookup = load_player_lookup(cursor)
+            espn_id_lookup = load_espn_id_lookup(cursor)
 
         rows = []
         for item in items:
-            player_id, confidence = match_player(item["raw_text"], player_lookup)
+            player_id, confidence = _match_item(item, player_lookup, espn_id_lookup)
             content_hash = hashlib.sha256(f"{item['source']}:{item['raw_text']}".encode("utf-8")).hexdigest()
             rows.append({
                 **item,
