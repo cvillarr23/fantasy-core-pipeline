@@ -5,7 +5,7 @@ Thin controller over src.services.matchup_service, mirroring src/api/roster.py's
 pattern of splitting a REST surface out of the MCP-only layer.
 """
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from espn_api.requests.espn_requests import ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError
 from fastapi import APIRouter, HTTPException
@@ -37,6 +37,9 @@ class PlayerLine(BaseModel):
     projected_points: Optional[float]
     # The player's NFL bye week; None when the schedule couldn't be read.
     bye_week: Optional[int] = None
+    # Where the player's NFL game stands. None when the scoreboard can't be read, the team has no
+    # game this week (bye; see bye_week), or the week is already stored as completed history.
+    game_status: Optional[Literal["not_started", "in_progress", "final"]] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
@@ -46,7 +49,13 @@ class TeamInfo(BaseModel):
     name: str
     logo_url: str
     score: float
+    # ESPN's live projected total (totalProjectedPointsLive); when ESPN sends none (no game under
+    # way) espn_api falls back to the sum of the starters' static pregame projections.
     projected: Optional[float]
+    # ESPN's chance (0-1, two decimals) this team wins the matchup. The two sides sum to 1. ESPN
+    # only sends it for the matchup period in progress; None for a finished or future week, a
+    # stored completed week, or when ESPN can't be read.
+    win_probability: Optional[float] = None
 
 
 class TeamSide(BaseModel):
@@ -85,6 +94,8 @@ class ScoreboardTeamInfo(BaseModel):
     logo_url: str
     score: float
     projected: Optional[float]
+    # Same meaning as TeamInfo.win_probability.
+    win_probability: Optional[float] = None
 
 
 class ScoreboardMatchup(BaseModel):

@@ -166,3 +166,14 @@ def no_live_kubernetes(monkeypatch):
         raise RuntimeError("no live Kubernetes in tests")
 
     monkeypatch.setattr(k8s_client, "_load_config", unavailable)
+
+
+@pytest.fixture(autouse=True)
+def no_live_espn_win_probability():
+    """Win probability is read through a bare ESPN request client; a test must never reach ESPN
+    (the read fails soft to "unknown"). Tests that exercise it patch build_espn_requests."""
+    with patch(
+        "src.services.matchup_service.build_espn_requests",
+        side_effect=RuntimeError("no live ESPN in tests"),
+    ):
+        yield

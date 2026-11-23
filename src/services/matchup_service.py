@@ -2,6 +2,7 @@
 Weekly head-to-head matchup view. Completed ingested weeks use historical ESPN scores
 and lineups in Postgres; current or un-ingested weeks use the authenticated ESPN client.
 """
+import json
 import logging
 import os
 
@@ -9,9 +10,10 @@ import requests
 
 from src.database import get_db_cursor
 from src.services.espn_ownership import load_espn_ownership
-from src.ingestion.sync_league import build_league
+from src.ingestion.sync_league import build_espn_requests, build_league
 from src.ir_eligibility import lineup_ir_hints, load_lineup_slot_counts_row, open_ir_slots
 from src.nfl_byes import bye_week_for, bye_weeks_or_empty
+from src.nfl_game_status import game_status_for, load_team_game_status
 from src.nfl_schedule import WeekResolutionError, require_upcoming_week
 from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
@@ -43,6 +45,31 @@ def _fetch_box_scores(season: int, week: int):
         raise ESPNTimeoutError("ESPN request timed out") from exc
 
 
+def _win_probabilities_from_raw(raw: dict) -> dict:
+    """team_id -> ESPN's win probability (0-1) for each side of the raw schedule that has one."""
+    probabilities = {}
+    for game in raw.get("schedule", []):
+        for side in (game.get("home") or {}, game.get("away") or {}):
+            if side.get("winProbability") is not None:
+                probabilities[str(side["teamId"])] = side["winProbability"]
+    return probabilities
+
+
+def _fetch_win_probabilities(season: int, week: int) -> dict:
+    """team_id -> win probability for the week's matchup period. espn_api's BoxScore drops the
+    field, so this reads the raw payload. ESPN only fills it for the matchup in progress; a
+    finished or future one has none. Display-only: any failure means unknown, not a failed page."""
+    try:
+        raw = build_espn_requests(season, request_timeout_seconds=ESPN_REQUEST_TIMEOUT_SECONDS).league_get(
+            params={"view": ["mMatchupScore", "mScoreboard"], "scoringPeriodId": week},
+            headers={"x-fantasy-filter": json.dumps({"schedule": {"filterMatchupPeriodIds": {"value": [week]}}})},
+        )
+        return _win_probabilities_from_raw(raw)
+    except Exception as exc:
+        logger.warning(f"No win probability for Season {season} Week {week}: could not read ESPN's matchup scores: {exc}")
+        return {}
+
+
 class NoMatchupFoundError(Exception):
     """No box score found for our team this week (bye week, offseason, out-of-range week)."""
 
@@ -54,8 +81,9 @@ def _headshot_url(espn_id: str) -> str:
     return f"https://a.espncdn.com/i/headshots/nfl/players/full/{espn_id}.png"
 
 
-def _shape_player_line(box_player, bye_weeks: dict | None = None) -> dict:
+def _shape_player_line(box_player, bye_weeks: dict | None = None, game_statuses: dict | None = None) -> dict:
     espn_id = str(box_player.playerId)
+    pro_team = getattr(box_player, "proTeam", None)
     return {
         "player_id": espn_id,
         "espn_id": espn_id,
@@ -65,7 +93,8 @@ def _shape_player_line(box_player, bye_weeks: dict | None = None) -> dict:
         "slot": box_player.slot_position,
         "points": box_player.points,
         "projected_points": box_player.projected_points,
-        "bye_week": bye_week_for(getattr(box_player, "proTeam", None), bye_weeks or {}),
+        "bye_week": bye_week_for(pro_team, bye_weeks or {}),
+        "game_status": game_status_for(pro_team, game_statuses),
         "headshot_url": _headshot_url(espn_id),
         "deficit_flag": False,
         "suggested_swap": None,
@@ -172,10 +201,12 @@ def _apply_rumor_signal(player_lines: list, signal_by_espn_id: dict) -> None:
         line["rumor_suggested_action"] = signal["suggested_action"]
 
 
-def _split_starters_bench(lineup: list, bye_weeks: dict | None = None) -> tuple[list, list]:
+def _split_starters_bench(
+    lineup: list, bye_weeks: dict | None = None, game_statuses: dict | None = None
+) -> tuple[list, list]:
     starters, bench = [], []
     for box_player in lineup:
-        line = _shape_player_line(box_player, bye_weeks)
+        line = _shape_player_line(box_player, bye_weeks, game_statuses)
         (bench if box_player.slot_position in BENCH_AND_IR_SLOTS else starters).append(line)
     return starters, bench
 
@@ -257,14 +288,18 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     }
 
 
-def _shape_team_side(team, lineup, score, projected, bye_weeks: dict | None = None) -> dict:
-    starters, bench = _split_starters_bench(lineup, bye_weeks)
+def _shape_team_side(
+    team, lineup, score, projected, bye_weeks: dict | None = None, game_statuses: dict | None = None,
+    win_probability: float | None = None,
+) -> dict:
+    starters, bench = _split_starters_bench(lineup, bye_weeks, game_statuses)
     return {
         "team": {
             "name": team.team_name,
             "logo_url": team.logo_url,
             "score": score,
             "projected": projected,
+            "win_probability": win_probability,
         },
         "starters": starters,
         "bench": bench,
@@ -324,8 +359,16 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
     opp_projected = matched_box.away_projected if we_are_home else matched_box.home_projected
 
     bye_weeks = bye_weeks_or_empty(season)
-    our_side = _shape_team_side(our_team, our_lineup, our_score, our_projected, bye_weeks)
-    opponent_side = _shape_team_side(opponent_team, opp_lineup, opp_score, opp_projected, bye_weeks)
+    game_statuses = load_team_game_status(season, week)
+    win_probabilities = _fetch_win_probabilities(season, week)
+    our_side = _shape_team_side(
+        our_team, our_lineup, our_score, our_projected, bye_weeks, game_statuses,
+        win_probabilities.get(str(our_team.team_id)),
+    )
+    opponent_side = _shape_team_side(
+        opponent_team, opp_lineup, opp_score, opp_projected, bye_weeks, game_statuses,
+        win_probabilities.get(str(opponent_team.team_id)),
+    )
 
     deficits = compute_roster_deficits(season, week)
     deficits_by_position = deficits["teams"].get(our_team_id, {})
@@ -335,7 +378,7 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
     return {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
 
 
-def _shape_scoreboard_team(team, score: float, projected: float) -> dict | None:
+def _shape_scoreboard_team(team, score: float, projected: float, win_probability: float | None = None) -> dict | None:
     if team is None:
         return None
     return {
@@ -344,6 +387,7 @@ def _shape_scoreboard_team(team, score: float, projected: float) -> dict | None:
         "logo_url": team.logo_url,
         "score": score,
         "projected": projected,
+        "win_probability": win_probability,
     }
 
 
@@ -358,19 +402,24 @@ def get_league_scoreboard(season: int, week: int) -> dict:
     )
 
 
+def _shape_scoreboard_matchup(box, win_probabilities: dict) -> dict:
+    def chance(team):
+        return win_probabilities.get(str(team.team_id)) if team is not None else None
+
+    return {
+        "home": _shape_scoreboard_team(box.home_team, box.home_score, box.home_projected, chance(box.home_team)),
+        "away": _shape_scoreboard_team(box.away_team, box.away_score, box.away_projected, chance(box.away_team)),
+    }
+
+
 def _load_league_scoreboard(season: int, week: int) -> dict:
     stored = load_completed_week(season, week)
     if stored:
         return stored_scoreboard(stored, season, week)
     box_scores = _fetch_box_scores(season, week)
 
-    matchups = [
-        {
-            "home": _shape_scoreboard_team(box.home_team, box.home_score, box.home_projected),
-            "away": _shape_scoreboard_team(box.away_team, box.away_score, box.away_projected),
-        }
-        for box in box_scores
-    ]
+    win_probabilities = _fetch_win_probabilities(season, week)
+    matchups = [_shape_scoreboard_matchup(box, win_probabilities) for box in box_scores]
     return {"season": season, "week": week, "matchups": matchups}
 
 
