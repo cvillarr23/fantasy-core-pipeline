@@ -143,6 +143,8 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 
 | Method | Path | Purpose | `X-API-Key` | Publishes to |
 |---|---|---|---|---|
+| `GET` | `/v1/news` | Merged, de-duplicated player news, newest first. | No |  |
+| `GET` | `/v1/news/recent` | Whether each player has news from the last 24 hours. | No |  |
 | `GET` | `/v1/players/search` | Search players by name. | No |  |
 | `GET` | `/v1/players/{player_id}/summary` | Show one player's season summary. | No |  |
 | `GET` | `/v1/stats/vorp` | List VORP scores. | No |  |

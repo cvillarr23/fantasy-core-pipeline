@@ -44,7 +44,7 @@ AREAS = [
         "League and matchup",
         ("/v1/league", "/v1/matchup", "/v1/scoreboard"),
     ),
-    ("Players and stats", "Players and stats", ("/v1/players", "/v1/stats")),
+    ("Players and stats", "Players and stats", ("/v1/players", "/v1/stats", "/v1/news")),
     ("Backtests", "Backtests", ("/v1/backtest",)),
     ("Other", "Chat and health", ("/v1/chat", "/v1/health", "/v1/livez")),
 ]
@@ -133,6 +133,8 @@ DESCRIPTIONS = {
     "GET /v1/matchup/roster": "Show a matchup roster with swap and IR suggestions.",
     "GET /v1/matchup/scoreboard": "Show every matchup's score for a season and week.",
     "GET /v1/scoreboard": "Same as `/v1/matchup/scoreboard`.",
+    "GET /v1/news": "Merged, de-duplicated player news, newest first.",
+    "GET /v1/news/recent": "Whether each player has news from the last 24 hours.",
     "GET /v1/players/search": "Search players by name.",
     "GET /v1/players/{player_id}/summary": "Show one player's season summary.",
     "GET /v1/stats/vorp": "List VORP scores.",
