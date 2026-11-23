@@ -164,6 +164,42 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 
 <!-- END GENERATED: endpoints -->
 
+## Matchup response fields
+
+Notes on `GET /v1/matchup` (and the team fields shared with `GET /v1/matchup/scoreboard`) that the schema alone doesn't say.
+
+### `game_status`
+
+Each player line carries `game_status`: where that player's NFL game stands.
+
+| Value | Meaning |
+|---|---|
+| `not_started` | The game hasn't kicked off. |
+| `in_progress` | The game is under way. |
+| `final` | The game is over. |
+| `null` | Unknown: the NFL scoreboard couldn't be read, the player's team has no game this week (a bye; `bye_week` says so), or the week is stored completed history, which carries no game status. |
+
+The status comes from ESPN's public NFL scoreboard (`pre`, `in` and `post`), once per response. A failed read gives `null` on every line rather than failing the request. The matchup is cached for 60 seconds, so a status can lag a kickoff or a final whistle by up to that long.
+
+### When `points` and `projected_points` are null
+
+Use `game_status` to tell an unplayed player from a real 0.0:
+
+- **Live and current weeks** (read from ESPN's box score): both are always numbers. ESPN reports 0.0 for a player whose game hasn't started, so `points: 0.0` with `game_status: not_started` means "not played yet", not "scored nothing". Show a dash.
+- **Stored completed weeks**: `null` means ESPN's history had no value, which is unknown, never zero. A starter on a bye is a true 0.0.
+
+`projected_points` on a player is ESPN's static pregame projection. It doesn't move during the game.
+
+### Team `projected` is live
+
+`team.projected` is ESPN's `totalProjectedPointsLive`: for a game in progress it blends points already scored with the projection for what's left. When ESPN sends no live total (nothing under way yet), it falls back to the sum of the starters' static projections. So `team.projected` can move during a game while the players' `projected_points` do not.
+
+### `win_probability`
+
+`team.win_probability` (matchup, and each side of `/v1/matchup/scoreboard`) is ESPN's chance, from 0 to 1 with two decimals, that the team wins the matchup. The two sides sum to 1. ESPN only sends it for the matchup period in progress. It is `null` for a finished or future week, a stored completed week, or when ESPN can't be read.
+
+Probe result (2026 league, read-only, matchup period 11 live): ESPN's raw `mMatchupScore` and `mScoreboard` views include `schedule[].home.winProbability` and `schedule[].away.winProbability`. For a finished period (10) the value is `null`, and a future period (12) doesn't carry the field. The ESPN API client `espn_api` drops it from `BoxScore`, so the API reads the raw payload with one extra request per cache miss.
+
 ## Related
 
 - [Activity submissions](./activity-api.md): how to read an action's delivery and verification state.

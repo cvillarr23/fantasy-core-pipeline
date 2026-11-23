@@ -4692,6 +4692,22 @@
             "title": "Espn Id",
             "type": "string"
           },
+          "game_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "not_started",
+                  "in_progress",
+                  "final"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Game Status"
+          },
           "headshot_url": {
             "title": "Headshot Url",
             "type": "string"
@@ -6698,6 +6714,17 @@
           "team_id": {
             "title": "Team Id",
             "type": "string"
+          },
+          "win_probability": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Win Probability"
           }
         },
         "required": [
@@ -7287,6 +7314,17 @@
           "score": {
             "title": "Score",
             "type": "number"
+          },
+          "win_probability": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Win Probability"
           }
         },
         "required": [

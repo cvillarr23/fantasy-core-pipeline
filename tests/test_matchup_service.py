@@ -13,6 +13,12 @@ def _fake_db_cursor(cursor):
     yield cursor
 
 
+@pytest.fixture(autouse=True)
+def no_scoreboard(monkeypatch):
+    """Game status reads ESPN's public scoreboard; unit tests never reach the network."""
+    monkeypatch.setattr(matchup_service, "load_team_game_status", lambda season, week: None)
+
+
 @pytest.mark.parametrize("service_name", ["get_current_team_matchup", "get_league_scoreboard"])
 @pytest.mark.parametrize("failure_point", ["build", "box_scores"])
 def test_espn_timeout_is_specific_to_espn_calls(service_name, failure_point):
@@ -38,8 +44,9 @@ def test_headshot_url_builds_espn_cdn_path_from_espn_id():
 
 
 def _make_box_player(playerId=4240657, name="Test Player", position="RB", jersey="22",
-                      slot_position="RB", points=14.5, projected_points=11.2):
+                      slot_position="RB", points=14.5, projected_points=11.2, proTeam=None):
     bp = MagicMock()
+    bp.proTeam = proTeam
     bp.playerId = playerId
     bp.name = name
     bp.position = position
@@ -63,10 +70,33 @@ def test_shape_player_line_maps_box_player_fields():
         "points": 14.5,
         "projected_points": 11.2,
         "bye_week": None,
+        "game_status": None,
         "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/4240657.png",
         "deficit_flag": False,
         "suggested_swap": None,
     }
+
+
+def test_shape_player_line_carries_the_status_of_the_players_nfl_game():
+    statuses = {"WAS": "in_progress", "DAL": "final"}
+
+    live = matchup_service._shape_player_line(_make_box_player(proTeam="WSH"), game_statuses=statuses)
+    done = matchup_service._shape_player_line(_make_box_player(proTeam="DAL"), game_statuses=statuses)
+
+    assert (live["game_status"], done["game_status"]) == ("in_progress", "final")
+
+
+def test_shape_player_line_has_no_game_status_for_a_team_with_no_game_this_week():
+    """A bye-week team is absent from the scoreboard; the line's bye_week says why."""
+    line = matchup_service._shape_player_line(_make_box_player(proTeam="NYJ"), game_statuses={"DAL": "final"})
+
+    assert line["game_status"] is None
+
+
+def test_shape_player_line_has_no_game_status_when_the_scoreboard_is_unavailable():
+    line = matchup_service._shape_player_line(_make_box_player(proTeam="DAL"), game_statuses=None)
+
+    assert line["game_status"] is None
 
 
 def test_shape_player_line_coerces_non_string_jersey_to_none():
@@ -512,3 +542,107 @@ def test_lineup_line_carries_the_players_nfl_bye_week():
     line = matchup_service._shape_lineup_player_line(_make_roster_player(), {"DET": 8})
 
     assert line["bye_week"] == 8
+
+
+def test_get_current_team_matchup_marks_starters_and_bench_of_both_sides_with_game_status(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(
+        matchup_service, "load_team_game_status",
+        lambda season, week: {"DAL": "not_started", "PHI": "in_progress", "KC": "final"},
+    )
+    box = _make_box_score(
+        home_team=_make_team(team_id=8),
+        away_team=_make_team(team_id=9),
+        home_lineup=[_make_box_player(playerId=1, proTeam="DAL"), _make_box_player(playerId=2, slot_position="BE", proTeam="KC")],
+        away_lineup=[_make_box_player(playerId=3, proTeam="PHI")],
+    )
+    mock_league = MagicMock()
+    mock_league.box_scores.return_value = [box]
+
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        result = matchup_service.get_current_team_matchup(season=2026, week=2)
+
+    assert result["our_team"]["starters"][0]["game_status"] == "not_started"
+    assert result["our_team"]["bench"][0]["game_status"] == "final"
+    assert result["opponent"]["starters"][0]["game_status"] == "in_progress"
+
+
+def _raw_schedule(*games):
+    return {"schedule": [{"matchupPeriodId": 11, **game} for game in games]}
+
+
+def test_win_probabilities_from_raw_maps_each_side_by_team_id():
+    raw = _raw_schedule(
+        {"home": {"teamId": 8, "winProbability": 0.34}, "away": {"teamId": 7, "winProbability": 0.66}},
+        {"home": {"teamId": 3, "winProbability": 0.99}, "away": {"teamId": 5, "winProbability": 0.01}},
+    )
+
+    assert matchup_service._win_probabilities_from_raw(raw) == {"8": 0.34, "7": 0.66, "3": 0.99, "5": 0.01}
+
+
+def test_win_probabilities_from_raw_skips_sides_without_a_value():
+    """ESPN sends no winProbability for a finished or future matchup, and no away side on a bye."""
+    raw = _raw_schedule(
+        {"home": {"teamId": 1, "winProbability": None}, "away": {"teamId": 2}},
+        {"home": {"teamId": 4}},
+    )
+
+    assert matchup_service._win_probabilities_from_raw(raw) == {}
+
+
+def test_fetch_win_probabilities_asks_espn_for_the_weeks_matchup_period():
+    requests_client = MagicMock()
+    requests_client.league_get.return_value = _raw_schedule(
+        {"home": {"teamId": 8, "winProbability": 0.4}, "away": {"teamId": 7, "winProbability": 0.6}}
+    )
+
+    with patch("src.services.matchup_service.build_espn_requests", return_value=requests_client) as build:
+        result = matchup_service._fetch_win_probabilities(2026, 11)
+
+    assert result == {"8": 0.4, "7": 0.6}
+    build.assert_called_once_with(2026, request_timeout_seconds=matchup_service.ESPN_REQUEST_TIMEOUT_SECONDS)
+    kwargs = requests_client.league_get.call_args.kwargs
+    assert kwargs["params"]["view"] == ["mMatchupScore", "mScoreboard"]
+    assert kwargs["params"]["scoringPeriodId"] == 11
+    assert '"value": [11]' in kwargs["headers"]["x-fantasy-filter"]
+
+
+def test_fetch_win_probabilities_is_unknown_when_espn_fails(caplog):
+    with patch("src.services.matchup_service.build_espn_requests", side_effect=requests.Timeout("slow")):
+        assert matchup_service._fetch_win_probabilities(2026, 11) == {}
+    assert "win probability" in caplog.text.lower()
+
+
+def test_matchup_and_scoreboard_carry_each_teams_win_probability(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    box = _make_box_score(home_team=_make_team(team_id=8), away_team=_make_team(team_id=9, team_name="Theirs"))
+    mock_league = MagicMock()
+    mock_league.box_scores.return_value = [box]
+
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
+         patch("src.services.matchup_service._fetch_win_probabilities", return_value={"8": 0.34, "9": 0.66}), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        matchup = matchup_service.get_current_team_matchup(season=2026, week=2)
+        board = matchup_service.get_league_scoreboard(season=2026, week=2)
+
+    assert matchup["our_team"]["team"]["win_probability"] == 0.34
+    assert matchup["opponent"]["team"]["win_probability"] == 0.66
+    assert board["matchups"][0]["home"]["win_probability"] == 0.34
+    assert board["matchups"][0]["away"]["win_probability"] == 0.66
+
+
+def test_win_probability_is_none_when_espn_gave_none(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    box = _make_box_score(home_team=_make_team(team_id=8), away_team=_make_team(team_id=9))
+    mock_league = MagicMock()
+    mock_league.box_scores.return_value = [box]
+
+    with patch("src.services.matchup_service.build_league", return_value=mock_league), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        matchup = matchup_service.get_current_team_matchup(season=2026, week=2)
+
+    assert matchup["our_team"]["team"]["win_probability"] is None

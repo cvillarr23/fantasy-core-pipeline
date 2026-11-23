@@ -40,6 +40,19 @@ def _require_env(name: str) -> str:
     return value
 
 
+def build_espn_requests(season: int, request_timeout_seconds: int, logger=None) -> TimedEspnFantasyRequests:
+    """An authenticated raw ESPN request client with a per-request timeout, for callers that
+    need a payload espn_api's typed classes drop and don't need the whole League fetched."""
+    return TimedEspnFantasyRequests(
+        sport="nfl",
+        year=season,
+        league_id=int(_require_env("ESPN_LEAGUE_ID")),
+        cookies={"espn_s2": _require_env("ESPN_S2"), "SWID": _require_env("ESPN_SWID")},
+        logger=logger,
+        timeout_seconds=request_timeout_seconds,
+    )
+
+
 def build_league(season: int, request_timeout_seconds: int | None = None) -> League:
     """Constructs an authenticated espn_api League client from OpenBao-sourced env vars."""
     league_id = _require_env("ESPN_LEAGUE_ID")
@@ -50,14 +63,7 @@ def build_league(season: int, request_timeout_seconds: int | None = None) -> Lea
         return League(**kwargs)
 
     league = League(**kwargs, fetch_league=False)
-    league.espn_request = TimedEspnFantasyRequests(
-        sport="nfl",
-        year=season,
-        league_id=int(league_id),
-        cookies={"espn_s2": espn_s2, "SWID": swid},
-        logger=league.logger,
-        timeout_seconds=request_timeout_seconds,
-    )
+    league.espn_request = build_espn_requests(season, request_timeout_seconds, logger=league.logger)
     league.fetch_league()
     return league
 
