@@ -1,0 +1,21 @@
+{
+  "feed": [
+    {
+      "post": {
+        "uri": "at://did:plc:hlvr2omhnmvdmfnvmcuhyevz/app.bsky.feed.post/3n2wvevktc22b",
+        "cid": "bafyreifrxhhbsrqntkcami33eucxaz6ln6h6huwu5tuiqkokygy3is6i5e",
+        "author": {
+          "did": "did:plc:hlvr2omhnmvdmfnvmcuhyevz",
+          "handle": "rapsheet.bsky.social",
+          "displayName": "Ian Rapoport"
+        },
+        "record": {
+          "$type": "app.bsky.feed.post",
+          "text": "Chargers QB Justin Herbert is now in the NFL’s concussion protocol, per a team official.",
+          "createdAt": "2026-11-23T00:40:04.629Z"
+        },
+        "indexedAt": "2026-11-23T00:40:06.092Z"
+      }
+    }
+  ]
+}

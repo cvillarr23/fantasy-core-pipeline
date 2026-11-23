@@ -223,7 +223,7 @@ erDiagram
 
 | Table | Holds | Written by |
 |---|---|---|
-| `raw_signals` | News and rumor items, deduplicated on `(source, source_item_id)`. | `sync_rumors` |
+| `raw_signals` | News and rumor items, deduplicated on `(source, source_item_id)`. `source` is `rotowire_rss`, `reddit_fantasyfootball`, `espn_news` or `bluesky`. `headline` (ESPN only) and `author` (ESPN and Bluesky) are null on RotoWire, Reddit and older rows. The rumor digest reads only `rotowire_rss` and `reddit_fantasyfootball`. | `sync_rumors` |
 | `rumor_signals` | The LLM's verdict per player and run. The latest row per player is the current signal. | Worker's rumor digest bot. |
 | `llm_call_metrics` | One row per provider attempt, including failed fallbacks. | Core `llm_client`, and the worker's `llm_client.js`. |
 | `backtest_results` | One row per backtest run, with a `summary_json` blob. | `src/backtesting/report.py` |

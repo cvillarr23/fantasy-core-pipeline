@@ -24,6 +24,18 @@ def test_migrations_include_score_history_and_actual_provenance():
     assert any("CREATE TABLE IF NOT EXISTS fantasy_player_week_scores" in s for s in statements)
 
 
+def test_migrations_add_raw_signals_news_columns():
+    cursor = _mock_cursor(pk_check_result=(1,))
+    with patch("src.migrations.get_db_cursor") as get_cursor:
+        get_cursor.return_value.__enter__.return_value = cursor
+        migrations.run_migrations()
+    statements = [c.args[0] for c in cursor.execute.call_args_list]
+    create = next(i for i, s in enumerate(statements) if "CREATE TABLE IF NOT EXISTS raw_signals" in s)
+    headline = next(i for i, s in enumerate(statements) if "raw_signals ADD COLUMN IF NOT EXISTS headline" in s)
+    author = next(i for i, s in enumerate(statements) if "raw_signals ADD COLUMN IF NOT EXISTS author" in s)
+    assert create < headline < author
+
+
 def test_run_migrations_succeeds_when_weekly_stats_pk_includes_season():
     cursor = _mock_cursor(pk_check_result=(1,))
     with patch("src.migrations.get_db_cursor") as mock_get_cursor:

@@ -1,0 +1,78 @@
+{
+  "news": [
+    {
+      "id": 50565334,
+      "type": "Media",
+      "headline": "Jahmyr Gibbs' 2nd TD of game seals win for Lions",
+      "description": "Jahmyr Gibbs' 2nd TD of game seals win for Lions",
+      "published": "2026-11-22T21:37:29.000+00:00",
+      "lastModified": "2026-11-22T21:37:29.000+00:00",
+      "byline": null,
+      "links": {
+        "web": {
+          "href": "https://www.espn.com/video/clip/_/id/50565334/jahmyr-gibbs-2nd-td-game-seals-win-lions"
+        }
+      },
+      "categories": [
+        {
+          "type": "athlete",
+          "athleteId": 4429795,
+          "description": "Jahmyr Gibbs"
+        },
+        {
+          "type": "league",
+          "description": "NFL"
+        },
+        {
+          "type": "league",
+          "description": "Fantasy NFL"
+        },
+        {
+          "type": "team",
+          "description": "Tampa Bay Buccaneers"
+        },
+        {
+          "type": "team",
+          "description": "Detroit Lions"
+        }
+      ]
+    },
+    {
+      "id": 50564717,
+      "type": "Media",
+      "headline": "Jahmyr Gibbs crosses the goal line for a Lions TD",
+      "description": "Jahmyr Gibbs crosses the goal line for a Lions TD",
+      "published": "2026-11-22T21:24:43.000+00:00",
+      "lastModified": "2026-11-22T21:24:43.000+00:00",
+      "byline": null,
+      "links": {
+        "web": {
+          "href": "https://www.espn.com/video/clip/_/id/50564717/jahmyr-gibbs-crosses-goal-line-lions-td"
+        }
+      },
+      "categories": [
+        {
+          "type": "athlete",
+          "athleteId": 4429795,
+          "description": "Jahmyr Gibbs"
+        },
+        {
+          "type": "league",
+          "description": "NFL"
+        },
+        {
+          "type": "league",
+          "description": "Fantasy NFL"
+        },
+        {
+          "type": "team",
+          "description": "Tampa Bay Buccaneers"
+        },
+        {
+          "type": "team",
+          "description": "Detroit Lions"
+        }
+      ]
+    }
+  ]
+}

@@ -390,6 +390,16 @@ CREATE TABLE IF NOT EXISTS raw_signals (
 );
 """
 
+# Display fields for the player news feed, added with the espn_news and bluesky sources.
+# Nullable, with no backfill: RotoWire and Reddit rows keep everything in raw_text.
+ADD_RAW_SIGNALS_HEADLINE_COLUMN = """
+ALTER TABLE raw_signals ADD COLUMN IF NOT EXISTS headline TEXT;
+"""
+
+ADD_RAW_SIGNALS_AUTHOR_COLUMN = """
+ALTER TABLE raw_signals ADD COLUMN IF NOT EXISTS author VARCHAR(200);
+"""
+
 # One row per LLM provider-call attempt (WORKER-12), not just the winning attempt -- a
 # fallback chain that tried and failed against groq before succeeding on gemini needs both
 # rows for CORE-14's success/failure-rate and fallback-frequency panels to mean anything.
