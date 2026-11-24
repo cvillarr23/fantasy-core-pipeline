@@ -683,6 +683,12 @@
 - Contracts with other repos: `live:health` is the launcher `health` key (rewritten every tick,
   failed ones too, with a 10 min TTL; infra uses `grace: 10m`). `live:last_viewed` is written by the
   live API as epoch seconds; under 5 min old means 30s ticks, otherwise 180s.
+- `live_service` is the API's only reader of those keys (`GET /v1/live/players`, `GET /v1/matchup/feed`, the `live`
+  block on `GET /v1/matchup` lines and the player summary). It never calls ESPN and fails soft: a Redis error reads
+  as no snapshot. The API writes `live:last_viewed` (epoch seconds, 10 min TTL) on each of those requests. The matchup
+  `live` block is overlaid *after* `get_current_team_matchup`'s 60s cache, takes `game_status` from the snapshot so the
+  two agree, and maps ESPN ids to `player_id` through `players.espn_id`. Each play carries `recorded_at` and a
+  per-player `fantasy_delta`, both stamped by the poller (`attach_play_deltas`); a delta is null when it can't be told.
 - ESPN plays carry no athlete ids, so `_play_player_ids` matches roster players by name in the play
   text, only for the play's own teams. Fixtures in `tests/fixtures/espn_live/` are trimmed real
   payloads; record new ones rather than hand-writing ESPN shapes.

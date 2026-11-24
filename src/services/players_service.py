@@ -3,9 +3,11 @@ Player summary/search read logic, split out of src/api/players.py so the router 
 thin HTTP controller over this module doing the actual DB work.
 """
 from src.database import get_db_cursor
+from src.services import live_service
 from src.services.espn_ownership import load_latest_espn_ownership
 
 RECENT_NEWS_LIMIT = 5
+WEEKLY_LOG_WEEKS = 4
 SEARCH_RESULT_LIMIT = 20
 
 
@@ -34,6 +36,31 @@ def _recent_news(cursor, player_id: str, limit: int) -> list:
         {"source": row[0], "raw_text": row[1], "url": row[2], "published_at": row[3].isoformat() if row[3] else None}
         for row in cursor.fetchall()
     ]
+
+
+def _played_weeks(cursor, player_id: str) -> list:
+    """`(week, actual_points)` for the weeks of the player's latest season that have final actual
+    scores, oldest first. `actual_points` defaults to 0.0, so only rows an actual-scores sync
+    stamped (`actual_points_source`) count as played."""
+    cursor.execute("""
+        SELECT season, week, actual_points
+        FROM weekly_stats
+        WHERE player_id = %s AND actual_points_source IS NOT NULL AND actual_points IS NOT NULL
+        ORDER BY season DESC, week DESC;
+    """, (player_id,))
+    rows = cursor.fetchall()
+    if not rows:
+        return []
+    latest = rows[0][0]
+    return sorted((week, points) for season, week, points in rows if season == latest)
+
+
+def _season_avg(played: list):
+    return round(sum(points for _, points in played) / len(played), 2) if played else None
+
+
+def _weekly_log(played: list) -> list:
+    return [{"week": week, "points": points} for week, points in played[-WEEKLY_LOG_WEEKS:]]
 
 
 def search_players(query: str) -> list:
@@ -88,6 +115,8 @@ def get_player_summary(player_id: str) -> dict:
             raise PlayerNotFoundError(f"Unknown player_id '{player_id}'.")
         recent_news = _recent_news(cursor, player_id, RECENT_NEWS_LIMIT)
         espn = load_latest_espn_ownership(cursor, [player_id]).get(player_id)
+        played = _played_weeks(cursor, player_id)
+        live = live_service.player_live_summary(cursor, player_id)
 
     return {
         "player_id": row[0],
@@ -99,4 +128,7 @@ def get_player_summary(player_id: str) -> dict:
         "espn_id": row[6],
         "recent_news": recent_news,
         "espn": espn,
+        "live": live,
+        "season_avg": _season_avg(played),
+        "weekly_log": _weekly_log(played),
     }

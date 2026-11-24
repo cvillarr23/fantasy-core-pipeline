@@ -16,6 +16,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 
 from src.schemas.players import PlayerSearchResult, PlayerSummaryResponse
+from src.services import live_service
 from src.services.players_service import PlayerNotFoundError, get_player_summary, search_players
 
 logger = logging.getLogger("PlayerRoutes")
@@ -40,7 +41,10 @@ def search_players_endpoint(q: str):
 @player_router.get("/{player_id}/summary", response_model=PlayerSummaryResponse)
 def get_player_summary_endpoint(player_id: str):
     try:
-        return get_player_summary(player_id)
+        summary = get_player_summary(player_id)
+        if summary["live"] is not None:
+            live_service.touch_last_viewed()
+        return summary
     except PlayerNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

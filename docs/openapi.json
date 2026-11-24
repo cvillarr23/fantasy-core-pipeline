@@ -1858,6 +1858,229 @@
         "title": "FantasyScheduleWeek",
         "type": "object"
       },
+      "FeedItem": {
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "clock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clock"
+          },
+          "cursor": {
+            "title": "Cursor",
+            "type": "string"
+          },
+          "espn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Espn Id"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "fantasy_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fantasy Delta"
+          },
+          "game_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Game Label"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "news_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "News Id"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period"
+          },
+          "play_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Play Id"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "string"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "scoring": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring"
+          },
+          "side": {
+            "enum": [
+              "mine",
+              "theirs"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "team": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "type": {
+            "enum": [
+              "play",
+              "news"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "type",
+          "cursor",
+          "player_id",
+          "side"
+        ],
+        "title": "FeedItem",
+        "type": "object"
+      },
       "FreeAgentEntry": {
         "properties": {
           "bench_player": {
@@ -4032,6 +4255,187 @@
         "title": "LineupWeek",
         "type": "object"
       },
+      "LiveBlock": {
+        "description": "One player's live snapshot, merged from `live:player` and the player's `live:game`.\nEvery field is nullable; the whole block is null when no snapshot exists.",
+        "properties": {
+          "away_abbr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Away Abbr"
+          },
+          "away_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Away Score"
+          },
+          "clock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clock"
+          },
+          "home_abbr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Home Abbr"
+          },
+          "home_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Home Score"
+          },
+          "live_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Points"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period"
+          },
+          "possession": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Possession"
+          },
+          "red_zone": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Red Zone"
+          },
+          "stat_line": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat Line"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "not_started",
+                  "in_progress",
+                  "final"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "yard_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yard Line"
+          }
+        },
+        "title": "LiveBlock",
+        "type": "object"
+      },
+      "LivePlayersResponse": {
+        "properties": {
+          "players": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/LiveBlock"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Players",
+            "type": "object"
+          }
+        },
+        "required": [
+          "players"
+        ],
+        "title": "LivePlayersResponse",
+        "type": "object"
+      },
       "LlmSessionRef": {
         "properties": {
           "id": {
@@ -4048,6 +4452,33 @@
           "title"
         ],
         "title": "LlmSessionRef",
+        "type": "object"
+      },
+      "MatchupFeedResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FeedItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "MatchupFeedResponse",
         "type": "object"
       },
       "MatchupResponse": {
@@ -4826,6 +5257,16 @@
             ],
             "title": "Jersey"
           },
+          "live": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -4889,6 +5330,73 @@
           "deficit_flag"
         ],
         "title": "PlayerLine",
+        "type": "object"
+      },
+      "PlayerLiveSummary": {
+        "description": "The `live` field of a player summary (what the web UI's popover reads).",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "game_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Game Label"
+          },
+          "game_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "not_started",
+                  "in_progress",
+                  "final"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Game Status"
+          },
+          "live_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Points"
+          },
+          "projected_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projected Points"
+          }
+        },
+        "title": "PlayerLiveSummary",
         "type": "object"
       },
       "PlayerSearchResult": {
@@ -5007,6 +5515,16 @@
             ],
             "title": "Injury Status"
           },
+          "live": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlayerLiveSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -5026,6 +5544,17 @@
             "title": "Recent News",
             "type": "array"
           },
+          "season_avg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Avg"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -5033,6 +5562,14 @@
           "team": {
             "title": "Team",
             "type": "string"
+          },
+          "weekly_log": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WeeklyLogEntry"
+            },
+            "title": "Weekly Log",
+            "type": "array"
           }
         },
         "required": [
@@ -9572,6 +10109,30 @@
         ],
         "title": "WaiverTriggerPayload",
         "type": "object"
+      },
+      "WeeklyLogEntry": {
+        "properties": {
+          "points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Points"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week"
+        ],
+        "title": "WeeklyLogEntry",
+        "type": "object"
       }
     }
   },
@@ -11234,6 +11795,47 @@
         "summary": "Get Teams"
       }
     },
+    "/v1/live/players": {
+      "get": {
+        "operationId": "get_live_players_v1_live_players_get",
+        "parameters": [
+          {
+            "description": "Comma-separated players.player_id values",
+            "in": "query",
+            "name": "ids",
+            "required": true,
+            "schema": {
+              "description": "Comma-separated players.player_id values",
+              "title": "Ids",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivePlayersResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Live Players"
+      }
+    },
     "/v1/livez": {
       "get": {
         "description": "Kubernetes liveness probe: answers as long as the event loop is serving requests.\nIt never checks Postgres or RabbitMQ, so a dependency outage takes the pod out of\nrotation through /v1/health (readiness) instead of restarting it.",
@@ -11297,6 +11899,83 @@
           }
         },
         "summary": "Get Matchup"
+      }
+    },
+    "/v1/matchup/feed": {
+      "get": {
+        "description": "Plays and recent news for both sides' players, newest first. `season` is accepted for\nsymmetry with the other matchup routes; the snapshot is only ever the poller's week.",
+        "operationId": "get_matchup_feed_v1_matchup_feed_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "week",
+            "required": true,
+            "schema": {
+              "title": "Week",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchupFeedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Matchup Feed"
       }
     },
     "/v1/matchup/roster": {

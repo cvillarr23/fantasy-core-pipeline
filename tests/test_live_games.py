@@ -68,6 +68,13 @@ class FakeRedis:
         self.data[key] = value
         self.ttl[key] = ex
 
+    def mget(self, keys):
+        return [self.data.get(key) for key in keys]
+
+    def lrange(self, key, start, end):
+        values = self.data.get(key, [])
+        return values[start:] if end == -1 else values[start:end + 1]
+
     def delete(self, key):
         self.data.pop(key, None)
         self.ttl.pop(key, None)
@@ -216,6 +223,52 @@ def test_plays_name_matchup_players_newest_first(league):
     assert kickoff["text"].startswith("W.Reichard kicks")
     assert set(kickoff["player_ids"]) == {"p4567104", "p3126486"}
     assert set(kickoff) == {"play_id", "period", "clock", "text", "player_ids", "scoring"}
+
+
+def _stamped_play(play_id, *player_ids):
+    return {"play_id": play_id, "period": 1, "clock": "5:00", "text": "t", "player_ids": list(player_ids), "scoring": False}
+
+
+def test_new_play_gets_its_players_point_change_and_recorded_at():
+    plays = [_stamped_play("2", "a", "b")]
+
+    stamped = lg.attach_play_deltas(plays, [], {"a": 4.0, "b": None}, {"a": 10.0, "b": 0.8}, NOW)
+
+    assert stamped[0]["recorded_at"] == "2026-11-23T18:00:00Z"
+    assert stamped[0]["fantasy_delta"] == {"a": 6.0, "b": 0.8}
+
+
+def test_delta_is_null_when_a_player_has_several_new_plays_or_no_earlier_snapshot():
+    plays = [_stamped_play("3", "a"), _stamped_play("2", "a", "c")]
+
+    stamped = lg.attach_play_deltas(plays, [], {"a": 1.0}, {"a": 5.0, "c": 3.0}, NOW)
+
+    assert stamped[0]["fantasy_delta"] == {"a": None}
+    assert stamped[1]["fantasy_delta"] == {"a": None, "c": None}
+
+
+def test_stored_play_keeps_its_stamp_and_delta():
+    stored = {**_stamped_play("1", "a"), "recorded_at": "2026-11-23T17:00:00Z", "fantasy_delta": {"a": 2.0}}
+
+    stamped = lg.attach_play_deltas([_stamped_play("1", "a")], [stored], {"a": 9.0}, {"a": 9.0}, NOW)
+
+    assert stamped[0]["recorded_at"] == "2026-11-23T17:00:00Z"
+    assert stamped[0]["fantasy_delta"] == {"a": 2.0}
+
+
+def test_tick_stamps_new_plays_from_the_previous_snapshot(espn, board, league):
+    espn.board = fixture("scoreboard_in_progress.json")
+    espn.summaries[MNF] = fixture("summary_in_progress.json")
+    redis = FakeRedis()
+    poller = make_poller(league, redis)
+
+    poller.tick(NOW)
+    first = [json.loads(p) for p in redis.data[f"live:plays:{MNF}"]]
+    poller.tick(NOW.replace(minute=1))
+    second = [json.loads(p) for p in redis.data[f"live:plays:{MNF}"]]
+
+    assert all("recorded_at" in p and "fantasy_delta" in p for p in first)
+    assert [p["recorded_at"] for p in second] == [p["recorded_at"] for p in first]
 
 
 def test_scoring_plays_are_flagged(league):

@@ -134,7 +134,10 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `GET` | `/v1/league/player-leaders` | Show top scorers. | No |  |
 | `GET` | `/v1/league/standings` | Show league standings. | No |  |
 | `GET` | `/v1/league/teams` | List league teams. | No |  |
+| `GET` | `/v1/live/players` | Show live game state and points for players by id. | No |  |
+| `GET` | `/v1/livez` | Liveness probe; checks no dependencies. | No |  |
 | `GET` | `/v1/matchup` | Show our matchup for a season and week. | No |  |
+| `GET` | `/v1/matchup/feed` | List live plays and news for both sides' players, newest first. | No |  |
 | `GET` | `/v1/matchup/roster` | Show a matchup roster with swap and IR suggestions. | No |  |
 | `GET` | `/v1/matchup/scoreboard` | Show every matchup's score for a season and week. | No |  |
 | `GET` | `/v1/scoreboard` | Same as `/v1/matchup/scoreboard`. | No |  |
@@ -162,7 +165,6 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 |---|---|---|---|---|
 | `POST` | `/v1/chat/query` | Ask the LLM a roster or waiver question. | No |  |
 | `GET` | `/v1/health` | Check Postgres and RabbitMQ reachability. | No |  |
-| `GET` | `/v1/livez` | Liveness probe; checks no dependencies. | No |  |
 
 <!-- END GENERATED: endpoints -->
 
@@ -182,6 +184,35 @@ Each player line carries `game_status`: where that player's NFL game stands.
 | `null` | Unknown: the NFL scoreboard couldn't be read, the player's team has no game this week (a bye; `bye_week` says so), or the week is stored completed history, which carries no game status. |
 
 The status comes from ESPN's public NFL scoreboard (`pre`, `in` and `post`), once per response. A failed read gives `null` on every line rather than failing the request. The matchup is cached for 60 seconds, so a status can lag a kickoff or a final whistle by up to that long.
+
+### `live`
+
+Each player line also carries `live`, the poller's snapshot of that player's game (`live_games`, see [Ingestion](./ingestion.md)). It is read from Redis after the matchup cache, so it is fresher than the rest of the response. The whole object is `null` when there is no snapshot for the player (the poller isn't running this week, the player isn't on either roster it tracks, or Redis is unreachable). Within it, every field is nullable.
+
+| Field | Meaning |
+|---|---|
+| `status` | `not_started`, `in_progress` or `final`. When `live` is set, the line's `game_status` is taken from it, so the two always agree. |
+| `period`, `clock` | Quarter and game clock. Null unless the game is in progress. |
+| `home_abbr`, `home_score`, `away_abbr`, `away_score` | nflverse team codes (`WAS`, not `WSH`). Scores are null before kickoff, never 0. |
+| `possession`, `yard_line`, `red_zone` | Who has the ball and where. Null (`red_zone` false) unless in progress. |
+| `stat_line` | The player's stat counts so far, keyed like `passYd`, `rushTD`, `rec`, `recYd`. A stat ESPN didn't report is left out. |
+| `live_points` | ESPN's applied fantasy total for the player. Null (not 0) when ESPN has no stat row yet. |
+| `updated_at` | When the poller last wrote this player. |
+
+`GET /v1/live/players?ids=a,b,c` returns the same object for players outside the matchup page (Lineup, Waivers). The ids are `players.player_id` (the Sleeper namespace, as in `/v1/players/{id}/summary`), at most 100. The response is `{"players": {id: live | null}}`. Matchup lines carry ESPN ids, so they get their `live` block from the matchup route itself.
+
+All live routes (`/v1/matchup`, `/v1/matchup/feed`, `/v1/live/players`, and a player summary that has a live block) write `live:last_viewed`, which moves the poller from 180s to 30s ticks. None of them calls ESPN.
+
+### `GET /v1/matchup/feed`
+
+`season`, `week`, `limit` (1-200, default 50) and `before`. Returns `{items, next_before}`: plays from the live snapshot for both sides' players, newest first, with news on those players from the last 2 hours mixed in by time. A play that involves two matchup players is two items.
+
+- `type`: `play` or `news`. `side`: `mine` or `theirs`. `at`: when core recorded the play (ESPN has no wall time, so this is the poll that first saw it, up to 30-180s after it happened) or when the news was published.
+- Play items: `play_id`, `event_id`, `game_label` (`TB @ ATL`, or `TB 14 – 17 ATL` once there is a score), `period`, `clock`, `text`, `scoring`, `fantasy_delta`.
+- `fantasy_delta` is the change in that player's `live_points` at the poll that saw the play. It is `null` when it can't be told: the player had several new plays in the same poll, or the poller had no earlier snapshot of the player.
+- News items: `news_id`, `source`, `headline`, `url`.
+- Paging: pass `next_before` as `before`. It is null on the last page. An unknown cursor (its play aged out of the poller's 300-play cap) returns an empty page.
+- The feed is empty (not an error) when the poller isn't running for that `week`.
 
 ### When `points` and `projected_points` are null
 

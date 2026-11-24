@@ -12,6 +12,7 @@ from src.migrations import run_migrations
 from src.api.routes import router
 from src.api.draft import draft_router
 from src.api.players import player_router
+from src.api.live import live_router
 from src.api.news import news_router
 from src.api.backtest import backtest_router
 from src.api.roster import roster_router
@@ -99,6 +100,7 @@ app.include_router(router, prefix="/v1")
 app.include_router(draft_router, prefix="/v1/draft")
 app.include_router(player_router, prefix="/v1/players")
 app.include_router(news_router, prefix="/v1/news")
+app.include_router(live_router, prefix="/v1/live")
 app.include_router(backtest_router, prefix="/v1/backtest")
 app.include_router(roster_router, prefix="/v1/roster")
 app.include_router(waiver_router, prefix="/v1/waiver")
