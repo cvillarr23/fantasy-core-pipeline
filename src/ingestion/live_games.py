@@ -156,7 +156,7 @@ def fetch_scoreboard(season: int, week: int):
 
 
 def fetch_summary(event_id: str):
-    """One game's summary (situation and plays), or None when it is unavailable."""
+    """One game's summary (plays), or None when it is unavailable."""
     return _with_retries(f"summary {event_id}", lambda: _get_json(SUMMARY_URL, {"event": event_id}))
 
 
@@ -211,11 +211,9 @@ def _team_abbr_by_id(competitors: list) -> dict:
     }
 
 
-def _situation(event: dict, summary: dict | None) -> dict:
-    """The live down-and-distance block. The summary's is fresher when it has one; the
-    scoreboard's own competition carries one while a game is live too."""
-    if summary and summary.get("situation"):
-        return summary["situation"]
+def _situation(event: dict) -> dict:
+    """The live down-and-distance block. Only the scoreboard carries it: a live `summary` has
+    no `situation`."""
     return ((event.get("competitions") or [{}])[0]).get("situation") or {}
 
 
@@ -226,14 +224,14 @@ def _possession(situation: dict, abbr_by_id: dict):
     return abbr_by_id.get(str(possession)) if possession is not None else None
 
 
-def shape_game(event: dict, summary: dict | None, now: datetime) -> dict:
+def shape_game(event: dict, now: datetime) -> dict:
     """`live:game:{event_id}`. Clock, period and field position are null unless the game is
     in progress."""
     status = _event_status(event) or NOT_STARTED
     competitors = _competitors(event)
     event_status = event.get("status") or {}
     live = status == IN_PROGRESS
-    situation = _situation(event, summary) if live else {}
+    situation = _situation(event) if live else {}
     return {
         "event_id": str(event.get("id")),
         "status": status,
@@ -568,7 +566,7 @@ class LiveGamesPoller:
         games, plays = [], {}
         for event_id, event in events.items():
             summary = fetch_summary(event_id) if self._needs_summary(event_id, event) else None
-            games.append(shape_game(event, summary, now))
+            games.append(shape_game(event, now))
             if summary is not None and roster:
                 plays[event_id] = shape_plays(summary, roster)
                 if _event_status(event) == FINAL:
