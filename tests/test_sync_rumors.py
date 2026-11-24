@@ -772,3 +772,55 @@ def test_sources_includes_display_only_news_sources():
     names = [name for name, _, _ in sync_rumors._sources()]
 
     assert names[-2:] == ["espn_news", "bluesky"]
+
+
+# --- bluesky phrase matching ---
+
+PHRASE_LOOKUP = [
+    ("1", "Brandon Johnson"),
+    ("2", "Cameron Dicker"),
+    ("3", "Geno Smith"),
+    ("4", "Anthony Richardson"),
+    ("5", "Marvin Harrison Jr."),
+]
+
+
+@pytest.mark.parametrize("text", [
+    "did not expect Brandon Staley to mostly win the battle against Ben Johnson",
+    "We WILL talk Ravens-Chargers live postgame with @jourdanrodrigue.bsky.social",
+])
+def test_match_player_phrase_ignores_names_spread_across_people(text):
+    assert sync_rumors.match_player_phrase(text, PHRASE_LOOKUP) == (None, None)
+
+
+@pytest.mark.parametrize("text, player_id", [
+    ("Jets QB Geno Smith has been ruled out", "3"),
+    ("Colts QB Anthony Richardson Sr. is back at practice", "4"),
+    ("ANTHONY RICHARDSON, questionable", "4"),
+    ("Marvin Harrison is expected to play", "5"),
+    ("Marvin Harrison Jr. (hamstring) limited", "5"),
+])
+def test_match_player_phrase_matches_a_contiguous_name(text, player_id):
+    assert sync_rumors.match_player_phrase(text, PHRASE_LOOKUP) == (player_id, 1.0)
+
+
+def test_match_player_phrase_needs_whole_words():
+    assert sync_rumors.match_player_phrase("Geno Smithson signs", PHRASE_LOOKUP) == (None, None)
+
+
+def test_match_player_phrase_prefers_the_longer_name():
+    lookup = [("1", "Mike Evans"), ("2", "Mike Evans Williams")]
+    assert sync_rumors.match_player_phrase("Mike Evans Williams signs", lookup)[0] == "2"
+
+
+def test_match_item_uses_phrase_matching_for_bluesky_only():
+    text = "did not expect Brandon Staley to mostly win the battle against Ben Johnson"
+    assert sync_rumors._match_item({"source": "bluesky", "raw_text": text}, PHRASE_LOOKUP, {}) == (None, None)
+    fuzzy = sync_rumors._match_item({"source": "rotowire_rss", "raw_text": text}, PHRASE_LOOKUP, {})
+    assert fuzzy[0] == "1"
+
+
+def test_match_player_phrase_prefers_the_player_named_first():
+    text = "Rams WR Puka Nacua is out, while Davante Adams is likely back"
+    lookup = [("1", "Davante Adams"), ("2", "Puka Nacua")]
+    assert sync_rumors.match_player_phrase(text, lookup)[0] == "2"
