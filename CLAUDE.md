@@ -670,3 +670,19 @@
   after committing.
 - `start_chain(from_step)` is the `downstream: true` path for manual runs. A manual run without
   it gets no `chain_root_id`, so it never starts downstream steps.
+
+## Live games (`src/ingestion/live_games.py`)
+
+- A launcher service job (`live-games`, fantasy-infra) that polls one game window and writes
+  only Redis `live:*` keys (6h TTL). The live API reads them, so nothing on the request path calls
+  ESPN. Keys, shapes and cadence are in `docs/ingestion.md` ("How does `live_games` keep live
+  game state?").
+- Game state comes from ESPN's public scoreboard and `summary` endpoints. Points come from the
+  league's `mMatchupScore` payload (`appliedTotal` on the `statSourceId` 0 row), never recomputed.
+  A player with no actual row has `live_points: null`, not 0.
+- Contracts with other repos: `live:health` is the launcher `health` key (rewritten every tick,
+  failed ones too, with a 10 min TTL; infra uses `grace: 10m`). `live:last_viewed` is written by the
+  live API as epoch seconds; under 5 min old means 30s ticks, otherwise 180s.
+- ESPN plays carry no athlete ids, so `_play_player_ids` matches roster players by name in the play
+  text, only for the play's own teams. Fixtures in `tests/fixtures/espn_live/` are trimmed real
+  payloads; record new ones rather than hand-writing ESPN shapes.

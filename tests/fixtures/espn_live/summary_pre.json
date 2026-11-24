@@ -1,0 +1,42 @@
+{
+  "header": {
+    "competitions": [
+      {
+        "status": {
+          "type": {
+            "id": "1",
+            "name": "STATUS_SCHEDULED",
+            "state": "pre",
+            "completed": false,
+            "description": "Scheduled",
+            "detail": "Mon, November 23rd at 8:15 PM EST",
+            "shortDetail": "11/23 - 8:15 PM EST"
+          },
+          "isTBDFlex": false
+        },
+        "competitors": [
+          {
+            "id": "28",
+            "homeAway": "home",
+            "score": null,
+            "possession": false,
+            "team": {
+              "id": "28",
+              "abbreviation": "WSH"
+            }
+          },
+          {
+            "id": "4",
+            "homeAway": "away",
+            "score": null,
+            "possession": false,
+            "team": {
+              "id": "4",
+              "abbreviation": "CIN"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

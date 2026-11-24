@@ -51,6 +51,7 @@ flowchart TD
 | `sync_defense_strength` | nflverse, previous season | `defense_position_strength` | Only needed when `MATCHUP_WEIGHTING_ENABLED=true`. |
 | `sync_rumors` | RotoWire RSS, r/fantasyfootball, ESPN news, Bluesky | `raw_signals` | Fetch and store only. The LLM interpretation happens in the worker. See [News sources](#which-news-sources-does-sync_rumors-read). |
 | `sync_actual_scores` | ESPN scoring weeks | `fantasy_*` tables, `weekly_stats.actual_points` | See [Score history](#how-is-score-history-stored). |
+| `live_games` | ESPN's public NFL scoreboard and game summaries, plus the league's live matchup payload | Redis `live:*` keys only | A launcher service job during game windows. See [Live game state](#how-does-live_games-keep-live-game-state). |
 
 ## Which news sources does `sync_rumors` read?
 
@@ -66,6 +67,41 @@ flowchart TD
 Each source fails on its own: an outage logs and leaves that source empty for the run. The roster lookup needs `ESPN_TEAM_ID`, and the opponent lookup also needs `ESPN_LEAGUE_ID` and a `fantasy_matchups` row for the upcoming week. Without them, the per-athlete calls narrow to our roster or stop, and the general feed still runs. `rumor-syncer` runs inline in the launcher, so these variables come from the launcher Deployment's env. An empty `NEWS_BLUESKY_HANDLES` skips Bluesky.
 
 An article tagging more than `ESPN_COVERAGE_MAX_ATHLETES` (3) athletes, such as a recap or weekly roundup, still gets a row per athlete. It doesn't count as news about them, though, so it doesn't stand in for the athlete-page call.
+
+## How does `live_games` keep live game state?
+
+`python -m src.ingestion.live_games [--season N] [--week N] [--once]` polls this week's fantasy matchup for one game window and keeps a snapshot in Redis. The live API reads that snapshot, so no request ever waits on ESPN. It runs as the `live-games` launcher service job (fantasy-infra), one run per game window.
+
+At startup it resolves the upcoming week (`resolve_upcoming_week`), reads our matchup period and opponent from `fantasy_matchups` (`ESPN_LEAGUE_ID`, `ESPN_TEAM_ID`), and loads `players.espn_id`. It exits 0 when the season is over or we have no scheduled matchup, and 1 when the week can't be resolved.
+
+Each tick:
+
+1. Reads the week's scoreboard from ESPN's public site API, with no auth.
+2. Reads the league's `mMatchupScore` payload for our matchup period, once. This is the same request `sync_actual_scores` makes, with `ESPN_S2` and `ESPN_SWID`. Both rosters come from it, bench included.
+3. Tracks every game with a team that has a player on either roster.
+4. Fetches `summary?event=` for each tracked game in progress, plus once more when a game turns final, to get its plays.
+5. Writes the keys below in one pipeline.
+
+A failed fetch is retried 3 times. A failed tick logs and the loop carries on.
+
+| Key | Value | TTL |
+|---|---|---|
+| `live:game:{event_id}` | `{event_id, status: not_started\|in_progress\|final, detail, period, clock, home: {abbr, score}, away: {abbr, score}, possession, yard_line, red_zone, kickoff, updated_at}`. `period`, `clock`, `possession` and `yard_line` are null unless the game is live. Scores are null before kickoff. | 6h |
+| `live:player:{player_id}` | `{event_id, team, fantasy_team_id, lineup_slot_id, stat_line, live_points, applied_stats, updated_at}`, for every player on either matchup roster with a `players.espn_id` match. | 6h |
+| `live:plays:{event_id}` | A list, newest first, capped at 300: `{play_id, period, clock, text, player_ids, scoring}`. Only plays that involve a matchup player are kept. | 6h |
+| `live:updated_at` | ISO-8601 time of the last successful tick. | 6h |
+| `live:health` | `{updated_at, last_success_at, week, tracked_events}`, written every tick, including a failed one. This is the service job's launcher `health` key. | 10 min |
+| `live:last_viewed` | Written by the live API, not by this job: the unix epoch seconds when someone last opened a live page. ISO-8601 is also accepted. | n/a |
+
+Team codes are nflverse codes (`WAS`, not ESPN's `WSH`), the same as `players.team`.
+
+**Points are ESPN's own.** `live_points` is the actual stat row's `appliedTotal` (`statSourceId` 0), which ESPN updates in game and which matches the matchup score. `applied_stats` is that row's points per ESPN stat id. `stat_line` is its raw counts, named: `passYd`, `passTD`, `int`, `rushYd`, `rushTD`, `rec`, `recYd`, `recTD`, `fumLost` and `twoPt`, plus kicker and D/ST stats. A stat ESPN didn't report is left out. A player who hasn't played yet has `live_points: null`, never 0.
+
+**Plays are matched by name.** ESPN's plays carry no athlete ids. A player is tagged when the play text has his play-by-play name (`J.Gibbs`, `Ja.Chase`, `A.St. Brown`) or his full name (scoring plays), without a Jr./III suffix. A tag only counts when the player's team is one of the play's teams. A D/ST is tagged on turnovers, sacks, safeties and scores while its team is on defense (a score against it counts toward points allowed), and on its own return touchdowns. Two teammates with the same initial and last name would both be tagged.
+
+**Cadence.** Ticks run every 30s while `live:last_viewed` is under 5 minutes old, and every 180s otherwise. The wait rechecks `live:last_viewed` every 10s, so a new viewer speeds polling up at once. A summary that is unavailable leaves that game on its scoreboard state and keeps its previous plays.
+
+**Exit.** The poller exits 0 once no tracked game is in progress and none kicks off within 30 minutes. That covers every game being final, and an empty window costing one tick. SIGTERM also stops it cleanly.
 
 ## When do they run?
 

@@ -1,0 +1,4316 @@
+{
+  "header": {
+    "competitions": [
+      {
+        "status": {
+          "type": {
+            "id": "3",
+            "name": "STATUS_FINAL",
+            "state": "post",
+            "completed": true,
+            "description": "Final",
+            "detail": "Final",
+            "shortDetail": "Final"
+          },
+          "isTBDFlex": false
+        },
+        "competitors": [
+          {
+            "id": "25",
+            "homeAway": "home",
+            "score": "35",
+            "possession": false,
+            "team": {
+              "id": "25",
+              "abbreviation": "SF"
+            }
+          },
+          {
+            "id": "16",
+            "homeAway": "away",
+            "score": "10",
+            "possession": false,
+            "team": {
+              "id": "16",
+              "abbreviation": "MIN"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "drives": {
+    "previous": [
+      {
+        "id": "4018730771",
+        "plays": [
+          {
+            "id": "40187307739",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "W.Reichard kicks 61 yards from MIN 35 to SF 4. D.Samuel to SF 28 for 24 yards (J.Jones).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "40187307762",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey right guard to SF 31 for 3 yards (J.Metellus; J.Pierre).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "14:55"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "40187307784",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "B.Purdy pass short right to K.Juszczyk to SF 37 for 6 yards (A.Van Ginkel).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "14:24"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077109",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short left to M.Evans to MIN 49 for 14 yards (B.Murphy).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "13:45"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077134",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) C.McCaffrey right tackle to MIN 42 for 7 yards (J.Redmond).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "13:07"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077156",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) D.Samuel up the middle to MIN 35 for 7 yards (L.Rodriguez).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "12:29"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077178",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short left to D.Samuel pushed ob at MIN 17 for 18 yards (J.Pierre).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:55"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077208",
+            "type": {
+              "text": "Passing Touchdown"
+            },
+            "text": "(Shotgun) B.Purdy pass short middle to G.Kittle for 17 yards, TOUCHDOWN. E.Pineiro extra point is GOOD, Center-J.Weeks, Holder-C.Waitman.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:16"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077242",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 11:16.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730772",
+        "plays": [
+          {
+            "id": "401873077249",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "C.Waitman kicks 65 yards from SF 35 to end zone, Touchback to the MIN 35.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077273",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) A.Jones left guard to MIN 39 for 4 yards (F.Warner; J.Dugger).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077295",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short right to J.Jennings to MIN 48 for 9 yards (M.Mustapha).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "10:34"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077320",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "A.Jones left guard to MIN 44 for -4 yards (C.West).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:57"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077342",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete short middle to T.Felton (F.Warner).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077365",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short right to T.Hockenson to SF 36 for 20 yards (U.Stout) [O.Odighizuwa].",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:07"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077390",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete deep right to J.Jefferson.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "8:20"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077413",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Mason left end to SF 37 for -1 yards (F.Warner).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "8:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077435",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(No Huddle, Shotgun) K.Cousins pass incomplete short middle to J.Jennings (D.Lenoir).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:44"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077458",
+            "type": {
+              "text": "Field Goal Missed"
+            },
+            "text": " W.Reichard 55 yard field goal is No Good, Wide Left, Center-A.DePaola, Holder-B.Thorson.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:38"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "401873077469",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 07:33.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:33"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730773",
+        "plays": [
+          {
+            "id": "401873077479",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "B.Purdy pass incomplete deep right to M.Evans.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:33"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077509",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey left end to SF 43 for -2 yards (J.Redmond).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:28"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077531",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(Shotgun) B.Purdy sacked at SF 36 for -7 yards (E.Wilson).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "6:50"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077551",
+            "type": {
+              "text": "Punt"
+            },
+            "text": " C.Waitman punts 54 yards to MIN 10, Center-J.Weeks, fair catch by M.Price.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "6:09"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "defense"
+              },
+              {
+                "id": "25",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "401873077561",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 06:01.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "6:01"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730774",
+        "plays": [
+          {
+            "id": "401873077571",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Mason right guard to MIN 13 for 3 yards (J.Thompson; M.Mustapha).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "6:01"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077600",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to J.Jefferson to MIN 12 for -1 yards (D.Lenoir).PENALTY on SF-M.Williams, Defensive Offside, 5 yards, enforced at MIN 13 - No Play.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "5:22"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077636",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to T.Felton pushed ob at MIN 23 for 5 yards (E.Prysock).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "4:56"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077671",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass deep left to J.Jefferson ran ob at SF 48 for 29 yards (D.Lenoir).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "4:18"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077701",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Mason up the middle to SF 41 for 7 yards (M.Sigle).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "3:44"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077723",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete deep right to J.Jennings (D.Lenoir).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "3:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077746",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to T.Hockenson to SF 25 for 16 yards (R.Green).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "2:53"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077771",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "A.Jones left guard to SF 22 for 3 yards (D.Buckner).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "2:06"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077793",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "K.Cousins pass incomplete short left to T.Hockenson.PENALTY on SF-N.Bosa, Roughing the Passer, 11 yards, enforced at SF 22 - No Play.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:28"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077827",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "K.Cousins pass incomplete short left to T.Hockenson [N.Bosa].",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:24"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077850",
+            "type": {
+              "text": "Rushing Touchdown"
+            },
+            "text": "A.Jones left end for 11 yards, TOUCHDOWN. W.Reichard extra point is GOOD, Center-A.DePaola, Holder-B.Thorson.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:13"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077881",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 01:13.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730775",
+        "plays": [
+          {
+            "id": "401873077888",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "W.Reichard kicks 65 yards from MIN 35 to SF 0. D.Samuel to SF 33 for 33 yards (C.Chambliss; J.Golday).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077918",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "B.Purdy pass short right to J.Watkins to MIN 48 for 19 yards (D.Orange).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:05"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077943",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) B.Purdy pass incomplete short left to D.Samuel.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "0:22"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077966",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass deep middle to M.Evans to MIN 14 for 34 yards (T.Jackson).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "0:15"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873077991",
+            "type": {
+              "text": "End Period"
+            },
+            "text": "END QUARTER 1",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "0:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771011",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey left end to MIN 8 for 6 yards (D.Turner; B.Cashman).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771033",
+            "type": {
+              "text": "Passing Touchdown"
+            },
+            "text": "(Shotgun) B.Purdy pass short middle to G.Kittle for 8 yards, TOUCHDOWN. E.Pineiro extra point is GOOD, Center-J.Weeks, Holder-C.Waitman.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:13"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730776",
+        "plays": [
+          {
+            "id": "4018730771074",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "C.Waitman kicks 65 yards from SF 35 to MIN 0. M.Price to MIN 25 for 25 yards (A.Davis).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771097",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "K.Cousins pass incomplete deep middle to T.Felton [M.Williams].",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:06"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771120",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Mason right end to MIN 25 for no gain (D.Lenoir).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771142",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short right to A.Jones to MIN 38 for 13 yards (J.Brown).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "13:22"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771167",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) PENALTY on MIN, Delay of Game, 5 yards, enforced at MIN 38 - No Play.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "12:31"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771200",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to J.Jefferson to MIN 40 for 7 yards (R.Green).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "12:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771225",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to J.Mason to MIN 39 for -1 yards (D.Buckner, R.Height).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "11:37"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771250",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short middle to T.Felton to MIN 47 for 8 yards (F.Warner).  The ball spot was assisted by replay.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "10:53"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771277",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "A.Jones right end to SF 48 for 5 yards (J.Dugger).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "10:08"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771299",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "K.Cousins pass short left to T.Felton pushed ob at SF 37 for 11 yards (R.Green).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "9:29"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771329",
+            "type": {
+              "text": "Fumble Recovery (Own)"
+            },
+            "text": "K.Cousins FUMBLES (Aborted) at SF 38, and recovers at SF 38. K.Cousins to SF 37 for 1 yard (J.Dugger).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "8:57"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771356",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Mason left guard to SF 33 for 4 yards (G.Wallow; J.Thompson).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "8:15"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771378",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short right to T.Hockenson to SF 30 for 3 yards (J.Brown).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "7:34"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771408",
+            "type": {
+              "text": "Field Goal Good"
+            },
+            "text": " W.Reichard 48 yard field goal is GOOD, Center-A.DePaola, Holder-B.Thorson.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:48"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771423",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 06:48.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:48"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730777",
+        "plays": [
+          {
+            "id": "4018730771437",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "W.Reichard kicks 65 yards from MIN 35 to end zone, Touchback to the SF 35.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:48"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771461",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey right end to SF 39 for 4 yards (J.Metellus; I.Pace). SF-C.McKivitz was injured during the play.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:48"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771474",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 06:38.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:38"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771486",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey left tackle to SF 49 for 10 yards (T.Jackson; J.Pierre).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:24"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771515",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) K.Black up the middle to MIN 49 for 2 yards (I.Pace).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "5:44"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771537",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short right to K.Allen to MIN 32 for 17 yards (H.Smith).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "5:08"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771562",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) K.Black left guard to MIN 30 for 2 yards (D.Turner).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "4:27"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771584",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) PENALTY on SF-V.Lowe, False Start, 5 yards, enforced at MIN 30 - No Play.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "3:44"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771608",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short right to M.Evans pushed ob at MIN 6 for 29 yards (J.Pierre).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "3:29"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771638",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey left tackle to MIN 4 for 2 yards (T.Ingram-Dawkins).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "2:53"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771660",
+            "type": {
+              "text": "Passing Touchdown"
+            },
+            "text": "(Shotgun) B.Purdy pass short right to M.Evans for 4 yards, TOUCHDOWN. E.Pineiro extra point is GOOD, Center-J.Weeks, Holder-C.Waitman.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "2:09"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730778",
+        "plays": [
+          {
+            "id": "4018730771701",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "C.Waitman kicks 56 yards from SF 35 to MIN 9. M.Price to MIN 26 for 17 yards (T.Bethune).PENALTY on MIN-D.Dallas, Illegal Double-Team Block, 13 yards, enforced at MIN 26.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "2:09"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771735",
+            "type": {
+              "text": "Interception Return Touchdown"
+            },
+            "text": "(Shotgun) K.Cousins pass short middle intended for T.Felton INTERCEPTED by J.Brown at MIN 18. J.Brown for 18 yards, TOUCHDOWN. E.Pineiro extra point is GOOD, Center-J.Weeks, Holder-C.Waitman.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:59"
+            },
+            "scoringPlay": true,
+            "isTurnover": true,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771771",
+            "type": {
+              "text": "Two-minute warning"
+            },
+            "text": "Two-Minute Warning",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:59"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730779",
+        "plays": [
+          {
+            "id": "4018730771778",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "C.Waitman kicks 61 yards from SF 35 to MIN 4. M.Price to MIN 29 for 25 yards (M.Sigle; T.Bethune).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:59"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771813",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Jefferson right end to MIN 30 for 1 yard (G.Wallow).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:54"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771842",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(No Huddle, Shotgun) K.Cousins sacked at MIN 21 for -9 yards (sack split by O.Odighizuwa and D.Buckner).Penalty on MIN-R.Van Demark, Illegal Formation, declined.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771873",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to T.Hockenson to MIN 22 for 1 yard (O.Odighizuwa).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:21"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771886",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #1 by SF at 01:08.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:08"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771898",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "B.Thorson punts 64 yards to SF 14, Center-A.DePaola. J.Cowing to MIN 39 for 47 yards (I.Pace).PENALTY on SF-T.Bethune, Offensive Holding, 7 yards, enforced at SF 14.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:08"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771921",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 00:51.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:51"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307710",
+        "plays": [
+          {
+            "id": "4018730771943",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey left tackle to SF 10 for 3 yards (D.Turner; B.Cashman).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:51"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771958",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #1 by MIN at 00:46.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771972",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short middle to M.Evans to SF 20 for 10 yards (B.Cashman). MIN-T.Jackson was injured during the play.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730771988",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #2 by MIN at 00:35.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:35"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772004",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short left to C.McCaffrey pushed ob at SF 20 for no gain (J.Pierre).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:35"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772049",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) B.Purdy pass incomplete short left [J.Redmond].PENALTY on SF-B.Purdy, Intentional Grounding, 16 yards, enforced at SF 20.  10-second runoff declined.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:31"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772090",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) C.McCaffrey up the middle to SF 11 for 7 yards (D.Turner; J.Pierre).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:24"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772101",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #3 by MIN at 00:11.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:11"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772112",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "C.Waitman punts 50 yards to MIN 39, Center-J.Weeks, fair catch by M.Price.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:11"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "defense"
+              },
+              {
+                "id": "25",
+                "type": "offense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307711",
+        "plays": [
+          {
+            "id": "4018730772139",
+            "type": {
+              "text": "Field Goal Missed"
+            },
+            "text": "W.Reichard 71 yard fair catch free kick field goal is No Good, Short, Holder-B.Thorson.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:03"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772167",
+            "type": {
+              "text": "End of Half"
+            },
+            "text": "END QUARTER 2",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "0:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307712",
+        "plays": [
+          {
+            "id": "4018730772187",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "C.Waitman kicks 65 yards from SF 35 to end zone, Touchback to the MIN 35.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772207",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "A.Jones right guard to MIN 37 for 2 yards (F.Warner). ** Injury Update: MIN-C.Darrisaw has returned to the game.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772229",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short right to J.Jennings to MIN 42 for 5 yards (R.Green).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "14:18"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772257",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to T.Hockenson to 50 for 8 yards (G.Wallow; R.Height) [N.Bosa].",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "13:36"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772282",
+            "type": {
+              "text": "Fumble Recovery (Opponent)"
+            },
+            "text": "K.Cousins pass deep left to J.Jefferson to SF 25 for 25 yards (D.Lenoir). FUMBLES (D.Lenoir), RECOVERED by SF-D.Lenoir at SF 25. D.Lenoir to SF 42 for 17 yards (C.Darrisaw).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "12:52"
+            },
+            "scoringPlay": false,
+            "isTurnover": true,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772303",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 12:39.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "12:39"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307713",
+        "plays": [
+          {
+            "id": "4018730772323",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "B.Purdy pass short middle to K.Juszczyk to SF 49 for 7 yards (B.Cashman; J.Metellus). ** Injury Update: MIN-T.Jackson has returned to the game.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "12:39"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772355",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey right tackle to SF 49 for no gain (J.Pierre; B.Cashman).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "11:56"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772380",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) B.Purdy pass incomplete short right to C.McCaffrey (K.Van Noy) [A.Van Ginkel].",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "11:19"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772403",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "C.Waitman punts 46 yards to MIN 5, Center-J.Weeks, downed by SF-S.Neal.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "11:15"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "defense"
+              },
+              {
+                "id": "25",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772413",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 11:06.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "11:06"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307714",
+        "plays": [
+          {
+            "id": "4018730772423",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short right to J.Jefferson to MIN 10 for 5 yards (R.Green).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "11:06"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772455",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Mason right tackle to MIN 15 for 5 yards (F.Warner; M.Williams).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "10:30"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772477",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to J.Jefferson pushed ob at MIN 21 for 6 yards (R.Green).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "9:49"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772507",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Mason up the middle to MIN 24 for 3 yards (J.Dugger; F.Warner).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "9:15"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772518",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #1 by SF at 08:46.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "8:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772529",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Mason left guard to MIN 27 for 3 yards (J.Brown; F.Warner).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "8:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772558",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "K.Cousins pass short right to G.Bartholomew to MIN 32 for 5 yards (J.Dugger).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "8:04"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772583",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to J.Jennings to MIN 38 for 6 yards (R.Green).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "7:20"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772608",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete deep left to T.Felton.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "6:39"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772631",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) A.Jones right guard to MIN 41 for 3 yards (F.Warner).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "6:35"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772653",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete short left to T.Felton (M.Sigle).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "5:47"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772676",
+            "type": {
+              "text": "Punt"
+            },
+            "text": " B.Thorson punts 57 yards to SF 2, impetus ends at SF 1, Center-A.DePaola, downed by MIN-Jac.Thomas.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "5:42"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772687",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 05:30.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "5:30"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307715",
+        "plays": [
+          {
+            "id": "4018730772698",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.McCaffrey up the middle to SF 5 for 3 yards (D.Orange).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "5:30"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772727",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "B.Purdy pass short left to M.Evans to SF 23 for 18 yards (B.Cashman).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "4:58"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772752",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "B.Purdy pass short left to D.Samuel to SF 20 for -3 yards (E.Williams).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "4:19"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772777",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short middle to G.Kittle to SF 29 for 9 yards (J.Metellus; K.Van Noy).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "3:37"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772802",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short left to K.Allen to SF 37 for 8 yards (B.Murphy).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "2:58"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772827",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) D.Samuel right end pushed ob at MIN 43 for 20 yards (J.Pierre; J.Metellus). MIN-J.Pierre was injured during the play.",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "2:20"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772854",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "K.Black left tackle to MIN 42 for 1 yard (L.Rodriguez; J.Redmond).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "1:48"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772879",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) B.Purdy pass incomplete short right to K.Allen (B.Murphy).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "1:10"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772902",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short right to K.Allen to MIN 29 for 13 yards (B.Murphy) [J.Redmond].",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "1:06"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772927",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "B.Purdy pass short right to L.Farrell to MIN 22 for 7 yards (B.Cashman).",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "0:28"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772952",
+            "type": {
+              "text": "End Period"
+            },
+            "text": "END QUARTER 3",
+            "period": {
+              "number": 3
+            },
+            "clock": {
+              "displayValue": "0:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772972",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) K.Black left guard to MIN 24 for -2 yards (J.Redmond, J.Pierre). ** Injury Update: MIN-J.Pierre has returned to the game.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730772994",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) B.Purdy pass incomplete short left to G.Kittle [A.Van Ginkel].PENALTY on MIN-J.Metellus, Defensive Holding, 5 yards, enforced at MIN 24 - No Play.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "14:18"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773031",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short right to C.McCaffrey to MIN 6 for 13 yards (A.Van Ginkel; H.Smith).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "14:14"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773056",
+            "type": {
+              "text": "Rushing Touchdown"
+            },
+            "text": "C.McCaffrey right guard for 6 yards, TOUCHDOWN. E.Pineiro extra point is GOOD, Center-J.Weeks, Holder-C.Waitman.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "13:26"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773087",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 13:26.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "13:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307716",
+        "plays": [
+          {
+            "id": "4018730773094",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "C.Waitman kicks 63 yards from SF 35 to MIN 2. M.Price pushed ob at MIN 29 for 27 yards (J.Brown).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "13:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773129",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "K.Cousins pass short left to J.Jefferson pushed ob at MIN 33 for 4 yards (R.Green).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "13:20"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773159",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(No Huddle, Shotgun) K.Cousins pass short left to T.Hockenson pushed ob at MIN 40 for 7 yards (G.Wallow).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "13:03"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773189",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) A.Jones left guard to MIN 46 for 6 yards (J.Thompson; J.Dugger).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "12:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773211",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete short right to T.Felton.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "11:48"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773234",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass deep right to M.Price to SF 32 for 22 yards (U.Stout).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "11:40"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773259",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to M.Price ran ob at SF 28 for 4 yards (R.Green).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "10:52"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773289",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Mason up the middle to SF 27 for 1 yard (M.Williams).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "10:21"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773316",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to J.Jefferson pushed ob at SF 17 for 10 yards (E.Prysock).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "9:38"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773356",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "K.Cousins pass short left to T.Felton to SF 20 for -3 yards (M.Mustapha).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "9:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773381",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete deep left to J.Jefferson.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "8:31"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773404",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) K.Cousins pass incomplete short left to J.Jennings.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "8:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773416",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #1 by MIN at 08:23.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "8:23"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773427",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) K.Cousins pass short left to D.Dallas pushed ob at SF 10 for 10 yards (G.Wallow).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "8:23"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773446",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 08:16.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "8:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307717",
+        "plays": [
+          {
+            "id": "4018730773464",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "K.Black right end to SF 15 for 5 yards (B.Cashman).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "8:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773493",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "K.Black up the middle to SF 15 for no gain (J.Golday).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "7:31"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773515",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) B.Purdy pass short middle to K.Black to SF 22 for 7 yards (I.Pace).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "6:48"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773544",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.James right guard to SF 26 for 4 yards (B.Cashman; E.Williams).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "6:04"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773566",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.James left end to SF 29 for 3 yards (J.Golday; D.Orange).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "5:21"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773588",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) PENALTY on SF-L.Farrell, False Start, 5 yards, enforced at SF 29 - No Play.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "4:45"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773612",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) M.Jones pass short right to D.Samuel to SF 29 for 5 yards (Jak.Thomas).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "4:45"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773637",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "C.Waitman punts 51 yards to MIN 20, Center-J.Weeks. M.Price to MIN 39 for 19 yards (B.Willis).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "3:58"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "defense"
+              },
+              {
+                "id": "25",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773650",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 03:46.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "3:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307718",
+        "plays": [
+          {
+            "id": "4018730773663",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Mason left tackle to SF 45 for 16 yards (E.Prysock).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "3:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773692",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) C.Wentz pass short right to J.Jones to SF 37 for 8 yards (S.Neal).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "3:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773717",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) C.Wentz pass short right to T.Felton to SF 21 for 16 yards (M.Mustapha) [C.West].",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "2:45"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773742",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(No Huddle, Shotgun) J.Mason right tackle to SF 24 for -3 yards (K.White, T.Bethune).",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "2:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773753",
+            "type": {
+              "text": "Two-minute warning"
+            },
+            "text": "Two-Minute Warning",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "2:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773764",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) C.Wentz pass short right to T.Felton ran ob at SF 19 for 5 yards.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "2:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773801",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(No Huddle, Shotgun) C.Wentz pass incomplete deep right to G.Bartholomew.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "1:57"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "16",
+                "type": "offense"
+              },
+              {
+                "id": "25",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773824",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) C.Wentz pass incomplete short right to G.Bartholomew.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "1:52"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "defense"
+              },
+              {
+                "id": "16",
+                "type": "offense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307719",
+        "plays": [
+          {
+            "id": "4018730773847",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "M.Jones kneels to SF 19 for no gain.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "1:47"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773869",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "M.Jones kneels to SF 18 for -1 yards.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "1:05"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773891",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "M.Jones kneels to SF 18 for no gain.",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "0:27"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730773913",
+            "type": {
+              "text": "End of Game"
+            },
+            "text": "END GAME",
+            "period": {
+              "number": 4
+            },
+            "clock": {
+              "displayValue": "0:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "25",
+                "type": "offense"
+              },
+              {
+                "id": "16",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
