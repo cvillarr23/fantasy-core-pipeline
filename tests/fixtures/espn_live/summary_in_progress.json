@@ -1,0 +1,2106 @@
+{
+  "header": {
+    "competitions": [
+      {
+        "status": {
+          "displayClock": "1:30",
+          "period": 2,
+          "type": {
+            "id": "2",
+            "name": "STATUS_IN_PROGRESS",
+            "state": "in",
+            "completed": false,
+            "description": "In Progress",
+            "detail": "1:30 - 2nd Quarter",
+            "shortDetail": "1:30 - 2nd",
+            "statusPrimary": "1:30",
+            "statusSecondary": "2nd"
+          },
+          "isTBDFlex": false,
+          "displayPeriod": "2nd"
+        },
+        "competitors": [
+          {
+            "id": "28",
+            "homeAway": "home",
+            "score": "0",
+            "possession": true,
+            "team": {
+              "id": "28",
+              "abbreviation": "WSH"
+            }
+          },
+          {
+            "id": "4",
+            "homeAway": "away",
+            "score": "10",
+            "possession": false,
+            "team": {
+              "id": "4",
+              "abbreviation": "CIN"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "drives": {
+    "current": {
+      "id": "40187307810",
+      "plays": [
+        {
+          "id": "4018730781631",
+          "type": {
+            "text": "Kickoff"
+          },
+          "text": "E.McPherson kicks 64 yards from CIN 35 to WAS 1. L.McCaffrey to WAS 21 for 20 yards (P.Jules).",
+          "period": {
+            "number": 2
+          },
+          "clock": {
+            "displayValue": "1:55"
+          },
+          "scoringPlay": false,
+          "isTurnover": false,
+          "teamParticipants": [
+            {
+              "id": "28",
+              "type": "offense"
+            },
+            {
+              "id": "4",
+              "type": "defense"
+            }
+          ]
+        },
+        {
+          "id": "4018730781661",
+          "type": {
+            "text": "Pass Reception"
+          },
+          "text": "(Shotgun) J.Daniels pass deep left to T.Burks pushed ob at WAS 38 for 17 yards (J.Newton).",
+          "period": {
+            "number": 2
+          },
+          "clock": {
+            "displayValue": "1:49"
+          },
+          "scoringPlay": false,
+          "isTurnover": false,
+          "teamParticipants": [
+            {
+              "id": "28",
+              "type": "offense"
+            },
+            {
+              "id": "4",
+              "type": "defense"
+            }
+          ]
+        },
+        {
+          "id": "4018730781691",
+          "type": {
+            "text": "Pass Incompletion"
+          },
+          "text": "(Shotgun) J.Daniels pass incomplete short middle to A.Ekeler [D.Lawrence].",
+          "period": {
+            "number": 2
+          },
+          "clock": {
+            "displayValue": "1:43"
+          },
+          "scoringPlay": false,
+          "isTurnover": false,
+          "teamParticipants": [
+            {
+              "id": "28",
+              "type": "offense"
+            },
+            {
+              "id": "4",
+              "type": "defense"
+            }
+          ]
+        },
+        {
+          "id": "4018730781714",
+          "type": {
+            "text": "Pass Reception"
+          },
+          "text": "(Shotgun) J.Daniels pass short right to A.Ekeler to WAS 39 for 1 yard (D.Turner).",
+          "period": {
+            "number": 2
+          },
+          "clock": {
+            "displayValue": "1:39"
+          },
+          "scoringPlay": false,
+          "isTurnover": false,
+          "teamParticipants": [
+            {
+              "id": "28",
+              "type": "offense"
+            },
+            {
+              "id": "4",
+              "type": "defense"
+            }
+          ]
+        },
+        {
+          "id": "4018730781727",
+          "type": {
+            "text": "Timeout"
+          },
+          "text": "Timeout #2 by CIN at 01:30.",
+          "period": {
+            "number": 2
+          },
+          "clock": {
+            "displayValue": "1:30"
+          },
+          "scoringPlay": false,
+          "isTurnover": false,
+          "teamParticipants": [
+            {
+              "id": "28",
+              "type": "offense"
+            },
+            {
+              "id": "4",
+              "type": "defense"
+            }
+          ]
+        }
+      ]
+    },
+    "previous": [
+      {
+        "id": "4018730781",
+        "plays": [
+          {
+            "id": "40187307840",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "D.Stevens kicks 65 yards from WAS 35 to CIN 0. D.Meyers to CIN 24 for 24 yards (K.Medrano; M.Sainristil).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "40187307863",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(Shotgun) J.Burrow sacked at CIN 18 for -6 yards (sack split by T.Settle and K.Chaisson).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "14:54"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "40187307883",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete short right to J.Chase [C.Omenihu].",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "14:07"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078106",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to C.Brown to CIN 24 for 6 yards (M.Sainristil).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "14:01"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078131",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "R.Rehkow punts 56 yards to WAS 20, Center-W.Wagner. L.McCaffrey to WAS 19 for -1 yards (T.Davis).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "13:15"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "defense"
+              },
+              {
+                "id": "4",
+                "type": "offense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730782",
+        "plays": [
+          {
+            "id": "401873078157",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Daniels scrambles up the middle to WAS 22 for 3 yards (M.Murphy).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "13:04"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078179",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(Shotgun) J.Daniels sacked at WAS 20 for -2 yards (B.Mafe).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "12:24"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078199",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Daniels pass incomplete short left to C.Okonkwo.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:43"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078222",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "T.Way punts 49 yards to CIN 31, Center-T.Ott, fair catch by D.Meyers.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:39"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "defense"
+              },
+              {
+                "id": "28",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "401873078232",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 11:31.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:31"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730783",
+        "plays": [
+          {
+            "id": "401873078242",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) C.Brown up the middle to CIN 34 for 3 yards (T.Amos; F.Luvu).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "11:31"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078271",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to J.Chase pushed ob at CIN 37 for 3 yards (R.Douglas).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "10:52"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078301",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short middle to S.Perine to CIN 41 for 4 yards (F.Luvu) [K.Chaisson].PENALTY on CIN-D.Fairchild, Unnecessary Roughness, 15 yards, enforced at CIN 41.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "10:16"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078337",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) S.Perine right guard to CIN 30 for 4 yards (Q.Martin; T.Settle).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:51"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078359",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete short middle to M.Gesicki (J.Reaves).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:09"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078382",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) PENALTY on CIN, Delay of Game, 5 yards, enforced at CIN 30 - No Play.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:01"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078406",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete short right to C.Young (R.Douglas).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "9:01"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078429",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "R.Rehkow punts 58 yards to WAS 17, Center-W.Wagner, fair catch by L.McCaffrey.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "8:57"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "defense"
+              },
+              {
+                "id": "4",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "401873078439",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 08:49.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "8:49"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730784",
+        "plays": [
+          {
+            "id": "401873078449",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Croskey-Merritt left tackle to WAS 26 for 9 yards (B.Cook; D.Hill).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "8:49"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078478",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Croskey-Merritt right tackle to WAS 30 for 4 yards (J.Battle; M.Murphy).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "8:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078500",
+            "type": {
+              "text": "Penalty"
+            },
+            "text": "(Shotgun) PENALTY on WAS-J.Conerly, False Start, 5 yards, enforced at WAS 30 - No Play.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078524",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Daniels pass short right to A.Williams to WAS 41 for 16 yards (J.Battle).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "7:14"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078549",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(No Huddle, Shotgun) J.Daniels pass short right to A.Williams pushed ob at WAS 46 for 5 yards (D.Knight).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "6:47"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078579",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) J.Daniels up the middle to WAS 40 for -6 yards (D.Lawrence).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "6:08"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078617",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Daniels pass short left to A.Williams to WAS 42 for 2 yards (J.Battle).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "5:23"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078642",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "T.Way punts 40 yards to CIN 18, Center-T.Ott, out of bounds.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "4:41"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "defense"
+              },
+              {
+                "id": "28",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "401873078658",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 04:33.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "4:33"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730785",
+        "plays": [
+          {
+            "id": "401873078673",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) C.Brown up the middle to CIN 19 for 1 yard (T.Settle).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "4:33"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078702",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete short left to J.Chase (R.Douglas).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "3:55"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078725",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short right to S.Perine to CIN 36 for 17 yards. FUMBLES, ball out of bounds at CIN 43.",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "3:52"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078759",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) C.Brown right end to CIN 35 for -1 yards (J.Reaves, D.Armstrong).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "3:10"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078782",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to J.Chase to CIN 45 for 10 yards (R.Douglas).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "2:27"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078807",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) S.Perine up the middle to CIN 45 for no gain (S.Tuttle; N.Cross).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:45"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078829",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Burrow left end to CIN 45 for no gain (F.Luvu).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "1:01"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "defense"
+              },
+              {
+                "id": "4",
+                "type": "offense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730786",
+        "plays": [
+          {
+            "id": "401873078851",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Daniels pass short right to A.Ekeler to CIN 43 for 2 yards (D.Hill; S.Bozeman).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "0:58"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078876",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Croskey-Merritt up the middle to CIN 39 for 4 yards (T.Slaton).",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "0:19"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078898",
+            "type": {
+              "text": "End Period"
+            },
+            "text": "END QUARTER 1",
+            "period": {
+              "number": 1
+            },
+            "clock": {
+              "displayValue": "0:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078918",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(Shotgun) J.Daniels sacked at CIN 45 for -6 yards (B.Mafe).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "15:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078938",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "T.Way punts 36 yards to CIN 9, Center-T.Ott, fair catch by D.Meyers.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:21"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "defense"
+              },
+              {
+                "id": "28",
+                "type": "offense"
+              }
+            ]
+          },
+          {
+            "id": "401873078950",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 14:14.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:14"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730787",
+        "plays": [
+          {
+            "id": "401873078961",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to J.Endries to CIN 19 for 10 yards (F.Luvu; J.Reaves).  The first down was assisted by replay.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "14:14"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "401873078993",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) S.Perine right tackle to CIN 30 for 11 yards (Q.Martin; F.Luvu).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "13:34"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781017",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete short middle to C.Brown.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "12:51"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781052",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short middle to C.Brown to CIN 37 for 7 yards (S.Styles).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "12:46"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781077",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to C.Brown pushed ob at CIN 40 for 3 yards (T.Amos).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "12:05"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781107",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(No Huddle, Shotgun) J.Burrow pass short left to M.Gesicki to CIN 46 for 6 yards (J.Reaves).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "11:26"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781132",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to D.Sample to WAS 45 for 9 yards (J.Reaves).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "10:50"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781157",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) C.Brown left end to WAS 44 for 1 yard (S.Styles).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "10:07"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781179",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to J.Chase to WAS 37 for 7 yards (T.Amos).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "9:24"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781204",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete deep left to D.Meyers.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "8:39"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781227",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short middle to M.Gesicki to WAS 26 for 11 yards (S.Styles).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "8:34"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781252",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "C.Brown up the middle to WAS 26 for no gain (F.Luvu; C.Omenihu).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "7:55"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781274",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short right to J.Endries to WAS 20 for 6 yards (F.Luvu; T.Amos).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "7:13"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781299",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Burrow pass incomplete short left to J.Endries [J.Josephs].",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:27"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781322",
+            "type": {
+              "text": "Field Goal Good"
+            },
+            "text": "E.McPherson 38 yard field goal is GOOD, Center-W.Wagner, Holder-R.Rehkow.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:17"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781332",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 06:17.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:17"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730788",
+        "plays": [
+          {
+            "id": "4018730781342",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "E.McPherson kicks 59 yards from CIN 35 to WAS 6. L.McCaffrey to WAS 29 for 23 yards (J.Kiser; J.Giles-Harris).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:17"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781372",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "J.Croskey-Merritt left tackle to WAS 33 for 4 yards (B.Carter; B.Hill).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "6:11"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781394",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(Shotgun) J.Daniels sacked at WAS 30 for -3 yards (B.Mafe).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "5:32"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781414",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Daniels pass incomplete short right to S.Diggs (J.Newton).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "4:47"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781437",
+            "type": {
+              "text": "Punt"
+            },
+            "text": "T.Way punts 42 yards to CIN 28, Center-T.Ott. D.Meyers ran ob at CIN 45 for 17 yards (J.Magee; J.Reaves).PENALTY on CIN-S.Bozeman, Illegal Block Above the Waist, 10 yards, enforced at CIN 33.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "4:43"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "defense"
+              },
+              {
+                "id": "28",
+                "type": "offense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4018730789",
+        "plays": [
+          {
+            "id": "4018730781479",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short left to J.Endries to CIN 28 for 5 yards (T.Amos; F.Luvu).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "4:33"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781504",
+            "type": {
+              "text": "Sack"
+            },
+            "text": "(Shotgun) J.Burrow sacked at CIN 22 for -6 yards (T.Settle).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "3:50"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781514",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #1 by CIN at 03:02.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "3:02"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781524",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Burrow pass short middle to S.Perine pushed ob at WAS 34 for 44 yards (J.Reaves).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "3:02"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781561",
+            "type": {
+              "text": "Rush"
+            },
+            "text": "(Shotgun) S.Perine right guard to WAS 31 for 3 yards (J.Newton).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "2:23"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781572",
+            "type": {
+              "text": "Two-minute warning"
+            },
+            "text": "Two-Minute Warning",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "2:00"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781583",
+            "type": {
+              "text": "Passing Touchdown"
+            },
+            "text": "(Shotgun) J.Burrow pass deep left to T.Higgins for 31 yards, TOUCHDOWN. E.McPherson extra point is GOOD, Center-W.Wagner, Holder-R.Rehkow.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:55"
+            },
+            "scoringPlay": true,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781624",
+            "type": {
+              "text": "Official Timeout"
+            },
+            "text": "Official Timeout at 01:55.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:55"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "4",
+                "type": "offense"
+              },
+              {
+                "id": "28",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "40187307810",
+        "plays": [
+          {
+            "id": "4018730781631",
+            "type": {
+              "text": "Kickoff"
+            },
+            "text": "E.McPherson kicks 64 yards from CIN 35 to WAS 1. L.McCaffrey to WAS 21 for 20 yards (P.Jules).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:55"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781661",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Daniels pass deep left to T.Burks pushed ob at WAS 38 for 17 yards (J.Newton).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:49"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781691",
+            "type": {
+              "text": "Pass Incompletion"
+            },
+            "text": "(Shotgun) J.Daniels pass incomplete short middle to A.Ekeler [D.Lawrence].",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:43"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781714",
+            "type": {
+              "text": "Pass Reception"
+            },
+            "text": "(Shotgun) J.Daniels pass short right to A.Ekeler to WAS 39 for 1 yard (D.Turner).",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:39"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          },
+          {
+            "id": "4018730781727",
+            "type": {
+              "text": "Timeout"
+            },
+            "text": "Timeout #2 by CIN at 01:30.",
+            "period": {
+              "number": 2
+            },
+            "clock": {
+              "displayValue": "1:30"
+            },
+            "scoringPlay": false,
+            "isTurnover": false,
+            "teamParticipants": [
+              {
+                "id": "28",
+                "type": "offense"
+              },
+              {
+                "id": "4",
+                "type": "defense"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
