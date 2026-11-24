@@ -2,9 +2,11 @@
 
 `scoreboard_pre_and_final.json` and `summary_final.json`/`summary_pre.json` are week 11 of 2026
 (MIN @ SF final, CIN @ WSH not started); `league_matchup.json` is that week's mMatchupScore
-payload for fantasy teams 8 and 7, trimmed to the fields the poller reads.
+payload for fantasy teams 8 and 7, trimmed to the fields the poller reads. CIN @ WSH was then
+recorded live: `scoreboard_in_progress.json` and `summary_in_progress.json` at 1:30 of the 2nd
+(CIN 10-0, WSH ball at its 39), `scoreboard_red_zone.json` at 7:13 of the 2nd (CIN 3rd & 4 at
+the WSH 20).
 """
-import copy
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -48,21 +50,6 @@ def roster(league, event_by_pro_team=None):
 
 def event(board, event_id):
     return next(e for e in board["events"] if e["id"] == event_id)
-
-
-def live_event(board, event_id=MNF, red_zone=False):
-    """The recorded pre-game event moved into the second quarter, CIN (team 4) driving."""
-    e = copy.deepcopy(event(board, event_id))
-    e["status"].update({"period": 2, "displayClock": "1:05"})
-    e["status"]["type"].update({"state": "in", "name": "STATUS_IN_PROGRESS", "shortDetail": "1:05 - 2nd"})
-    for c in e["competitions"][0]["competitors"]:
-        c["score"] = "7" if c["homeAway"] == "away" else "3"
-    e["competitions"][0]["situation"] = {
-        "possession": "4",
-        "possessionText": "WSH 12" if red_zone else "WSH 41",
-        "isRedZone": red_zone,
-    }
-    return e
 
 
 class FakeRedis:
@@ -114,7 +101,7 @@ class FakePipeline:
 
 
 def test_pre_game_has_kickoff_but_no_score_or_clock(board):
-    game = lg.shape_game(event(board, MNF), None, NOW)
+    game = lg.shape_game(event(board, MNF), NOW)
 
     assert game == {
         "event_id": MNF,
@@ -133,7 +120,7 @@ def test_pre_game_has_kickoff_but_no_score_or_clock(board):
 
 
 def test_final_game_has_score_and_no_clock(board):
-    game = lg.shape_game(event(board, SNF), fixture("summary_final.json"), NOW)
+    game = lg.shape_game(event(board, SNF), NOW)
 
     assert game["status"] == "final"
     assert game["home"] == {"abbr": "SF", "score": 35}
@@ -141,21 +128,24 @@ def test_final_game_has_score_and_no_clock(board):
     assert (game["period"], game["clock"], game["possession"], game["red_zone"]) == (4, None, None, False)
 
 
-def test_in_progress_game_has_clock_and_possession(board):
-    game = lg.shape_game(live_event(board), None, NOW)
+def test_in_progress_game_has_clock_score_and_possession():
+    game = lg.shape_game(event(fixture("scoreboard_in_progress.json"), MNF), NOW)
 
-    assert game["status"] == "in_progress"
-    assert (game["period"], game["clock"]) == (2, "1:05")
-    assert game["away"] == {"abbr": "CIN", "score": 7}
-    assert (game["possession"], game["yard_line"], game["red_zone"]) == ("CIN", "WSH 41", False)
+    assert (game["status"], game["detail"]) == ("in_progress", "1:30 - 2nd")
+    assert (game["period"], game["clock"]) == (2, "1:30")
+    assert (game["home"], game["away"]) == ({"abbr": "WAS", "score": 0}, {"abbr": "CIN", "score": 10})
+    assert (game["possession"], game["yard_line"], game["red_zone"]) == ("WAS", "WSH 39", False)
 
 
-def test_red_zone_prefers_the_summarys_situation(board):
-    summary = {"situation": {"possession": "4", "possessionText": "WSH 8", "isRedZone": True}}
+def test_red_zone_comes_from_the_scoreboard():
+    game = lg.shape_game(event(fixture("scoreboard_red_zone.json"), MNF), NOW)
 
-    game = lg.shape_game(live_event(board), summary, NOW)
+    assert (game["possession"], game["yard_line"], game["red_zone"]) == ("CIN", "WSH 20", True)
 
-    assert (game["yard_line"], game["red_zone"]) == ("WSH 8", True)
+
+def test_live_summary_has_no_situation():
+    """Why the scoreboard is the only field-position source."""
+    assert "situation" not in fixture("summary_in_progress.json")
 
 
 def test_tracks_only_games_with_a_matchup_player(board, league):
@@ -299,6 +289,15 @@ def test_plays_are_capped():
     assert plays[0]["play_id"] == str(lg.MAX_PLAYS + 49)
 
 
+def test_live_summary_tags_both_sides_and_lists_each_play_once(league):
+    plays = lg.shape_plays(fixture("summary_in_progress.json"), roster(league))
+
+    tagged = {pid for p in plays for pid in p["player_ids"]}
+    assert tagged == {"p4362238", "p4360635"}  # Chase Brown (CIN, team 8), Chig Okonkwo (WSH, team 7)
+    assert len({p["play_id"] for p in plays}) == len(plays)
+    assert plays[0]["period"] == 2 and plays[-1]["period"] == 1
+
+
 def test_current_drive_is_included_once():
     player = _player("Jahmyr", "Gibbs")
     last = {**_play("J.Gibbs run"), "id": "9"}
@@ -364,19 +363,20 @@ def test_final_game_summary_is_fetched_once_and_pre_game_never(espn, league):
 
 
 def test_live_game_summary_is_fetched_every_tick(espn, board, league):
-    espn.board = copy.deepcopy(board)
-    espn.board["events"] = [live_event(board) if e["id"] == MNF else e for e in board["events"]]
-    poller = make_poller(league)
+    espn.board = fixture("scoreboard_in_progress.json")
+    espn.summaries[MNF] = fixture("summary_in_progress.json")
+    redis = FakeRedis()
+    poller = make_poller(league, redis)
 
     poller.tick(NOW)
     poller.tick(NOW)
 
     assert espn.summary_calls.count(MNF) == 2
+    assert redis.data[f"live:plays:{MNF}"]
 
 
 def test_unavailable_summary_keeps_previous_plays_and_scoreboard_state(espn, board, league):
-    espn.board = copy.deepcopy(board)
-    espn.board["events"] = [live_event(board, red_zone=True) if e["id"] == MNF else e for e in board["events"]]
+    espn.board = fixture("scoreboard_red_zone.json")
     redis = FakeRedis()
     redis.data[f"live:plays:{MNF}"] = ["previous"]
     poller = make_poller(league, redis)
@@ -385,7 +385,7 @@ def test_unavailable_summary_keeps_previous_plays_and_scoreboard_state(espn, boa
 
     assert redis.data[f"live:plays:{MNF}"] == ["previous"]
     game = next(g for g in games if g["event_id"] == MNF)
-    assert (game["status"], game["red_zone"], game["yard_line"]) == ("in_progress", True, "WSH 12")
+    assert (game["status"], game["red_zone"], game["yard_line"]) == ("in_progress", True, "WSH 20")
 
 
 def test_failed_tick_still_writes_health(espn, league):
@@ -527,7 +527,7 @@ def test_exit_condition(games, expected):
 
 
 def test_recorded_board_exits_until_mnf_is_near(board, league):
-    games = [lg.shape_game(e, None, NOW) for e in lg.tracked_events(board, {"4", "28"}).values()]
+    games = [lg.shape_game(e, NOW) for e in lg.tracked_events(board, {"4", "28"}).values()]
 
     assert lg.should_exit(games, NOW) is True
     assert lg.should_exit(games, datetime(2026, 11, 24, 0, 50, tzinfo=timezone.utc)) is False
