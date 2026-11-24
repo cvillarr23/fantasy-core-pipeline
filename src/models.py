@@ -646,6 +646,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_log_draft_pick_click ON execution_log(l
 CREATE INDEX IF NOT EXISTS idx_draft_picks_league_season ON draft_picks(league_id, season);
 CREATE INDEX IF NOT EXISTS idx_draft_slots_league_season ON draft_slots(league_id, season);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_player_id ON raw_signals(player_id);
+CREATE INDEX IF NOT EXISTS idx_raw_signals_player_published ON raw_signals(player_id, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_signals_ingested_at ON raw_signals(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_created_at ON llm_call_metrics(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_call_metrics_provider ON llm_call_metrics(provider, model);

@@ -4185,6 +4185,109 @@
         "title": "NegotiationThread",
         "type": "object"
       },
+      "NewsFeedResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NewsItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "NewsFeedResponse",
+        "type": "object"
+      },
+      "NewsItem": {
+        "properties": {
+          "also_reported_by": {
+            "default": [],
+            "items": {
+              "enum": [
+                "espn_news",
+                "bluesky",
+                "rotowire",
+                "reddit"
+              ],
+              "type": "string"
+            },
+            "title": "Also Reported By",
+            "type": "array"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "headline": {
+            "title": "Headline",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "string"
+          },
+          "published_at": {
+            "format": "date-time",
+            "title": "Published At",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "source": {
+            "enum": [
+              "espn_news",
+              "bluesky",
+              "rotowire",
+              "reddit"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "player_id",
+          "source",
+          "headline",
+          "published_at"
+        ],
+        "title": "NewsItem",
+        "type": "object"
+      },
       "OfferPlayer": {
         "properties": {
           "espn_id": {
@@ -5315,6 +5418,22 @@
           "raw_text"
         ],
         "title": "RecentNewsItem",
+        "type": "object"
+      },
+      "RecentNewsResponse": {
+        "properties": {
+          "has_news_24h": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Has News 24H",
+            "type": "object"
+          }
+        },
+        "required": [
+          "has_news_24h"
+        ],
+        "title": "RecentNewsResponse",
         "type": "object"
       },
       "ResourceQuantities": {
@@ -11281,6 +11400,113 @@
           }
         },
         "summary": "Get Scoreboard"
+      }
+    },
+    "/v1/news": {
+      "get": {
+        "operationId": "get_news_endpoint_v1_news_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "player_ids",
+            "required": true,
+            "schema": {
+              "title": "Player Ids",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewsFeedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get News Endpoint"
+      }
+    },
+    "/v1/news/recent": {
+      "get": {
+        "operationId": "get_recent_news_endpoint_v1_news_recent_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "player_ids",
+            "required": true,
+            "schema": {
+              "title": "Player Ids",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecentNewsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Recent News Endpoint"
       }
     },
     "/v1/players/search": {
