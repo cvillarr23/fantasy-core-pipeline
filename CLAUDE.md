@@ -704,6 +704,13 @@
   per-player `fantasy_delta`, both stamped by the poller (`attach_play_deltas`); a delta is null when it can't be told,
   including the first plays after a tick that couldn't refresh that game's plays. A failed read of the stored plays
   leaves that game's list untouched for the tick.
+- Scoring breakdowns (`src/espn_scoring.py`, the one ESPN stat-id map) are built at read time from
+  `live:player`'s `applied_stats`/`applied_qty`, labelled from `league_settings.scoring_settings`
+  (`scoring_service`; a D/ST rule is a `pointsOverrides["16"]` entry). A line's `points` is always
+  ESPN's applied value, never stat × rule, and any unitemized remainder over 0.05 is an `other`
+  line. Unknown stat ids are logged and skipped, never raised. Rules unreadable means
+  `breakdown: null`. `GET /v1/matchup/games/{event_id}` sums starters only (bench and IR slots
+  20/21 never count), null before kickoff.
 - ESPN plays carry no athlete ids, so `_play_player_ids` matches roster players by name in the play
   text, only for the play's own teams. Fixtures in `tests/fixtures/espn_live/` are trimmed real
   payloads; record new ones rather than hand-writing ESPN shapes.

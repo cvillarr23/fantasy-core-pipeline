@@ -15,7 +15,9 @@ Sources:
 
 Each tick writes, with a 6h TTL so stale data ages out:
 - `live:game:{event_id}` for each tracked game (a team with a player on either matchup roster).
-- `live:player:{player_id}` (our `players.player_id`, mapped through `players.espn_id`).
+- `live:player:{player_id}` (our `players.player_id`, mapped through `players.espn_id`). It keeps
+  ESPN's `appliedStats` (points per stat id) and `applied_qty` (the raw count behind each), which
+  the live API itemizes into a scoring breakdown (`src/espn_scoring.py`).
 - `live:plays:{event_id}`, the plays that name a matchup player, newest first, capped at 300.
   ESPN's plays carry no athlete ids, so players are matched by name in the play text, scoped to
   the play's teams (`_play_player_ids`). Each play also carries `recorded_at` (the tick that first
@@ -56,6 +58,7 @@ import requests
 from espn_api.football.constant import PRO_TEAM_MAP
 
 from src.database import get_db_cursor, get_redis_client
+from src.espn_positions import DEFAULT_POSITIONS
 from src.ingestion.sync_league import build_espn_requests
 from src.nfl_byes import to_nflverse_team
 from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
@@ -312,6 +315,13 @@ def stat_line(raw_stats: dict) -> dict:
     return line
 
 
+def applied_quantities(row: dict) -> dict:
+    """The raw count behind each scored stat (`appliedStats` holds points, `stats` the counts),
+    so a breakdown can say "98 yds × 0.1". A stat with no count is left out."""
+    raw = row.get("stats") or {}
+    return {stat_id: raw[stat_id] for stat_id in row.get("appliedStats") or {} if raw.get(stat_id) is not None}
+
+
 def roster_entries(payload: dict, team_ids: set) -> list:
     """`(fantasy team id, roster entry)` for both sides of our matchup, bench included."""
     entries = []
@@ -351,6 +361,8 @@ def shape_roster_player(team_id, entry, season, week, player_id, event_by_pro_te
             "stat_line": stat_line(row.get("stats") or {}) if row else {},
             "live_points": row.get("appliedTotal") if row else None,
             "applied_stats": (row.get("appliedStats") or {}) if row else {},
+            "applied_qty": applied_quantities(row) if row else {},
+            "position": DEFAULT_POSITIONS.get(player.get("defaultPositionId")),
             "updated_at": _iso(now),
         },
     }
