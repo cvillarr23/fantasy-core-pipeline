@@ -4548,6 +4548,17 @@
             ],
             "title": "Home Score"
           },
+          "kickoff": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kickoff"
+          },
           "live_points": {
             "anyOf": [
               {
@@ -5661,6 +5672,17 @@
           "position": {
             "title": "Position",
             "type": "string"
+          },
+          "pro_team": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pro Team"
           },
           "projected_points": {
             "anyOf": [

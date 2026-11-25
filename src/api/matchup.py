@@ -35,6 +35,9 @@ class PlayerLine(BaseModel):
     position: str
     jersey: Optional[str] = None
     slot: str
+    # The player's NFL team as an nflverse code (`WAS`, not ESPN's `WSH`), the codes the `live`
+    # block's home/away use. None when ESPN gives no team.
+    pro_team: Optional[str] = None
     points: Optional[float]
     projected_points: Optional[float]
     # The player's NFL bye week; None when the schedule couldn't be read.

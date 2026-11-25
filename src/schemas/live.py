@@ -35,6 +35,8 @@ class LiveBlock(BaseModel):
     possession: Optional[str] = None
     yard_line: Optional[str] = None
     red_zone: Optional[bool] = None
+    # The game's scheduled start, ISO-8601 UTC.
+    kickoff: Optional[str] = None
     stat_line: Optional[Dict[str, float]] = None
     live_points: Optional[float] = None
     # Null when the player has no live points yet or the league's rules can't be read.

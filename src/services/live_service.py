@@ -143,6 +143,7 @@ def _live_block(player: dict, game: dict | None, rules: dict | None) -> dict:
         "possession": game.get("possession"),
         "yard_line": game.get("yard_line"),
         "red_zone": game.get("red_zone"),
+        "kickoff": game.get("kickoff"),
         "stat_line": player.get("stat_line"),
         "live_points": player.get("live_points"),
         "breakdown": _breakdown(player, rules),

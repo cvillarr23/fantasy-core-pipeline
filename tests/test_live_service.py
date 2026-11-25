@@ -11,7 +11,7 @@ NOW = datetime(2026, 11, 23, 18, 0, 0, tzinfo=timezone.utc)
 LIVE_EVENT, FINAL_EVENT = "401", "402"
 
 LIVE_GAME = {
-    "event_id": LIVE_EVENT, "status": "in_progress", "period": 3, "clock": "8:42",
+    "event_id": LIVE_EVENT, "status": "in_progress", "period": 3, "clock": "8:42", "kickoff": "2026-11-23T18:00Z",
     "home": {"abbr": "ATL", "score": 17}, "away": {"abbr": "TB", "score": 14},
     "possession": "ATL", "yard_line": "TB 12", "red_zone": True,
 }
@@ -93,7 +93,7 @@ def test_live_player_merges_player_and_game(seeded):
     assert block == {
         "status": "in_progress", "period": 3, "clock": "8:42",
         "home_abbr": "ATL", "home_score": 17, "away_abbr": "TB", "away_score": 14,
-        "possession": "ATL", "yard_line": "TB 12", "red_zone": True,
+        "possession": "ATL", "yard_line": "TB 12", "red_zone": True, "kickoff": "2026-11-23T18:00Z",
         "stat_line": {"rushYd": 124}, "live_points": 12.4, "breakdown": [rush_line(12.4)],
         "updated_at": "2026-11-23T17:59:30Z",
     }

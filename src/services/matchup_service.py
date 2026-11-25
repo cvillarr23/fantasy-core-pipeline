@@ -12,7 +12,7 @@ from src.database import get_db_cursor
 from src.services.espn_ownership import load_espn_ownership
 from src.ingestion.sync_league import build_espn_requests, build_league
 from src.ir_eligibility import lineup_ir_hints, load_lineup_slot_counts_row, open_ir_slots
-from src.nfl_byes import bye_week_for, bye_weeks_or_empty
+from src.nfl_byes import bye_week_for, bye_weeks_or_empty, to_nflverse_team
 from src.nfl_game_status import game_status_for, load_team_game_status
 from src.nfl_schedule import WeekResolutionError, require_upcoming_week
 from src.optimization.lineup_solver import (
@@ -91,6 +91,7 @@ def _shape_player_line(box_player, bye_weeks: dict | None = None, game_statuses:
         "position": box_player.position,
         "jersey": box_player.jersey if isinstance(box_player.jersey, str) else None,
         "slot": box_player.slot_position,
+        "pro_team": to_nflverse_team(pro_team),
         "points": box_player.points,
         "projected_points": box_player.projected_points,
         "bye_week": bye_week_for(pro_team, bye_weeks or {}),
