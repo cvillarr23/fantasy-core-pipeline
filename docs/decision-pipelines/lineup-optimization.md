@@ -8,8 +8,10 @@ The lineup solver fills starting slots with the highest total eligible VORP. Use
 
 ```mermaid
 flowchart LR
-    R[Non-IR roster] -->|player IDs| P[Pregame metric pool]
-    P -->|eligible players| H[Hold missing K and D/ST slots]
+    E[ESPN roster sync] -->|league_rosters| R[Non-IR roster]
+    R -->|player IDs| P[Pregame metric pool]
+    P -->|eligible players| L[Lock kicked-off players]
+    L -->|unlocked players and seats| H[Hold missing K and D/ST slots]
     H -->|remaining slot demand| S[Lineup ILP]
     S -->|optimal starters| D[Diff current starters]
     D -->|internal swaps| I[Resolve ESPN identities]
@@ -33,7 +35,17 @@ flowchart LR
 K/D-ST rows alone do not select target-week mode. Week 1 never borrows the prior season; stale inputs, missing schedules and an empty eligible pool fail evaluation.
 :::
 
-Source evidence reports `metric_source`, `source_mode`, `source_season`, `source_weeks` and `held_slots`.
+Source evidence reports `metric_source`, `source_mode`, `source_season`, `source_weeks`, `held_slots` and `locked_players`.
+
+## Can it run mid-week?
+
+Yes. Runs can happen on any day of the week, not only Tuesday (fantasy-infra#248). The
+optimizer first resyncs `league_rosters` from ESPN (`sync_rosters`). If that sync fails, the
+run fails: it never acts on a stale roster. ESPN locks each player at his own game's kickoff,
+so `evaluate_lineup` reads kickoffs from the nflverse schedule (`gameday` + `gametime`,
+Eastern). A player is locked once his team's kickoff is no more than 5 minutes away. A game
+with no kickoff time counts from midnight ET on its day. If the schedule can't be read,
+evaluation fails.
 
 ## How are slots filled?
 
@@ -49,6 +61,9 @@ subject to exactly one eligible player per starting slot
 | FLEX | Accept the positions named by the slot |
 | BE, Bench, IR | Exclude from starter demand |
 | Missing K/D-ST capacity | Hold the slot; preserve its current starter |
+| Locked starter (game kicked off) | Keep him in his slot: the seat leaves demand and he is never a removal |
+| Locked bench player | Leave him out of the pool |
+| Every seat or pool player locked | Zero swaps, not an error |
 | Missing skill-position capacity | Fail the solve |
 | Negative VORP | Allow it when needed to fill a slot |
 | Successful solve | CBC status must be `Optimal` |
@@ -63,7 +78,7 @@ The solver uses position eligibility, not arbitrary ESPN `eligible_slots`. Missi
 | Diff | Compare optimal player IDs with current starters |
 | Pair | Match adds with same-position removals first, then any remaining removal for FLEX |
 | Slot | Use the removed starter's actual roster slot |
-| Held starters | Never become removal candidates |
+| Held and locked starters | Never become removal candidates |
 | Identity | Resolve internal IDs to ESPN IDs before publication |
 | Evidence | Retain add/drop VORP, multiplier, season/week and source |
 | Dry run | `--dry-run` evaluates without publishing |
