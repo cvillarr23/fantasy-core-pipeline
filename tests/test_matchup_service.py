@@ -454,7 +454,7 @@ def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):
 
 
 def test_get_current_team_roster_resolves_the_default_week_without_retry_sleeps(monkeypatch):
-    """A web request must not wait out the CronJob backoff, and an unresolvable week must
+    """A web request must not wait out the launcher job's retry backoff, and an unresolvable week must
     propagate for the route to map rather than quietly showing another week."""
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     error = matchup_service.WeekResolutionError("download failed")

@@ -940,7 +940,7 @@ def test_optimize_returns_zero_when_lineup_already_optimal():
 
 
 # ---------------------------------------------------------------------------
-# main (CronJob entrypoint exit codes)
+# main (launcher job entrypoint exit codes)
 # ---------------------------------------------------------------------------
 
 ARGV = ["--team-id", "8", "--season", "2026", "--week", "5"]
@@ -1026,7 +1026,7 @@ def test_main_with_explicit_week_never_resolves():
 
 
 # ---------------------------------------------------------------------------
-# resolve_default_week (imported by fantasy-infra's refresher and waiver CronJobs)
+# resolve_default_week (imported by fantasy-infra's refresher and waiver launcher jobs)
 # ---------------------------------------------------------------------------
 
 def test_resolve_default_week_raises_instead_of_falling_back_to_week_one():

@@ -1,6 +1,6 @@
 """
 Shared OpenTelemetry bootstrap for both the FastAPI gateway (src/api/main.py) and the
-CronJob/listener pipeline entrypoints (vorp_matrix, lineup_solver, draft_matrix), so
+launcher job/listener pipeline entrypoints (vorp_matrix, lineup_solver, draft_matrix), so
 tracer-provider setup isn't duplicated 4x.
 
 configure_tracing() does no eager work at import time - the TracerProvider and any

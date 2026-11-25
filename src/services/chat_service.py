@@ -12,7 +12,7 @@ anything that publishes a waiver claim or lineup change -- that stays behind the
 bot pipeline in fantasy-browser-worker.
 
 Excludes the "ollama" tier from this call site's provider chain. llm_client.py's fallback
-chain can block ~90s scaling Ollama 0->1 on a cold pod, which is fine for the queue/CronJob
+chain can block ~90s scaling Ollama 0->1 on a cold pod, which is fine for the queue and launcher job
 callers that motivated it but not for this synchronous HTTP endpoint a human is waiting on.
 """
 

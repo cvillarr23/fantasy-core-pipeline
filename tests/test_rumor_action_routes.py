@@ -23,7 +23,7 @@ def test_trigger_rumor_action_uses_env_team_id_when_no_body(client, monkeypatch)
     args, _ = mock_eval.call_args
     assert args[0] == "7"
     assert args[2] == 5
-    # A request never waits out the CronJob retry backoff.
+    # A request never waits out the launcher job's retry backoff.
     assert mock_resolve.call_args.kwargs == {"attempts": 1}
 
 

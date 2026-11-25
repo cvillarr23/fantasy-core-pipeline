@@ -4161,7 +4161,7 @@
                 "type": "null"
               }
             ],
-            "description": "Stable key for this lineup decision (#189). lineup_solver retries a failed publish and the CronJob retries a failed pod, and a retry after an ambiguous failure (read timeout, reset after send) could otherwise enqueue the same swaps twice. Repeats within LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS return status 'duplicate'. Optional: the web UI's manual swaps omit it.",
+            "description": "Stable key for this lineup decision (#189). lineup_solver retries a failed publish and the launcher retries a failed run, and a retry after an ambiguous failure (read timeout, reset after send) could otherwise enqueue the same swaps twice. Repeats within LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS return status 'duplicate'. Optional: the web UI's manual swaps omit it.",
             "title": "Idempotency Key"
           },
           "optimized_swaps": {
