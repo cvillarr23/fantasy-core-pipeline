@@ -252,6 +252,13 @@
   (no-op) when the season is over. `lineup_solver.resolve_default_week()` is kept for
   fantasy-infra's refresher/waiver scripts: it raises the same way and returns
   `SEASON_OVER_WEEK` (19) for "season over", which the refresher reads as offseason.
+- Mid-week runs (#442): `optimize_weekly_lineup` first calls `sync_league.sync_rosters` and lets
+  a failure raise, never `refresh_rosters_if_stale`, which swallows errors. `evaluate_lineup` locks
+  players whose team's nflverse kickoff (`gameday` + `gametime`, ET) is at most
+  `KICKOFF_LOCK_BUFFER` (5 min) away. A locked starter keeps his seat: it leaves slot demand and
+  he is never a removal. A locked bench player leaves the pool. When nothing is left to decide
+  the result is zero swaps, not an error. An unreadable schedule raises
+  `InsufficientLineupInputError`. Locks use `players.team`, and evidence carries `locked_players`.
 - Exit codes: `main()` returns 0 for a real decision (swaps published *or* lineup already
   optimal) and 1 for `InsufficientLineupInputError` (no roster, no usable/stale metrics,
   schedule unavailable in mode (2), infeasible solve), so the CronJob's Job fails and

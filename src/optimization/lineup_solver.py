@@ -21,7 +21,8 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import nflreadpy as nfl
 import pulp
@@ -29,6 +30,7 @@ from opentelemetry import trace
 
 from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
+from src.ingestion import sync_league
 from src.ingestion.metrics_extractor import normalize_team
 from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
 from src.telemetry import configure_tracing
@@ -63,6 +65,10 @@ METRIC_SOURCE = "weekly_stats.vorp_score"
 # resolve_default_week's "regular season over" answer: one past the last regular-season
 # week, which fantasy-draft-prep-refresher's inline script treats as offseason (exit 0).
 SEASON_OVER_WEEK = 19
+# ESPN locks each player at his own game's kickoff. A player whose game starts within this
+# buffer is treated as locked already, so a swap published now can't land after the lock.
+KICKOFF_LOCK_BUFFER = timedelta(minutes=5)
+SCHEDULE_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class InsufficientLineupInputError(Exception):
@@ -102,6 +108,36 @@ def load_teams_playing(season: int, week: int) -> set:
     df = nfl.load_schedules(season)
     games = df.filter(df["week"] == week)
     return {normalize_team(t) for t in games["home_team"].to_list() + games["away_team"].to_list()}
+
+
+def _kickoff_utc(gameday: str, gametime: str | None) -> datetime:
+    """A game's kickoff in UTC from nflverse's Eastern `gameday` and `gametime`. A game
+    with no time yet counts as starting at midnight ET on its day: locking early only
+    holds a player in place, while locking late could publish a move ESPN rejects."""
+    clock = gametime or "00:00"
+    local = datetime.strptime(f"{gameday} {clock}", "%Y-%m-%d %H:%M").replace(tzinfo=SCHEDULE_TIMEZONE)
+    return local.astimezone(timezone.utc)
+
+
+def _kicked_off_teams(season: int, week: int, now: datetime) -> set:
+    """Normalized teams whose season/week game kicks off at or before now plus
+    KICKOFF_LOCK_BUFFER, so their players are locked on ESPN. Raises
+    InsufficientLineupInputError when the schedule can't be read: without kickoffs the
+    solver can't tell which players it may still move."""
+    try:
+        df = nfl.load_schedules(season)
+    except Exception as exc:
+        raise InsufficientLineupInputError(
+            f"could not load the nflverse schedule for Season {season} Week {week} "
+            f"to find games that have kicked off: {exc}"
+        ) from exc
+    games = df.filter(df["week"] == week)
+    cutoff = now + KICKOFF_LOCK_BUFFER
+    teams = set()
+    for game in games.select(["gameday", "gametime", "home_team", "away_team"]).iter_rows(named=True):
+        if _kickoff_utc(str(game["gameday"]), game["gametime"]) <= cutoff:
+            teams.update({normalize_team(game["home_team"]), normalize_team(game["away_team"])})
+    return teams
 
 
 def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int,
@@ -211,7 +247,7 @@ def load_pregame_roster_pool(cursor, team_id: str, season: int, target_week: int
                 missing_metric_positions.add(position)
             continue
         pool.append({
-            "player_id": pid, "name": name, "position": position,
+            "player_id": pid, "name": name, "position": position, "team": team,
             "vorp_score": vorp_by_player[pid],
             "defense_matchup_multiplier": multiplier_by_player.get(pid) or 1.0,
         })
@@ -298,6 +334,43 @@ def load_lineup_slot_counts(cursor, season: int) -> dict:
 # so the solver fills as many slots as it can before comparing VORP: an empty slot scores
 # nothing, so even a below-replacement starter beats it.
 FILLED_SLOT_WEIGHT = 1000.0
+
+
+def _hold_locked_starters(lineup_slot_counts: dict, current_starters: dict, kicked_off: set) -> tuple:
+    """Takes each locked starter's seat out of slot demand. ESPN locks a player at his own
+    game's kickoff, so his seat isn't ours to fill and he can't be benched or moved, the
+    same way held_slots' starters stay put. Returns (slot counts to solve, current
+    starters still movable, sorted locked starter ids)."""
+    counts = dict(lineup_slot_counts)
+    locked = sorted(
+        pid for pid, info in current_starters.items() if normalize_team(info.get("team")) in kicked_off
+    )
+    for pid in locked:
+        slot = _slot_key(current_starters[pid]["slot_position"])
+        if int(counts.get(slot, 0)) > 0:
+            counts[slot] = int(counts[slot]) - 1
+        else:
+            logger.warning(f"Locked starter {pid} sits in slot {slot}, which has no seat in lineup_slot_counts.")
+    movable = {pid: info for pid, info in current_starters.items() if pid not in locked}
+    return counts, movable, locked
+
+
+def _drop_locked_players(roster_pool: list, kicked_off: set, locked_starters: list) -> tuple:
+    """Removes from the pool locked starters (they keep their seat outside the solve) and
+    locked bench players (ESPN won't let them be started). Returns (pool, locked bench ids)."""
+    held = set(locked_starters)
+    locked_bench = sorted(
+        p["player_id"] for p in roster_pool
+        if p["player_id"] not in held and normalize_team(p.get("team")) in kicked_off
+    )
+    gone = held | set(locked_bench)
+    return [p for p in roster_pool if p["player_id"] not in gone], locked_bench
+
+
+def _nothing_left_to_decide(lineup_slot_counts: dict, roster_pool: list) -> bool:
+    """True when kickoffs have locked every starter seat or every pool player, so there is
+    no move to make. That is a real zero-swap answer, not a lineup the solver failed to fill."""
+    return not _starter_slots(lineup_slot_counts) or not roster_pool
 
 
 def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = None,
@@ -399,7 +472,7 @@ def build_and_solve_lineup(roster_pool: list, lineup_slot_counts: dict | None = 
 
 
 def load_current_starters(cursor, team_id: str, season: int, week: int) -> dict:
-    """Maps player_id -> {"position", "slot_position", "vorp_score"} for the team's
+    """Maps player_id -> {"position", "slot_position", "vorp_score", "team"} for the team's
     currently-started players. slot_position (e.g. "RB1", "FLEX") is the actual roster
     slot, distinct from the player's real position - a WR started in FLEX has
     position="WR" but slot_position="FLEX", and a swap must report the slot being
@@ -407,9 +480,10 @@ def load_current_starters(cursor, team_id: str, season: int, week: int) -> dict:
 
     vorp_score (CORE-17/#35) is the dropped starter's own VORP, for compute_lineup_swaps'
     decision_inputs. LEFT JOIN, not INNER like load_roster_pool - a starter being dropped
-    can be on a bye (no weekly_stats row) and must still appear here as droppable."""
+    can be on a bye (no weekly_stats row) and must still appear here as droppable. team
+    (players.team) tells evaluate_lineup whether his game has kicked off."""
     query = """
-        SELECT p.player_id, p.position, r.slot_position, COALESCE(s.vorp_score, 0.0) AS vorp_score
+        SELECT p.player_id, p.position, r.slot_position, COALESCE(s.vorp_score, 0.0) AS vorp_score, p.team
         FROM league_rosters r
         JOIN players p ON r.player_id = p.player_id
         LEFT JOIN weekly_stats s ON s.player_id = p.player_id AND s.season = %s AND s.week = %s
@@ -417,8 +491,8 @@ def load_current_starters(cursor, team_id: str, season: int, week: int) -> dict:
     """
     cursor.execute(query, (season, week, team_id))
     return {
-        pid: {"position": pos, "slot_position": slot_position, "vorp_score": vorp_score}
-        for pid, pos, slot_position, vorp_score in cursor.fetchall()
+        pid: {"position": pos, "slot_position": slot_position, "vorp_score": vorp_score, "team": team}
+        for pid, pos, slot_position, vorp_score, team in cursor.fetchall()
     }
 
 
@@ -632,11 +706,11 @@ def resolve_lineup_swaps(cursor, swaps: list) -> list:
 def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = None) -> str:
     """Stable key for one lineup decision (#189), so a retry - in-process after an ambiguous
     failure, or a whole re-run when the launcher retries a failed run - can't enqueue the same
-    swaps twice. A re-run recomputes identical swaps (league_rosters isn't resynced from
-    ESPN in between), so the same inputs give the same key. The Job name, when set
-    (JOB_NAME, `<job>@<dedupe>`: the catalog job name plus the run's dedupe key), scopes it to
-    one run: a new scheduled or manual run has a new dedupe key, so it is a new decision and
-    always publishes.
+    swaps twice. A re-run resyncs league_rosters from ESPN first, so swaps the worker has
+    already applied drop out, and an unchanged decision recomputes the same key. The Job name,
+    when set (JOB_NAME, `<job>@<dedupe>`: the catalog job name plus the run's dedupe key),
+    scopes it to one run: a new scheduled or manual run has a new dedupe key, so it is a new
+    decision and always publishes.
 
     IR and move entries ({kind, player_id, slot}) are keyed by all three; a swap keeps its original
     [drop, add, slot] material, so keys computed before IR entries existed still match."""
@@ -680,17 +754,26 @@ def publish_lineup_swaps(team_id: str, swaps: list, *, idempotency_key: str | No
     return True
 
 
-def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
+def evaluate_lineup(cursor, team_id: str, season: int, week: int, now: datetime | None = None) -> dict:
     """Pregame lineup decision for team/season/week, without publishing: pool ->
-    held slots -> ILP -> diff. Shared by the weekly optimizer, the matchup page's swap
-    badge, and rumor bench_watch actions, so all three see the same upcoming-week data.
+    kickoff locks -> held slots -> ILP -> diff. Shared by the weekly optimizer, the matchup
+    page's swap badge, and rumor bench_watch actions, so all three see the same
+    upcoming-week data. A player whose game has kicked off (by `now`, default the current
+    time) is locked: a starter keeps his seat, a bench player can't be started.
     Returns {"swaps", "optimal_starters", "roster_pool", "source"}; raises
     InsufficientLineupInputError when there isn't enough data to decide."""
+    now = now or datetime.now(timezone.utc)
     with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
         roster_pool, vorp_by_player, source = load_pregame_roster_pool(cursor, team_id, season, week)
-        lineup_slot_counts, held_slots = hold_slots_without_metrics(
-            load_lineup_slot_counts(cursor, season), roster_pool,
+        lineup_slot_counts = load_lineup_slot_counts(cursor, season)
+        kicked_off = _kicked_off_teams(season, week, now)
+        current_starters = load_current_starters(cursor, team_id, season, week)
+        lineup_slot_counts, current_starters, locked_starters = _hold_locked_starters(
+            lineup_slot_counts, current_starters, kicked_off,
         )
+        roster_pool, locked_bench = _drop_locked_players(roster_pool, kicked_off, locked_starters)
+        source["locked_players"] = sorted(locked_starters + locked_bench)
+        lineup_slot_counts, held_slots = hold_slots_without_metrics(lineup_slot_counts, roster_pool)
         source["held_slots"] = held_slots
         # Byes can leave a slot with no one to start. That slot stays as it is, and the
         # rest of the lineup is still optimized, so an Out starter elsewhere still gets
@@ -699,7 +782,9 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
         # might be the right starter.
         unfilled_slots = short_slots(roster_pool, lineup_slot_counts)
         gap_positions = set(source.pop("missing_metric_positions"))
-        if any(gap_positions & set(FLEX_SLOT_ELIGIBLE_POSITIONS.get(slot, (slot,))) for slot in unfilled_slots):
+        if not _nothing_left_to_decide(lineup_slot_counts, roster_pool) and any(
+            gap_positions & set(FLEX_SLOT_ELIGIBLE_POSITIONS.get(slot, (slot,))) for slot in unfilled_slots
+        ):
             raise InsufficientLineupInputError(
                 "could not fill the starting lineup from players with usable metrics: "
                 + describe_unfilled_slots(roster_pool, lineup_slot_counts)
@@ -708,13 +793,19 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
     logger.info(
         f"Evaluating Team {team_id} Season {season} Week {week} from {METRIC_SOURCE} "
         f"({source['source_mode']}, Season {season} Week(s) {source['source_weeks']}); "
-        f"{len(roster_pool)} eligible player(s); held slots without metrics: {held_slots or 'none'}; "
+        f"{len(roster_pool)} eligible player(s); locked by kickoff: {source['locked_players'] or 'none'}; "
+        f"held slots without metrics: {held_slots or 'none'}; "
         f"slots short of eligible players: {unfilled_slots or 'none'}."
     )
     span = trace.get_current_span()
     span.set_attribute("source_mode", source["source_mode"])
     span.set_attribute("source_weeks", source["source_weeks"])
     span.set_attribute("held_slots", held_slots)
+    span.set_attribute("locked_players", source["locked_players"])
+
+    if _nothing_left_to_decide(lineup_slot_counts, roster_pool):
+        logger.info(f"Every starter seat or pool player for Team {team_id} is locked by kickoff; no swaps to make.")
+        return {"swaps": [], "optimal_starters": [], "roster_pool": roster_pool, "source": source}
 
     with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
         optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts, allow_unfilled=True)
@@ -724,8 +815,6 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
                 + describe_unfilled_slots(roster_pool, lineup_slot_counts)
             )
 
-    with tracer.start_as_current_span("lineup_solver.load_current_starters"):
-        current_starters = load_current_starters(cursor, team_id, season, week)
     # Held slots' starters stay put, so they must not appear as droppable.
     current_starters = {
         pid: dict(info, vorp_score=vorp_by_player.get(pid, info["vorp_score"]))
@@ -744,10 +833,16 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int) -> dict:
 def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool = False) -> int:
     """Returns the number of swaps published (0 = lineup already optimal). Raises
     InsufficientLineupInputError when there isn't enough data to decide, or when every
-    proposed swap lacks an espn_id."""
+    proposed swap lacks an espn_id.
+
+    league_rosters is resynced from ESPN first, and a failure raises: a run can land any
+    day of the week, and acting on ESPN from a stale roster could bench the wrong player."""
     logger.info(f"Assembling mathematical optimization model for Team {team_id} Season {season} Week {week}...")
 
     with tracer.start_as_current_span("lineup_solver.run", attributes={"team_id": team_id, "season": season, "week": week}):
+        with tracer.start_as_current_span("lineup_solver.sync_rosters"):
+            written = sync_league.sync_rosters(season)
+        logger.info(f"Synced {written} league_rosters row(s) from ESPN for Season {season}.")
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 evaluation = evaluate_lineup(cursor, team_id, season, week)
