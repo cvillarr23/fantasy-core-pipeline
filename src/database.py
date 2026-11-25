@@ -35,9 +35,9 @@ if not DB_PASSWORD:
 def _open_pool():
     """Open the pool, retrying connection errors for up to DB_CONNECT_RETRY_SECONDS.
 
-    A CronJob catching up on a missed schedule after a node boot can start before cluster
-    DNS and the CNI are ready, and with backoffLimit 1 the Job controller kills it after one
-    quick restart. Retrying here rides out that warm-up. A wrong password is also an
+    A launcher run catching up on a missed schedule after a node boot can start before cluster
+    DNS and the CNI are ready, and the launcher's retries (the job's max_attempts) can be spent
+    before that warm-up ends. Retrying here rides out that warm-up. A wrong password is also an
     OperationalError, so a bad credential takes the full window to fail.
     """
     deadline = time.monotonic() + DB_CONNECT_RETRY_SECONDS

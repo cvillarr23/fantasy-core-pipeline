@@ -77,7 +77,7 @@ def filter_week_plays(df_pbp: pl.DataFrame, week: int) -> pl.DataFrame:
 def missing_final_games(df_pbp: pl.DataFrame, df_schedules: pl.DataFrame, week: int) -> list[str]:
     """game_ids the schedule marks final for the week that have no play-by-play yet. The
     schedule's scores and pbp are published separately, so Monday night's game can be final
-    in one and absent from the other when the Tuesday CronJob runs. Checks raw pbp, not
+    in one and absent from the other when the Tuesday chain runs. Checks raw pbp, not
     filter_week_plays' pass/run subset."""
     final = df_schedules.filter(
         (pl.col("week") == week) & pl.col("home_score").is_not_null() & pl.col("away_score").is_not_null()
@@ -722,7 +722,7 @@ def extract_weekly_metrics(year: int, week: int) -> int:
 def resolve_default_year_week(year: int | None = None) -> tuple[int, int | None]:
     """Resolves the season and the most recently *completed* week - the only week with
     play-by-play to ingest. nflreadpy's current week is already the upcoming, unplayed
-    week by the Tuesday CronJob, so this reads final scores from the schedule instead.
+    week by the Tuesday chain's run, so this reads final scores from the schedule instead.
     Returns week=None when no week has completed yet (preseason); raises
     WeekResolutionError (a RuntimeError) when the schedule can't be loaded after retries."""
     if year is None:
@@ -736,8 +736,8 @@ def resolve_default_year_week(year: int | None = None) -> tuple[int, int | None]
 
 
 def main(argv=None) -> int:
-    """CronJob entrypoint. Nonzero when a completed week yields no rows or its pbp is
-    missing final games, so a failed or partial ingestion fails the Job instead of
+    """Launcher job entrypoint. Nonzero when a completed week yields no rows or its pbp is
+    missing final games, so a failed or partial ingestion fails the run instead of
     logging a warning and exiting 0."""
     parser = argparse.ArgumentParser(description="Extract nflverse advanced weekly metrics into weekly_stats.")
     parser.add_argument("--year", type=int, default=None)

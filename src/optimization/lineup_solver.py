@@ -13,7 +13,7 @@ two id spaces overlap numerically, so an untranslated id can swap the wrong play
 
 Exit codes: 0 = a real decision was made (swaps published, or lineup already optimal);
 nonzero = missing/insufficient input - including proposed swaps none of which resolve to an
-espn_id - so the CronJob's Job fails and alerts (fantasy-infra#97) instead of looking healthy.
+espn_id - so the launcher run fails and alerts (fantasy-infra#97) instead of looking healthy.
 """
 import argparse
 import hashlib
@@ -631,11 +631,12 @@ def resolve_lineup_swaps(cursor, swaps: list) -> list:
 
 def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = None) -> str:
     """Stable key for one lineup decision (#189), so a retry - in-process after an ambiguous
-    failure, or a whole re-run when the CronJob retries a failed pod - can't enqueue the same
+    failure, or a whole re-run when the launcher retries a failed run - can't enqueue the same
     swaps twice. A re-run recomputes identical swaps (league_rosters isn't resynced from
     ESPN in between), so the same inputs give the same key. The Job name, when set
-    (JOB_NAME, from the CronJob's downward API), scopes it to one Job: a new scheduled or
-    manual Job is a new decision and always publishes.
+    (JOB_NAME, `<job>@<dedupe>`: the catalog job name plus the run's dedupe key), scopes it to
+    one run: a new scheduled or manual run has a new dedupe key, so it is a new decision and
+    always publishes.
 
     IR and move entries ({kind, player_id, slot}) are keyed by all three; a swap keeps its original
     [drop, add, slot] material, so keys computed before IR entries existed still match."""
@@ -765,9 +766,9 @@ def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool =
 
 
 def resolve_default_week(season: int | None = None) -> int:
-    """The upcoming week for fantasy-infra's shell/inline CronJob scripts, which print it
+    """The upcoming week for fantasy-infra's shell/inline launcher job scripts, which print it
     and pass it on. Raises WeekResolutionError rather than guessing, so those scripts fail
-    the Job. After the regular season it returns SEASON_OVER_WEEK, which the refresher
+    the run. After the regular season it returns SEASON_OVER_WEEK, which the refresher
     reads as offseason; Python callers use resolve_upcoming_week's explicit None instead."""
     if season is None:
         season = int(os.getenv("CURRENT_YEAR") or nfl.get_current_season())

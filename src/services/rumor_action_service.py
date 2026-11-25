@@ -841,7 +841,7 @@ def _record_execution(
 
 
 def main(argv=None):
-    # Mirrors waiver_evaluator.py's __main__ shape - every CronJob in fantasy-infra runs a
+    # Mirrors waiver_evaluator.py's __main__ shape - every launcher job in fantasy-infra's catalog runs a
     # `python -m` module directly rather than curling the live FastAPI service.
     parser = argparse.ArgumentParser(
         description="Evaluate and publish today's rumor-driven actions."

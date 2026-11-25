@@ -429,7 +429,7 @@ def get_current_team_roster(season: int, selected_week: int | None = None) -> di
     our_team_id = os.getenv("ESPN_TEAM_ID")
     # Resolve the default week before keying, so "current week" and an explicit week share
     # one entry and a week rollover never serves the previous week's badges.
-    # One attempt: a request shouldn't wait out the CronJob backoff, and the route turns a
+    # One attempt: a request shouldn't wait out the launcher job's retry backoff, and the route turns a
     # failure into a 503 instead of showing another week's roster.
     week = selected_week if selected_week is not None else require_upcoming_week(season, attempts=1)
     return cached(
