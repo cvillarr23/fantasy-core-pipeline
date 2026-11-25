@@ -3,6 +3,7 @@ Player summary/search read logic, split out of src/api/players.py so the router 
 thin HTTP controller over this module doing the actual DB work.
 """
 from src.database import get_db_cursor
+from src.nfl_byes import bye_week_for, bye_weeks_or_empty
 from src.services import live_service
 from src.services.espn_ownership import load_latest_espn_ownership
 
@@ -41,18 +42,29 @@ def _recent_news(cursor, player_id: str, limit: int) -> list:
 def _played_weeks(cursor, player_id: str) -> list:
     """`(week, actual_points)` for the weeks of the player's latest season that have final actual
     scores, oldest first. `actual_points` defaults to 0.0, so only rows an actual-scores sync
-    stamped (`actual_points_source`) count as played."""
+    stamped (`actual_points_source`) count as played.
+
+    That sync scores only players on our league's rosters (no table holds actuals for every
+    player), so a player never rostered here has no weeks. It also stores a bye-week starter
+    as 0.0, so weeks the player's team was on bye are left out; that week's `weekly_stats.team`
+    is preferred over `players.team` for a player who changed teams."""
     cursor.execute("""
-        SELECT season, week, actual_points
-        FROM weekly_stats
-        WHERE player_id = %s AND actual_points_source IS NOT NULL AND actual_points IS NOT NULL
-        ORDER BY season DESC, week DESC;
+        SELECT ws.season, ws.week, ws.actual_points, COALESCE(ws.team, p.team)
+        FROM weekly_stats ws
+        JOIN players p ON p.player_id = ws.player_id
+        WHERE ws.player_id = %s AND ws.actual_points_source IS NOT NULL AND ws.actual_points IS NOT NULL
+        ORDER BY ws.season DESC, ws.week DESC;
     """, (player_id,))
     rows = cursor.fetchall()
     if not rows:
         return []
     latest = rows[0][0]
-    return sorted((week, points) for season, week, points in rows if season == latest)
+    byes = bye_weeks_or_empty(latest)
+    return sorted(
+        (week, points)
+        for season, week, points, team in rows
+        if season == latest and bye_week_for(team, byes) != week
+    )
 
 
 def _season_avg(played: list):

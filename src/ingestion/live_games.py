@@ -22,12 +22,17 @@ Each tick writes, with a 6h TTL so stale data ages out:
   saw it, since ESPN gives no wall time) and `fantasy_delta` (`player_id` -> change in that
   player's `live_points` since the previous tick). A delta is null when one player has more than
   one new play in the same tick (the change can't be split) or when the player had no earlier
-  `live:player` row (first tick, or after a restart with the keys expired). Both are carried
-  forward unchanged on later ticks (`attach_play_deltas`).
+  `live:player` row (first tick, or after a restart with the keys expired), or when the previous
+  tick didn't refresh that game's plays (its summary or stored plays couldn't be read), since
+  `live:player` moved on without them. Both are carried forward unchanged on later ticks
+  (`attach_play_deltas`). When the stored plays can't be read, that game's list is left as it is
+  for the tick rather than rewritten.
+- `live:player_ids`, a JSON list of this tick's `live:player` ids, so readers needn't scan.
 - `live:updated_at`.
 
 `live:health` is the launcher's health key for this service job. It is rewritten every tick,
 including a failed one, with a 10 minute TTL: it says the loop is alive, not that ESPN answered.
+It carries the `season` and `week` being polled, so readers can tell whose snapshot it is.
 
 Cadence: a 30s tick while `live:last_viewed` (epoch seconds, written by the live API) is under
 5 minutes old, otherwise 180s. The wait rechecks it every 10s, so a new viewer speeds polling
@@ -73,6 +78,7 @@ LAST_VIEWED_KEY = "live:last_viewed"
 UPDATED_AT_KEY = "live:updated_at"
 GAME_KEY = "live:game:{event_id}"
 PLAYER_KEY = "live:player:{player_id}"
+PLAYER_IDS_KEY = "live:player_ids"
 PLAYS_KEY = "live:plays:{event_id}"
 MAX_PLAYS = 300
 
@@ -467,11 +473,19 @@ def _play_delta(player_id, new_counts: Counter, previous_points: dict, current_p
     return round(current - (previous_points[player_id] or 0.0), 2)
 
 
-def attach_play_deltas(plays, previous_plays, previous_points, current_points, now) -> list:
+def _carried_play(play: dict, earlier: dict) -> dict:
+    """A play an earlier tick stored keeps the stamp and deltas it got then: the baseline has
+    moved on since, so recomputing would give zero."""
+    return {**play, "recorded_at": earlier.get("recorded_at"), "fantasy_delta": earlier.get("fantasy_delta") or {}}
+
+
+def attach_play_deltas(plays, previous_plays, previous_points, current_points, now, baseline_stale=False) -> list:
     """Stamps each play with `recorded_at` and `fantasy_delta`. A play stored by an earlier
     tick keeps what it had; a new one is stamped now, with each of its players' point change
     since the previous tick. `previous_points` / `current_points` map our player id to
-    `live_points`; a player missing from `previous_points` had no earlier snapshot."""
+    `live_points`; a player missing from `previous_points` had no earlier snapshot.
+    `baseline_stale` means the previous tick didn't refresh this game's plays, so
+    `previous_points` already counts plays this tick sees as new: their deltas are null."""
     known = {play["play_id"]: play for play in previous_plays}
     new_counts = Counter(
         player_id
@@ -479,18 +493,15 @@ def attach_play_deltas(plays, previous_plays, previous_points, current_points, n
         if play["play_id"] not in known
         for player_id in play["player_ids"]
     )
+    baseline = {} if baseline_stale else previous_points
     stamped = []
     for play in plays:
         earlier = known.get(play["play_id"])
         if earlier is not None:
-            stamped.append({
-                **play,
-                "recorded_at": earlier.get("recorded_at"),
-                "fantasy_delta": earlier.get("fantasy_delta") or {},
-            })
+            stamped.append(_carried_play(play, earlier))
             continue
         deltas = {
-            player_id: _play_delta(player_id, new_counts, previous_points, current_points)
+            player_id: _play_delta(player_id, new_counts, baseline, current_points)
             for player_id in play["player_ids"]
         }
         stamped.append({**play, "recorded_at": _iso(now), "fantasy_delta": deltas})
@@ -553,6 +564,7 @@ class LiveGamesPoller:
         self.ticks = 0
         self.failed_ticks = 0
         self.tracked = set()
+        self.unrefreshed = set()
 
     def tick(self, now: datetime | None = None):
         """One poll. Returns the tracked games' shapes, or None when the tick failed (ESPN
@@ -586,24 +598,36 @@ class LiveGamesPoller:
             if payload is not None
             else []
         )
+        needed = {event_id for event_id, event in events.items() if self._needs_summary(event_id, event)}
         games, plays = self._games_and_plays(events, roster, now)
         plays = self._stamp_plays(plays, roster, now)
+        self.unrefreshed = self._unrefreshed(needed, roster, plays)
         self._write(games, roster, plays, now)
         return games
 
+    def _unrefreshed(self, needed: set, roster: list, plays: dict) -> set:
+        """Games whose plays this tick should have refreshed but didn't, while `live:player`
+        still moved on: the next tick can't attribute their point changes. Without a roster
+        no `live:player` is written, so the baseline holds and the earlier answer stands."""
+        return needed - set(plays) if roster else self.unrefreshed
+
     def _stamp_plays(self, plays: dict, roster: list, now) -> dict:
         """Adds `recorded_at` and `fantasy_delta` from what the previous tick left in Redis.
-        Read before `_write` replaces it, so a restart doesn't lose the baseline."""
+        Read before `_write` replaces it, so a restart doesn't lose the baseline. A game whose
+        stored plays can't be read is dropped for this tick, so `_write` keeps its list."""
         if not plays:
             return plays
         previous_points = self._previous_points(roster)
         current_points = {p["player_id"]: p["value"]["live_points"] for p in roster}
-        return {
-            event_id: attach_play_deltas(
-                event_plays, self._previous_plays(event_id), previous_points, current_points, now
-            )
-            for event_id, event_plays in plays.items()
-        }
+        stamped = {}
+        for event_id, event_plays in plays.items():
+            previous_plays = self._previous_plays(event_id)
+            if previous_plays is not None:
+                stamped[event_id] = attach_play_deltas(
+                    event_plays, previous_plays, previous_points, current_points, now,
+                    baseline_stale=event_id in self.unrefreshed,
+                )
+        return stamped
 
     def _previous_points(self, roster: list) -> dict:
         """Our player id -> `live_points` for every player with a `live:player` row; empty on a
@@ -621,12 +645,14 @@ class LiveGamesPoller:
             logger.warning(f"Could not read previous live players: {e}")
             return {}
 
-    def _previous_plays(self, event_id: str) -> list:
+    def _previous_plays(self, event_id: str) -> list | None:
+        """The game's stored plays, or None when they can't be read: an empty list would make
+        every stored play look new and rewrite its stamp."""
         try:
             return [json.loads(p) for p in self.r.lrange(PLAYS_KEY.format(event_id=event_id), 0, -1)]
         except Exception as e:
-            logger.warning(f"Could not read previous plays for {event_id}: {e}")
-            return []
+            logger.warning(f"Could not read previous plays for {event_id}; keeping them this tick: {e}")
+            return None
 
     def _pro_team_ids(self, payload) -> set:
         return {
@@ -664,6 +690,8 @@ class LiveGamesPoller:
             pipe.set(GAME_KEY.format(event_id=game["event_id"]), json.dumps(game), ex=LIVE_TTL_SECONDS)
         for player in roster:
             pipe.set(PLAYER_KEY.format(player_id=player["player_id"]), json.dumps(player["value"]), ex=LIVE_TTL_SECONDS)
+        if roster:
+            pipe.set(PLAYER_IDS_KEY, json.dumps(sorted(p["player_id"] for p in roster)), ex=LIVE_TTL_SECONDS)
         for event_id, event_plays in plays.items():
             key = PLAYS_KEY.format(event_id=event_id)
             pipe.delete(key)
@@ -681,6 +709,7 @@ class LiveGamesPoller:
         health = {
             "updated_at": _iso(now),
             "last_success_at": _iso(self.last_success_at) if self.last_success_at else None,
+            "season": self.season,
             "week": self.week,
             "tracked_events": sorted(self.tracked),
         }

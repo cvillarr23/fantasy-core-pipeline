@@ -39,9 +39,12 @@ RECENT_WINDOW = timedelta(hours=24)
 _NON_WORD = re.compile(r"[^a-z0-9\s]")
 
 
-def get_news(player_ids: List[str], since: Optional[datetime], limit: int) -> List[dict]:
-    """Newest-first news for the given players, one entry per story."""
-    rows = _fetch_rows(player_ids, since, limit * FETCH_MULTIPLIER)
+def get_news(
+    player_ids: List[str], since: Optional[datetime], limit: int, until: Optional[datetime] = None
+) -> List[dict]:
+    """Newest-first news for the given players, one entry per story. `until` (inclusive) lets a
+    pager ask for the stories at or before its cursor rather than always the newest."""
+    rows = _fetch_rows(player_ids, since, limit * FETCH_MULTIPLIER, until)
     stories = []
     for player_id in sorted({row["player_id"] for row in rows}):
         stories.extend(_merge_stories([r for r in rows if r["player_id"] == player_id]))
@@ -72,7 +75,17 @@ def _visible_params() -> tuple:
     return list(SOURCE_BY_DB_VALUE), BLUESKY_MIN_CONFIDENCE
 
 
-def _fetch_rows(player_ids: List[str], since: Optional[datetime], cap: int) -> List[dict]:
+def story_published_at(news_id: int) -> Optional[datetime]:
+    """When one raw_signals row (a story's id) was published; None for an unknown id."""
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT published_at FROM raw_signals WHERE id = %s;", (news_id,))
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def _fetch_rows(
+    player_ids: List[str], since: Optional[datetime], cap: int, until: Optional[datetime] = None
+) -> List[dict]:
     with get_db_cursor() as cursor:
         cursor.execute(
             f"""
@@ -81,11 +94,12 @@ def _fetch_rows(player_ids: List[str], since: Optional[datetime], cap: int) -> L
             WHERE player_id = ANY(%s)
               AND published_at IS NOT NULL
               AND (%s::timestamp IS NULL OR published_at >= %s)
+              AND (%s::timestamp IS NULL OR published_at <= %s)
               AND {_VISIBLE_SQL}
             ORDER BY published_at DESC, id DESC
             LIMIT %s;
             """,
-            (player_ids, since, since, *_visible_params(), cap),
+            (player_ids, since, since, until, until, *_visible_params(), cap),
         )
         return [_row_to_item(row) for row in cursor.fetchall()]
 

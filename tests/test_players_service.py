@@ -117,14 +117,26 @@ def test_summary_and_search_carry_espn_ownership_or_none(monkeypatch):
     assert seen == [["p1"], ["p1", "p2"]]
 
 
-def test_played_weeks_keep_only_the_latest_season_oldest_first():
+def test_played_weeks_keep_only_the_latest_season_oldest_first(monkeypatch):
+    monkeypatch.setattr(players_service, "bye_weeks_or_empty", lambda season: {})
     cursor = MagicMock()
-    cursor.fetchall.return_value = [(2026, 6, 10.0), (2026, 5, 20.0), (2026, 2, 15.0), (2025, 17, 99.0)]
+    cursor.fetchall.return_value = [(2026, 6, 10.0, "KC"), (2026, 5, 20.0, "KC"), (2026, 2, 15.0, "KC"), (2025, 17, 99.0, "KC")]
 
     played = REAL_PLAYED_WEEKS(cursor, "p1")
 
     assert played == [(2, 15.0), (5, 20.0), (6, 10.0)]
     assert "actual_points_source IS NOT NULL" in cursor.execute.call_args[0][0]
+
+
+def test_played_weeks_leave_out_the_teams_bye(monkeypatch):
+    # sync_actual_scores stores a bye-week starter as 0.0; that week wasn't played.
+    seasons = []
+    monkeypatch.setattr(players_service, "bye_weeks_or_empty", lambda season: seasons.append(season) or {"KC": 5, "DEN": 6})
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(2026, 6, 0.0, "KC"), (2026, 5, 0.0, "KC"), (2026, 4, 12.0, "KC")]
+
+    assert REAL_PLAYED_WEEKS(cursor, "p1") == [(4, 12.0), (6, 0.0)]
+    assert seasons == [2026]
 
 
 def test_season_avg_and_weekly_log_cover_the_last_four_played_weeks():

@@ -11903,7 +11903,7 @@
     },
     "/v1/matchup/feed": {
       "get": {
-        "description": "Plays and recent news for both sides' players, newest first. `season` is accepted for\nsymmetry with the other matchup routes; the snapshot is only ever the poller's week.",
+        "description": "Plays and recent news for both sides' players, newest first. Empty unless the poller is\nrunning this season and week.",
         "operationId": "get_matchup_feed_v1_matchup_feed_get",
         "parameters": [
           {

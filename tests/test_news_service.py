@@ -83,6 +83,27 @@ def test_since_and_confidence_are_passed_to_the_query():
     assert news_service.BLUESKY_MIN_CONFIDENCE in params
 
 
+def test_until_bounds_the_query_and_defaults_to_open():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+    with patch("src.services.news_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        news_service.get_news(["p1"], T0, 5, until=T0 + timedelta(hours=1))
+    assert cursor.execute.call_args[0][1][3:5] == (T0 + timedelta(hours=1), T0 + timedelta(hours=1))
+    assert "published_at <= %s" in cursor.execute.call_args[0][0]
+
+    _, cursor = _news([], since=T0)
+    assert cursor.execute.call_args[0][1][3:5] == (None, None)
+
+
+def test_story_published_at_reads_one_row():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [(T0,), None]
+    with patch("src.services.news_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        assert news_service.story_published_at(7) == T0
+        assert news_service.story_published_at(8) is None
+    assert cursor.execute.call_args[0][1] == (8,)
+
+
 def test_empty_result_and_unknown_player():
     items, _ = _news([], player_ids=("nobody",))
     assert items == []
