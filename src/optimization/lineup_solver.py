@@ -634,8 +634,9 @@ def lineup_idempotency_key(team_id: str, swaps: list, job_name: str | None = Non
     failure, or a whole re-run when the launcher retries a failed run - can't enqueue the same
     swaps twice. A re-run recomputes identical swaps (league_rosters isn't resynced from
     ESPN in between), so the same inputs give the same key. The Job name, when set
-    (JOB_NAME, the launcher's catalog job name), scopes it to one job: a new scheduled or
-    manual run is a new decision and always publishes.
+    (JOB_NAME, `<job>@<dedupe>`: the catalog job name plus the run's dedupe key), scopes it to
+    one run: a new scheduled or manual run has a new dedupe key, so it is a new decision and
+    always publishes.
 
     IR and move entries ({kind, player_id, slot}) are keyed by all three; a swap keeps its original
     [drop, add, slot] material, so keys computed before IR entries existed still match."""
