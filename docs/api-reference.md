@@ -187,7 +187,7 @@ The status comes from ESPN's public NFL scoreboard (`pre`, `in` and `post`), onc
 
 ### `live`
 
-Each player line also carries `live`, the poller's snapshot of that player's game (`live_games`, see [Ingestion](./ingestion.md)). It is read from Redis after the matchup cache, so it is fresher than the rest of the response. The whole object is `null` when there is no snapshot for the player (the poller isn't running this week, the player isn't on either roster it tracks, or Redis is unreachable). Within it, every field is nullable.
+Each player line also carries `live`, the poller's snapshot of that player's game (`live_games`, see [Ingestion](./ingestion.md)). It is read from Redis after the matchup cache, so it is fresher than the rest of the response. The whole object is `null` when there is no snapshot for the player (the poller isn't running for this `season` and `week`, the player isn't on either roster it tracks, or Redis is unreachable). Within it, every field is nullable.
 
 | Field | Meaning |
 |---|---|
@@ -201,7 +201,9 @@ Each player line also carries `live`, the poller's snapshot of that player's gam
 
 `GET /v1/live/players?ids=a,b,c` returns the same object for players outside the matchup page (Lineup, Waivers). The ids are `players.player_id` (the Sleeper namespace, as in `/v1/players/{id}/summary`), at most 100. The response is `{"players": {id: live | null}}`. Matchup lines carry ESPN ids, so they get their `live` block from the matchup route itself.
 
-All live routes (`/v1/matchup`, `/v1/matchup/feed`, `/v1/live/players`, and a player summary that has a live block) write `live:last_viewed`, which moves the poller from 180s to 30s ticks. None of them calls ESPN.
+Live data is served only while the poller is running: its snapshot keys stay in Redis for hours after it exits, so `/v1/live/players` and the player summary's `live` are `null` once its 10-minute health key has expired. The matchup overlay and the feed also need the poller to be on the requested `season` and `week`.
+
+The live routes (`/v1/matchup`, `/v1/matchup/feed`, `/v1/live/players`, and the player summary) write `live:last_viewed`, which moves the poller from 180s to 30s ticks, only when they returned live data. A matchup for another season or week doesn't count. None of them calls ESPN.
 
 ### `GET /v1/matchup/feed`
 
@@ -211,8 +213,9 @@ All live routes (`/v1/matchup`, `/v1/matchup/feed`, `/v1/live/players`, and a pl
 - Play items: `play_id`, `event_id`, `game_label` (`TB @ ATL`, or `TB 14 – 17 ATL` once there is a score), `period`, `clock`, `text`, `scoring`, `fantasy_delta`.
 - `fantasy_delta` is the change in that player's `live_points` at the poll that saw the play. It is `null` when it can't be told: the player had several new plays in the same poll, or the poller had no earlier snapshot of the player.
 - News items: `news_id`, `source`, `headline`, `url`.
-- Paging: pass `next_before` as `before`. It is null on the last page. An unknown cursor (its play aged out of the poller's 300-play cap) returns an empty page.
-- The feed is empty (not an error) when the poller isn't running for that `week`.
+- `fantasy_delta` is also `null` for a game's plays first seen on the poll after one that couldn't read that game's plays.
+- Paging: pass `next_before` as `before`. It is null on the last page. News on each page is bounded by the cursor's time, so older stories are reached by paging. A news cursor whose story has left the 2-hour window resumes from that story's publish time. An unknown play cursor (its play aged out of the poller's 300-play cap) returns an empty page.
+- The feed is empty (not an error) when the poller isn't running for that `season` and `week`.
 
 ### When `points` and `projected_points` are null
 
@@ -232,6 +235,13 @@ Use `game_status` to tell an unplayed player from a real 0.0:
 `team.win_probability` (matchup, and each side of `/v1/matchup/scoreboard`) is ESPN's chance, from 0 to 1 with two decimals, that the team wins the matchup. The two sides sum to 1. ESPN only sends it for the matchup period in progress. It is `null` for a finished or future week, a stored completed week, or when ESPN can't be read.
 
 Probe result (2026 league, read-only, matchup period 11 live): ESPN's raw `mMatchupScore` and `mScoreboard` views include `schedule[].home.winProbability` and `schedule[].away.winProbability`. For a finished period (10) the value is `null`, and a future period (12) doesn't carry the field. The ESPN API client `espn_api` drops it from `BoxScore`, so the API reads the raw payload with one extra request per cache miss.
+
+## Player summary fields
+
+`GET /v1/players/{player_id}/summary` returns the player's identity, `recent_news`, `espn`, `live` and two history fields.
+
+- `live`: `{live_points, projected_points, game_label, game_status, event_id}` from the poller's snapshot, or `null` when the poller isn't running or the player isn't on either matchup roster. `projected_points` is the player's `weekly_stats` projection for the season and week the poller is on, and is `null` when none is stored or it can't be read.
+- `season_avg` and `weekly_log` (the last 4 played weeks, oldest first) come from the actual scores `sync_actual_scores` stores. That job scores only players on our league's rosters, so a player never rostered in this league (most free agents) has `season_avg: null` and an empty `weekly_log`; no stored source covers every player. Weeks his team was on bye are left out, since a bye-week starter is stored as 0.0. Any other week ESPN scored 0.0 while he sat out (inactive, injured) still counts.
 
 ## Related
 

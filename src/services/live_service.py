@@ -3,8 +3,17 @@ Reads the live snapshot `src.ingestion.live_games` keeps in Redis: the `live` bl
 and summary players, `/v1/live/players` and the matchup feed. Nothing here calls ESPN.
 
 Every reader fails soft: a Redis error reads as "no snapshot" (null blocks, an empty feed), so a
-Redis outage never breaks the page around it. `touch_last_viewed` is what speeds the poller up:
-its value is epoch seconds, kept 10 minutes, and under 5 minutes old means 30s ticks.
+Redis outage never breaks the page around it.
+
+The snapshot counts only while the poller is running: `live:health` (10 minute TTL, rewritten
+every tick) must exist and name a `season`. The `live:game`/`live:player` keys outlive the poller
+by hours, so without health every reader shows nothing. The matchup overlay and the feed also
+require health's season and week to be the ones asked for, so a past season's week never gets
+this week's games. Health from a poller that predates the `season` key counts as not live.
+
+`_touch_last_viewed` is what speeds the poller up (epoch seconds, kept 10 minutes; under 5
+minutes old means 30s ticks). Each reader calls it only when it served live data, so a page for
+another week, or one opened while no poller runs, doesn't count as watching.
 
 Keys are keyed by our `players.player_id`; matchup lines carry ESPN ids, so `overlay_matchup`
 maps them through `players.espn_id` (the two id spaces overlap numerically, never substitute).
@@ -16,23 +25,24 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from src.database import get_db_cursor, get_redis_client
-from src.ingestion.live_games import GAME_KEY, HEALTH_KEY, LAST_VIEWED_KEY, PLAYER_KEY, PLAYS_KEY
+from src.ingestion.live_games import GAME_KEY, HEALTH_KEY, LAST_VIEWED_KEY, PLAYER_IDS_KEY, PLAYER_KEY, PLAYS_KEY
 from src.services import news_service
 
 logger = logging.getLogger("LiveService")
 
 LAST_VIEWED_TTL_SECONDS = 10 * 60
 NEWS_WINDOW = timedelta(hours=2)
-PLAYER_KEY_PATTERN = PLAYER_KEY.format(player_id="*")
+NEWS_CURSOR_PREFIX = "news:"
+EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------- redis access
 
 
-def touch_last_viewed() -> None:
+def _touch_last_viewed(r) -> None:
     """Marks the live pages as in use. Never raises."""
     try:
-        get_redis_client().set(LAST_VIEWED_KEY, str(int(time.time())), ex=LAST_VIEWED_TTL_SECONDS)
+        r.set(LAST_VIEWED_KEY, str(int(time.time())), ex=LAST_VIEWED_TTL_SECONDS)
     except Exception as e:
         logger.warning(f"Could not write {LAST_VIEWED_KEY}: {e}")
 
@@ -50,16 +60,23 @@ def _loads(values) -> list:
     return [json.loads(value) if value else None for value in values]
 
 
-def _read_health(r) -> dict | None:
+def _live_health(r, season: int | None = None, week: int | None = None) -> dict | None:
+    """The poller's health while it is running (and, given a season and week, polling that
+    one), else None. Health without `season` came from a poller older than that key; it can't
+    say which season it polls, so it counts as not live."""
     raw = r.get(HEALTH_KEY)
-    return json.loads(raw) if raw else None
+    health = json.loads(raw) if raw else None
+    if not health or health.get("season") is None:
+        return None
+    if season is not None and (health.get("season"), health.get("week")) != (season, week):
+        return None
+    return health
 
 
-def _live_week_health(r, week: int) -> dict | None:
-    """The poller's health if it is polling `week`, else None: a snapshot for another week is
-    not this week's."""
-    health = _read_health(r)
-    return health if health and health.get("week") == week else None
+def _games(r, event_ids: list) -> dict:
+    if not event_ids:
+        return {}
+    return dict(zip(event_ids, _loads(r.mget([GAME_KEY.format(event_id=e) for e in event_ids]))))
 
 
 def _snapshots(r, player_ids: list) -> dict:
@@ -68,8 +85,7 @@ def _snapshots(r, player_ids: list) -> dict:
     if not player_ids:
         return {}
     players = dict(zip(player_ids, _loads(r.mget([PLAYER_KEY.format(player_id=p) for p in player_ids]))))
-    event_ids = sorted({p["event_id"] for p in players.values() if p and p.get("event_id")})
-    games = dict(zip(event_ids, _loads(r.mget([GAME_KEY.format(event_id=e) for e in event_ids])))) if event_ids else {}
+    games = _games(r, sorted({p["event_id"] for p in players.values() if p and p.get("event_id")}))
     return {
         player_id: (player, games.get(player.get("event_id")))
         for player_id, player in players.items()
@@ -112,15 +128,23 @@ def _game_label(game: dict | None) -> str | None:
     return f"{away['abbr']} {away['score']} – {home['score']} {home['abbr']}"
 
 
+def _live_blocks(r, player_ids: list) -> dict:
+    """player id -> live block, for the players with a snapshot."""
+    return {player_id: _live_block(player, game) for player_id, (player, game) in _snapshots(r, player_ids).items()}
+
+
 def load_live_blocks(player_ids: list) -> dict:
-    """player id -> live block, or None when the player has no snapshot."""
+    """`GET /v1/live/players`: player id -> live block, or None when the player has no
+    snapshot or the poller isn't running."""
     r = _redis()
     blocks = {player_id: None for player_id in player_ids}
     if r is None or not player_ids:
         return blocks
     try:
-        for player_id, (player, game) in _snapshots(r, player_ids).items():
-            blocks[player_id] = _live_block(player, game)
+        if _live_health(r) is None:
+            return blocks
+        _touch_last_viewed(r)
+        blocks.update(_live_blocks(r, player_ids))
     except Exception as e:
         logger.warning(f"Could not read live players: {e}")
     return blocks
@@ -161,24 +185,26 @@ def _side_with_live(side: dict, blocks_by_espn_id: dict) -> dict:
     }
 
 
-def _blocks_by_espn_id(matchup: dict) -> dict:
+def _blocks_by_espn_id(r, matchup: dict) -> dict:
     espn_ids = sorted({line["espn_id"] for line in _matchup_lines(matchup)})
     player_by_espn = _player_ids_by_espn_id(espn_ids)
-    blocks = load_live_blocks(sorted(set(player_by_espn.values())))
+    blocks = _live_blocks(r, sorted(set(player_by_espn.values())))
     return {espn_id: blocks.get(player_id) for espn_id, player_id in player_by_espn.items()}
 
 
 def overlay_matchup(matchup: dict) -> dict:
-    """The matchup with a `live` block on every player the poller has a snapshot for. Applied
-    after the matchup cache, since the snapshot moves faster. The input is not mutated, and
-    any failure returns it as it came."""
+    """The matchup with a `live` block on every player the poller has a snapshot for, when the
+    poller is running the matchup's season and week. Applied after the matchup cache, since
+    the snapshot moves faster. The input is not mutated, and any failure returns it as it
+    came."""
     r = _redis()
     if r is None:
         return matchup
     try:
-        if _live_week_health(r, matchup["week"]) is None:
+        if _live_health(r, matchup["season"], matchup["week"]) is None:
             return matchup
-        blocks = _blocks_by_espn_id(matchup)
+        _touch_last_viewed(r)
+        blocks = _blocks_by_espn_id(r, matchup)
         return {
             **matchup,
             "our_team": _side_with_live(matchup["our_team"], blocks),
@@ -193,50 +219,75 @@ def overlay_matchup(matchup: dict) -> dict:
 
 
 def player_live_summary(cursor, player_id: str) -> dict | None:
-    """The `live` field of `GET /v1/players/{id}/summary`, or None without a snapshot."""
+    """The `live` field of `GET /v1/players/{id}/summary`, or None without a snapshot or
+    while the poller isn't running."""
     r = _redis()
     if r is None:
         return None
     try:
-        health = _read_health(r)
-        player, game = _snapshots(r, [player_id]).get(player_id, (None, None))
+        health = _live_health(r)
+        snapshot = _snapshots(r, [player_id]).get(player_id) if health else None
     except Exception as e:
         logger.warning(f"Could not read the live snapshot for {player_id}: {e}")
         return None
-    if player is None:
+    if snapshot is None:
         return None
+    _touch_last_viewed(r)
+    player, game = snapshot
     return {
         "live_points": player.get("live_points"),
-        "projected_points": _projected_points(cursor, player_id, (health or {}).get("week")),
+        "projected_points": _projected_points(cursor, player_id, health["season"], health.get("week")),
         "game_label": _game_label(game),
         "game_status": (game or {}).get("status"),
         "event_id": player.get("event_id"),
     }
 
 
-def _projected_points(cursor, player_id: str, week: int | None):
+def _projected_points(cursor, player_id: str, season: int, week: int | None):
+    """The player's projection for the polled week, or None. Runs in a savepoint on the
+    caller's cursor, so a failed query rolls back only itself: the summary's transaction
+    carries on and the field is null rather than the request failing."""
     if week is None:
         return None
-    cursor.execute(
-        "SELECT projected_points FROM weekly_stats WHERE player_id = %s AND week = %s ORDER BY season DESC LIMIT 1;",
-        (player_id, week),
-    )
-    row = cursor.fetchone()
-    return row[0] if row else None
+    try:
+        cursor.execute("SAVEPOINT live_projected_points;")
+        cursor.execute(
+            "SELECT projected_points FROM weekly_stats WHERE player_id = %s AND season = %s AND week = %s;",
+            (player_id, season, week),
+        )
+        row = cursor.fetchone()
+        cursor.execute("RELEASE SAVEPOINT live_projected_points;")
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning(f"Could not read the live projection for {player_id}: {e}")
+        _rollback_to_savepoint(cursor)
+        return None
+
+
+def _rollback_to_savepoint(cursor) -> None:
+    try:
+        cursor.execute("ROLLBACK TO SAVEPOINT live_projected_points;")
+    except Exception as e:
+        logger.warning(f"Could not roll back the live projection savepoint: {e}")
 
 
 # ---------------------------------------------------------------- matchup feed
 
 
-def _all_live_players(r) -> dict:
-    """player id -> `live:player` value for every matchup player the poller wrote."""
-    keys = sorted(r.scan_iter(match=PLAYER_KEY_PATTERN))
-    prefix = PLAYER_KEY.format(player_id="")
-    return {
-        key[len(prefix):]: value
-        for key, value in zip(keys, _loads(r.mget(keys)) if keys else [])
-        if value
-    }
+def _indexed_live_players(r) -> dict:
+    """player id -> `live:player` value for every matchup player the poller wrote, found
+    through its `live:player_ids` index rather than a keyspace scan."""
+    raw = r.get(PLAYER_IDS_KEY)
+    player_ids = json.loads(raw) if raw else []
+    if not player_ids:
+        return {}
+    values = _loads(r.mget([PLAYER_KEY.format(player_id=p) for p in player_ids]))
+    return {player_id: value for player_id, value in zip(player_ids, values) if value}
+
+
+def _player_row(row) -> tuple:
+    """`(player_id, {name, position, team, espn_id})` from a players row."""
+    return row[0], {"name": row[1], "position": row[2], "team": row[3], "espn_id": row[4]}
 
 
 def _player_rows(player_ids: list) -> dict:
@@ -245,7 +296,7 @@ def _player_rows(player_ids: list) -> dict:
             "SELECT player_id, name, position, team, espn_id FROM players WHERE player_id = ANY(%s);",
             (player_ids,),
         )
-        return {row[0]: {"name": row[1], "position": row[2], "team": row[3], "espn_id": row[4]} for row in cursor.fetchall()}
+        return dict(_player_row(row) for row in cursor.fetchall())
 
 
 def _side(player: dict) -> str:
@@ -264,87 +315,147 @@ def _who(player_id: str, live_player: dict, rows: dict) -> dict:
     }
 
 
-def _play_items(r, event_ids: list, games: dict, players: dict, rows: dict) -> list:
+def _play_item(event_id: str, label: str | None, play: dict, player_id: str, who: dict) -> dict:
+    """One feed item: a play as one of its matchup players saw it."""
+    return {
+        "type": "play",
+        "cursor": f"play:{event_id}:{play['play_id']}:{player_id}",
+        "at": play.get("recorded_at"),
+        **who,
+        "play_id": play["play_id"],
+        "event_id": event_id,
+        "game_label": label,
+        "period": play.get("period"),
+        "clock": play.get("clock"),
+        "text": play.get("text"),
+        "scoring": bool(play.get("scoring")),
+        "fantasy_delta": (play.get("fantasy_delta") or {}).get(player_id),
+    }
+
+
+def _play_items(r, event_ids: list, players: dict, rows: dict) -> list:
+    games = _games(r, event_ids)
     items = []
     for event_id in event_ids:
         label = _game_label(games.get(event_id))
         for play in _loads(r.lrange(PLAYS_KEY.format(event_id=event_id), 0, -1)):
-            deltas = play.get("fantasy_delta") or {}
-            for player_id in play.get("player_ids") or []:
-                if player_id not in players:
-                    continue
-                items.append({
-                    "type": "play",
-                    "cursor": f"play:{event_id}:{play['play_id']}:{player_id}",
-                    "at": play.get("recorded_at"),
-                    **_who(player_id, players[player_id], rows),
-                    "play_id": play["play_id"],
-                    "event_id": event_id,
-                    "game_label": label,
-                    "period": play.get("period"),
-                    "clock": play.get("clock"),
-                    "text": play.get("text"),
-                    "scoring": bool(play.get("scoring")),
-                    "fantasy_delta": deltas.get(player_id),
-                })
+            items.extend(
+                _play_item(event_id, label, play, player_id, _who(player_id, players[player_id], rows))
+                for player_id in play.get("player_ids") or []
+                if player_id in players
+            )
     return items
 
 
-def _news_items(players: dict, rows: dict, now: datetime, limit: int) -> list:
-    """News on matchup players from the last two hours. Extra to the feed, so a failure
-    leaves it out rather than failing the feed."""
+def _news_item(story: dict, who: dict) -> dict:
+    return {
+        "type": "news",
+        "cursor": f"{NEWS_CURSOR_PREFIX}{story['id']}",
+        "at": story["published_at"].replace(microsecond=0).isoformat() + "Z",
+        **who,
+        "news_id": story["id"],
+        "source": story["source"],
+        "headline": story["headline"],
+        "url": story.get("url"),
+    }
+
+
+def _news_items(players: dict, rows: dict, now: datetime, limit: int, until: datetime | None) -> list:
+    """News on matchup players from the last two hours, at or before `until` (the page's
+    cursor time) when paging. Two more than `limit` are fetched: one for the cursor's own
+    story and one so the page can tell more follow. Extra to the feed, so a failure leaves it
+    out rather than failing the feed."""
+    since = (now - NEWS_WINDOW).astimezone(timezone.utc).replace(tzinfo=None)
+    until = until.astimezone(timezone.utc).replace(tzinfo=None) if until else None
     try:
-        stories = news_service.get_news(list(players), (now - NEWS_WINDOW).replace(tzinfo=None), limit)
+        stories = news_service.get_news(list(players), since, limit + 2, until=until)
     except Exception as e:
         logger.warning(f"Could not load news for the matchup feed: {e}")
         return []
     return [
-        {
-            "type": "news",
-            "cursor": f"news:{story['id']}",
-            "at": story["published_at"].replace(microsecond=0).isoformat() + "Z",
-            **_who(story["player_id"], players[story["player_id"]], rows),
-            "news_id": story["id"],
-            "source": story["source"],
-            "headline": story["headline"],
-            "url": story.get("url"),
-        }
+        _news_item(story, _who(story["player_id"], players[story["player_id"]], rows))
         for story in stories
         if story["player_id"] in players
     ]
 
 
-def _page(items: list, limit: int, before: str | None) -> dict:
-    start = 0
-    if before is not None:
-        cursors = [item["cursor"] for item in items]
-        start = cursors.index(before) + 1 if before in cursors else len(items)
+def _moment(at: str | None) -> datetime:
+    """A feed item's `at` as aware UTC, for ordering; EARLIEST when missing or unparsable."""
+    if not at:
+        return EARLIEST
+    try:
+        parsed = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        return EARLIEST
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _news_cursor_time(cursor: str) -> datetime | None:
+    """When a `news:{id}` cursor's story was published, even after it left the news window;
+    None when it can't be told."""
+    try:
+        published = news_service.story_published_at(int(cursor[len(NEWS_CURSOR_PREFIX):]))
+    except Exception as e:
+        logger.warning(f"Could not resolve the feed cursor {cursor}: {e}")
+        return None
+    return published.replace(tzinfo=timezone.utc) if published else None
+
+
+def _cursor_time(before: str | None, plays: list) -> datetime | None:
+    """The time a `before` cursor stands for: its play's `at`, or its story's publish time.
+    None without a cursor, or for a play cursor that aged out of the poller's cap."""
+    if before is None:
+        return None
+    play = next((item for item in plays if item["cursor"] == before), None)
+    if play is not None:
+        return _moment(play["at"])
+    return _news_cursor_time(before) if before.startswith(NEWS_CURSOR_PREFIX) else None
+
+
+def _page_start(items: list, before: str | None, before_at: datetime | None) -> int:
+    """Index of the first item after the cursor. A cursor that isn't in the list (a story that
+    left the news window) starts at the first older item; one with no known time ends the
+    feed."""
+    if before is None:
+        return 0
+    cursors = [item["cursor"] for item in items]
+    if before in cursors:
+        return cursors.index(before) + 1
+    if before_at is None:
+        return len(items)
+    return next((i for i, item in enumerate(items) if _moment(item["at"]) < before_at), len(items))
+
+
+def _page(items: list, limit: int, before: str | None, before_at: datetime | None) -> dict:
+    start = _page_start(items, before, before_at)
     page = items[start:start + limit]
     more = start + limit < len(items)
     return {"items": page, "next_before": page[-1]["cursor"] if page and more else None}
 
 
-def load_feed(week: int, limit: int, before: str | None = None, now: datetime | None = None) -> dict:
+def load_feed(season: int, week: int, limit: int, before: str | None = None, now: datetime | None = None) -> dict:
     """Plays (and recent news) for the matchup's players, newest first, one item per player
-    involved. Empty when the poller isn't running this week. An unknown `before` cursor (its
-    play aged out of the poller's cap) returns an empty page."""
+    involved. Empty when the poller isn't running this season and week. An unknown play
+    cursor (its play aged out of the poller's cap) returns an empty page; a news cursor whose
+    story left the window resumes from that story's time."""
     empty = {"items": [], "next_before": None}
     r = _redis()
     if r is None:
         return empty
     now = now or datetime.now(timezone.utc)
     try:
-        health = _live_week_health(r, week)
+        health = _live_health(r, season, week)
         if health is None:
             return empty
-        players = _all_live_players(r)
-        event_ids = health.get("tracked_events") or []
-        games = dict(zip(event_ids, _loads(r.mget([GAME_KEY.format(event_id=e) for e in event_ids])))) if event_ids else {}
+        _touch_last_viewed(r)
+        players = _indexed_live_players(r)
         rows = _player_rows(list(players))
-        items = _play_items(r, event_ids, games, players, rows) + _news_items(players, rows, now, limit)
+        plays = _play_items(r, health.get("tracked_events") or [], players, rows)
     except Exception as e:
         logger.warning(f"Could not build the matchup feed: {e}")
         return empty
+    before_at = _cursor_time(before, plays)
+    items = plays + _news_items(players, rows, now, limit, before_at)
     # Stable, so plays from one tick keep the poller's newest-first order.
-    items.sort(key=lambda item: item["at"] or "", reverse=True)
-    return _page(items, limit, before)
+    items.sort(key=lambda item: _moment(item["at"]), reverse=True)
+    return _page(items, limit, before, before_at)

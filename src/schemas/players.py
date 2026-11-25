@@ -25,9 +25,11 @@ class PlayerSummaryResponse(BaseModel):
     espn_id: Optional[str] = None
     recent_news: List[RecentNewsItem]
     espn: Optional[EspnOwnership] = None
-    # The poller's snapshot for this week's game; null for a player outside the live matchup.
+    # The poller's snapshot for this week's game; null for a player outside the live matchup or
+    # while the poller isn't running.
     live: Optional[PlayerLiveSummary] = None
-    # Mean actual points over the player's played weeks of their latest season; null with none.
+    # Mean actual points over the player's played weeks of their latest season (bye weeks left
+    # out); null with none, as for a player never rostered in our league.
     season_avg: Optional[float] = None
     # Last 4 played weeks of that season, oldest first.
     weekly_log: List[WeeklyLogEntry] = []

@@ -23,6 +23,7 @@ NOW = datetime(2026, 11, 23, 18, 0, tzinfo=timezone.utc)
 TEAMS = {"8", "7"}
 MNF = "401873078"  # CIN @ WSH, not started in the recorded board
 SNF = "401873077"  # MIN @ SF, final
+CHASE_BROWN = "p4362238"
 
 
 def fixture(name):
@@ -271,6 +272,114 @@ def test_tick_stamps_new_plays_from_the_previous_snapshot(espn, board, league):
     assert [p["recorded_at"] for p in second] == [p["recorded_at"] for p in first]
 
 
+def _summary_without(summary: dict, play_id: str) -> dict:
+    """The summary as an earlier tick saw it: before `play_id` happened."""
+    trimmed = json.loads(json.dumps(summary))
+    drives = trimmed["drives"]
+    for drive in [*drives.get("previous", []), drives.get("current") or {}]:
+        drive["plays"] = [p for p in drive.get("plays") or [] if str(p.get("id")) != play_id]
+    return trimmed
+
+
+def _set_live_points(league, espn_id: str, points: float) -> None:
+    """Gives one roster player an actual stat row worth `points` this week."""
+    entry = next(e for _, e in lg.roster_entries(league, TEAMS) if str(e["playerId"]) == espn_id)
+    player = lg._entry_player(entry)
+    stats = [s for s in player.get("stats") or [] if s.get("statSourceId") != 0]
+    player["stats"] = stats + [{
+        "seasonId": 2026, "scoringPeriodId": 11, "statSplitTypeId": 1, "statSourceId": 0,
+        "appliedTotal": points, "stats": {}, "appliedStats": {},
+    }]
+
+
+@pytest.fixture
+def live_mnf(espn):
+    """MNF in progress, with its newest matchup play (a Chase Brown run) not yet seen on the
+    first tick, when Brown has 5.0 points."""
+    espn.board = fixture("scoreboard_in_progress.json")
+    full = fixture("summary_in_progress.json")
+    newest = lg.shape_plays(full, roster(espn.league))[0]
+    assert newest["player_ids"] == [CHASE_BROWN]
+    espn.summaries[MNF] = _summary_without(full, newest["play_id"])
+    espn.full_summary, espn.newest = full, newest
+    _set_live_points(espn.league, CHASE_BROWN[1:], 5.0)
+    return espn
+
+
+def _stored_play(redis, play_id):
+    return next(json.loads(p) for p in redis.data[f"live:plays:{MNF}"] if json.loads(p)["play_id"] == play_id)
+
+
+def test_new_play_on_the_next_tick_gets_a_delta(live_mnf, league):
+    redis = FakeRedis()
+    poller = make_poller(league, redis)
+    poller.tick(NOW)
+    live_mnf.summaries[MNF] = live_mnf.full_summary
+    _set_live_points(league, CHASE_BROWN[1:], 5.5)
+
+    poller.tick(NOW + timedelta(minutes=1))
+
+    assert _stored_play(redis, live_mnf.newest["play_id"])["fantasy_delta"] == {CHASE_BROWN: 0.5}
+
+
+def test_delta_is_null_when_the_previous_tick_skipped_the_events_plays(live_mnf, league):
+    # The middle tick's summary fails while live:player keeps moving, so the next tick's
+    # baseline already includes the play's points: its delta would read +0.0.
+    redis = FakeRedis()
+    poller = make_poller(league, redis)
+    poller.tick(NOW)
+    live_mnf.summaries[MNF] = None
+    _set_live_points(league, CHASE_BROWN[1:], 5.5)
+    poller.tick(NOW + timedelta(minutes=1))
+    live_mnf.summaries[MNF] = live_mnf.full_summary
+
+    poller.tick(NOW + timedelta(minutes=2))
+
+    assert _stored_play(redis, live_mnf.newest["play_id"])["fantasy_delta"] == {CHASE_BROWN: None}
+
+
+class FlakyListRedis(FakeRedis):
+    """A FakeRedis whose LRANGE fails while `fail_lrange` is set."""
+
+    fail_lrange = False
+
+    def lrange(self, key, start, end):
+        if self.fail_lrange:
+            raise ConnectionError("lrange timed out")
+        return super().lrange(key, start, end)
+
+
+def test_failed_play_history_read_keeps_the_stored_plays(live_mnf, league):
+    redis = FlakyListRedis()
+    poller = make_poller(league, redis)
+    poller.tick(NOW)
+    stored = list(redis.data[f"live:plays:{MNF}"])
+    live_mnf.summaries[MNF] = live_mnf.full_summary
+    redis.fail_lrange = True
+
+    poller.tick(NOW + timedelta(minutes=1))
+
+    assert redis.data[f"live:plays:{MNF}"] == stored
+    assert redis.json("live:health")["last_success_at"] == "2026-11-23T18:01:00Z"
+
+
+def test_a_play_first_seen_after_a_failed_history_read_has_a_null_delta(live_mnf, league):
+    redis = FlakyListRedis()
+    poller = make_poller(league, redis)
+    poller.tick(NOW)
+    live_mnf.summaries[MNF] = live_mnf.full_summary
+    _set_live_points(league, CHASE_BROWN[1:], 5.5)
+    redis.fail_lrange = True
+    poller.tick(NOW + timedelta(minutes=1))
+    redis.fail_lrange = False
+
+    poller.tick(NOW + timedelta(minutes=2))
+
+    newest = _stored_play(redis, live_mnf.newest["play_id"])
+    assert newest["recorded_at"] == "2026-11-23T18:02:00Z"
+    assert newest["fantasy_delta"] == {CHASE_BROWN: None}
+
+
 def test_scoring_plays_are_flagged(league):
     plays = lg.shape_plays(fixture("summary_final.json"), roster(league))
 
@@ -402,7 +511,11 @@ def test_tick_writes_every_key_with_its_ttl(espn, league):
     health = redis.json("live:health")
     assert redis.ttl["live:health"] == 10 * 60
     assert health["last_success_at"] == "2026-11-23T18:00:00Z" and health["week"] == 11
+    assert health["season"] == 2026
     assert MNF in health["tracked_events"]
+    player_ids = json.loads(redis.data["live:player_ids"])
+    assert "p4429795" in player_ids and player_ids == sorted(player_ids)
+    assert redis.ttl["live:player_ids"] == 6 * 3600
 
 
 def test_final_game_summary_is_fetched_once_and_pre_game_never(espn, league):

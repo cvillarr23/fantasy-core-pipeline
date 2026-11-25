@@ -1,5 +1,5 @@
 """Live game REST endpoints: thin controller over src.services.live_service. Reads only the
-poller's Redis snapshot, never ESPN, and each request tells the poller someone is watching."""
+poller's Redis snapshot, never ESPN; the service tells the poller someone is watching."""
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Query
@@ -24,5 +24,4 @@ def _parse_ids(ids: str) -> List[str]:
 @live_router.get("/players", response_model=LivePlayersResponse)
 def get_live_players(ids: str = Query(..., description="Comma-separated players.player_id values")):
     parsed = _parse_ids(ids)
-    live_service.touch_last_viewed()
     return {"players": live_service.load_live_blocks(parsed)}

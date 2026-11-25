@@ -688,14 +688,22 @@
   league's `mMatchupScore` payload (`appliedTotal` on the `statSourceId` 0 row), never recomputed.
   A player with no actual row has `live_points: null`, not 0.
 - Contracts with other repos: `live:health` is the launcher `health` key (rewritten every tick,
-  failed ones too, with a 10 min TTL; infra uses `grace: 10m`). `live:last_viewed` is written by the
-  live API as epoch seconds; under 5 min old means 30s ticks, otherwise 180s.
+  failed ones too, with a 10 min TTL; infra uses `grace: 10m`). Its keys are `updated_at`,
+  `last_success_at`, `season`, `week` and `tracked_events`; add keys, never rename or drop one.
+  `live:last_viewed` is written by the live API as epoch seconds; under 5 min old means 30s ticks,
+  otherwise 180s.
 - `live_service` is the API's only reader of those keys (`GET /v1/live/players`, `GET /v1/matchup/feed`, the `live`
   block on `GET /v1/matchup` lines and the player summary). It never calls ESPN and fails soft: a Redis error reads
-  as no snapshot. The API writes `live:last_viewed` (epoch seconds, 10 min TTL) on each of those requests. The matchup
+  as no snapshot. Every reader is gated on `live:health`, since the data keys outlive the poller by hours: no health,
+  or health without `season` (a poller from before that key), means no live data. The matchup overlay and the feed
+  also need health's `season` and `week` to match the request. The service, not the router, writes
+  `live:last_viewed` (epoch seconds, 10 min TTL), and only when it served live data. The feed finds its players
+  through the poller's `live:player_ids` index, never a keyspace scan. The matchup
   `live` block is overlaid *after* `get_current_team_matchup`'s 60s cache, takes `game_status` from the snapshot so the
   two agree, and maps ESPN ids to `player_id` through `players.espn_id`. Each play carries `recorded_at` and a
-  per-player `fantasy_delta`, both stamped by the poller (`attach_play_deltas`); a delta is null when it can't be told.
+  per-player `fantasy_delta`, both stamped by the poller (`attach_play_deltas`); a delta is null when it can't be told,
+  including the first plays after a tick that couldn't refresh that game's plays. A failed read of the stored plays
+  leaves that game's list untouched for the tick.
 - ESPN plays carry no athlete ids, so `_play_player_ids` matches roster players by name in the play
   text, only for the play's own teams. Fixtures in `tests/fixtures/espn_live/` are trimmed real
   payloads; record new ones rather than hand-writing ESPN shapes.

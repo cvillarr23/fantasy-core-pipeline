@@ -78,7 +78,6 @@ class MatchupResponse(BaseModel):
 
 @matchup_router.get("", response_model=MatchupResponse)
 def get_matchup(season: int, week: int):
-    live_service.touch_last_viewed()
     try:
         return live_service.overlay_matchup(get_current_team_matchup(season, week))
     except NoMatchupFoundError as e:
@@ -101,11 +100,10 @@ def get_matchup_feed(
     limit: int = Query(50, ge=1, le=200),
     before: Optional[str] = None,
 ):
-    """Plays and recent news for both sides' players, newest first. `season` is accepted for
-    symmetry with the other matchup routes; the snapshot is only ever the poller's week."""
-    live_service.touch_last_viewed()
+    """Plays and recent news for both sides' players, newest first. Empty unless the poller is
+    running this season and week."""
     try:
-        return live_service.load_feed(week, limit, before)
+        return live_service.load_feed(season, week, limit, before)
     except Exception as e:
         logger.error(f"Failed to build matchup feed for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to build matchup feed: {str(e)}")
