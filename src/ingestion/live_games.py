@@ -18,7 +18,12 @@ Each tick writes, with a 6h TTL so stale data ages out:
 - `live:player:{player_id}` (our `players.player_id`, mapped through `players.espn_id`).
 - `live:plays:{event_id}`, the plays that name a matchup player, newest first, capped at 300.
   ESPN's plays carry no athlete ids, so players are matched by name in the play text, scoped to
-  the play's teams (`_play_player_ids`).
+  the play's teams (`_play_player_ids`). Each play also carries `recorded_at` (the tick that first
+  saw it, since ESPN gives no wall time) and `fantasy_delta` (`player_id` -> change in that
+  player's `live_points` since the previous tick). A delta is null when one player has more than
+  one new play in the same tick (the change can't be split) or when the player had no earlier
+  `live:player` row (first tick, or after a restart with the keys expired). Both are carried
+  forward unchanged on later ticks (`attach_play_deltas`).
 - `live:updated_at`.
 
 `live:health` is the launcher's health key for this service job. It is rewritten every tick,
@@ -38,6 +43,7 @@ import signal
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import nflreadpy as nfl
@@ -450,6 +456,47 @@ def shape_plays(summary: dict, roster: list) -> list:
     return shaped
 
 
+def _play_delta(player_id, new_counts: Counter, previous_points: dict, current_points: dict):
+    """One player's fantasy-point change attributed to a new play, or None when it can't be
+    told: several new plays this tick, no earlier snapshot of the player, or no points now."""
+    if new_counts[player_id] != 1 or player_id not in previous_points:
+        return None
+    current = current_points.get(player_id)
+    if current is None:
+        return None
+    return round(current - (previous_points[player_id] or 0.0), 2)
+
+
+def attach_play_deltas(plays, previous_plays, previous_points, current_points, now) -> list:
+    """Stamps each play with `recorded_at` and `fantasy_delta`. A play stored by an earlier
+    tick keeps what it had; a new one is stamped now, with each of its players' point change
+    since the previous tick. `previous_points` / `current_points` map our player id to
+    `live_points`; a player missing from `previous_points` had no earlier snapshot."""
+    known = {play["play_id"]: play for play in previous_plays}
+    new_counts = Counter(
+        player_id
+        for play in plays
+        if play["play_id"] not in known
+        for player_id in play["player_ids"]
+    )
+    stamped = []
+    for play in plays:
+        earlier = known.get(play["play_id"])
+        if earlier is not None:
+            stamped.append({
+                **play,
+                "recorded_at": earlier.get("recorded_at"),
+                "fantasy_delta": earlier.get("fantasy_delta") or {},
+            })
+            continue
+        deltas = {
+            player_id: _play_delta(player_id, new_counts, previous_points, current_points)
+            for player_id in play["player_ids"]
+        }
+        stamped.append({**play, "recorded_at": _iso(now), "fantasy_delta": deltas})
+    return stamped
+
+
 # ---------------------------------------------------------------- cadence
 
 
@@ -540,8 +587,46 @@ class LiveGamesPoller:
             else []
         )
         games, plays = self._games_and_plays(events, roster, now)
+        plays = self._stamp_plays(plays, roster, now)
         self._write(games, roster, plays, now)
         return games
+
+    def _stamp_plays(self, plays: dict, roster: list, now) -> dict:
+        """Adds `recorded_at` and `fantasy_delta` from what the previous tick left in Redis.
+        Read before `_write` replaces it, so a restart doesn't lose the baseline."""
+        if not plays:
+            return plays
+        previous_points = self._previous_points(roster)
+        current_points = {p["player_id"]: p["value"]["live_points"] for p in roster}
+        return {
+            event_id: attach_play_deltas(
+                event_plays, self._previous_plays(event_id), previous_points, current_points, now
+            )
+            for event_id, event_plays in plays.items()
+        }
+
+    def _previous_points(self, roster: list) -> dict:
+        """Our player id -> `live_points` for every player with a `live:player` row; empty on a
+        Redis error, which only costs this tick its deltas."""
+        if not roster:
+            return {}
+        try:
+            raw = self.r.mget([PLAYER_KEY.format(player_id=p["player_id"]) for p in roster])
+            return {
+                player["player_id"]: json.loads(value).get("live_points")
+                for player, value in zip(roster, raw)
+                if value
+            }
+        except Exception as e:
+            logger.warning(f"Could not read previous live players: {e}")
+            return {}
+
+    def _previous_plays(self, event_id: str) -> list:
+        try:
+            return [json.loads(p) for p in self.r.lrange(PLAYS_KEY.format(event_id=event_id), 0, -1)]
+        except Exception as e:
+            logger.warning(f"Could not read previous plays for {event_id}: {e}")
+            return []
 
     def _pro_team_ids(self, payload) -> set:
         return {

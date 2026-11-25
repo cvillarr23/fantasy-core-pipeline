@@ -120,6 +120,53 @@ def _read_cache_disabled(monkeypatch):
     monkeypatch.setattr(read_cache, "get_redis_client", unavailable)
 
 
+@pytest.fixture(autouse=True)
+def _live_redis_disabled(monkeypatch):
+    """The live endpoints read the poller's Redis snapshot and fail soft; without this every
+    route test would wait on the real Redis host's connect timeout. Tests of the snapshot opt
+    in with the live_redis fixture."""
+    from src.services import live_service
+
+    def unavailable():
+        raise ConnectionError("live redis disabled in tests")
+
+    monkeypatch.setattr(live_service, "get_redis_client", unavailable)
+
+
+class LiveFakeRedis:
+    """Strings, lists and scans: what live_service reads, plus the `live:last_viewed` write."""
+
+    def __init__(self):
+        self.data, self.ttl = {}, {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value, ex=None):
+        self.data[key] = value
+        self.ttl[key] = ex
+
+    def mget(self, keys):
+        return [self.data.get(key) for key in keys]
+
+    def lrange(self, key, start, end):
+        values = self.data.get(key, [])
+        return values[start:] if end == -1 else values[start:end + 1]
+
+    def scan_iter(self, match=None):
+        prefix = (match or "").rstrip("*")
+        return iter([key for key in list(self.data) if key.startswith(prefix)])
+
+
+@pytest.fixture
+def live_redis(monkeypatch):
+    from src.services import live_service
+
+    fake = LiveFakeRedis()
+    monkeypatch.setattr(live_service, "get_redis_client", lambda: fake)
+    return fake
+
+
 @pytest.fixture
 def read_cache_redis(monkeypatch):
     from src.services import read_cache

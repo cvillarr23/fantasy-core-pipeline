@@ -8,11 +8,13 @@ import logging
 from typing import Literal, Optional
 
 from espn_api.requests.espn_requests import ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.schemas.espn_ownership import EspnOwnership
+from src.schemas.live import LiveBlock, MatchupFeedResponse
+from src.services import live_service
 from src.services.matchup_service import (
     ESPNTimeoutError,
     NoMatchupFoundError,
@@ -40,6 +42,9 @@ class PlayerLine(BaseModel):
     # Where the player's NFL game stands. None when the scoreboard can't be read, the team has no
     # game this week (bye; see bye_week), or the week is already stored as completed history.
     game_status: Optional[Literal["not_started", "in_progress", "final"]] = None
+    # The poller's live snapshot (score, clock, stat line, live points). None when there is none
+    # for this player; when set, `live.status` and `game_status` agree.
+    live: Optional[LiveBlock] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
@@ -73,8 +78,9 @@ class MatchupResponse(BaseModel):
 
 @matchup_router.get("", response_model=MatchupResponse)
 def get_matchup(season: int, week: int):
+    live_service.touch_last_viewed()
     try:
-        return get_current_team_matchup(season, week)
+        return live_service.overlay_matchup(get_current_team_matchup(season, week))
     except NoMatchupFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ESPNTimeoutError as e:
@@ -86,6 +92,23 @@ def get_matchup(season: int, week: int):
     except Exception as e:
         logger.error(f"Failed to compute matchup for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to compute matchup: {str(e)}")
+
+
+@matchup_router.get("/feed", response_model=MatchupFeedResponse)
+def get_matchup_feed(
+    season: int,
+    week: int,
+    limit: int = Query(50, ge=1, le=200),
+    before: Optional[str] = None,
+):
+    """Plays and recent news for both sides' players, newest first. `season` is accepted for
+    symmetry with the other matchup routes; the snapshot is only ever the poller's week."""
+    live_service.touch_last_viewed()
+    try:
+        return live_service.load_feed(week, limit, before)
+    except Exception as e:
+        logger.error(f"Failed to build matchup feed for season={season} week={week}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to build matchup feed: {str(e)}")
 
 
 class ScoreboardTeamInfo(BaseModel):

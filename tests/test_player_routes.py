@@ -15,6 +15,7 @@ ESPN_JSON = {"pos_rank": 12, "percent_owned": 91.0, "percent_started": 80.0, "pe
 @pytest.fixture(autouse=True)
 def _no_espn_ownership(monkeypatch):
     monkeypatch.setattr(players_service, "load_latest_espn_ownership", lambda *a, **k: {})
+    monkeypatch.setattr(players_service, "_played_weeks", lambda *a, **k: [])
 
 
 @contextmanager
