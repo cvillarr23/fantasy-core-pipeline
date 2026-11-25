@@ -4,13 +4,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src import espn_scoring
 from src.services import live_service
 
 NOW = datetime(2026, 11, 23, 18, 0, 0, tzinfo=timezone.utc)
 LIVE_EVENT, FINAL_EVENT = "401", "402"
 
 LIVE_GAME = {
-    "event_id": LIVE_EVENT, "status": "in_progress", "period": 3, "clock": "8:42",
+    "event_id": LIVE_EVENT, "status": "in_progress", "period": 3, "clock": "8:42", "kickoff": "2026-11-23T18:00Z",
     "home": {"abbr": "ATL", "score": 17}, "away": {"abbr": "TB", "score": 14},
     "possession": "ATL", "yard_line": "TB 12", "red_zone": True,
 }
@@ -21,10 +22,26 @@ FINAL_GAME = {
 }
 
 
+RULES = espn_scoring.rule_points({"scoringItems": [
+    {"statId": 24, "points": 0.1}, {"statId": 25, "points": 6.0}, {"statId": 99, "points": 0, "pointsOverrides": {"16": 1.0}},
+]})
+
+
 def live_player(event_id, team_id, points, **extra):
+    """A rushing-only snapshot whose applied stats add up to `points`."""
+    scored = points is not None
     return {
         "event_id": event_id, "team": "ATL", "fantasy_team_id": team_id, "lineup_slot_id": 2,
-        "stat_line": {"rushYd": 78}, "live_points": points, "updated_at": "2026-11-23T17:59:30Z", **extra,
+        "stat_line": {"rushYd": round(points * 10)} if scored else {}, "live_points": points,
+        "applied_stats": {"24": points} if scored else {}, "applied_qty": {"24": round(points * 10)} if scored else {},
+        "position": "RB", "updated_at": "2026-11-23T17:59:30Z", **extra,
+    }
+
+
+def rush_line(points):
+    return {
+        "stat_key": "rushYd", "label": "Rushing yards", "qty": round(points * 10), "unit": "yds",
+        "rule_label": "1 pt per 10 rushing yds", "points": points,
     }
 
 
@@ -57,6 +74,7 @@ def seeded(live_redis, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _db(monkeypatch):
+    monkeypatch.setattr(live_service.scoring_service, "load_rule_points", lambda cursor: RULES)
     rows = {
         "bijan": {"name": "Bijan Robinson", "position": "RB", "team": "ATL", "espn_id": "4429795"},
         "evans": {"name": "Mike Evans", "position": "WR", "team": "TB", "espn_id": "15795"},
@@ -75,9 +93,49 @@ def test_live_player_merges_player_and_game(seeded):
     assert block == {
         "status": "in_progress", "period": 3, "clock": "8:42",
         "home_abbr": "ATL", "home_score": 17, "away_abbr": "TB", "away_score": 14,
-        "possession": "ATL", "yard_line": "TB 12", "red_zone": True,
-        "stat_line": {"rushYd": 78}, "live_points": 12.4, "updated_at": "2026-11-23T17:59:30Z",
+        "possession": "ATL", "yard_line": "TB 12", "red_zone": True, "kickoff": "2026-11-23T18:00Z",
+        "stat_line": {"rushYd": 124}, "live_points": 12.4, "breakdown": [rush_line(12.4)],
+        "updated_at": "2026-11-23T17:59:30Z",
     }
+
+
+def test_breakdown_is_null_when_the_rules_cant_be_read(seeded, monkeypatch):
+    def boom(cursor):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(live_service.scoring_service, "load_rule_points", boom)
+
+    block = live_service.load_live_blocks(["bijan"])["bijan"]
+
+    assert block["breakdown"] is None and block["live_points"] == 12.4
+
+
+def test_player_who_hasnt_scored_has_no_breakdown(seeded):
+    assert live_service.load_live_blocks(["bye"])["bye"]["breakdown"] is None
+
+
+def test_unitemized_points_show_as_an_other_line(seeded):
+    seeded.data["live:player:bijan"] = json.dumps(live_player(LIVE_EVENT, "8", 12.4, applied_stats={"24": 6.4, "9999": 6}))
+
+    lines = live_service.load_live_blocks(["bijan"])["bijan"]["breakdown"]
+
+    assert [(line["stat_key"], line["points"]) for line in lines] == [("rushYd", 6.4), ("other", 6.0)]
+
+
+# ---------------------------------------------------------------- player summary
+
+
+def test_player_summary_live_carries_the_same_breakdown(seeded):
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (11.0,)
+
+    summary = live_service.player_live_summary(cursor, "bijan")
+
+    assert summary == {
+        "live_points": 12.4, "projected_points": 11.0, "game_label": "TB 14 – 17 ATL",
+        "game_status": "in_progress", "event_id": LIVE_EVENT, "breakdown": [rush_line(12.4)],
+    }
+    assert summary["breakdown"] == live_service.load_live_blocks(["bijan"])["bijan"]["breakdown"]
 
 
 def test_final_player_has_final_status_and_no_clock(seeded):
@@ -375,7 +433,7 @@ def test_summary_projects_the_polled_season_and_week(seeded):
 
     assert live == {
         "live_points": 12.4, "projected_points": 14.5, "game_label": "TB 14 – 17 ATL",
-        "game_status": "in_progress", "event_id": LIVE_EVENT,
+        "game_status": "in_progress", "event_id": LIVE_EVENT, "breakdown": [rush_line(12.4)],
     }
     select = next(c for c in cursor.execute.call_args_list if "weekly_stats" in c.args[0])
     assert select.args[1] == ("bijan", 2026, 11)
@@ -403,3 +461,68 @@ def test_summary_is_null_once_the_poller_has_stopped(seeded):
 
     assert live_service.player_live_summary(MagicMock(), "bijan") is None
     assert live_service.load_live_blocks(["bijan"]) == {"bijan": None}
+
+
+# ---------------------------------------------------------------- game detail
+
+
+@pytest.fixture
+def game_seeded(seeded, monkeypatch):
+    """Two more players in the live game: our benched RB, who scored, and their kicker."""
+    data = seeded.data
+    data["live:player:bench"] = json.dumps(live_player(LIVE_EVENT, "8", 7.0, lineup_slot_id=20))
+    data["live:player:kicker"] = json.dumps(live_player(LIVE_EVENT, "7", None, lineup_slot_id=17))
+    data["live:player_ids"] = json.dumps(["allen", "bench", "bijan", "bye", "evans", "kicker"])
+    monkeypatch.setattr(live_service, "_projections", lambda ids, season, week: {"bijan": 15.5})
+    return seeded
+
+
+def test_game_detail_splits_starters_points_by_side(game_seeded):
+    detail = live_service.load_game_detail(LIVE_EVENT, 2026, 11)
+
+    # The benched RB's 7.0 doesn't count; their kicker hasn't scored yet and counts 0.
+    assert (detail["mine_points"], detail["theirs_points"]) == (12.4, 9.0)
+    assert detail["game"]["game_label"] == "TB 14 – 17 ATL"
+    assert detail["game"]["status"] == "in_progress"
+
+
+def test_game_detail_lists_both_rosters_ours_first_starters_first(game_seeded):
+    players = live_service.load_game_detail(LIVE_EVENT, 2026, 11)["players"]
+
+    assert [(p["player_id"], p["side"], p["slot"], p["starter"]) for p in players] == [
+        ("bijan", "mine", "RB", True),
+        ("bench", "mine", "BE", False),
+        ("evans", "theirs", "RB", True),
+        ("kicker", "theirs", "K", True),
+    ]
+    bijan = players[0]
+    assert bijan["projected_points"] == 15.5
+    assert bijan["breakdown"] == [rush_line(12.4)]
+    assert players[3]["breakdown"] is None
+
+
+def test_game_detail_has_only_that_games_plays_newest_first(game_seeded):
+    plays = live_service.load_game_detail(LIVE_EVENT, 2026, 11)["plays"]
+
+    assert [(p["play_id"], p["player_id"]) for p in plays] == [("12", "bijan"), ("11", "evans"), ("11", "bijan")]
+    assert all(p["event_id"] == LIVE_EVENT for p in plays)
+
+
+def test_game_detail_split_is_null_before_kickoff(game_seeded):
+    game_seeded.data[f"live:game:{LIVE_EVENT}"] = json.dumps({**LIVE_GAME, "status": "not_started"})
+
+    detail = live_service.load_game_detail(LIVE_EVENT, 2026, 11)
+
+    assert detail["mine_points"] is None and detail["theirs_points"] is None
+
+
+def test_game_detail_unknown_game_or_week_is_not_found(game_seeded):
+    with pytest.raises(live_service.LiveGameNotFoundError):
+        live_service.load_game_detail("nope", 2026, 11)
+    with pytest.raises(live_service.LiveGameNotFoundError):
+        live_service.load_game_detail(LIVE_EVENT, 2026, 12)
+
+
+def test_game_detail_without_redis_is_unavailable():
+    with pytest.raises(live_service.LiveSnapshotUnavailableError):
+        live_service.load_game_detail(LIVE_EVENT, 2026, 11)

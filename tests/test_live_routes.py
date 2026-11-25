@@ -1,7 +1,7 @@
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from tests.test_live_service import _db, seeded  # noqa: F401  (fixtures)
+from tests.test_live_service import LIVE_EVENT, _db, game_seeded, seeded  # noqa: F401  (fixtures)
 
 
 def test_live_players_returns_blocks_and_nulls_and_bumps_last_viewed(client, seeded):
@@ -68,3 +68,58 @@ def test_matchup_route_without_a_snapshot_has_null_live(client):
 
     assert response.status_code == 200
     assert response.json()["our_team"]["starters"][0]["live"] is None
+
+
+def test_matchup_game_route_returns_the_split_and_bumps_last_viewed(client, game_seeded):
+    response = client.get(f"/v1/matchup/games/{LIVE_EVENT}?season=2026&week=11")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["mine_points"], body["theirs_points"]) == (12.4, 9.0)
+    assert body["game"]["home"] == {"abbr": "ATL", "score": 17}
+    assert body["players"][0]["breakdown"][0]["rule_label"] == "1 pt per 10 rushing yds"
+    assert body["plays"][0]["type"] == "play"
+    assert game_seeded.data["live:last_viewed"].isdigit()
+
+
+def test_matchup_game_route_404s_for_an_unknown_game(client, game_seeded):
+    assert client.get("/v1/matchup/games/nope?season=2026&week=11").status_code == 404
+
+
+def test_matchup_game_route_503s_without_redis(client):
+    assert client.get(f"/v1/matchup/games/{LIVE_EVENT}?season=2026&week=11").status_code == 503
+
+
+def _settings_cursor(row):
+    cursor = MagicMock()
+    cursor.fetchone.return_value = row
+    context = MagicMock()
+    context.__enter__.return_value = cursor
+    return context, cursor
+
+
+def test_scoring_rules_route_explains_the_league_rules(client):
+    settings = {"scoringItems": [{"statId": 24, "points": 0.1}, {"statId": 99, "points": 0, "pointsOverrides": {"16": 1.0}}]}
+    context, cursor = _settings_cursor((2026, json.dumps(settings)))
+
+    with patch("src.services.scoring_service.get_db_cursor", return_value=context):
+        response = client.get("/v1/scoring/rules")
+
+    assert response.status_code == 200
+    assert response.json() == {"season": 2026, "rules": [
+        {"stat_key": "rushYd", "label": "Rushing yards", "category": "Rushing", "points_per": 0.1, "unit": "yds",
+         "rule_label": "1 pt per 10 rushing yds", "position": None},
+        {"stat_key": "sacks", "label": "Sacks", "category": "Defense", "points_per": 1.0, "unit": "sacks",
+         "rule_label": "1 pt per sack", "position": "D/ST"},
+    ]}
+    assert cursor.execute.call_args.args[1] == (None, None)
+
+
+def test_scoring_rules_route_404s_without_synced_settings(client):
+    context, cursor = _settings_cursor(None)
+
+    with patch("src.services.scoring_service.get_db_cursor", return_value=context):
+        response = client.get("/v1/scoring/rules?season=2025")
+
+    assert response.status_code == 404
+    assert cursor.execute.call_args.args[1] == (2025, 2025)

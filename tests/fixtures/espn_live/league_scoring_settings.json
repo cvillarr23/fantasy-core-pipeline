@@ -1,0 +1,289 @@
+{
+  "scoringType": "H2H_POINTS",
+  "scoringItems": [
+    {
+      "points": -2.0,
+      "statId": 20,
+      "pointsOverrides": {}
+    },
+    {
+      "points": -2.0,
+      "statId": 72,
+      "pointsOverrides": {}
+    },
+    {
+      "points": -1.0,
+      "statId": 85,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 0.0,
+      "statId": 89,
+      "pointsOverrides": {
+        "16": 5.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 90,
+      "pointsOverrides": {
+        "16": 4.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 91,
+      "pointsOverrides": {
+        "16": 3.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 92,
+      "pointsOverrides": {
+        "16": 1.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 95,
+      "pointsOverrides": {
+        "16": 2.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 96,
+      "pointsOverrides": {
+        "16": 2.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 97,
+      "pointsOverrides": {
+        "16": 2.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 98,
+      "pointsOverrides": {
+        "16": 2.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 99,
+      "pointsOverrides": {
+        "16": 1.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 123,
+      "pointsOverrides": {
+        "16": -1.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 124,
+      "pointsOverrides": {
+        "16": -3.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 125,
+      "pointsOverrides": {
+        "16": -5.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 128,
+      "pointsOverrides": {
+        "16": 5.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 129,
+      "pointsOverrides": {
+        "16": 3.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 130,
+      "pointsOverrides": {
+        "16": 2.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 132,
+      "pointsOverrides": {
+        "16": -1.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 133,
+      "pointsOverrides": {
+        "16": -3.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 134,
+      "pointsOverrides": {
+        "16": -5.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 135,
+      "pointsOverrides": {
+        "16": -6.0
+      }
+    },
+    {
+      "points": 0.0,
+      "statId": 136,
+      "pointsOverrides": {
+        "16": -7.0
+      }
+    },
+    {
+      "points": 0.04,
+      "statId": 3,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 0.1,
+      "statId": 24,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 0.1,
+      "statId": 42,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 1.0,
+      "statId": 53,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 1.0,
+      "statId": 86,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 1.0,
+      "statId": 209,
+      "pointsOverrides": {
+        "16": 1.0
+      }
+    },
+    {
+      "points": 2.0,
+      "statId": 19,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 2.0,
+      "statId": 26,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 2.0,
+      "statId": 44,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 2.0,
+      "statId": 206,
+      "pointsOverrides": {
+        "16": 2.0
+      }
+    },
+    {
+      "points": 3.0,
+      "statId": 80,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 4.0,
+      "statId": 4,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 4.0,
+      "statId": 77,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 5.0,
+      "statId": 198,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 6.0,
+      "statId": 25,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 6.0,
+      "statId": 43,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 6.0,
+      "statId": 63,
+      "pointsOverrides": {}
+    },
+    {
+      "points": 6.0,
+      "statId": 93,
+      "pointsOverrides": {
+        "16": 6.0
+      }
+    },
+    {
+      "points": 6.0,
+      "statId": 101,
+      "pointsOverrides": {
+        "16": 6.0
+      }
+    },
+    {
+      "points": 6.0,
+      "statId": 102,
+      "pointsOverrides": {
+        "16": 6.0
+      }
+    },
+    {
+      "points": 6.0,
+      "statId": 103,
+      "pointsOverrides": {
+        "16": 6.0
+      }
+    },
+    {
+      "points": 6.0,
+      "statId": 104,
+      "pointsOverrides": {
+        "16": 6.0
+      }
+    },
+    {
+      "points": 6.0,
+      "statId": 201,
+      "pointsOverrides": {}
+    }
+  ]
+}

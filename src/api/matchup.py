@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.schemas.espn_ownership import EspnOwnership
-from src.schemas.live import LiveBlock, MatchupFeedResponse
+from src.schemas.live import GameDetailResponse, LiveBlock, MatchupFeedResponse
 from src.services import live_service
 from src.services.matchup_service import (
     ESPNTimeoutError,
@@ -35,6 +35,9 @@ class PlayerLine(BaseModel):
     position: str
     jersey: Optional[str] = None
     slot: str
+    # The player's NFL team as an nflverse code (`WAS`, not ESPN's `WSH`), the codes the `live`
+    # block's home/away use. None when ESPN gives no team.
+    pro_team: Optional[str] = None
     points: Optional[float]
     projected_points: Optional[float]
     # The player's NFL bye week; None when the schedule couldn't be read.
@@ -107,6 +110,19 @@ def get_matchup_feed(
     except Exception as e:
         logger.error(f"Failed to build matchup feed for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to build matchup feed: {str(e)}")
+
+
+@matchup_router.get("/games/{event_id}", response_model=GameDetailResponse)
+def get_matchup_game(event_id: str, season: int, week: int):
+    """One NFL game in this week's matchup: header, each side's starters' fantasy points from
+    it, the matchup players in it with their scoring breakdown, and its plays."""
+    try:
+        return live_service.load_game_detail(event_id, season, week)
+    except live_service.LiveGameNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except live_service.LiveSnapshotUnavailableError as e:
+        logger.error(f"Live snapshot unavailable for game {event_id}: {e}")
+        raise HTTPException(status_code=503, detail="The live snapshot is unavailable")
 
 
 class ScoreboardTeamInfo(BaseModel):

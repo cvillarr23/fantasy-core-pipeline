@@ -2334,6 +2334,227 @@
         "title": "FreeAgentsResponse",
         "type": "object"
       },
+      "GameDetailResponse": {
+        "properties": {
+          "game": {
+            "$ref": "#/components/schemas/LiveGame"
+          },
+          "mine_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mine Points"
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/GamePlayer"
+            },
+            "title": "Players",
+            "type": "array"
+          },
+          "plays": {
+            "items": {
+              "$ref": "#/components/schemas/FeedItem"
+            },
+            "title": "Plays",
+            "type": "array"
+          },
+          "season": {
+            "title": "Season",
+            "type": "integer"
+          },
+          "theirs_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theirs Points"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "season",
+          "week",
+          "game",
+          "players",
+          "plays"
+        ],
+        "title": "GameDetailResponse",
+        "type": "object"
+      },
+      "GamePlayer": {
+        "description": "A matchup player (either roster, bench included) whose NFL team plays in the game.",
+        "properties": {
+          "breakdown": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ScoreBreakdownLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Breakdown"
+          },
+          "espn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Espn Id"
+          },
+          "live_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Points"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "string"
+          },
+          "player_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Name"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "projected_points": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projected Points"
+          },
+          "side": {
+            "enum": [
+              "mine",
+              "theirs"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot"
+          },
+          "starter": {
+            "title": "Starter",
+            "type": "boolean"
+          },
+          "stat_line": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat Line"
+          },
+          "team": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team"
+          }
+        },
+        "required": [
+          "player_id",
+          "side",
+          "starter"
+        ],
+        "title": "GamePlayer",
+        "type": "object"
+      },
+      "GameTeam": {
+        "properties": {
+          "abbr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Abbr"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          }
+        },
+        "title": "GameTeam",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -4280,6 +4501,20 @@
             ],
             "title": "Away Score"
           },
+          "breakdown": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ScoreBreakdownLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Breakdown"
+          },
           "clock": {
             "anyOf": [
               {
@@ -4312,6 +4547,17 @@
               }
             ],
             "title": "Home Score"
+          },
+          "kickoff": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kickoff"
           },
           "live_points": {
             "anyOf": [
@@ -4411,6 +4657,143 @@
           }
         },
         "title": "LiveBlock",
+        "type": "object"
+      },
+      "LiveGame": {
+        "description": "The poller's `live:game` snapshot.",
+        "properties": {
+          "away": {
+            "$ref": "#/components/schemas/GameTeam"
+          },
+          "clock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clock"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "game_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Game Label"
+          },
+          "home": {
+            "$ref": "#/components/schemas/GameTeam"
+          },
+          "kickoff": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kickoff"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period"
+          },
+          "possession": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Possession"
+          },
+          "red_zone": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Red Zone"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "not_started",
+                  "in_progress",
+                  "final"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "yard_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yard Line"
+          }
+        },
+        "required": [
+          "event_id",
+          "home",
+          "away"
+        ],
+        "title": "LiveGame",
         "type": "object"
       },
       "LivePlayersResponse": {
@@ -5290,6 +5673,17 @@
             "title": "Position",
             "type": "string"
           },
+          "pro_team": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pro Team"
+          },
           "projected_points": {
             "anyOf": [
               {
@@ -5335,6 +5729,20 @@
       "PlayerLiveSummary": {
         "description": "The `live` field of a player summary (what the web UI's popover reads).",
         "properties": {
+          "breakdown": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ScoreBreakdownLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Breakdown"
+          },
           "event_id": {
             "anyOf": [
               {
@@ -7090,6 +7498,63 @@
         "title": "ScheduleWeek",
         "type": "object"
       },
+      "ScoreBreakdownLine": {
+        "description": "One stat's share of a player's live points (src/espn_scoring.py). `points` is ESPN's own\nfigure, so the lines sum to `live_points` (within 0.05). A `stat_key` of `other` carries\nwhatever ESPN scored that isn't itemized, with null `qty` and `unit`.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "points": {
+            "title": "Points",
+            "type": "number"
+          },
+          "qty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qty"
+          },
+          "rule_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Label"
+          },
+          "stat_key": {
+            "title": "Stat Key",
+            "type": "string"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          }
+        },
+        "required": [
+          "stat_key",
+          "label",
+          "points"
+        ],
+        "title": "ScoreBreakdownLine",
+        "type": "object"
+      },
       "ScoreCoverage": {
         "properties": {
           "nfl_schedule_unavailable_weeks": {
@@ -7391,6 +7856,83 @@
           "projected"
         ],
         "title": "ScoreboardTeamInfo",
+        "type": "object"
+      },
+      "ScoringRule": {
+        "description": "One league rule: `points_per` points per unit of the stat, or, for a range stat like\n\"7\u201313 points allowed\", once when it happens.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "points_per": {
+            "title": "Points Per",
+            "type": "number"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "rule_label": {
+            "title": "Rule Label",
+            "type": "string"
+          },
+          "stat_key": {
+            "title": "Stat Key",
+            "type": "string"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          }
+        },
+        "required": [
+          "stat_key",
+          "label",
+          "category",
+          "points_per",
+          "rule_label"
+        ],
+        "title": "ScoringRule",
+        "type": "object"
+      },
+      "ScoringRulesResponse": {
+        "properties": {
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/ScoringRule"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "season": {
+            "title": "Season",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "season",
+          "rules"
+        ],
+        "title": "ScoringRulesResponse",
         "type": "object"
       },
       "ShadowPolicy": {
@@ -11978,6 +12520,64 @@
         "summary": "Get Matchup Feed"
       }
     },
+    "/v1/matchup/games/{event_id}": {
+      "get": {
+        "description": "One NFL game in this week's matchup: header, each side's starters' fantasy points from\nit, the matchup players in it with their scoring breakdown, and its plays.",
+        "operationId": "get_matchup_game_v1_matchup_games__event_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "title": "Event Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "week",
+            "required": true,
+            "schema": {
+              "title": "Week",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Matchup Game"
+      }
+    },
     "/v1/matchup/roster": {
       "get": {
         "operationId": "get_lineup_roster_v1_matchup_roster_get",
@@ -12743,6 +13343,53 @@
           }
         },
         "summary": "Get Scoreboard"
+      }
+    },
+    "/v1/scoring/rules": {
+      "get": {
+        "description": "The league's rules in plain English. Without `season`, the latest synced season.",
+        "operationId": "get_scoring_rules_endpoint_v1_scoring_rules_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "season",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Season"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoringRulesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Scoring Rules Endpoint"
       }
     },
     "/v1/stats/vorp": {

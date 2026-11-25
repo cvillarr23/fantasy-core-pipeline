@@ -179,6 +179,8 @@ def test_player_carries_espns_live_points_and_stat_line(league):
     assert gibbs["value"]["live_points"] == 27.8
     assert gibbs["value"]["stat_line"] == {"rushYd": 98, "rushTD": 2, "rec": 4, "recYd": 20}
     assert gibbs["value"]["applied_stats"] == {"53": 4, "24": 9.8, "25": 12, "42": 2}
+    assert gibbs["value"]["applied_qty"] == {"53": 4, "24": 98, "25": 2, "42": 20}
+    assert gibbs["value"]["position"] == "RB"
 
 
 def test_player_who_hasnt_played_has_unknown_points_not_zero(league):
@@ -186,6 +188,7 @@ def test_player_who_hasnt_played_has_unknown_points_not_zero(league):
 
     assert brown["value"]["live_points"] is None
     assert brown["value"]["stat_line"] == {}
+    assert brown["value"]["applied_qty"] == {}
 
 
 def test_dst_stat_line(league):

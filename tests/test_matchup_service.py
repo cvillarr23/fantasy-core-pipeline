@@ -67,6 +67,7 @@ def test_shape_player_line_maps_box_player_fields():
         "position": "RB",
         "jersey": "22",
         "slot": "RB",
+        "pro_team": None,
         "points": 14.5,
         "projected_points": 11.2,
         "bye_week": None,
@@ -84,6 +85,13 @@ def test_shape_player_line_carries_the_status_of_the_players_nfl_game():
     done = matchup_service._shape_player_line(_make_box_player(proTeam="DAL"), game_statuses=statuses)
 
     assert (live["game_status"], done["game_status"]) == ("in_progress", "final")
+
+
+def test_shape_player_line_carries_the_nflverse_team_code():
+    """The live game blocks use nflverse codes, so the line's team must too for vs/@ and W/L."""
+    line = matchup_service._shape_player_line(_make_box_player(proTeam="WSH"))
+
+    assert line["pro_team"] == "WAS"
 
 
 def test_shape_player_line_has_no_game_status_for_a_team_with_no_game_this_week():

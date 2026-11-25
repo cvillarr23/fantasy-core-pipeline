@@ -138,9 +138,11 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 | `GET` | `/v1/livez` | Liveness probe; checks no dependencies. | No |  |
 | `GET` | `/v1/matchup` | Show our matchup for a season and week. | No |  |
 | `GET` | `/v1/matchup/feed` | List live plays and news for both sides' players, newest first. | No |  |
+| `GET` | `/v1/matchup/games/{event_id}` | Show one NFL game's fantasy split, players with scoring breakdowns, and plays. | No |  |
 | `GET` | `/v1/matchup/roster` | Show a matchup roster with swap and IR suggestions. | No |  |
 | `GET` | `/v1/matchup/scoreboard` | Show every matchup's score for a season and week. | No |  |
 | `GET` | `/v1/scoreboard` | Same as `/v1/matchup/scoreboard`. | No |  |
+| `GET` | `/v1/scoring/rules` | List the league's scoring rules in plain English. | No |  |
 
 ### Players and stats
 

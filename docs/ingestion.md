@@ -87,7 +87,7 @@ A failed fetch is retried 3 times. A failed tick logs and the loop carries on.
 | Key | Value | TTL |
 |---|---|---|
 | `live:game:{event_id}` | `{event_id, status: not_started\|in_progress\|final, detail, period, clock, home: {abbr, score}, away: {abbr, score}, possession, yard_line, red_zone, kickoff, updated_at}`. `period`, `clock`, `possession` and `yard_line` are null unless the game is live. Scores are null before kickoff. | 6h |
-| `live:player:{player_id}` | `{event_id, team, fantasy_team_id, lineup_slot_id, stat_line, live_points, applied_stats, updated_at}`, for every player on either matchup roster with a `players.espn_id` match. | 6h |
+| `live:player:{player_id}` | `{event_id, team, fantasy_team_id, lineup_slot_id, position, stat_line, live_points, applied_stats, applied_qty, updated_at}`, for every player on either matchup roster with a `players.espn_id` match. | 6h |
 | `live:plays:{event_id}` | A list, newest first, capped at 300: `{play_id, period, clock, text, player_ids, scoring, recorded_at, fantasy_delta}`. Only plays that involve a matchup player are kept. `recorded_at` is the tick that first saw the play (ESPN gives no wall time) and `fantasy_delta` maps each `player_id` to the change in that player's `live_points` since the previous tick. Both are carried forward unchanged on later ticks. | 6h |
 | `live:player_ids` | A JSON list of the `player_id`s written to `live:player` this tick, sorted. The feed reads players through it instead of scanning keys. | 6h |
 | `live:updated_at` | ISO-8601 time of the last successful tick. | 6h |
@@ -97,6 +97,8 @@ A failed fetch is retried 3 times. A failed tick logs and the loop carries on.
 Team codes are nflverse codes (`WAS`, not ESPN's `WSH`), the same as `players.team`.
 
 **Points are ESPN's own.** `live_points` is the actual stat row's `appliedTotal` (`statSourceId` 0), which ESPN updates in game and which matches the matchup score. `applied_stats` is that row's points per ESPN stat id. `stat_line` is its raw counts, named: `passYd`, `passTD`, `int`, `rushYd`, `rushTD`, `rec`, `recYd`, `recTD`, `fumLost` and `twoPt`, plus kicker and D/ST stats. A stat ESPN didn't report is left out. A player who hasn't played yet has `live_points: null`, never 0.
+
+**Scoring breakdown.** `applied_qty` is the raw count behind each `applied_stats` entry (98 for 98 rushing yards), and `position` is ESPN's default position, which picks the league's per-position rules (every D/ST stat is a `pointsOverrides["16"]` rule). The live API turns these into `breakdown` lines (`src/espn_scoring.py`) at read time, labelled from `league_settings.scoring_settings`: `points` is always ESPN's own `applied_stats` value, so the lines add up to `live_points`. An unknown stat id is left out and logged, and anything that doesn't add up shows as an `other` line. `GET /v1/scoring/rules` lists the same rules in plain English, and `GET /v1/matchup/games/{event_id}` splits one game's points by side, counting starters only.
 
 **Plays are matched by name.** ESPN's plays carry no athlete ids. A player is tagged when the play text has his play-by-play name (`J.Gibbs`, `Ja.Chase`, `A.St. Brown`) or his full name (scoring plays), without a Jr./III suffix. A tag only counts when the player's team is one of the play's teams. A D/ST is tagged on turnovers, sacks, safeties and scores while its team is on defense (a score against it counts toward points allowed), and on its own return touchdowns. Two teammates with the same initial and last name would both be tagged.
 

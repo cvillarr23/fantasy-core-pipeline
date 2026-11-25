@@ -24,9 +24,14 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
+from espn_api.football.constant import POSITION_MAP
+
 from src.database import get_db_cursor, get_redis_client
-from src.ingestion.live_games import GAME_KEY, HEALTH_KEY, LAST_VIEWED_KEY, PLAYER_IDS_KEY, PLAYER_KEY, PLAYS_KEY
-from src.services import news_service
+from src.espn_scoring import score_breakdown
+from src.ingestion.live_games import (
+    GAME_KEY, HEALTH_KEY, LAST_VIEWED_KEY, NOT_STARTED, PLAYER_IDS_KEY, PLAYER_KEY, PLAYS_KEY,
+)
+from src.services import news_service, scoring_service
 
 logger = logging.getLogger("LiveService")
 
@@ -34,6 +39,16 @@ LAST_VIEWED_TTL_SECONDS = 10 * 60
 NEWS_WINDOW = timedelta(hours=2)
 NEWS_CURSOR_PREFIX = "news:"
 EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
+# ESPN lineup slots whose points don't count toward the matchup score.
+NON_SCORING_SLOT_IDS = {20, 21}
+
+
+class LiveGameNotFoundError(LookupError):
+    """The poller has no snapshot of that game for the requested week."""
+
+
+class LiveSnapshotUnavailableError(RuntimeError):
+    """Redis can't be read, so whether the game exists is unknown."""
 
 
 # ---------------------------------------------------------------- redis access
@@ -93,10 +108,28 @@ def _snapshots(r, player_ids: list) -> dict:
     }
 
 
+# ---------------------------------------------------------------- scoring breakdown
+
+
+def _load_rule_points() -> dict | None:
+    """The league's rule index for the breakdown's labels, or None (no breakdown) when the
+    settings can't be read. Its own cursor, so a failure never aborts the caller's transaction."""
+    try:
+        with get_db_cursor() as cursor:
+            return scoring_service.load_rule_points(cursor)
+    except Exception as e:
+        logger.warning(f"Scoring rules unavailable; live breakdowns left out: {e}")
+        return None
+
+
+def _breakdown(player: dict, rules: dict | None):
+    return score_breakdown(player, rules) if rules is not None else None
+
+
 # ---------------------------------------------------------------- the live block
 
 
-def _live_block(player: dict, game: dict | None) -> dict:
+def _live_block(player: dict, game: dict | None, rules: dict | None) -> dict:
     game = game or {}
     home, away = game.get("home") or {}, game.get("away") or {}
     return {
@@ -110,8 +143,10 @@ def _live_block(player: dict, game: dict | None) -> dict:
         "possession": game.get("possession"),
         "yard_line": game.get("yard_line"),
         "red_zone": game.get("red_zone"),
+        "kickoff": game.get("kickoff"),
         "stat_line": player.get("stat_line"),
         "live_points": player.get("live_points"),
+        "breakdown": _breakdown(player, rules),
         "updated_at": player.get("updated_at"),
     }
 
@@ -129,8 +164,11 @@ def _game_label(game: dict | None) -> str | None:
 
 
 def _live_blocks(r, player_ids: list) -> dict:
-    """player id -> live block, for the players with a snapshot."""
-    return {player_id: _live_block(player, game) for player_id, (player, game) in _snapshots(r, player_ids).items()}
+    """player id -> live block, for the players with a snapshot. The league's rules are read
+    once, and only when there is a snapshot to break down."""
+    snapshots = _snapshots(r, player_ids)
+    rules = _load_rule_points() if snapshots else None
+    return {player_id: _live_block(player, game, rules) for player_id, (player, game) in snapshots.items()}
 
 
 def load_live_blocks(player_ids: list) -> dict:
@@ -240,6 +278,7 @@ def player_live_summary(cursor, player_id: str) -> dict | None:
         "game_label": _game_label(game),
         "game_status": (game or {}).get("status"),
         "event_id": player.get("event_id"),
+        "breakdown": _breakdown(player, _load_rule_points()),
     }
 
 
@@ -459,3 +498,103 @@ def load_feed(season: int, week: int, limit: int, before: str | None = None, now
     # Stable, so plays from one tick keep the poller's newest-first order.
     items.sort(key=lambda item: _moment(item["at"]), reverse=True)
     return _page(items, limit, before, before_at)
+
+
+# ---------------------------------------------------------------- game detail
+
+
+def _game_header(game: dict) -> dict:
+    return {**game, "game_label": _game_label(game)}
+
+
+def _projections(player_ids: list, season: int, week: int) -> dict:
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT player_id, projected_points FROM weekly_stats WHERE player_id = ANY(%s) AND season = %s AND week = %s;",
+            (player_ids, season, week),
+        )
+        return dict(cursor.fetchall())
+
+
+def _is_starter(live_player: dict) -> bool:
+    slot_id = live_player.get("lineup_slot_id")
+    return slot_id is not None and slot_id not in NON_SCORING_SLOT_IDS
+
+
+def _game_player(player_id, live_player, rows, projections, rules) -> dict:
+    slot_id = live_player.get("lineup_slot_id")
+    return {
+        **_who(player_id, live_player, rows),
+        "slot": POSITION_MAP.get(slot_id) if slot_id is not None else None,
+        "starter": _is_starter(live_player),
+        "live_points": live_player.get("live_points"),
+        "projected_points": projections.get(player_id),
+        "stat_line": live_player.get("stat_line"),
+        "breakdown": _breakdown(live_player, rules),
+    }
+
+
+def _player_order(player: dict):
+    """Ours first, starters before bench, most points first."""
+    points = player["live_points"]
+    return (player["side"] != "mine", not player["starter"], points is None, -(points or 0))
+
+
+def _side_points(players: list, side: str, status: str | None):
+    """What one side's starters scored in this game; bench points never count. Null before
+    kickoff, when nothing is known yet; a starter with no points yet counts 0."""
+    if status == NOT_STARTED:
+        return None
+    return round(sum(p["live_points"] or 0 for p in players if p["side"] == side and p["starter"]), 2)
+
+
+def _game_snapshot(r, event_id: str, season: int, week: int):
+    """`(live:game value, {player id: live:player value in that game})`, while the poller runs
+    this season and week."""
+    if _live_health(r, season, week) is None:
+        raise LiveGameNotFoundError(f"No live snapshot for {season} week {week}.")
+    raw_game = r.get(GAME_KEY.format(event_id=event_id))
+    if not raw_game:
+        raise LiveGameNotFoundError(f"No live snapshot of game {event_id}.")
+    in_game = {pid: p for pid, p in _indexed_live_players(r).items() if p.get("event_id") == event_id}
+    return json.loads(raw_game), in_game
+
+
+def _read_game_snapshot(r, event_id: str, season: int, week: int):
+    """`_game_snapshot`, with a Redis failure raised as LiveSnapshotUnavailableError."""
+    if r is None:
+        raise LiveSnapshotUnavailableError("The live snapshot can't be read.")
+    try:
+        return _game_snapshot(r, event_id, season, week)
+    except LiveGameNotFoundError:
+        raise
+    except Exception as e:
+        raise LiveSnapshotUnavailableError(f"The live snapshot can't be read: {e}") from e
+
+
+def load_game_detail(event_id: str, season: int, week: int) -> dict:
+    """One NFL game in this week's matchup: its header, each side's starters' points from it,
+    every matchup player in it with their breakdown, and its plays (the feed's item shape,
+    newest first)."""
+    r = _redis()
+    game, in_game = _read_game_snapshot(r, event_id, season, week)
+    _touch_last_viewed(r)
+    ids = sorted(in_game)
+    rows = _player_rows(ids) if ids else {}
+    projections = _projections(ids, season, week) if ids else {}
+    rules = _load_rule_points() if ids else None
+    players = sorted(
+        (_game_player(pid, in_game[pid], rows, projections, rules) for pid in ids),
+        key=_player_order,
+    )
+    plays = _play_items(r, [event_id], in_game, rows)
+    plays.sort(key=lambda item: _moment(item["at"]), reverse=True)
+    return {
+        "season": season,
+        "week": week,
+        "game": _game_header(game),
+        "mine_points": _side_points(players, "mine", game.get("status")),
+        "theirs_points": _side_points(players, "theirs", game.get("status")),
+        "players": players,
+        "plays": plays,
+    }
