@@ -556,6 +556,10 @@ def test_kickoff_lead_matches_the_live_pollers_lookahead():
         ({"lead": "20m", "seasons": ["missing"]}, None, "unknown season"),
         ({"lead": "20m", "seasons": ["regular"]}, {"week": "int"}, "requires week"),
         ({"lead": "0m", "seasons": ["regular"]}, None, "positive"),
+        ({"lead": -60, "seasons": ["regular"]}, None, "positive"),
+        ({"lead": "-5m", "seasons": ["regular"]}, None, "duration must use"),
+        ({"lead": "20m", "catch_up": "0s", "seasons": ["regular"]}, None, "positive"),
+        ({"lead": "20m", "fallback_every": 0, "seasons": ["regular"]}, None, "positive"),
     ],
 )
 def test_kickoffs_reject_bad_settings(kickoffs, params, message):
