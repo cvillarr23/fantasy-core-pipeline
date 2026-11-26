@@ -4526,6 +4526,17 @@
             ],
             "title": "Clock"
           },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
           "home_abbr": {
             "anyOf": [
               {

@@ -133,6 +133,7 @@ def _live_block(player: dict, game: dict | None, rules: dict | None) -> dict:
     game = game or {}
     home, away = game.get("home") or {}, game.get("away") or {}
     return {
+        "event_id": player.get("event_id"),
         "status": game.get("status"),
         "period": game.get("period"),
         "clock": game.get("clock"),
