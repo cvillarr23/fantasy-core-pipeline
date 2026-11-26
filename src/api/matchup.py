@@ -29,8 +29,12 @@ scoreboard_router = APIRouter()
 
 
 class PlayerLine(BaseModel):
+    # ESPN's player id, the same as espn_id.
     player_id: str
     espn_id: str
+    # players.player_id, which /v1/players/{id}/summary, /v1/news/recent and /v1/live/players
+    # take. None when no player row matches espn_id or the lookup fails.
+    core_player_id: Optional[str] = None
     name: str
     position: str
     jersey: Optional[str] = None
@@ -163,8 +167,11 @@ def get_scoreboard(season: int, week: int):
 
 
 class LineupPlayerLine(BaseModel):
+    # ESPN's player id, the same as espn_id.
     player_id: str
     espn_id: str
+    # Same meaning as PlayerLine.core_player_id.
+    core_player_id: Optional[str] = None
     name: str
     position: str
     jersey: Optional[str] = None

@@ -19,6 +19,7 @@ from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
     evaluate_lineup,
 )
+from src.services.live_service import player_ids_by_espn_id
 from src.services.read_cache import cached, league_key
 from src.services.roster_service import compute_roster_deficits
 from src.services.score_history import load_completed_week, stored_scoreboard
@@ -202,6 +203,35 @@ def _apply_rumor_signal(player_lines: list, signal_by_espn_id: dict) -> None:
         line["rumor_suggested_action"] = signal["suggested_action"]
 
 
+def _core_player_ids(player_lines: list) -> dict:
+    """espn_id -> players.player_id for these lines. Empty when the lookup fails: the id only
+    lets a client make per-player reads, so a database failure must not fail the page."""
+    try:
+        return player_ids_by_espn_id([line["espn_id"] for line in player_lines])
+    except Exception as exc:
+        logger.warning(f"No core_player_id on player lines: could not look up players: {exc}")
+        return {}
+
+
+def _apply_core_player_ids(player_lines: list) -> None:
+    """Mutates player_lines in place. `player_id` stays ESPN's, which lineup submissions use;
+    the id that the summary, news and live reads take goes beside it."""
+    player_ids = _core_player_ids(player_lines)
+    for line in player_lines:
+        line["core_player_id"] = player_ids.get(line["espn_id"])
+
+
+def _with_core_player_ids(matchup: dict) -> dict:
+    """Both sides' lines identified with one lookup, for live and stored weeks alike."""
+    _apply_core_player_ids([
+        line
+        for side in ("our_team", "opponent")
+        for group in ("starters", "bench")
+        for line in matchup[side][group]
+    ])
+    return matchup
+
+
 def _split_starters_bench(
     lineup: list, bye_weeks: dict | None = None, game_statuses: dict | None = None
 ) -> tuple[list, list]:
@@ -328,10 +358,10 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
         def shape(side):
             return {key: side[key] for key in ("team", "starters", "bench")}
 
-        return {
+        return _with_core_player_ids({
             "season": season, "week": week,
             "our_team": shape(ours), "opponent": shape(opponent),
-        }
+        })
     box_scores = _fetch_box_scores(season, week)
 
     matched_box = None
@@ -376,7 +406,9 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
     swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
     _apply_badges(our_side["starters"], deficits_by_position, swap_suggestions)
 
-    return {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
+    return _with_core_player_ids(
+        {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
+    )
 
 
 def _shape_scoreboard_team(team, score: float, projected: float, win_probability: float | None = None) -> dict | None:
@@ -464,6 +496,8 @@ def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     rumor_signal_by_espn_id = _load_rumor_signal_by_espn_id(our_team_id)
     _apply_rumor_signal(starters, rumor_signal_by_espn_id)
     _apply_rumor_signal(bench, rumor_signal_by_espn_id)
+
+    _apply_core_player_ids(starters + bench)
 
     slot_counts = _load_lineup_slot_counts(season)
     ir_blocking = _apply_ir_hints(starters + bench, open_ir_slots(slot_counts or {}, 0))

@@ -201,7 +201,7 @@ def _matchup_lines(matchup: dict) -> list:
     ]
 
 
-def _player_ids_by_espn_id(espn_ids: list) -> dict:
+def player_ids_by_espn_id(espn_ids: list) -> dict:
     with get_db_cursor() as cursor:
         cursor.execute("SELECT espn_id, player_id FROM players WHERE espn_id = ANY(%s);", (espn_ids,))
         return {str(espn_id): player_id for espn_id, player_id in cursor.fetchall()}
@@ -226,7 +226,7 @@ def _side_with_live(side: dict, blocks_by_espn_id: dict) -> dict:
 
 def _blocks_by_espn_id(r, matchup: dict) -> dict:
     espn_ids = sorted({line["espn_id"] for line in _matchup_lines(matchup)})
-    player_by_espn = _player_ids_by_espn_id(espn_ids)
+    player_by_espn = player_ids_by_espn_id(espn_ids)
     blocks = _live_blocks(r, sorted(set(player_by_espn.values())))
     return {espn_id: blocks.get(player_id) for espn_id, player_id in player_by_espn.items()}
 

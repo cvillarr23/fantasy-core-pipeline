@@ -176,7 +176,7 @@ def matchup(week=11, season=2026):
 
 
 def test_overlay_adds_live_and_aligns_game_status(seeded, monkeypatch):
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan", "15795": "evans"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan", "15795": "evans"})
     original = matchup()
 
     result = live_service.overlay_matchup(original)
@@ -191,14 +191,14 @@ def test_overlay_adds_live_and_aligns_game_status(seeded, monkeypatch):
 
 
 def test_overlay_skips_another_weeks_snapshot(seeded, monkeypatch):
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
     original = matchup(week=12)
 
     assert live_service.overlay_matchup(original) is original
 
 
 def test_overlay_skips_the_same_week_of_another_season(seeded, monkeypatch):
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
     original = matchup(season=2025)
 
     assert live_service.overlay_matchup(original) is original
@@ -206,7 +206,7 @@ def test_overlay_skips_the_same_week_of_another_season(seeded, monkeypatch):
 
 def test_health_without_a_season_is_not_live(seeded, monkeypatch):
     # A poller from before `season` was written can't say which season it polls.
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
     seeded.data["live:health"] = json.dumps({"week": 11, "tracked_events": [LIVE_EVENT]})
     original = matchup()
 
@@ -220,7 +220,7 @@ def test_overlay_survives_a_lookup_failure(seeded, monkeypatch):
     def boom(ids):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", boom)
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", boom)
     original = matchup()
 
     assert live_service.overlay_matchup(original) is original
@@ -390,7 +390,7 @@ def test_touch_last_viewed_never_raises():
 
 
 def test_live_readers_mark_the_page_viewed(seeded, monkeypatch):
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
     for read in (
         lambda: live_service.load_live_blocks(["bijan"]),
         lambda: live_service.overlay_matchup(matchup()),
@@ -402,7 +402,7 @@ def test_live_readers_mark_the_page_viewed(seeded, monkeypatch):
 
 
 def test_another_season_or_week_is_not_a_view(seeded, monkeypatch):
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
 
     live_service.overlay_matchup(matchup(season=2025))
     live_service.overlay_matchup(matchup(week=12))
@@ -412,7 +412,7 @@ def test_another_season_or_week_is_not_a_view(seeded, monkeypatch):
 
 
 def test_nothing_is_a_view_once_the_poller_has_stopped(seeded, monkeypatch):
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
     del seeded.data["live:health"]
 
     live_service.load_live_blocks(["bijan"])
