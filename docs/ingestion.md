@@ -153,6 +153,8 @@ By default it processes the last **completed** regular-season week: every game f
 | `fantasy_team_week_scores` | Team and week | `(league_id, season, week, team_id)` |
 | `fantasy_player_week_scores` | Player, team and week | `(league_id, season, week, team_id, espn_id)` |
 
+Each player's payload keeps ESPN's `applied_stats` (points per stat id) and `applied_qty` (the count behind each) from the actual stat row, the same fields the live poller writes. `GET /v1/matchup` turns them into a completed week's `breakdown` lines at read time. Because every run rewrites every completed week, weeks stored before these fields were kept gain them on the next run.
+
 It also sets `weekly_stats.actual_points`, with `actual_points_source` and `actual_points_updated_at` recording where each value came from. Use `--dry-run` to validate a week without opening the database.
 
 ## Related

@@ -208,6 +208,8 @@ Each player line also carries `live`, the poller's snapshot of that player's gam
 
 `GET /v1/live/players?ids=a,b,c` returns the same object for players outside the matchup page (Lineup, Waivers). The ids are `players.player_id` (the Sleeper namespace, as in `/v1/players/{id}/summary`), at most 100. The response is `{"players": {id: live | null}}`. Matchup lines carry ESPN ids, so they get their `live` block from the matchup route itself.
 
+A stored completed week's lines also carry `breakdown`: the same lines as `live.breakdown`, built from the ESPN per-stat points and counts `sync_actual_scores` stores, so a past week can be itemized after the poller has stopped. The lines sum to the line's `points` (ESPN's actual score) within 0.05, with an `other` line for anything not itemized. It is `null` for a live or upcoming week (read `live.breakdown` instead), for a week stored before the job kept per-stat points, and when the league's scoring rules can't be read.
+
 Live data is served only while the poller is running: its snapshot keys stay in Redis for hours after it exits, so `/v1/live/players` and the player summary's `live` are `null` once its 10-minute health key has expired. The matchup overlay and the feed also need the poller to be on the requested `season` and `week`.
 
 The live routes (`/v1/matchup`, `/v1/matchup/feed`, `/v1/live/players`, and the player summary) write `live:last_viewed`, which moves the poller from 180s to 30s ticks, only when they returned live data. A matchup for another season or week doesn't count. None of them calls ESPN.

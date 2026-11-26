@@ -5612,6 +5612,20 @@
       },
       "PlayerLine": {
         "properties": {
+          "breakdown": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ScoreBreakdownLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Breakdown"
+          },
           "bye_week": {
             "anyOf": [
               {

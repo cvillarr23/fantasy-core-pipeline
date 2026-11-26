@@ -144,6 +144,19 @@ def test_missing_actual_is_unknown_and_negative_dst_is_preserved(snapshot):
     assert by_id["-1"]["slot"] == "BE"
 
 
+def test_player_keeps_espns_points_and_counts_per_stat(snapshot):
+    entry = snapshot["schedule"][0]["home"]["rosterForCurrentScoringPeriod"]["entries"][0]
+    entry["playerPoolEntry"]["player"]["stats"][0].update(
+        appliedStats={"24": 7.8, "25": 6}, stats={"24": 78, "25": 1, "23": 15}
+    )
+    data = sync.shape_week(snapshot, box_for(snapshot), scoreboard(), "123", 2026, 4)
+    by_id = {p["espn_id"]: p for p in data["players"]}
+    assert by_id["100"]["applied_stats"] == {"24": 7.8, "25": 6}
+    assert by_id["100"]["applied_qty"] == {"24": 78, "25": 1}
+    assert by_id["200"]["applied_stats"] == {}
+    assert by_id["200"]["applied_qty"] == {}
+
+
 def test_missing_starter_actual_fails_without_inventing_zero(snapshot):
     snapshot["schedule"][0]["home"]["rosterForCurrentScoringPeriod"]["entries"][0][
         "playerPoolEntry"

@@ -5,7 +5,7 @@ Thin controller over src.services.matchup_service, mirroring src/api/roster.py's
 pattern of splitting a REST surface out of the MCP-only layer.
 """
 import logging
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from espn_api.requests.espn_requests import ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError
 from fastapi import APIRouter, HTTPException, Query
@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.schemas.espn_ownership import EspnOwnership
-from src.schemas.live import GameDetailResponse, LiveBlock, MatchupFeedResponse
+from src.schemas.live import GameDetailResponse, LiveBlock, MatchupFeedResponse, ScoreBreakdownLine
 from src.services import live_service
 from src.services.matchup_service import (
     ESPNTimeoutError,
@@ -52,6 +52,11 @@ class PlayerLine(BaseModel):
     # The poller's live snapshot (score, clock, stat line, live points). None when there is none
     # for this player; when set, `live.status` and `game_status` agree.
     live: Optional[LiveBlock] = None
+    # A stored completed week's scoring breakdown, from the ESPN stats `sync_actual_scores`
+    # kept; the lines sum to `points` (within 0.05). None for a live or upcoming week (see
+    # `live.breakdown`), a week stored before per-stat points were kept, or when the league's
+    # rules can't be read.
+    breakdown: Optional[List[ScoreBreakdownLine]] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None

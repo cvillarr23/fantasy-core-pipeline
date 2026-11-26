@@ -111,14 +111,14 @@ def _snapshots(r, player_ids: list) -> dict:
 # ---------------------------------------------------------------- scoring breakdown
 
 
-def _load_rule_points() -> dict | None:
+def load_rule_points_or_none() -> dict | None:
     """The league's rule index for the breakdown's labels, or None (no breakdown) when the
     settings can't be read. Its own cursor, so a failure never aborts the caller's transaction."""
     try:
         with get_db_cursor() as cursor:
             return scoring_service.load_rule_points(cursor)
     except Exception as e:
-        logger.warning(f"Scoring rules unavailable; live breakdowns left out: {e}")
+        logger.warning(f"Scoring rules unavailable; breakdowns left out: {e}")
         return None
 
 
@@ -168,7 +168,7 @@ def _live_blocks(r, player_ids: list) -> dict:
     """player id -> live block, for the players with a snapshot. The league's rules are read
     once, and only when there is a snapshot to break down."""
     snapshots = _snapshots(r, player_ids)
-    rules = _load_rule_points() if snapshots else None
+    rules = load_rule_points_or_none() if snapshots else None
     return {player_id: _live_block(player, game, rules) for player_id, (player, game) in snapshots.items()}
 
 
@@ -279,7 +279,7 @@ def player_live_summary(cursor, player_id: str) -> dict | None:
         "game_label": _game_label(game),
         "game_status": (game or {}).get("status"),
         "event_id": player.get("event_id"),
-        "breakdown": _breakdown(player, _load_rule_points()),
+        "breakdown": _breakdown(player, load_rule_points_or_none()),
     }
 
 
@@ -583,7 +583,7 @@ def load_game_detail(event_id: str, season: int, week: int) -> dict:
     ids = sorted(in_game)
     rows = _player_rows(ids) if ids else {}
     projections = _projections(ids, season, week) if ids else {}
-    rules = _load_rule_points() if ids else None
+    rules = load_rule_points_or_none() if ids else None
     players = sorted(
         (_game_player(pid, in_game[pid], rows, projections, rules) for pid in ids),
         key=_player_order,

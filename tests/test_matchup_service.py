@@ -765,3 +765,52 @@ def test_stored_matchup_lines_carry_core_player_ids(monkeypatch):
 
     assert result["our_team"]["starters"][0]["core_player_id"] == "9221"
     assert result["opponent"]["starters"][0]["core_player_id"] == "4037"
+
+
+def _stored_side(team_id, opponent_id, line):
+    return {"team_id": team_id, "opponent_team_id": opponent_id, "team": {}, "starters": [line], "bench": []}
+
+
+def test_stored_matchup_lines_carry_a_breakdown_from_espns_stored_stats(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+    monkeypatch.setattr(matchup_service, "load_rule_points_or_none", lambda: {(24, None): 0.1, (25, None): 6.0})
+    ours = {
+        "player_id": "1", "espn_id": "1", "position": "RB", "actual_points": 15.8, "points": 15.8,
+        "applied_stats": {"24": 7.8, "25": 6, "9999": 2}, "applied_qty": {"24": 78, "25": 1},
+    }
+    theirs = {"player_id": "2", "espn_id": "2", "position": "QB", "actual_points": 3.0, "points": 3.0}
+    monkeypatch.setattr(
+        matchup_service, "load_completed_week",
+        lambda season, week: [_stored_side("8", "9", ours), _stored_side("9", "8", theirs)],
+    )
+
+    result = matchup_service.get_current_team_matchup(season=2026, week=3)
+
+    line = result["our_team"]["starters"][0]
+    assert [(b["stat_key"], b["qty"], b["rule_label"], b["points"]) for b in line["breakdown"]] == [
+        ("rushYd", 78.0, "1 pt per 10 rushing yds", 7.8),
+        ("rushTD", 1.0, "6 pts per rushing TD", 6.0),
+        ("other", None, "Not itemized", 2.0),
+    ]
+    assert sum(b["points"] for b in line["breakdown"]) == pytest.approx(line["points"])
+    assert "applied_stats" not in line and "applied_qty" not in line
+    # Stored before ESPN's per-stat points were kept: no breakdown, not an empty one.
+    assert result["opponent"]["starters"][0]["breakdown"] is None
+
+
+def test_stored_matchup_without_stored_stats_never_reads_the_rules(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+    rules = MagicMock()
+    monkeypatch.setattr(matchup_service, "load_rule_points_or_none", rules)
+    line = {"player_id": "1", "espn_id": "1", "actual_points": 3.0}
+    monkeypatch.setattr(
+        matchup_service, "load_completed_week",
+        lambda season, week: [_stored_side("8", "9", line), _stored_side("9", "8", dict(line))],
+    )
+
+    result = matchup_service.get_current_team_matchup(season=2026, week=4)
+
+    assert result["our_team"]["starters"][0]["breakdown"] is None
+    rules.assert_not_called()
