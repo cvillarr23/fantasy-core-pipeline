@@ -25,6 +25,8 @@ class ScoreBreakdownLine(BaseModel):
 class LiveBlock(BaseModel):
     """One player's live snapshot, merged from `live:player` and the player's `live:game`.
     Every field is nullable; the whole block is null when no snapshot exists."""
+    # The NFL game's id, as `GET /v1/matchup/games/{event_id}` takes it.
+    event_id: Optional[str] = None
     status: Optional[GameStatus] = None
     period: Optional[int] = None
     clock: Optional[str] = None

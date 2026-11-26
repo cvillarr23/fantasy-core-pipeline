@@ -10,6 +10,7 @@ def test_live_players_returns_blocks_and_nulls_and_bumps_last_viewed(client, see
     assert response.status_code == 200
     players = response.json()["players"]
     assert players["bijan"]["status"] == "in_progress" and players["bijan"]["live_points"] == 12.4
+    assert players["bijan"]["event_id"] == LIVE_EVENT
     assert players["ghost"] is None
     assert seeded.data["live:last_viewed"].isdigit() and seeded.ttl["live:last_viewed"] == 600
 
@@ -52,6 +53,7 @@ def test_matchup_route_adds_live_after_the_service(client, seeded, monkeypatch):
 
     body = response.json()["our_team"]["starters"][0]
     assert body["live"]["live_points"] == 12.4 and body["live"]["status"] == body["game_status"]
+    assert body["live"]["event_id"] == LIVE_EVENT
     assert seeded.data["live:last_viewed"].isdigit()
 
 

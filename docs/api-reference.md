@@ -193,6 +193,7 @@ Each player line also carries `live`, the poller's snapshot of that player's gam
 
 | Field | Meaning |
 |---|---|
+| `event_id` | The NFL game's id, for `GET /v1/matchup/games/{event_id}`. Null when the player's team has no tracked game. |
 | `status` | `not_started`, `in_progress` or `final`. When `live` is set, the line's `game_status` is taken from it, so the two always agree. |
 | `period`, `clock` | Quarter and game clock. Null unless the game is in progress. |
 | `home_abbr`, `home_score`, `away_abbr`, `away_score` | nflverse team codes (`WAS`, not `WSH`). Scores are null before kickoff, never 0. |

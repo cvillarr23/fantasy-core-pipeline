@@ -91,7 +91,7 @@ def test_live_player_merges_player_and_game(seeded):
     block = live_service.load_live_blocks(["bijan"])["bijan"]
 
     assert block == {
-        "status": "in_progress", "period": 3, "clock": "8:42",
+        "event_id": LIVE_EVENT, "status": "in_progress", "period": 3, "clock": "8:42",
         "home_abbr": "ATL", "home_score": 17, "away_abbr": "TB", "away_score": 14,
         "possession": "ATL", "yard_line": "TB 12", "red_zone": True, "kickoff": "2026-11-23T18:00Z",
         "stat_line": {"rushYd": 124}, "live_points": 12.4, "breakdown": [rush_line(12.4)],
