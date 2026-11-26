@@ -39,7 +39,7 @@ def test_matchup_feed_limit_is_bounded(client, seeded):
 def test_matchup_route_adds_live_after_the_service(client, seeded, monkeypatch):
     from src.services import live_service
 
-    monkeypatch.setattr(live_service, "_player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
+    monkeypatch.setattr(live_service, "player_ids_by_espn_id", lambda ids: {"4429795": "bijan"})
     line = {
         "player_id": "4429795", "espn_id": "4429795", "name": "Bijan Robinson", "position": "RB", "slot": "RB",
         "points": 12.4, "projected_points": 20.0, "game_status": "in_progress", "headshot_url": "h",

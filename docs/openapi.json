@@ -4214,6 +4214,17 @@
             ],
             "title": "Bye Week"
           },
+          "core_player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Player Id"
+          },
           "deficit_flag": {
             "title": "Deficit Flag",
             "type": "boolean"
@@ -5611,6 +5622,17 @@
               }
             ],
             "title": "Bye Week"
+          },
+          "core_player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Player Id"
           },
           "deficit_flag": {
             "title": "Deficit Flag",
