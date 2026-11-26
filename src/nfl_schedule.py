@@ -8,7 +8,9 @@ occasionally drop, so the read is retried with backoff before giving up.
 """
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import nflreadpy as nfl
 import polars as pl
@@ -18,6 +20,8 @@ logger = logging.getLogger("NflSchedule")
 SCHEDULE_LOAD_ATTEMPTS = 6
 SCHEDULE_BACKOFF_SECONDS = 5.0
 SCHEDULE_MAX_BACKOFF_SECONDS = 30.0
+# nflverse lists every `gameday`/`gametime` in Eastern time, international games included.
+SCHEDULE_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class WeekResolutionError(RuntimeError):
@@ -53,6 +57,15 @@ def load_schedule(
                 f"retrying in {delay:.0f}s."
             )
             sleep(delay)
+
+
+def kickoff_utc(gameday: str, gametime: str | None) -> datetime:
+    """A game's kickoff in UTC from nflverse's Eastern `gameday` and `gametime`. A game
+    with no time yet counts as starting at midnight ET on its day: locking early only
+    holds a player in place, while locking late could publish a move ESPN rejects."""
+    clock = gametime or "00:00"
+    local = datetime.strptime(f"{gameday[:10]} {clock}", "%Y-%m-%d %H:%M").replace(tzinfo=SCHEDULE_TIMEZONE)
+    return local.astimezone(timezone.utc)
 
 
 def _week_completion(df_schedules: pl.DataFrame) -> pl.DataFrame:

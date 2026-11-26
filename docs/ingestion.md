@@ -72,6 +72,8 @@ An article tagging more than `ESPN_COVERAGE_MAX_ATHLETES` (3) athletes, such as 
 
 `python -m src.ingestion.live_games [--season N] [--week N] [--once]` polls this week's fantasy matchup for one game window and keeps a snapshot in Redis. The live API reads that snapshot, so no request ever waits on ESPN. It runs as the `live-games` launcher service job (fantasy-infra), one run per game window.
 
+The launcher starts it from nflverse kickoff times through the job's catalog `kickoffs` block, not cron slots: `lead` (20m in production) before each distinct regular-season kickoff, on any weekday. Kickoffs are reread hourly, so a flexed or moved game is picked up. A failed reread keeps the last good copy. With no readable schedule at all, or on the day of a game whose time isn't set yet, it starts every `fallback_every` (30m) instead. A start that finds the previous run still up is skipped, since that run already covers the new kickoff.
+
 At startup it resolves the upcoming week (`resolve_upcoming_week`), reads our matchup period and opponent from `fantasy_matchups` (`ESPN_LEAGUE_ID`, `ESPN_TEAM_ID`), and loads `players.espn_id`. It exits 0 when the season is over or we have no scheduled matchup, and 1 when the week can't be resolved.
 
 Each tick:
