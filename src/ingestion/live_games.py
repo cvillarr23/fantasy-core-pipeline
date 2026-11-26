@@ -59,6 +59,7 @@ from espn_api.football.constant import PRO_TEAM_MAP
 
 from src.database import get_db_cursor, get_redis_client
 from src.espn_positions import DEFAULT_POSITIONS
+from src.espn_scoring import applied_quantities
 from src.ingestion.sync_league import build_espn_requests
 from src.nfl_byes import to_nflverse_team
 from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
@@ -313,13 +314,6 @@ def stat_line(raw_stats: dict) -> dict:
     if two_points:
         line["twoPt"] = sum(two_points)
     return line
-
-
-def applied_quantities(row: dict) -> dict:
-    """The raw count behind each scored stat (`appliedStats` holds points, `stats` the counts),
-    so a breakdown can say "98 yds × 0.1". A stat with no count is left out."""
-    raw = row.get("stats") or {}
-    return {stat_id: raw[stat_id] for stat_id in row.get("appliedStats") or {} if raw.get(stat_id) is not None}
 
 
 def roster_entries(payload: dict, team_ids: set) -> list:

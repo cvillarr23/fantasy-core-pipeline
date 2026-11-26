@@ -244,3 +244,8 @@ def test_without_league_rules_the_label_comes_from_espns_own_points():
     player = {"live_points": 9.8, "applied_stats": {"24": 9.8}, "applied_qty": {"24": 98}}
 
     assert sc.score_breakdown(player, {})[0]["rule_label"] == "1 pt per 10 rushing yds"
+
+
+def test_applied_quantities_keep_the_count_behind_each_scored_stat():
+    row = {"appliedStats": {"24": 9.8, "25": 12, "53": 0}, "stats": {"24": 98, "25": 2, "23": 15}}
+    assert sc.applied_quantities(row) == {"24": 98, "25": 2}

@@ -17,6 +17,7 @@ from espn_api.requests.espn_requests import (
 )
 
 from src.espn_positions import DEFAULT_POSITIONS
+from src.espn_scoring import applied_quantities
 from src.ingestion.sync_league import (
     build_league,
     fetch_raw_league_data,
@@ -172,6 +173,16 @@ def validate_scoreboard(board, season, week, expected_ids=None):
         raise IncompleteScoresError("NFL games are missing or not final")
 
 
+def _applied_stats(row):
+    """ESPN's points per stat id and the count behind each, from the actual stat row, so the
+    API can itemize a completed week's score with `espn_scoring.score_breakdown`. Empty for a
+    player ESPN wrote no actual row for."""
+    return {
+        "applied_stats": row.get("appliedStats") or {},
+        "applied_qty": applied_quantities(row),
+    }
+
+
 def shape_player(entry, season, week, team_id, bye_teams=frozenset()):
     raw = (
         (entry.get("playerPoolEntry") or {}).get("player") or entry.get("player") or {}
@@ -182,7 +193,7 @@ def shape_player(entry, season, week, team_id, bye_teams=frozenset()):
     slot = POSITION_MAP.get(entry.get("lineupSlotId"))
     if slot is None or not raw.get("fullName"):
         raise IncompleteScoresError("Missing historical player/slot")
-    scores = {}
+    scores, actual_row = {}, {}
     for stat in raw.get("stats", []):
         if (
             stat.get("seasonId") == season
@@ -194,6 +205,8 @@ def shape_player(entry, season, week, team_id, bye_teams=frozenset()):
             if source in scores:
                 raise IncompleteScoresError("Ambiguous player score")
             scores[source] = number(stat.get("appliedTotal"))
+            if source == 0:
+                actual_row = stat
     actual = scores.get(0)
     if actual is None:
         actual = number(entry.get("appliedStatTotal"))
@@ -214,6 +227,7 @@ def shape_player(entry, season, week, team_id, bye_teams=frozenset()):
         "actual_points": actual,
         "points": actual,
         "projected_points": scores.get(1),
+        **_applied_stats(actual_row),
         "headshot_url": f"https://a.espncdn.com/i/headshots/nfl/players/full/{espn_id}.png",
         "deficit_flag": False,
         "suggested_swap": None,

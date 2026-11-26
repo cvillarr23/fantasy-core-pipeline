@@ -1,7 +1,7 @@
 """
 ESPN fantasy scoring, explained: the one map from ESPN's fantasy stat ids to plain-English labels,
 the league rules built from `league_settings.scoring_settings` (`GET /v1/scoring/rules`), and the
-per-player breakdown on the live pages.
+per-player breakdown on the live pages and on stored completed weeks (`GET /v1/matchup`).
 
 Points are never recomputed here. A breakdown line's `points` is ESPN's own `appliedStats` value
 for that stat, so the lines add up to ESPN's `appliedTotal` (`live_points`). The league rule only
@@ -206,6 +206,14 @@ def scoring_rules(scoring_settings) -> list:
 
 
 # ---------------------------------------------------------------- breakdown
+
+
+def applied_quantities(row: dict) -> dict:
+    """The raw count behind each scored stat of one ESPN stat row (`appliedStats` holds points,
+    `stats` the counts), so a breakdown can say "98 yds × 0.1". A stat with no count is left out.
+    The live poller and `sync_actual_scores` both store it."""
+    raw = row.get("stats") or {}
+    return {stat_id: raw[stat_id] for stat_id in row.get("appliedStats") or {} if raw.get(stat_id) is not None}
 
 
 def _qty(applied_qty: dict, stat_id: str):

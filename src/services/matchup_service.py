@@ -19,7 +19,8 @@ from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
     evaluate_lineup,
 )
-from src.services.live_service import player_ids_by_espn_id
+from src.espn_scoring import score_breakdown
+from src.services.live_service import load_rule_points_or_none, player_ids_by_espn_id
 from src.services.read_cache import cached, league_key
 from src.services.roster_service import compute_roster_deficits
 from src.services.score_history import load_completed_week, stored_scoreboard
@@ -359,6 +360,38 @@ def _shape_team_side(
     }
 
 
+STORED_STAT_KEYS = ("applied_stats", "applied_qty")
+
+
+def _stored_rule_points(sides: list) -> dict | None:
+    """The league's rule index, read only when some stored line kept ESPN's per-stat points:
+    a week stored before they were kept has nothing to itemize."""
+    lines = [line for side in sides for group in ("starters", "bench") for line in side[group]]
+    return load_rule_points_or_none() if any("applied_stats" in line for line in lines) else None
+
+
+def _stored_breakdown(line: dict, rules: dict | None) -> list | None:
+    """The completed week's breakdown from the stats `sync_actual_scores` stored. ESPN's actual
+    points stand in for live points, so the lines still sum to ESPN's score. None for a line
+    stored without per-stat points, or when the rules can't be read."""
+    if rules is None or "applied_stats" not in line:
+        return None
+    return score_breakdown({**line, "live_points": line.get("actual_points")}, rules)
+
+
+def _stored_line(line: dict, rules: dict | None) -> dict:
+    public = {key: value for key, value in line.items() if key not in STORED_STAT_KEYS}
+    return {**public, "breakdown": _stored_breakdown(line, rules)}
+
+
+def _stored_side(side: dict, rules: dict | None) -> dict:
+    return {
+        "team": side["team"],
+        "starters": [_stored_line(line, rules) for line in side["starters"]],
+        "bench": [_stored_line(line, rules) for line in side["bench"]],
+    }
+
+
 def get_current_team_matchup(season: int, week: int) -> dict:
     our_team_id = os.getenv("ESPN_TEAM_ID")
     return cached(
@@ -377,12 +410,10 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
         if ours is None or opponent is None:
             raise NoMatchupFoundError(f"No opponent for team {our_team_id} in week {week}.")
 
-        def shape(side):
-            return {key: side[key] for key in ("team", "starters", "bench")}
-
+        rules = _stored_rule_points([ours, opponent])
         return _with_core_player_ids({
             "season": season, "week": week,
-            "our_team": shape(ours), "opponent": shape(opponent),
+            "our_team": _stored_side(ours, rules), "opponent": _stored_side(opponent, rules),
         })
     box_scores = _fetch_box_scores(season, week)
 
