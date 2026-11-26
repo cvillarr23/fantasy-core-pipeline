@@ -22,7 +22,6 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 import nflreadpy as nfl
 import pulp
@@ -32,7 +31,7 @@ from src.database import get_db_connection
 from src.espn_identity import resolve_espn_identity
 from src.ingestion import sync_league
 from src.ingestion.metrics_extractor import normalize_team
-from src.nfl_schedule import WeekResolutionError, resolve_upcoming_week
+from src.nfl_schedule import WeekResolutionError, kickoff_utc, resolve_upcoming_week
 from src.telemetry import configure_tracing
 from src.trigger_client import post_trigger_idempotent
 from src.services import run_log_service
@@ -68,7 +67,6 @@ SEASON_OVER_WEEK = 19
 # ESPN locks each player at his own game's kickoff. A player whose game starts within this
 # buffer is treated as locked already, so a swap published now can't land after the lock.
 KICKOFF_LOCK_BUFFER = timedelta(minutes=5)
-SCHEDULE_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class InsufficientLineupInputError(Exception):
@@ -110,15 +108,6 @@ def load_teams_playing(season: int, week: int) -> set:
     return {normalize_team(t) for t in games["home_team"].to_list() + games["away_team"].to_list()}
 
 
-def _kickoff_utc(gameday: str, gametime: str | None) -> datetime:
-    """A game's kickoff in UTC from nflverse's Eastern `gameday` and `gametime`. A game
-    with no time yet counts as starting at midnight ET on its day: locking early only
-    holds a player in place, while locking late could publish a move ESPN rejects."""
-    clock = gametime or "00:00"
-    local = datetime.strptime(f"{gameday} {clock}", "%Y-%m-%d %H:%M").replace(tzinfo=SCHEDULE_TIMEZONE)
-    return local.astimezone(timezone.utc)
-
-
 def _kicked_off_teams(season: int, week: int, now: datetime) -> set:
     """Normalized teams whose season/week game kicks off at or before now plus
     KICKOFF_LOCK_BUFFER, so their players are locked on ESPN. Raises
@@ -135,7 +124,7 @@ def _kicked_off_teams(season: int, week: int, now: datetime) -> set:
     cutoff = now + KICKOFF_LOCK_BUFFER
     teams = set()
     for game in games.select(["gameday", "gametime", "home_team", "away_team"]).iter_rows(named=True):
-        if _kickoff_utc(str(game["gameday"]), game["gametime"]) <= cutoff:
+        if kickoff_utc(str(game["gameday"]), game["gametime"]) <= cutoff:
             teams.update({normalize_team(game["home_team"]), normalize_team(game["away_team"])})
     return teams
 

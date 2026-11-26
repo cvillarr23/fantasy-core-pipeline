@@ -212,6 +212,38 @@ class Schedule(CatalogModel):
         return None if value is None else _duration(value, allow_zero=True)
 
 
+# The live poller exits unless a game kicks off within this long (live_games.KICKOFF_LOOKAHEAD),
+# so a start any earlier than this before kickoff would exit at once.
+MAX_KICKOFF_LEAD = timedelta(minutes=30)
+
+
+class Kickoffs(CatalogModel):
+    """Start the job ``lead`` before each distinct NFL regular-season kickoff in ``seasons``,
+    read from the nflverse schedule (see the scheduler's docstring). A start missed by a
+    launcher outage still fires within ``catch_up``. While no kickoff time is known (the
+    schedule unreadable, or a game's time not set yet), it starts every ``fallback_every``."""
+
+    lead: timedelta
+    catch_up: timedelta = timedelta(hours=3)
+    seasons: list[str] = Field(min_length=1)
+    fallback_every: timedelta = timedelta(minutes=30)
+
+    @field_validator("lead", "catch_up", "fallback_every", mode="before")
+    @classmethod
+    def parse_durations(cls, value: Any) -> timedelta:
+        return _duration(value)
+
+    @field_validator("lead")
+    @classmethod
+    def validate_lead(cls, value: timedelta) -> timedelta:
+        if value > MAX_KICKOFF_LEAD:
+            raise ValueError(
+                f"lead must be at most {MAX_KICKOFF_LEAD}: the poller exits when no game "
+                "kicks off within that long"
+            )
+        return value
+
+
 class EventSubscription(CatalogModel):
     key: str = Field(pattern=EVENT_KEY_PATTERN)
     debounce: timedelta
@@ -280,6 +312,7 @@ class Job(CatalogModel):
     group: str | None = None
     schedules: list[Schedule] = Field(default_factory=list)
     on_event: list[EventSubscription] = Field(default_factory=list)
+    kickoffs: Kickoffs | None = None
     fan_out: FanOut | None = None
     # Params passed to the process as env vars instead of flags, for entrypoints that read
     # env (the browser worker's draft_sync.js reads DRAFT_ROOM_URL).
@@ -472,6 +505,8 @@ class Catalog(CatalogModel):
                     f"jobs.{name}.on_event: events pass no params, but it requires "
                     f"{', '.join(_required_params(job))}"
                 )
+            if job.kickoffs:
+                self._validate_kickoffs(name, job)
         for name, chain in self.chains.items():
             if chain.schedule:
                 self._validate_schedule_seasons(
@@ -531,6 +566,19 @@ class Catalog(CatalogModel):
     def group_jobs(self, group: str) -> list[str]:
         """The names of the jobs in a concurrency group."""
         return [name for name, job in self.jobs.items() if job.group == group]
+
+    def _validate_kickoffs(self, name: str, job: Job) -> None:
+        assert job.kickoffs is not None
+        for season in job.kickoffs.seasons:
+            if season not in self.seasons:
+                raise ValueError(
+                    f"jobs.{name}.kickoffs.seasons references unknown season {season!r}"
+                )
+        if _required_params(job):
+            raise ValueError(
+                f"jobs.{name}.kickoffs: kickoff starts pass no params, but it requires "
+                f"{', '.join(_required_params(job))}"
+            )
 
     def _validate_schedule_seasons(self, schedule: Schedule, path: str) -> None:
         for season in schedule.seasons:

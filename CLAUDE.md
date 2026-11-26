@@ -681,7 +681,10 @@
 ## Live games (`src/ingestion/live_games.py`)
 
 - A launcher service job (`live-games`, fantasy-infra) that polls one game window and writes
-  only Redis `live:*` keys (6h TTL). The live API reads them, so nothing on the request path calls
+  only Redis `live:*` keys (6h TTL). The scheduler starts it from nflverse kickoff times
+  (catalog `kickoffs: {lead, catch_up, seasons, fallback_every}`, see the scheduler docstring),
+  not cron slots. `lead` can't exceed the poller's `KICKOFF_LOOKAHEAD` (`MAX_KICKOFF_LEAD`), or
+  the run would exit at once. With no readable schedule it starts every `fallback_every`. The live API reads them, so nothing on the request path calls
   ESPN. Keys, shapes and cadence are in `docs/ingestion.md` ("How does `live_games` keep live
   game state?").
 - Game state comes from ESPN's public scoreboard and `summary` endpoints. Points come from the

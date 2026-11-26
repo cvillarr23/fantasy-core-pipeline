@@ -519,3 +519,45 @@ def test_health_key_formats_from_params_and_skips_runs_without_them():
 def test_health_must_use_job_params_on_a_service_job(job, message):
     with pytest.raises(ValidationError, match=message):
         Catalog.model_validate(service_catalog(**job))
+
+
+def kickoff_catalog(kickoffs: dict, params: dict | None = None) -> dict:
+    raw = catalog_data()
+    raw["seasons"] = {"regular": {"start": 1, "end": 18}}
+    raw["jobs"]["one"]["kickoffs"] = kickoffs
+    if params:
+        raw["jobs"]["one"]["params"] = params
+    return raw
+
+
+def test_a_kickoffs_block_parses_with_defaults():
+    catalog = Catalog.model_validate(
+        kickoff_catalog({"lead": "20m", "seasons": ["regular"]})
+    )
+    kickoffs = catalog.jobs["one"].kickoffs
+    assert kickoffs.lead == timedelta(minutes=20)
+    assert kickoffs.catch_up == timedelta(hours=3)
+    assert kickoffs.fallback_every == timedelta(minutes=30)
+
+
+def test_kickoff_lead_matches_the_live_pollers_lookahead():
+    from src.ingestion.live_games import KICKOFF_LOOKAHEAD
+    from src.launcher.catalog import MAX_KICKOFF_LEAD
+
+    assert MAX_KICKOFF_LEAD == KICKOFF_LOOKAHEAD
+
+
+@pytest.mark.parametrize(
+    "kickoffs, params, message",
+    [
+        ({"seasons": ["regular"]}, None, "kickoffs.lead\n  Field required"),
+        ({"lead": "31m", "seasons": ["regular"]}, None, "lead must be at most"),
+        ({"lead": "20m", "seasons": []}, None, "at least 1"),
+        ({"lead": "20m", "seasons": ["missing"]}, None, "unknown season"),
+        ({"lead": "20m", "seasons": ["regular"]}, {"week": "int"}, "requires week"),
+        ({"lead": "0m", "seasons": ["regular"]}, None, "positive"),
+    ],
+)
+def test_kickoffs_reject_bad_settings(kickoffs, params, message):
+    with pytest.raises(ValidationError, match=message):
+        Catalog.model_validate(kickoff_catalog(kickoffs, params))
