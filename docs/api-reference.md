@@ -174,6 +174,10 @@ Accepted means queued by the API, not done on ESPN. See [Queue publishing](./que
 
 Notes on `GET /v1/matchup` (and the team fields shared with `GET /v1/matchup/scoreboard`) that the schema alone doesn't say.
 
+### Player ids
+
+On `GET /v1/matchup` and `GET /v1/matchup/roster` lines, `player_id` and `espn_id` are both ESPN's player id, the one lineup submissions use. `core_player_id` is this service's `players.player_id`: pass it to `GET /v1/players/{id}/summary`, `GET /v1/news/recent` and `GET /v1/live/players`. It is `null` when no player row matches the ESPN id or the lookup fails.
+
 ### `game_status`
 
 Each player line carries `game_status`: where that player's NFL game stands.

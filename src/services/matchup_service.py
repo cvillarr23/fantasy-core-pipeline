@@ -19,6 +19,7 @@ from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
     evaluate_lineup,
 )
+from src.services.live_service import player_ids_by_espn_id
 from src.services.read_cache import cached, league_key
 from src.services.roster_service import compute_roster_deficits
 from src.services.score_history import load_completed_week, stored_scoreboard
@@ -202,6 +203,35 @@ def _apply_rumor_signal(player_lines: list, signal_by_espn_id: dict) -> None:
         line["rumor_suggested_action"] = signal["suggested_action"]
 
 
+def _core_player_ids(player_lines: list) -> dict:
+    """espn_id -> players.player_id for these lines. Empty when the lookup fails: the id only
+    lets a client make per-player reads, so a database failure must not fail the page."""
+    try:
+        return player_ids_by_espn_id([line["espn_id"] for line in player_lines])
+    except Exception as exc:
+        logger.warning(f"No core_player_id on player lines: could not look up players: {exc}")
+        return {}
+
+
+def _apply_core_player_ids(player_lines: list) -> None:
+    """Mutates player_lines in place. `player_id` stays ESPN's, which lineup submissions use;
+    the id that the summary, news and live reads take goes beside it."""
+    player_ids = _core_player_ids(player_lines)
+    for line in player_lines:
+        line["core_player_id"] = player_ids.get(line["espn_id"])
+
+
+def _with_core_player_ids(matchup: dict) -> dict:
+    """Both sides' lines identified with one lookup, for live and stored weeks alike."""
+    _apply_core_player_ids([
+        line
+        for side in ("our_team", "opponent")
+        for group in ("starters", "bench")
+        for line in matchup[side][group]
+    ])
+    return matchup
+
+
 def _split_starters_bench(
     lineup: list, bye_weeks: dict | None = None, game_statuses: dict | None = None
 ) -> tuple[list, list]:
@@ -271,22 +301,44 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     """Read-only: reuses lineup_solver's pregame evaluation to see what the optimizer
     would start, but never publishes - this is a display-only badge, not an action.
     Missing lineup inputs mean no badges (logged), not a failed matchup page. Returns
-    {drop_player_id: {"bench_for": add_player_name, "add_player_id": ...}}."""
+    {drop_espn_id: {"bench_for": add_player_name, "add_player_id": add_espn_id}}: the solver
+    works on internal players.player_id, but matchup and roster lines carry ESPN's id."""
     try:
         with get_db_cursor() as cursor:
             evaluation = evaluate_lineup(cursor, team_id, season, week)
+            espn_ids = _espn_ids_by_player_id(cursor, _swap_player_ids(evaluation["swaps"]))
     except InsufficientLineupInputError as exc:
         logger.warning(f"No lineup swap badges for Team {team_id} Season {season} Week {week}: {exc}")
         return {}
+    except Exception as exc:
+        logger.warning(f"No lineup swap badges for Team {team_id} Season {season} Week {week}: could not look up players: {exc}")
+        return {}
 
     names_by_id = {p["player_id"]: p["name"] for p in evaluation["roster_pool"]}
-    return {
-        swap["drop_player_id"]: {
-            "bench_for": names_by_id[swap["add_player_id"]],
-            "add_player_id": swap["add_player_id"],
-        }
-        for swap in evaluation["swaps"]
-    }
+    suggestions = {}
+    for swap in evaluation["swaps"]:
+        drop_espn_id = espn_ids.get(swap["drop_player_id"])
+        add_espn_id = espn_ids.get(swap["add_player_id"])
+        if drop_espn_id is None or add_espn_id is None:
+            logger.warning(f"Skipping swap badge for player {swap['drop_player_id']} -> {swap['add_player_id']}: no ESPN id")
+            continue
+        suggestions[drop_espn_id] = {"bench_for": names_by_id[swap["add_player_id"]], "add_player_id": add_espn_id}
+    return suggestions
+
+
+def _swap_player_ids(swaps: list) -> list:
+    return sorted({pid for swap in swaps for pid in (swap["drop_player_id"], swap["add_player_id"])})
+
+
+def _espn_ids_by_player_id(cursor, player_ids: list) -> dict:
+    """players.player_id -> ESPN id (as a string, like the lines carry); players without one are absent."""
+    if not player_ids:
+        return {}
+    cursor.execute(
+        "SELECT player_id, espn_id FROM players WHERE player_id = ANY(%s) AND espn_id IS NOT NULL;",
+        (player_ids,),
+    )
+    return {player_id: str(espn_id) for player_id, espn_id in cursor.fetchall()}
 
 
 def _shape_team_side(
@@ -328,10 +380,10 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
         def shape(side):
             return {key: side[key] for key in ("team", "starters", "bench")}
 
-        return {
+        return _with_core_player_ids({
             "season": season, "week": week,
             "our_team": shape(ours), "opponent": shape(opponent),
-        }
+        })
     box_scores = _fetch_box_scores(season, week)
 
     matched_box = None
@@ -376,7 +428,9 @@ def _load_current_team_matchup(season: int, week: int, our_team_id: str) -> dict
     swap_suggestions = suggest_lineup_swaps(our_team_id, season, week)
     _apply_badges(our_side["starters"], deficits_by_position, swap_suggestions)
 
-    return {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
+    return _with_core_player_ids(
+        {"season": season, "week": week, "our_team": our_side, "opponent": opponent_side}
+    )
 
 
 def _shape_scoreboard_team(team, score: float, projected: float, win_probability: float | None = None) -> dict | None:
@@ -464,6 +518,8 @@ def _load_current_team_roster(season: int, week: int, our_team_id: str) -> dict:
     rumor_signal_by_espn_id = _load_rumor_signal_by_espn_id(our_team_id)
     _apply_rumor_signal(starters, rumor_signal_by_espn_id)
     _apply_rumor_signal(bench, rumor_signal_by_espn_id)
+
+    _apply_core_player_ids(starters + bench)
 
     slot_counts = _load_lineup_slot_counts(season)
     ir_blocking = _apply_ir_hints(starters + bench, open_ir_slots(slot_counts or {}, 0))
