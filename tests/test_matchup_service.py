@@ -303,6 +303,7 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
     """Uses lineup_solver's pregame evaluation (#178 follow-up) - the exact-week pool it
     used before is empty until the target week's projections land, so the badge vanished."""
     cursor = MagicMock()
+    cursor.fetchall.return_value = [("drop1", "5001"), ("add1", "5002")]
     evaluation = {
         "swaps": [{"drop_player_id": "drop1", "add_player_id": "add1", "slot": "RB", "matchup_multiplier": 1.0}],
         "roster_pool": [{"player_id": "add1", "name": "Better Back", "position": "RB", "vorp_score": 10.0}],
@@ -314,9 +315,47 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
          patch("src.optimization.lineup_solver.publish_lineup_swaps") as mock_publish:
         result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
 
-    assert result == {"drop1": {"bench_for": "Better Back", "add_player_id": "add1"}}
+    assert result == {"5001": {"bench_for": "Better Back", "add_player_id": "5002"}}
     mock_publish.assert_not_called()
     mock_evaluate.assert_called_once_with(cursor, "team1", 2026, 2)
+
+
+def test_suggest_lineup_swaps_skips_swap_without_espn_id(caplog):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("drop1", "5001")]
+    evaluation = {
+        "swaps": [{"drop_player_id": "drop1", "add_player_id": "add1", "slot": "RB", "matchup_multiplier": 1.0}],
+        "roster_pool": [{"player_id": "add1", "name": "Better Back", "position": "RB", "vorp_score": 10.0}],
+        "optimal_starters": [], "source": {},
+    }
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation):
+        result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
+
+    assert result == {}
+    assert "no ESPN id" in caplog.text
+
+
+def test_suggest_lineup_swap_lands_on_the_line_with_the_bench_players_espn_id():
+    """Internal ids (sleeper-style) differ from ESPN's: the badge must still hit the starter's
+    line and add_player_id must equal the bench line's player_id."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("internal-drop", "4001"), ("internal-add", "4002")]
+    evaluation = {
+        "swaps": [{"drop_player_id": "internal-drop", "add_player_id": "internal-add", "slot": "RB", "matchup_multiplier": 1.0}],
+        "roster_pool": [{"player_id": "internal-add", "name": "Bench Back", "position": "RB", "vorp_score": 10.0}],
+        "optimal_starters": [], "source": {},
+    }
+    starter = matchup_service._shape_player_line(_make_box_player(playerId=4001, position="RB"))
+    bench = matchup_service._shape_player_line(_make_box_player(playerId=4002, position="RB"))
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation):
+        swaps = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
+    matchup_service._apply_badges([starter], {}, swaps)
+
+    assert starter["suggested_swap"] == {"bench_for": "Bench Back", "add_player_id": bench["player_id"]}
 
 
 def test_suggest_lineup_swaps_shows_no_badges_on_insufficient_input(caplog):

@@ -301,22 +301,44 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     """Read-only: reuses lineup_solver's pregame evaluation to see what the optimizer
     would start, but never publishes - this is a display-only badge, not an action.
     Missing lineup inputs mean no badges (logged), not a failed matchup page. Returns
-    {drop_player_id: {"bench_for": add_player_name, "add_player_id": ...}}."""
+    {drop_espn_id: {"bench_for": add_player_name, "add_player_id": add_espn_id}}: the solver
+    works on internal players.player_id, but matchup and roster lines carry ESPN's id."""
     try:
         with get_db_cursor() as cursor:
             evaluation = evaluate_lineup(cursor, team_id, season, week)
+            espn_ids = _espn_ids_by_player_id(cursor, _swap_player_ids(evaluation["swaps"]))
     except InsufficientLineupInputError as exc:
         logger.warning(f"No lineup swap badges for Team {team_id} Season {season} Week {week}: {exc}")
         return {}
+    except Exception as exc:
+        logger.warning(f"No lineup swap badges for Team {team_id} Season {season} Week {week}: could not look up players: {exc}")
+        return {}
 
     names_by_id = {p["player_id"]: p["name"] for p in evaluation["roster_pool"]}
-    return {
-        swap["drop_player_id"]: {
-            "bench_for": names_by_id[swap["add_player_id"]],
-            "add_player_id": swap["add_player_id"],
-        }
-        for swap in evaluation["swaps"]
-    }
+    suggestions = {}
+    for swap in evaluation["swaps"]:
+        drop_espn_id = espn_ids.get(swap["drop_player_id"])
+        add_espn_id = espn_ids.get(swap["add_player_id"])
+        if drop_espn_id is None or add_espn_id is None:
+            logger.warning(f"Skipping swap badge for player {swap['drop_player_id']} -> {swap['add_player_id']}: no ESPN id")
+            continue
+        suggestions[drop_espn_id] = {"bench_for": names_by_id[swap["add_player_id"]], "add_player_id": add_espn_id}
+    return suggestions
+
+
+def _swap_player_ids(swaps: list) -> list:
+    return sorted({pid for swap in swaps for pid in (swap["drop_player_id"], swap["add_player_id"])})
+
+
+def _espn_ids_by_player_id(cursor, player_ids: list) -> dict:
+    """players.player_id -> ESPN id (as a string, like the lines carry); players without one are absent."""
+    if not player_ids:
+        return {}
+    cursor.execute(
+        "SELECT player_id, espn_id FROM players WHERE player_id = ANY(%s) AND espn_id IS NOT NULL;",
+        (player_ids,),
+    )
+    return {player_id: str(espn_id) for player_id, espn_id in cursor.fetchall()}
 
 
 def _shape_team_side(
