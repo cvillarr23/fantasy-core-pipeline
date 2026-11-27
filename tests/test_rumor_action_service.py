@@ -207,7 +207,7 @@ def test_qualifying_bench_watch_signal_publishes_matching_swap():
 
 def test_bench_watch_fails_loudly_on_insufficient_lineup_input():
     """Same contract as the weekly optimizer (#178): missing lineup inputs raise (the
-    endpoint 500s, the CronJob fails) instead of reporting zero swaps."""
+    endpoint 500s, the launcher run fails) instead of reporting zero swaps."""
     redis_client = _fake_redis()
     signals_cursor = MagicMock()
     signals_cursor.fetchall.return_value = [(21, "9001", "negative", 0.8, ras.BENCH_WATCH_ACTION)]
@@ -263,7 +263,7 @@ def test_qualifying_signal_with_no_matching_proposed_move_still_advances_waterma
 
 
 # ---------------------------------------------------------------------------
-# main (CronJob entrypoint week resolution)
+# main (launcher job entrypoint week resolution)
 # ---------------------------------------------------------------------------
 
 def test_main_fails_without_evaluating_when_week_unresolvable(caplog):

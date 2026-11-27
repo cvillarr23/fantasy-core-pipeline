@@ -259,6 +259,13 @@
   (no-op) when the season is over. `lineup_solver.resolve_default_week()` is kept for
   fantasy-infra's refresher/waiver scripts: it raises the same way and returns
   `SEASON_OVER_WEEK` (19) for "season over", which the refresher reads as offseason.
+- Mid-week runs (#442): `optimize_weekly_lineup` first calls `sync_league.sync_rosters` and lets
+  a failure raise, never `refresh_rosters_if_stale`, which swallows errors. `evaluate_lineup` locks
+  players whose team's nflverse kickoff (`gameday` + `gametime`, ET) is at most
+  `KICKOFF_LOCK_BUFFER` (5 min) away. A locked starter keeps his seat: it leaves slot demand and
+  he is never a removal. A locked bench player leaves the pool. When nothing is left to decide
+  the result is zero swaps, not an error. An unreadable schedule raises
+  `InsufficientLineupInputError`. Locks use `players.team`, and evidence carries `locked_players`.
 - Exit codes: `main()` returns 0 for a real decision (swaps published *or* lineup already
   optimal) and 1 for `InsufficientLineupInputError` (no roster, no usable/stale metrics,
   schedule unavailable in mode (2), infeasible solve), so the CronJob's Job fails and
@@ -681,15 +688,39 @@
 ## Live games (`src/ingestion/live_games.py`)
 
 - A launcher service job (`live-games`, fantasy-infra) that polls one game window and writes
-  only Redis `live:*` keys (6h TTL). The live API reads them, so nothing on the request path calls
+  only Redis `live:*` keys (6h TTL). The scheduler starts it from nflverse kickoff times
+  (catalog `kickoffs: {lead, catch_up, seasons, fallback_every}`, see the scheduler docstring),
+  not cron slots. `lead` can't exceed the poller's `KICKOFF_LOOKAHEAD` (`MAX_KICKOFF_LEAD`), or
+  the run would exit at once. With no readable schedule it starts every `fallback_every`. The live API reads them, so nothing on the request path calls
   ESPN. Keys, shapes and cadence are in `docs/ingestion.md` ("How does `live_games` keep live
   game state?").
 - Game state comes from ESPN's public scoreboard and `summary` endpoints. Points come from the
   league's `mMatchupScore` payload (`appliedTotal` on the `statSourceId` 0 row), never recomputed.
   A player with no actual row has `live_points: null`, not 0.
 - Contracts with other repos: `live:health` is the launcher `health` key (rewritten every tick,
-  failed ones too, with a 10 min TTL; infra uses `grace: 10m`). `live:last_viewed` is written by the
-  live API as epoch seconds; under 5 min old means 30s ticks, otherwise 180s.
+  failed ones too, with a 10 min TTL; infra uses `grace: 10m`). Its keys are `updated_at`,
+  `last_success_at`, `season`, `week` and `tracked_events`; add keys, never rename or drop one.
+  `live:last_viewed` is written by the live API as epoch seconds; under 5 min old means 30s ticks,
+  otherwise 180s.
+- `live_service` is the API's only reader of those keys (`GET /v1/live/players`, `GET /v1/matchup/feed`, the `live`
+  block on `GET /v1/matchup` lines and the player summary). It never calls ESPN and fails soft: a Redis error reads
+  as no snapshot. Every reader is gated on `live:health`, since the data keys outlive the poller by hours: no health,
+  or health without `season` (a poller from before that key), means no live data. The matchup overlay and the feed
+  also need health's `season` and `week` to match the request. The service, not the router, writes
+  `live:last_viewed` (epoch seconds, 10 min TTL), and only when it served live data. The feed finds its players
+  through the poller's `live:player_ids` index, never a keyspace scan. The matchup
+  `live` block is overlaid *after* `get_current_team_matchup`'s 60s cache, takes `game_status` from the snapshot so the
+  two agree, and maps ESPN ids to `player_id` through `players.espn_id`. Each play carries `recorded_at` and a
+  per-player `fantasy_delta`, both stamped by the poller (`attach_play_deltas`); a delta is null when it can't be told,
+  including the first plays after a tick that couldn't refresh that game's plays. A failed read of the stored plays
+  leaves that game's list untouched for the tick.
+- Scoring breakdowns (`src/espn_scoring.py`, the one ESPN stat-id map) are built at read time from
+  `live:player`'s `applied_stats`/`applied_qty`, labelled from `league_settings.scoring_settings`
+  (`scoring_service`; a D/ST rule is a `pointsOverrides["16"]` entry). A line's `points` is always
+  ESPN's applied value, never stat × rule, and any unitemized remainder over 0.05 is an `other`
+  line. Unknown stat ids are logged and skipped, never raised. Rules unreadable means
+  `breakdown: null`. `GET /v1/matchup/games/{event_id}` sums starters only (bench and IR slots
+  20/21 never count), null before kickoff.
 - ESPN plays carry no athlete ids, so `_play_player_ids` matches roster players by name in the play
   text, only for the play's own teams. Fixtures in `tests/fixtures/espn_live/` are trimmed real
   payloads; record new ones rather than hand-writing ESPN shapes.

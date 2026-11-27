@@ -8,6 +8,7 @@ from src.schemas.espn_ownership import EspnOwnership
 from src.services import players_service
 
 
+REAL_PLAYED_WEEKS = players_service._played_weeks
 ESPN = EspnOwnership(pos_rank=12, percent_owned=91.0, percent_started=80.0, percent_bench=11.0, percent_change=3.0)
 
 
@@ -15,6 +16,7 @@ ESPN = EspnOwnership(pos_rank=12, percent_owned=91.0, percent_started=80.0, perc
 def _no_espn_ownership(monkeypatch):
     """Cursor mocks here return fixed rows; the loader has its own tests."""
     monkeypatch.setattr(players_service, "load_latest_espn_ownership", lambda *a, **k: {})
+    monkeypatch.setattr(players_service, "_played_weeks", lambda *a, **k: [])
 
 
 @contextmanager
@@ -113,3 +115,55 @@ def test_summary_and_search_carry_espn_ownership_or_none(monkeypatch):
         results = players_service.search_players("S")
     assert results[0]["espn"] == ESPN and results[1]["espn"] is None
     assert seen == [["p1"], ["p1", "p2"]]
+
+
+def test_played_weeks_keep_only_the_latest_season_oldest_first(monkeypatch):
+    monkeypatch.setattr(players_service, "bye_weeks_or_empty", lambda season: {})
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(2026, 6, 10.0, "KC"), (2026, 5, 20.0, "KC"), (2026, 2, 15.0, "KC"), (2025, 17, 99.0, "KC")]
+
+    played = REAL_PLAYED_WEEKS(cursor, "p1")
+
+    assert played == [(2, 15.0), (5, 20.0), (6, 10.0)]
+    assert "actual_points_source IS NOT NULL" in cursor.execute.call_args[0][0]
+
+
+def test_played_weeks_leave_out_the_teams_bye(monkeypatch):
+    # sync_actual_scores stores a bye-week starter as 0.0; that week wasn't played.
+    seasons = []
+    monkeypatch.setattr(players_service, "bye_weeks_or_empty", lambda season: seasons.append(season) or {"KC": 5, "DEN": 6})
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(2026, 6, 0.0, "KC"), (2026, 5, 0.0, "KC"), (2026, 4, 12.0, "KC")]
+
+    assert REAL_PLAYED_WEEKS(cursor, "p1") == [(4, 12.0), (6, 0.0)]
+    assert seasons == [2026]
+
+
+def test_season_avg_and_weekly_log_cover_the_last_four_played_weeks():
+    played = [(1, 5.0), (2, 15.0), (4, 0.0), (5, 20.0), (6, 10.0)]
+
+    assert players_service._season_avg(played) == 10.0
+    assert players_service._weekly_log(played) == [
+        {"week": 2, "points": 15.0}, {"week": 4, "points": 0.0}, {"week": 5, "points": 20.0}, {"week": 6, "points": 10.0},
+    ]
+
+
+def test_season_avg_is_null_and_log_empty_without_played_weeks():
+    assert players_service._season_avg([]) is None
+    assert players_service._weekly_log([]) == []
+
+
+def test_get_player_summary_includes_live_block_and_history(monkeypatch):
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("p1", "Some Back", "RB", "KC", "ACTIVE", None, "1")
+    cursor.fetchall.return_value = []
+    live = {"live_points": 7.5, "projected_points": 14.0, "game_label": "KC @ DEN", "game_status": "in_progress", "event_id": "9"}
+    monkeypatch.setattr(players_service, "_played_weeks", lambda *a: [(1, 12.0), (2, 8.0)])
+    monkeypatch.setattr(players_service.live_service, "player_live_summary", lambda cur, pid: live)
+
+    with patch("src.services.players_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        summary = players_service.get_player_summary("p1")
+
+    assert summary["live"] == live
+    assert summary["season_avg"] == 10.0
+    assert summary["weekly_log"] == [{"week": 1, "points": 12.0}, {"week": 2, "points": 8.0}]

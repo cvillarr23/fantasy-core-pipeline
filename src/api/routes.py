@@ -24,9 +24,9 @@ router = APIRouter()
 # earlier draft can never collide with a later one.
 DRAFT_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 900
 # Same guard for /trigger/lineup (#189). It covers lineup_solver's in-process retries and
-# the CronJob's pod-level retries, which all finish within minutes. Short enough that a
+# the launcher's retries of a failed run, which all finish within minutes. Short enough that a
 # deliberate re-run later the same day (after a manual revert on ESPN, say) isn't mistaken
-# for a duplicate - and the optimizer's key includes the Job name, so a new Job never is.
+# for a duplicate - and the optimizer's key includes the job name, so a new run never is.
 LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS = 1800
 # /trigger/waiver's guard spans a whole waiver week, not minutes: a claim sits queued on
 # ESPN until waivers process, where the worker's roster check can't see it, so any re-run
@@ -230,7 +230,7 @@ class LineupTriggerPayload(BaseModel):
         None,
         description=(
             "Stable key for this lineup decision (#189). lineup_solver retries a failed publish "
-            "and the CronJob retries a failed pod, and a retry after an ambiguous failure (read "
+            "and the launcher retries a failed run, and a retry after an ambiguous failure (read "
             "timeout, reset after send) could otherwise enqueue the same swaps twice. Repeats "
             "within LINEUP_TRIGGER_IDEMPOTENCY_TTL_SECONDS return status 'duplicate'. Optional: "
             "the web UI's manual swaps omit it."

@@ -12,7 +12,7 @@ player with no espn_id yet is skipped rather than published - not every player h
 resolved (see src/espn_identity.py), so an unresolved id is an expected gap, not a bug,
 and there is no ESPN identity to safely act on.
 
-Neither publisher here (the weekly CronJob, rumor_action_service's boost_waiver path)
+Neither publisher here (the weekly launcher job, rumor_action_service's boost_waiver path)
 drops an IR-eligible player while an IR slot is open. plan_live_waiver_moves uses the
 same waiver_strategy.plan_waiver_moves as the waiver page, and a free agent that should
 come in through an IR stash is never claimed with a healthy player's drop instead.
@@ -367,10 +367,10 @@ def run_weekly_waivers_live(team_id: str, season: int, week: int, core_api_base_
 
 
 def main(argv=None) -> int:
-    """CronJob entrypoint: 0 when claims were evaluated (published or none worth making),
-    1 when the target week's inputs are missing, so the Job fails instead of looking
+    """Launcher job entrypoint: 0 when claims were evaluated (published or none worth making),
+    1 when the target week's inputs are missing, so the run fails instead of looking
     healthy. A publish that fails after its in-process retries (or on a 4xx) propagates,
-    exiting nonzero, so the CronJob's pod retry re-runs every claim: already-queued ones
+    exiting nonzero, so the launcher's retry re-runs every claim: already-queued ones
     come back "duplicate" under their week-scoped keys (#191)."""
     parser = argparse.ArgumentParser(description="Evaluate and publish this week's live waiver claims.")
     parser.add_argument("--team-id", default=os.getenv("ESPN_TEAM_ID"))

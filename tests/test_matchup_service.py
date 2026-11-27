@@ -67,6 +67,7 @@ def test_shape_player_line_maps_box_player_fields():
         "position": "RB",
         "jersey": "22",
         "slot": "RB",
+        "pro_team": None,
         "points": 14.5,
         "projected_points": 11.2,
         "bye_week": None,
@@ -84,6 +85,13 @@ def test_shape_player_line_carries_the_status_of_the_players_nfl_game():
     done = matchup_service._shape_player_line(_make_box_player(proTeam="DAL"), game_statuses=statuses)
 
     assert (live["game_status"], done["game_status"]) == ("in_progress", "final")
+
+
+def test_shape_player_line_carries_the_nflverse_team_code():
+    """The live game blocks use nflverse codes, so the line's team must too for vs/@ and W/L."""
+    line = matchup_service._shape_player_line(_make_box_player(proTeam="WSH"))
+
+    assert line["pro_team"] == "WAS"
 
 
 def test_shape_player_line_has_no_game_status_for_a_team_with_no_game_this_week():
@@ -295,6 +303,7 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
     """Uses lineup_solver's pregame evaluation (#178 follow-up) - the exact-week pool it
     used before is empty until the target week's projections land, so the badge vanished."""
     cursor = MagicMock()
+    cursor.fetchall.return_value = [("drop1", "5001"), ("add1", "5002")]
     evaluation = {
         "swaps": [{"drop_player_id": "drop1", "add_player_id": "add1", "slot": "RB", "matchup_multiplier": 1.0}],
         "roster_pool": [{"player_id": "add1", "name": "Better Back", "position": "RB", "vorp_score": 10.0}],
@@ -306,9 +315,47 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
          patch("src.optimization.lineup_solver.publish_lineup_swaps") as mock_publish:
         result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
 
-    assert result == {"drop1": {"bench_for": "Better Back", "add_player_id": "add1"}}
+    assert result == {"5001": {"bench_for": "Better Back", "add_player_id": "5002"}}
     mock_publish.assert_not_called()
     mock_evaluate.assert_called_once_with(cursor, "team1", 2026, 2)
+
+
+def test_suggest_lineup_swaps_skips_swap_without_espn_id(caplog):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("drop1", "5001")]
+    evaluation = {
+        "swaps": [{"drop_player_id": "drop1", "add_player_id": "add1", "slot": "RB", "matchup_multiplier": 1.0}],
+        "roster_pool": [{"player_id": "add1", "name": "Better Back", "position": "RB", "vorp_score": 10.0}],
+        "optimal_starters": [], "source": {},
+    }
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation):
+        result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
+
+    assert result == {}
+    assert "no ESPN id" in caplog.text
+
+
+def test_suggest_lineup_swap_lands_on_the_line_with_the_bench_players_espn_id():
+    """Internal ids (sleeper-style) differ from ESPN's: the badge must still hit the starter's
+    line and add_player_id must equal the bench line's player_id."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("internal-drop", "4001"), ("internal-add", "4002")]
+    evaluation = {
+        "swaps": [{"drop_player_id": "internal-drop", "add_player_id": "internal-add", "slot": "RB", "matchup_multiplier": 1.0}],
+        "roster_pool": [{"player_id": "internal-add", "name": "Bench Back", "position": "RB", "vorp_score": 10.0}],
+        "optimal_starters": [], "source": {},
+    }
+    starter = matchup_service._shape_player_line(_make_box_player(playerId=4001, position="RB"))
+    bench = matchup_service._shape_player_line(_make_box_player(playerId=4002, position="RB"))
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation):
+        swaps = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
+    matchup_service._apply_badges([starter], {}, swaps)
+
+    assert starter["suggested_swap"] == {"bench_for": "Bench Back", "add_player_id": bench["player_id"]}
 
 
 def test_suggest_lineup_swaps_shows_no_badges_on_insufficient_input(caplog):
@@ -454,7 +501,7 @@ def test_get_current_team_roster_raises_when_team_not_found(monkeypatch):
 
 
 def test_get_current_team_roster_resolves_the_default_week_without_retry_sleeps(monkeypatch):
-    """A web request must not wait out the CronJob backoff, and an unresolvable week must
+    """A web request must not wait out the launcher job's retry backoff, and an unresolvable week must
     propagate for the route to map rather than quietly showing another week."""
     monkeypatch.setenv("ESPN_TEAM_ID", "8")
     error = matchup_service.WeekResolutionError("download failed")
@@ -646,3 +693,124 @@ def test_win_probability_is_none_when_espn_gave_none(monkeypatch):
         matchup = matchup_service.get_current_team_matchup(season=2026, week=2)
 
     assert matchup["our_team"]["team"]["win_probability"] is None
+
+
+def _roster_with_ids(monkeypatch, lookup):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lookup)
+    our_team = _make_team(team_id=8)
+    our_team.roster = [
+        _make_roster_player(playerId=1, lineupSlot="RB"),
+        _make_roster_player(playerId=2, lineupSlot="BE"),
+    ]
+    league = MagicMock()
+    league.teams = [our_team]
+    with patch("src.services.matchup_service.build_league", return_value=league), \
+         patch("src.services.matchup_service.require_upcoming_week", return_value=2), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        return matchup_service.get_current_team_roster(season=2026)
+
+
+def test_roster_lines_carry_the_core_player_id_beside_espns(monkeypatch):
+    result = _roster_with_ids(monkeypatch, lambda espn_ids: {"1": "9221"})
+
+    lines = result["starters"] + result["bench"]
+    assert [(p["player_id"], p["core_player_id"]) for p in lines] == [("1", "9221"), ("2", None)]
+
+
+def test_roster_still_loads_when_the_player_id_lookup_fails(monkeypatch, caplog):
+    def boom(espn_ids):
+        raise RuntimeError("database down")
+
+    result = _roster_with_ids(monkeypatch, boom)
+
+    assert [p["core_player_id"] for p in result["starters"] + result["bench"]] == [None, None]
+    assert "database down" in caplog.text
+
+
+def test_matchup_lines_carry_core_player_ids_on_both_sides(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {"1": "9221", "2": "JAX", "3": "4037"})
+    box = _make_box_score(
+        home_team=_make_team(team_id=8),
+        away_team=_make_team(team_id=9),
+        home_lineup=[_make_box_player(playerId=1, slot_position="RB"), _make_box_player(playerId=3, slot_position="BE")],
+        away_lineup=[_make_box_player(playerId=2, slot_position="D/ST")],
+    )
+    league = MagicMock()
+    league.box_scores.return_value = [box]
+
+    with patch("src.services.matchup_service.build_league", return_value=league), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        result = matchup_service.get_current_team_matchup(season=2026, week=2)
+
+    assert result["our_team"]["starters"][0]["core_player_id"] == "9221"
+    assert result["our_team"]["bench"][0]["core_player_id"] == "4037"
+    assert result["opponent"]["starters"][0]["core_player_id"] == "JAX"
+
+
+def test_stored_matchup_lines_carry_core_player_ids(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {"1": "9221", "2": "4037"})
+
+    def side(team_id, opponent_id, espn_id):
+        line = {"player_id": espn_id, "espn_id": espn_id}
+        return {"team_id": team_id, "opponent_team_id": opponent_id, "team": {}, "starters": [line], "bench": []}
+
+    monkeypatch.setattr(matchup_service, "load_completed_week", lambda season, week: [side("8", "9", "1"), side("9", "8", "2")])
+
+    result = matchup_service.get_current_team_matchup(season=2026, week=1)
+
+    assert result["our_team"]["starters"][0]["core_player_id"] == "9221"
+    assert result["opponent"]["starters"][0]["core_player_id"] == "4037"
+
+
+def _stored_side(team_id, opponent_id, line):
+    return {"team_id": team_id, "opponent_team_id": opponent_id, "team": {}, "starters": [line], "bench": []}
+
+
+def test_stored_matchup_lines_carry_a_breakdown_from_espns_stored_stats(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+    monkeypatch.setattr(matchup_service, "load_rule_points_or_none", lambda: {(24, None): 0.1, (25, None): 6.0})
+    ours = {
+        "player_id": "1", "espn_id": "1", "position": "RB", "actual_points": 15.8, "points": 15.8,
+        "applied_stats": {"24": 7.8, "25": 6, "9999": 2}, "applied_qty": {"24": 78, "25": 1},
+    }
+    theirs = {"player_id": "2", "espn_id": "2", "position": "QB", "actual_points": 3.0, "points": 3.0}
+    monkeypatch.setattr(
+        matchup_service, "load_completed_week",
+        lambda season, week: [_stored_side("8", "9", ours), _stored_side("9", "8", theirs)],
+    )
+
+    result = matchup_service.get_current_team_matchup(season=2026, week=3)
+
+    line = result["our_team"]["starters"][0]
+    assert [(b["stat_key"], b["qty"], b["rule_label"], b["points"]) for b in line["breakdown"]] == [
+        ("rushYd", 78.0, "1 pt per 10 rushing yds", 7.8),
+        ("rushTD", 1.0, "6 pts per rushing TD", 6.0),
+        ("other", None, "Not itemized", 2.0),
+    ]
+    assert sum(b["points"] for b in line["breakdown"]) == pytest.approx(line["points"])
+    assert "applied_stats" not in line and "applied_qty" not in line
+    # Stored before ESPN's per-stat points were kept: no breakdown, not an empty one.
+    assert result["opponent"]["starters"][0]["breakdown"] is None
+
+
+def test_stored_matchup_without_stored_stats_never_reads_the_rules(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+    rules = MagicMock()
+    monkeypatch.setattr(matchup_service, "load_rule_points_or_none", rules)
+    line = {"player_id": "1", "espn_id": "1", "actual_points": 3.0}
+    monkeypatch.setattr(
+        matchup_service, "load_completed_week",
+        lambda season, week: [_stored_side("8", "9", line), _stored_side("9", "8", dict(line))],
+    )
+
+    result = matchup_service.get_current_team_matchup(season=2026, week=4)
+
+    assert result["our_team"]["starters"][0]["breakdown"] is None
+    rules.assert_not_called()

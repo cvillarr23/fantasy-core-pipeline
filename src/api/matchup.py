@@ -5,14 +5,16 @@ Thin controller over src.services.matchup_service, mirroring src/api/roster.py's
 pattern of splitting a REST surface out of the MCP-only layer.
 """
 import logging
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from espn_api.requests.espn_requests import ESPNAccessDenied, ESPNInvalidLeague, ESPNUnknownError
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.schemas.espn_ownership import EspnOwnership
+from src.schemas.live import GameDetailResponse, LiveBlock, MatchupFeedResponse, ScoreBreakdownLine
+from src.services import live_service
 from src.services.matchup_service import (
     ESPNTimeoutError,
     NoMatchupFoundError,
@@ -27,12 +29,19 @@ scoreboard_router = APIRouter()
 
 
 class PlayerLine(BaseModel):
+    # ESPN's player id, the same as espn_id.
     player_id: str
     espn_id: str
+    # players.player_id, which /v1/players/{id}/summary, /v1/news/recent and /v1/live/players
+    # take. None when no player row matches espn_id or the lookup fails.
+    core_player_id: Optional[str] = None
     name: str
     position: str
     jersey: Optional[str] = None
     slot: str
+    # The player's NFL team as an nflverse code (`WAS`, not ESPN's `WSH`), the codes the `live`
+    # block's home/away use. None when ESPN gives no team.
+    pro_team: Optional[str] = None
     points: Optional[float]
     projected_points: Optional[float]
     # The player's NFL bye week; None when the schedule couldn't be read.
@@ -40,6 +49,14 @@ class PlayerLine(BaseModel):
     # Where the player's NFL game stands. None when the scoreboard can't be read, the team has no
     # game this week (bye; see bye_week), or the week is already stored as completed history.
     game_status: Optional[Literal["not_started", "in_progress", "final"]] = None
+    # The poller's live snapshot (score, clock, stat line, live points). None when there is none
+    # for this player; when set, `live.status` and `game_status` agree.
+    live: Optional[LiveBlock] = None
+    # A stored completed week's scoring breakdown, from the ESPN stats `sync_actual_scores`
+    # kept; the lines sum to `points` (within 0.05). None for a live or upcoming week (see
+    # `live.breakdown`), a week stored before per-stat points were kept, or when the league's
+    # rules can't be read.
+    breakdown: Optional[List[ScoreBreakdownLine]] = None
     headshot_url: str
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
@@ -74,7 +91,7 @@ class MatchupResponse(BaseModel):
 @matchup_router.get("", response_model=MatchupResponse)
 def get_matchup(season: int, week: int):
     try:
-        return get_current_team_matchup(season, week)
+        return live_service.overlay_matchup(get_current_team_matchup(season, week))
     except NoMatchupFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ESPNTimeoutError as e:
@@ -86,6 +103,35 @@ def get_matchup(season: int, week: int):
     except Exception as e:
         logger.error(f"Failed to compute matchup for season={season} week={week}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to compute matchup: {str(e)}")
+
+
+@matchup_router.get("/feed", response_model=MatchupFeedResponse)
+def get_matchup_feed(
+    season: int,
+    week: int,
+    limit: int = Query(50, ge=1, le=200),
+    before: Optional[str] = None,
+):
+    """Plays and recent news for both sides' players, newest first. Empty unless the poller is
+    running this season and week."""
+    try:
+        return live_service.load_feed(season, week, limit, before)
+    except Exception as e:
+        logger.error(f"Failed to build matchup feed for season={season} week={week}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to build matchup feed: {str(e)}")
+
+
+@matchup_router.get("/games/{event_id}", response_model=GameDetailResponse)
+def get_matchup_game(event_id: str, season: int, week: int):
+    """One NFL game in this week's matchup: header, each side's starters' fantasy points from
+    it, the matchup players in it with their scoring breakdown, and its plays."""
+    try:
+        return live_service.load_game_detail(event_id, season, week)
+    except live_service.LiveGameNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except live_service.LiveSnapshotUnavailableError as e:
+        logger.error(f"Live snapshot unavailable for game {event_id}: {e}")
+        raise HTTPException(status_code=503, detail="The live snapshot is unavailable")
 
 
 class ScoreboardTeamInfo(BaseModel):
@@ -126,8 +172,11 @@ def get_scoreboard(season: int, week: int):
 
 
 class LineupPlayerLine(BaseModel):
+    # ESPN's player id, the same as espn_id.
     player_id: str
     espn_id: str
+    # Same meaning as PlayerLine.core_player_id.
+    core_player_id: Optional[str] = None
     name: str
     position: str
     jersey: Optional[str] = None

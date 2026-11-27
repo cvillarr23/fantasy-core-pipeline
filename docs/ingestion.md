@@ -72,6 +72,8 @@ An article tagging more than `ESPN_COVERAGE_MAX_ATHLETES` (3) athletes, such as 
 
 `python -m src.ingestion.live_games [--season N] [--week N] [--once]` polls this week's fantasy matchup for one game window and keeps a snapshot in Redis. The live API reads that snapshot, so no request ever waits on ESPN. It runs as the `live-games` launcher service job (fantasy-infra), one run per game window.
 
+The launcher starts it from nflverse kickoff times through the job's catalog `kickoffs` block, not cron slots: `lead` (20m in production) before each distinct regular-season kickoff, on any weekday. Kickoffs are reread hourly, so a flexed or moved game is picked up. A failed reread keeps the last good copy. With no readable schedule at all, or on the day of a game whose time isn't set yet, it starts every `fallback_every` (30m) instead. A start that finds the previous run still up is skipped, since that run already covers the new kickoff.
+
 At startup it resolves the upcoming week (`resolve_upcoming_week`), reads our matchup period and opponent from `fantasy_matchups` (`ESPN_LEAGUE_ID`, `ESPN_TEAM_ID`), and loads `players.espn_id`. It exits 0 when the season is over or we have no scheduled matchup, and 1 when the week can't be resolved.
 
 Each tick:
@@ -87,19 +89,24 @@ A failed fetch is retried 3 times. A failed tick logs and the loop carries on.
 | Key | Value | TTL |
 |---|---|---|
 | `live:game:{event_id}` | `{event_id, status: not_started\|in_progress\|final, detail, period, clock, home: {abbr, score}, away: {abbr, score}, possession, yard_line, red_zone, kickoff, updated_at}`. `period`, `clock`, `possession` and `yard_line` are null unless the game is live. Scores are null before kickoff. | 6h |
-| `live:player:{player_id}` | `{event_id, team, fantasy_team_id, lineup_slot_id, stat_line, live_points, applied_stats, updated_at}`, for every player on either matchup roster with a `players.espn_id` match. | 6h |
-| `live:plays:{event_id}` | A list, newest first, capped at 300: `{play_id, period, clock, text, player_ids, scoring}`. Only plays that involve a matchup player are kept. | 6h |
+| `live:player:{player_id}` | `{event_id, team, fantasy_team_id, lineup_slot_id, position, stat_line, live_points, applied_stats, applied_qty, updated_at}`, for every player on either matchup roster with a `players.espn_id` match. | 6h |
+| `live:plays:{event_id}` | A list, newest first, capped at 300: `{play_id, period, clock, text, player_ids, scoring, recorded_at, fantasy_delta}`. Only plays that involve a matchup player are kept. `recorded_at` is the tick that first saw the play (ESPN gives no wall time) and `fantasy_delta` maps each `player_id` to the change in that player's `live_points` since the previous tick. Both are carried forward unchanged on later ticks. | 6h |
+| `live:player_ids` | A JSON list of the `player_id`s written to `live:player` this tick, sorted. The feed reads players through it instead of scanning keys. | 6h |
 | `live:updated_at` | ISO-8601 time of the last successful tick. | 6h |
-| `live:health` | `{updated_at, last_success_at, week, tracked_events}`, written every tick, including a failed one. This is the service job's launcher `health` key. | 10 min |
+| `live:health` | `{updated_at, last_success_at, season, week, tracked_events}`, written every tick, including a failed one. This is the service job's launcher `health` key. The live API serves nothing without it, and needs `season` and `week` to match for the matchup overlay and feed. Health without `season` (from a poller older than that key) counts as not live. | 10 min |
 | `live:last_viewed` | Written by the live API, not by this job: the unix epoch seconds when someone last opened a live page. ISO-8601 is also accepted. | n/a |
 
 Team codes are nflverse codes (`WAS`, not ESPN's `WSH`), the same as `players.team`.
 
 **Points are ESPN's own.** `live_points` is the actual stat row's `appliedTotal` (`statSourceId` 0), which ESPN updates in game and which matches the matchup score. `applied_stats` is that row's points per ESPN stat id. `stat_line` is its raw counts, named: `passYd`, `passTD`, `int`, `rushYd`, `rushTD`, `rec`, `recYd`, `recTD`, `fumLost` and `twoPt`, plus kicker and D/ST stats. A stat ESPN didn't report is left out. A player who hasn't played yet has `live_points: null`, never 0.
 
+**Scoring breakdown.** `applied_qty` is the raw count behind each `applied_stats` entry (98 for 98 rushing yards), and `position` is ESPN's default position, which picks the league's per-position rules (every D/ST stat is a `pointsOverrides["16"]` rule). The live API turns these into `breakdown` lines (`src/espn_scoring.py`) at read time, labelled from `league_settings.scoring_settings`: `points` is always ESPN's own `applied_stats` value, so the lines add up to `live_points`. An unknown stat id is left out and logged, and anything that doesn't add up shows as an `other` line. `GET /v1/scoring/rules` lists the same rules in plain English, and `GET /v1/matchup/games/{event_id}` splits one game's points by side, counting starters only.
+
 **Plays are matched by name.** ESPN's plays carry no athlete ids. A player is tagged when the play text has his play-by-play name (`J.Gibbs`, `Ja.Chase`, `A.St. Brown`) or his full name (scoring plays), without a Jr./III suffix. A tag only counts when the player's team is one of the play's teams. A D/ST is tagged on turnovers, sacks, safeties and scores while its team is on defense (a score against it counts toward points allowed), and on its own return touchdowns. Two teammates with the same initial and last name would both be tagged.
 
-**Cadence.** Ticks run every 30s while `live:last_viewed` is under 5 minutes old, and every 180s otherwise. The wait rechecks `live:last_viewed` every 10s, so a new viewer speeds polling up at once. A summary that is unavailable leaves that game on its scoreboard state and keeps its previous plays.
+**Play deltas.** A play's `fantasy_delta` for a player is null when the player has more than one new play in the same tick (the change can't be split between them), when the player had no earlier `live:player` row (the first tick, or after the keys expired), or when ESPN has no points for him. It is also null for a game's new plays on the tick after one that couldn't refresh that game's plays (its summary or its stored plays couldn't be read): `live:player` moved on that tick, so the baseline already includes those plays' points. The baseline is read back from Redis before each write, so a restart doesn't lose it. Because ESPN can post a stat a tick after the play, a delta can land on the next play instead.
+
+**Cadence.** Ticks run every 30s while `live:last_viewed` is under 5 minutes old, and every 180s otherwise. The wait rechecks `live:last_viewed` every 10s, so a new viewer speeds polling up at once. A summary that is unavailable leaves that game on its scoreboard state and keeps its previous plays. So does a failed read of the stored plays: the list is left as it is for that tick rather than rewritten with every play looking new.
 
 **Exit.** The poller exits 0 once no tracked game is in progress and none kicks off within 30 minutes. That covers every game being final, and an empty window costing one tick. SIGTERM also stops it cleanly.
 
@@ -145,6 +152,8 @@ By default it processes the last **completed** regular-season week: every game f
 | `fantasy_matchups` | Team and matchup period | `(league_id, season, matchup_period, team_id)` |
 | `fantasy_team_week_scores` | Team and week | `(league_id, season, week, team_id)` |
 | `fantasy_player_week_scores` | Player, team and week | `(league_id, season, week, team_id, espn_id)` |
+
+Each player's payload keeps ESPN's `applied_stats` (points per stat id) and `applied_qty` (the count behind each) from the actual stat row, the same fields the live poller writes. `GET /v1/matchup` turns them into a completed week's `breakdown` lines at read time. Because every run rewrites every completed week, weeks stored before these fields were kept gain them on the next run.
 
 It also sets `weekly_stats.actual_points`, with `actual_points_source` and `actual_points_updated_at` recording where each value came from. Use `--dry-run` to validate a week without opening the database.
 

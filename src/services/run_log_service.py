@@ -124,8 +124,9 @@ class RunNotFoundError(Exception):
 
 
 def trigger_from_env():
-    """Scheduled vs manual comes from the Job name: a CronJob names its Jobs
-    `<cronjob>-<minutes>`, while `kubectl create job --from=cronjob/...` picks any name.
+    """A launcher run sets RUN_TRIGGER, which wins. Without it (a pre-launcher pod), scheduled
+    vs manual comes from the Job name: a CronJob names its Jobs `<cronjob>-<minutes>`, while
+    `kubectl create job --from=cronjob/...` picks any name.
     """
     explicit = os.getenv("RUN_TRIGGER")
     if explicit:

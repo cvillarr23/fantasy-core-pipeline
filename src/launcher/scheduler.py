@@ -13,6 +13,16 @@ nothing:
   after the last game of its end week (nflverse game dates), so the Tuesday before week 1
   and the Tuesday after the end week both run. An unreadable NFL schedule fails open: every
   chained job already exits 0 in the offseason, while a skipped in-season slot loses a week.
+- **Kickoffs.** A job with catalog ``kickoffs: {lead, catch_up, seasons, fallback_every}``
+  starts ``lead`` before each distinct kickoff of a regular-season game in ``seasons``
+  (nflverse ``gameday`` + ``gametime``, Eastern), on any weekday; games at one time share a
+  slot. Only the latest slot within ``catch_up`` fires, so a launcher outage catches up once.
+  Kickoffs are reread every ``KICKOFF_CACHE_TTL`` to pick up flexed and moved games; a failed
+  reread keeps the last good copy. With no good copy at all, or on the Eastern day of a game
+  whose time isn't set yet, it starts every ``fallback_every`` (epoch-aligned) instead, so an
+  unreadable schedule never drops a game window: the poller exits at once when nothing is
+  live. A season nflverse hasn't published reads as empty, so the offseason starts nothing.
+  Dedupe keys are ``job@<slot in UTC>``, as for cron slots.
 - **Pauses.** A ``job_overrides`` row with ``paused_until`` NULL or in the future turns a
   due slot into a ``skipped`` run with ``end_reason='paused'``, written once per slot.
 - **Chains.** A chain root is a ``run_log`` row (``job_name`` = chain, ``trigger_type`` =
@@ -85,8 +95,17 @@ import polars as pl
 from croniter import croniter
 
 from src.launcher.approvals import start_then
-from src.launcher.catalog import ApprovalStep, Catalog, Chain, ChainStep, Schedule, Season
+from src.launcher.catalog import (
+    ApprovalStep,
+    Catalog,
+    Chain,
+    ChainStep,
+    Kickoffs,
+    Schedule,
+    Season,
+)
 from src.launcher.runs import FAN_OUT, WAITING, ApprovalRun, Runs
+from src.nfl_schedule import SCHEDULE_TIMEZONE, kickoff_utc
 from src.services import trade_offer_expiry
 
 if TYPE_CHECKING:
@@ -98,6 +117,8 @@ SLOT_GRACE = timedelta(minutes=2)
 SEASON_LEAD = timedelta(days=7)
 SEASON_TAIL = timedelta(days=2)
 SEASON_CACHE_TTL = timedelta(hours=24)
+# Kickoff times move (flexes, weather): reread hourly, which is cheap.
+KICKOFF_CACHE_TTL = timedelta(hours=1)
 # A failed nflverse read is cached briefly so ticks every few seconds don't each refetch.
 SEASON_FAILURE_TTL = timedelta(minutes=5)
 LATEST_GRACE = timedelta(minutes=30)
@@ -230,8 +251,17 @@ def next_slot(schedule: Schedule, now: datetime) -> datetime:
     return slot.astimezone(timezone.utc)
 
 
+@dataclass(frozen=True)
+class SeasonKickoffs:
+    """One season's regular-season kickoffs within a catalog season window."""
+
+    times: frozenset[datetime]
+    # Eastern days with a game whose kickoff time isn't set yet.
+    unset_days: frozenset[date]
+
+
 class NflSeasonCalendar:
-    """Season windows from nflverse game dates, cached per season."""
+    """Season windows and kickoffs from the nflverse schedule, cached per season."""
 
     def __init__(
         self,
@@ -244,11 +274,8 @@ class NflSeasonCalendar:
         self._failures: dict[int, tuple[datetime, Exception]] = {}
 
     def in_season(self, season: Season, day: date) -> bool:
-        # A season runs September to early February, so January belongs to the prior year.
-        year = day.year if day.month >= 3 else day.year - 1
-        games = self._schedule(year).filter(
-            (pl.col("season") == year) & (pl.col("game_type") == "REG")
-        )
+        year = season_year(day)
+        games = _regular_games(self._schedule(year, SEASON_CACHE_TTL), year)
         first = games.filter(pl.col("week") == season.start)["gameday"]
         last = games.filter(pl.col("week") == season.end)["gameday"]
         if first.is_empty() or last.is_empty():
@@ -257,11 +284,44 @@ class NflSeasonCalendar:
         end = date.fromisoformat(str(last.max())[:10]) + SEASON_TAIL
         return start <= day <= end
 
-    def _schedule(self, year: int) -> pl.DataFrame:
+    def kickoffs(self, season: Season, year: int) -> SeasonKickoffs:
+        """The ``year`` season's kickoffs in the weeks of ``season``. Raises only when the
+        schedule has never been read: a failed reread keeps the last good copy."""
+        games = _regular_games(
+            self._schedule(year, KICKOFF_CACHE_TTL, keep_stale=True), year
+        ).filter(pl.col("week").is_between(season.start, season.end))
+        times, unset_days = set(), set()
+        for game in games.select(["gameday", "gametime"]).iter_rows(named=True):
+            if game["gametime"]:
+                times.add(kickoff_utc(str(game["gameday"]), game["gametime"]))
+            else:
+                unset_days.add(date.fromisoformat(str(game["gameday"])[:10]))
+        return SeasonKickoffs(frozenset(times), frozenset(unset_days))
+
+    def _schedule(
+        self, year: int, ttl: timedelta, keep_stale: bool = False
+    ) -> pl.DataFrame:
         now = self._clock()
         cached = self._cache.get(year)
-        if cached and now - cached[0] < SEASON_CACHE_TTL:
+        if cached and now - cached[0] < ttl:
             return cached[1]
+        try:
+            schedule = self._fresh_schedule(year, now)
+        except Exception as exc:
+            if keep_stale and cached:
+                logger.warning(
+                    "Rereading the %s NFL schedule failed; using the copy from %s ago: %s",
+                    year,
+                    now - cached[0],
+                    exc,
+                )
+                return cached[1]
+            raise
+        self._cache[year] = (now, schedule)
+        return schedule
+
+    def _fresh_schedule(self, year: int, now: datetime) -> pl.DataFrame:
+        """Loads the schedule, unless a load failed within SEASON_FAILURE_TTL."""
         failed = self._failures.get(year)
         if failed and now - failed[0] < SEASON_FAILURE_TTL:
             raise failed[1]
@@ -271,8 +331,17 @@ class NflSeasonCalendar:
             self._failures[year] = (now, exc)
             raise
         self._failures.pop(year, None)
-        self._cache[year] = (now, schedule)
         return schedule
+
+
+def season_year(day: date) -> int:
+    """The NFL season a date belongs to: a season runs September to early February, so
+    January and February belong to the prior year."""
+    return day.year if day.month >= 3 else day.year - 1
+
+
+def _regular_games(schedule: pl.DataFrame, year: int) -> pl.DataFrame:
+    return schedule.filter((pl.col("season") == year) & (pl.col("game_type") == "REG"))
 
 
 def _publish_run(catalog: Catalog, job: str, **kwargs: Any) -> dict[str, str]:
@@ -318,6 +387,8 @@ class Scheduler:
             for step in chain.steps:
                 self._chains_by_job.setdefault(step, []).append(name)
         self._subscribers: dict[str, list[tuple[str, timedelta]]] = {}
+        # Only for logging an outage once; the slots themselves are recomputed every tick.
+        self._kickoff_outage = False
         for name, job in catalog.jobs.items():
             for subscription in job.on_event:
                 self._subscribers.setdefault(subscription.key, []).append(
@@ -341,6 +412,10 @@ class Scheduler:
         for name, job in self.catalog.jobs.items():
             for schedule in job.schedules:
                 self._guard(f"job {name} slot", self._job_slot, name, schedule, now)
+            if job.kickoffs:
+                self._guard(
+                    f"job {name} kickoffs", self._kickoff_slot, name, job.kickoffs, now
+                )
 
     def run(self, stop: threading.Event, poll_seconds: float = POLL_SECONDS) -> None:
         """Ticks until ``stop`` is set; a failed tick (database away) is retried next poll."""
@@ -448,10 +523,13 @@ class Scheduler:
     def next_job_run(self, job: str, now: datetime | None = None) -> datetime | None:
         """When ``job``'s own schedules next fire. None for a step with no schedule."""
         now = now or self.clock()
-        slots = (
+        slots = [
             self._next_firing_slot(schedule, now, job)
             for schedule in self.catalog.jobs[job].schedules
-        )
+        ]
+        kickoffs = self.catalog.jobs[job].kickoffs
+        if kickoffs:
+            slots.append(self._next_kickoff_slot(kickoffs, now))
         return min(filter(None, slots), default=None)
 
     def next_chain_run(
@@ -544,6 +622,94 @@ class Scheduler:
                 "Season check failed for %s; firing the slot anyway: %s", day, exc
             )
             return True
+
+    def _kickoff_slot(self, name: str, kickoffs: Kickoffs, now: datetime) -> None:
+        """Starts the latest kickoff slot within ``catch_up`` once."""
+        slots = self._kickoff_slots(kickoffs, now - kickoffs.catch_up, now)
+        if not slots:
+            return
+        slot = max(slots)
+        key = slot_key(name, slot)
+        if self.state.run_exists(key):
+            return
+        if now - slot > SLOT_GRACE:
+            logger.info("Catching up kickoff slot %s (%s late)", key, now - slot)
+        if self.state.paused(name, now):
+            self._skip(name, "schedule", key, slot, "paused")
+            return
+        self._publish(
+            name,
+            trigger="schedule",
+            dedupe_key=key,
+            scheduled_for=slot,
+            expires_at=slot + kickoffs.catch_up,
+        )
+
+    def _next_kickoff_slot(
+        self, kickoffs: Kickoffs, now: datetime
+    ) -> datetime | None:
+        """The first kickoff slot after ``now`` in the current season, or None."""
+        year = season_year(now.astimezone(SCHEDULE_TIMEZONE).date())
+        season_end = datetime.combine(date(year + 1, 3, 1), time(), SCHEDULE_TIMEZONE)
+        slots = self._kickoff_slots(
+            kickoffs, now + timedelta(microseconds=1), season_end - timedelta(microseconds=1)
+        )
+        return min(slots, default=None)
+
+    def _kickoff_slots(
+        self, kickoffs: Kickoffs, start: datetime, end: datetime
+    ) -> list[datetime]:
+        """Every slot from ``start`` through ``end``: ``lead`` before each kickoff, plus the
+        fallback cadence on days whose kickoff time is unknown, or throughout when the
+        schedule can't be read."""
+        try:
+            known = self._season_kickoffs(kickoffs, start, end)
+        except Exception as exc:
+            self._note_kickoff_outage(kickoffs, exc)
+            return _cadence(kickoffs.fallback_every, start, end)
+        self._note_kickoff_outage(kickoffs, None)
+        slots = {
+            kickoff - kickoffs.lead
+            for kickoff in known.times
+            if start <= kickoff - kickoffs.lead <= end
+        }
+        slots.update(
+            slot
+            for slot in _cadence(kickoffs.fallback_every, start, end)
+            if slot.astimezone(SCHEDULE_TIMEZONE).date() in known.unset_days
+        )
+        return sorted(slots)
+
+    def _note_kickoff_outage(self, kickoffs: Kickoffs, exc: Exception | None) -> None:
+        """Logs once when kickoffs become unreadable and once when they recover, not on
+        every tick."""
+        if exc is not None and not self._kickoff_outage:
+            logger.warning(
+                "Kickoff schedule unavailable; starting every %s until it reads: %s",
+                kickoffs.fallback_every,
+                exc,
+            )
+        elif exc is None and self._kickoff_outage:
+            logger.info("Kickoff schedule readable again")
+        self._kickoff_outage = exc is not None
+
+    def _season_kickoffs(
+        self, kickoffs: Kickoffs, start: datetime, end: datetime
+    ) -> SeasonKickoffs:
+        """The kickoffs of every season the span touches, across the job's seasons."""
+        years = {
+            season_year(moment.astimezone(SCHEDULE_TIMEZONE).date())
+            for moment in (start, end)
+        }
+        parts = [
+            self.seasons.kickoffs(self.catalog.seasons[name], year)
+            for year in sorted(years)
+            for name in kickoffs.seasons
+        ]
+        return SeasonKickoffs(
+            frozenset().union(*(part.times for part in parts)),
+            frozenset().union(*(part.unset_days for part in parts)),
+        )
 
     def _chain_slot(self, name: str, chain: Chain, now: datetime) -> None:
         assert chain.schedule is not None
@@ -957,6 +1123,17 @@ def _local_day(moment: datetime, tz: ZoneInfo) -> tuple[datetime, datetime]:
     start = datetime.combine(day, time(), tzinfo=tz)
     end = datetime.combine(day + timedelta(days=1), time(), tzinfo=tz)
     return start, end
+
+
+def _cadence(every: timedelta, start: datetime, end: datetime) -> list[datetime]:
+    """The epoch-aligned multiples of ``every`` from ``start`` through ``end``, in UTC."""
+    seconds = every.total_seconds()
+    first = -(-start.timestamp() // seconds) * seconds
+    count = int((end.timestamp() - first) // seconds) + 1
+    return [
+        datetime.fromtimestamp(first + i * seconds, timezone.utc)
+        for i in range(max(count, 0))
+    ]
 
 
 def _window(schedule: Schedule) -> timedelta:

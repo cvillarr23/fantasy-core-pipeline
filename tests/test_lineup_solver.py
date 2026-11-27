@@ -1,8 +1,23 @@
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import polars as pl
+import pytest
 import requests
 
 from src.optimization import lineup_solver as ls
+
+
+_real_kicked_off_teams = ls._kicked_off_teams
+
+
+@pytest.fixture(autouse=True)
+def _no_espn_or_schedule():
+    """No test reaches ESPN for the roster sync or nflverse for kickoffs; by default no
+    game has kicked off. Tests that need either patch over these."""
+    with patch("src.optimization.lineup_solver.sync_league.sync_rosters", return_value=0), \
+         patch("src.optimization.lineup_solver._kicked_off_teams", return_value=set()):
+        yield
 
 
 def _player(pid, position, vorp_score, name=None, defense_matchup_multiplier=1.0):
@@ -273,7 +288,7 @@ def test_load_current_starters_includes_vorp_score():
     """CORE-17 (#35): compute_lineup_swaps needs the dropped starter's own vorp_score to
     populate decision_inputs, which load_current_starters didn't carry before."""
     mock_cursor = MagicMock()
-    mock_cursor.fetchall.return_value = [("rb_old", "RB", "RB1", 4.0)]
+    mock_cursor.fetchall.return_value = [("rb_old", "RB", "RB1", 4.0, "BUF")]
 
     starters = ls.load_current_starters(mock_cursor, team_id="1", season=2025, week=3)
 
@@ -281,14 +296,14 @@ def test_load_current_starters_includes_vorp_score():
     assert "weekly_stats" in query
     assert "LEFT JOIN" in query
     assert params == (2025, 3, "1")
-    assert starters == {"rb_old": {"position": "RB", "slot_position": "RB1", "vorp_score": 4.0}}
+    assert starters == {"rb_old": {"position": "RB", "slot_position": "RB1", "vorp_score": 4.0, "team": "BUF"}}
 
 
 def test_load_current_starters_coalesces_null_vorp_score_for_a_bye_week_starter():
     """A starter's weekly_stats row is only missing (COALESCE fires) on a bye - the join
     is LEFT specifically so a starter still on a bye still shows up as droppable."""
     mock_cursor = MagicMock()
-    mock_cursor.fetchall.return_value = [("wr_bye", "WR", "FLEX", 0.0)]
+    mock_cursor.fetchall.return_value = [("wr_bye", "WR", "FLEX", 0.0, "KC")]
 
     ls.load_current_starters(mock_cursor, team_id="1", season=2025, week=3)
 
@@ -588,10 +603,14 @@ ROSTER = [
     ("k1", "K One", "K", "PHI", None),
 ]
 
+TEAM_BY_PID = {pid: team for pid, _name, _pos, team, _status in ROSTER}
 CURRENT_STARTERS = [
-    ("qb1", "QB", "QB", 0.0), ("rb1", "RB", "RB", 0.0), ("rb2", "RB", "RB", 0.0),
-    ("wr1", "WR", "WR", 0.0), ("wr2", "WR", "WR", 0.0), ("te1", "TE", "TE", 0.0),
-    ("wr_old", "WR", "RB/WR/TE", 0.0), ("dst1", "D/ST", "D/ST", 0.0), ("k1", "K", "K", 0.0),
+    (pid, pos, slot, 0.0, TEAM_BY_PID[pid])
+    for pid, pos, slot in (
+        ("qb1", "QB", "QB"), ("rb1", "RB", "RB"), ("rb2", "RB", "RB"),
+        ("wr1", "WR", "WR"), ("wr2", "WR", "WR"), ("te1", "TE", "TE"),
+        ("wr_old", "WR", "RB/WR/TE"), ("dst1", "D/ST", "D/ST"), ("k1", "K", "K"),
+    )
 ]
 
 
@@ -940,7 +959,7 @@ def test_optimize_returns_zero_when_lineup_already_optimal():
 
 
 # ---------------------------------------------------------------------------
-# main (CronJob entrypoint exit codes)
+# main (launcher job entrypoint exit codes)
 # ---------------------------------------------------------------------------
 
 ARGV = ["--team-id", "8", "--season", "2026", "--week", "5"]
@@ -1026,7 +1045,7 @@ def test_main_with_explicit_week_never_resolves():
 
 
 # ---------------------------------------------------------------------------
-# resolve_default_week (imported by fantasy-infra's refresher and waiver CronJobs)
+# resolve_default_week (imported by fantasy-infra's refresher and waiver launcher jobs)
 # ---------------------------------------------------------------------------
 
 def test_resolve_default_week_raises_instead_of_falling_back_to_week_one():
@@ -1249,3 +1268,134 @@ def test_pregame_pool_leaves_out_ir_slot_players():
     roster_sql, metrics_sql = (c.args[0] for c in mock_cursor.execute.call_args_list[:2])
     assert "r.slot_position IS DISTINCT FROM 'IR'" in roster_sql
     assert "r.slot_position IS DISTINCT FROM 'IR'" in metrics_sql
+
+
+# ---------------------------------------------------------------------------
+# Mid-week runs: roster sync and kickoff locks
+# ---------------------------------------------------------------------------
+
+def _with_team(pid, team):
+    """ROSTER and CURRENT_STARTERS with one player moved to `team`, so a lock can hit him alone."""
+    roster = [(p, n, pos, team if p == pid else t, st) for p, n, pos, t, st in ROSTER]
+    starters = [(p, pos, slot, v, team if p == pid else t) for p, pos, slot, v, t in CURRENT_STARTERS]
+    return roster, starters
+
+
+def _run_locked(kicked_off, roster=ROSTER, starters=CURRENT_STARTERS, vorp=None):
+    with patch("src.optimization.lineup_solver._kicked_off_teams", return_value=set(kicked_off)):
+        return _run_optimize(roster, _metric_rows(TARGET_WEEK, vorp or dict(BASE_VORP, wr_bench=99.0)), starters=starters)
+
+
+def _published_entries(mock_post):
+    return mock_post.call_args[0][1]["optimized_swaps"]
+
+
+def test_hold_locked_starters_takes_a_locked_flex_starters_seat_out_of_demand():
+    current = {"wr_old": dict(_current("WR", "RB/WR/TE"), team="MIA"), "wr2": dict(_current("WR"), team="SF")}
+
+    counts, movable, locked = ls._hold_locked_starters(ls.DEFAULT_LINEUP_SLOT_COUNTS, current, {"MIA"})
+
+    assert counts["RB/WR/TE"] == 0
+    assert counts["WR"] == ls.DEFAULT_LINEUP_SLOT_COUNTS["WR"]
+    assert locked == ["wr_old"]
+    assert list(movable) == ["wr2"]
+
+
+def test_optimize_keeps_a_locked_flex_starter_in_place():
+    roster, starters = _with_team("wr_old", "MIA")
+
+    result, mock_post, _ = _run_locked({"MIA"}, roster=roster, starters=starters)
+
+    # wr_bench (99) can't take wr_old's locked FLEX seat, so he replaces the weakest WR instead.
+    assert result == 1
+    entries = _published_entries(mock_post)
+    assert [(e["drop_player_id"], e["add_player_id"], e["slot"]) for e in entries] == [
+        (ESPN_ID_BY_PID["wr2"], ESPN_ID_BY_PID["wr_bench"], "WR"),
+    ]
+    assert entries[0]["decision_inputs"]["locked_players"] == ["wr_old"]
+
+
+def test_optimize_never_starts_a_locked_bench_player():
+    result, mock_post, _ = _run_locked({"LAR"})
+
+    assert result == 0
+    mock_post.assert_not_called()
+
+
+def test_optimize_makes_no_swaps_once_every_game_has_kicked_off():
+    result, mock_post, _ = _run_locked(ALL_TEAMS_PLAYING)
+
+    assert result == 0
+    mock_post.assert_not_called()
+
+
+def test_evaluate_lineup_reports_locked_players_in_its_source():
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [ROSTER, _metric_rows(TARGET_WEEK, BASE_VORP), CURRENT_STARTERS]
+    with patch("src.optimization.lineup_solver.load_lineup_slot_counts", return_value=ls.DEFAULT_LINEUP_SLOT_COUNTS), \
+         patch("src.optimization.lineup_solver._kicked_off_teams", return_value={"LAR", "KC"}):
+        evaluation = ls.evaluate_lineup(cursor, "8", TARGET_SEASON, TARGET_WEEK)
+
+    assert evaluation["source"]["locked_players"] == ["dst1", "qb1", "te1", "wr_bench"]
+    assert evaluation["swaps"] == []
+
+
+def test_optimize_raises_and_reads_nothing_when_the_roster_sync_fails():
+    with patch("src.optimization.lineup_solver.sync_league.sync_rosters", side_effect=RuntimeError("ESPN down")), \
+         patch("src.optimization.lineup_solver.get_db_connection") as mock_get_conn, \
+         patch("src.optimization.lineup_solver.post_trigger_idempotent") as mock_post:
+        with pytest.raises(RuntimeError, match="ESPN down"):
+            ls.optimize_weekly_lineup(team_id="8", season=TARGET_SEASON, week=TARGET_WEEK, dry_run=True)
+
+    mock_get_conn.assert_not_called()
+    mock_post.assert_not_called()
+
+
+def test_optimize_syncs_rosters_for_the_season_before_evaluating():
+    with patch("src.optimization.lineup_solver.sync_league.sync_rosters", return_value=12) as mock_sync:
+        result, _, _ = _run_optimize(ROSTER, _metric_rows(TARGET_WEEK, BASE_VORP), dry_run=True)
+
+    assert result == 0
+    mock_sync.assert_called_once_with(TARGET_SEASON)
+
+
+SCHEDULE = pl.DataFrame({
+    "week": [12, 12, 12, 13],
+    "gameday": ["2026-11-26", "2026-11-29", "2026-11-29", "2026-12-03"],
+    "gametime": ["20:20", "13:00", None, "20:15"],
+    "home_team": ["DAL", "BUF", "LA", "KC"],
+    "away_team": ["NYG", "MIA", "SF", "LV"],
+})
+
+
+def _kicked_off_at(iso):
+    with patch("src.optimization.lineup_solver.nfl.load_schedules", return_value=SCHEDULE):
+        return _real_kicked_off_teams(2026, 12, datetime.fromisoformat(iso))
+
+
+def test_kicked_off_teams_reads_kickoff_as_eastern_time():
+    # 20:20 ET on 11-26 is 01:20Z on 11-27; an untimed game counts from midnight ET (05:00Z) on its day.
+    assert _kicked_off_at("2026-11-27T01:00:00+00:00") == set()
+    assert _kicked_off_at("2026-11-27T01:21:00+00:00") == {"DAL", "NYG"}
+
+
+def test_kicked_off_teams_locks_within_the_buffer_before_kickoff():
+    assert _kicked_off_at("2026-11-27T01:14:00+00:00") == set()
+    assert _kicked_off_at("2026-11-27T01:15:00+00:00") == {"DAL", "NYG"}
+
+
+def test_kicked_off_teams_treats_an_untimed_game_as_starting_at_midnight_eastern():
+    assert _kicked_off_at("2026-11-29T04:54:00+00:00") == {"DAL", "NYG"}
+    assert _kicked_off_at("2026-11-29T04:56:00+00:00") == {"DAL", "NYG", "LAR", "SF"}
+
+
+def test_kicked_off_teams_ignores_other_weeks_and_normalizes_aliases():
+    teams = _kicked_off_at("2026-12-31T00:00:00+00:00")
+    assert teams == {"DAL", "NYG", "BUF", "MIA", "LAR", "SF"}
+    assert "KC" not in teams
+
+
+def test_kicked_off_teams_raises_when_the_schedule_is_unavailable():
+    with patch("src.optimization.lineup_solver.nfl.load_schedules", side_effect=ConnectionError("404")):
+        with pytest.raises(ls.InsufficientLineupInputError, match="kicked off"):
+            _real_kicked_off_teams(2026, 12, datetime(2026, 11, 26, tzinfo=timezone.utc))

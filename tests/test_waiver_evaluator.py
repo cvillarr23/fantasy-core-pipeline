@@ -391,8 +391,8 @@ def test_main_exits_zero_when_no_moves_are_worth_making():
 
 
 # ---------------------------------------------------------------------------
-# #191: the weekly waiver CronJob retries (in-process, and pod-level under restartPolicy:
-# Never) without ever queueing a claim twice. End to end through main() and the real
+# #191: the weekly waiver job retries (in-process, and a launcher retry of the run)
+# without ever queueing a claim twice. End to end through main() and the real
 # trigger client, against a fake /v1/trigger/waiver that dedupes on idempotency_key the
 # way the gateway does.
 # ---------------------------------------------------------------------------

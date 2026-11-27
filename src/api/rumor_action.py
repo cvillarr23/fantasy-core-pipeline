@@ -1,5 +1,5 @@
 """
-Rumor-signal action trigger REST endpoint (#124). The daily CronJob invokes the
+Rumor-signal action trigger REST endpoint (#124). The daily launcher job invokes the
 shared service directly via python -m; this is the HTTP entrypoint. Mirrors
 src/api/trade.py's thin-controller-over-a-service pattern.
 """
@@ -27,7 +27,7 @@ def trigger_rumor_action(payload: Optional[RumorActionTriggerRequest] = None):
     season = payload.season or int(os.getenv("CURRENT_YEAR", datetime.now().year))
     try:
         # One attempt: an HTTP caller can retry or pass a week; it shouldn't wait out the
-        # CronJob backoff, and must never get actions for a guessed week.
+        # launcher job's retry backoff, and must never get actions for a guessed week.
         week = payload.week or require_upcoming_week(season, attempts=1)
     except WeekResolutionError as e:
         logger.warning(f"Upcoming week unavailable for season={season}: {e}")
