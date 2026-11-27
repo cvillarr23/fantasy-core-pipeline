@@ -183,7 +183,13 @@ def test_formula_separates_our_gain_counterparty_impact_and_schedule_terms(conte
         "strength_weight": service.STRENGTH_WEIGHT,
         "z_clamp": service.Z_CLAMP,
         "indirect_factor": service.INDIRECT_FACTOR,
+        "ros_regular_weight": service.ROS_REGULAR_WEIGHT,
+        "playoff_week_weight": service.PLAYOFF_WEEK_WEIGHT,
     }
+    # No rest-of-season window: R is 0, not unavailable.
+    assert s["rest_of_season_value"] == 0.0
+    assert result["rest_of_season"]["weeks"] == []
+    assert result["rest_of_season"]["costs_playoff_value"] is False
     TradeScore.model_validate(result)
 
 
@@ -276,7 +282,13 @@ def test_unknown_strength_keeps_lineup_terms_but_withholds_weighted_scores(conte
 def test_final_score_is_the_sum_of_in_final_components(context):
     s = score(context)["score"]
     components = s["components"]
-    assert set(components) == {"our_weighted_gain", "counterparty_weighted_benefit"}
+    assert set(components) == {
+        "our_weighted_gain", "counterparty_weighted_benefit", "rest_of_season",
+    }
+    # No rest-of-season window in this context: R is 0 and counts.
+    assert components["rest_of_season"] == {
+        "value": 0.0, "in_final_score": True, "unavailable_reasons": [],
+    }
     assert components["our_weighted_gain"] == {
         "value": s["our_weighted_gain"], "in_final_score": True, "unavailable_reasons": [],
     }
@@ -602,3 +614,126 @@ def test_bye_coverage_reports_a_crunch_a_trade_creates(context):
     result = score(context, send=("103",), receive=("201",), playing=playing)
 
     assert result["bye_coverage"]["us"]["created"] == [6]
+
+
+def with_rest_of_season(context, kinds, overrides=None):
+    """Adds rest-of-season weeks ({week: kind}); every player keeps his week-5 metrics in
+    them unless overrides[(espn_id, week)] gives a VORP (None drops the metrics)."""
+    overrides = overrides or {}
+    context["rest_of_season"] = {
+        "weeks": [{"week": week, "kind": kind} for week, kind in kinds.items()],
+        "playoff_weeks": [week for week, kind in kinds.items() if kind == "playoff"],
+    }
+    for team in context["teams"].values():
+        for p in team["roster"]:
+            for week in kinds:
+                vorp = overrides.get((p["espn_id"], week), p["metrics"]["5"]["vorp_score"])
+                p["metrics"][str(week)] = {
+                    "vorp_score": vorp, "projected_points": None if vorp is None else 10.0,
+                }
+    return context
+
+
+def all_playing(*weeks):
+    return {week: set(ALL_TEAMS) for week in weeks}
+
+
+def test_rest_of_season_weights_playoff_weeks_over_regular_weeks(context):
+    horizon_only = score(deepcopy(context))["score"]
+    # Week 7 looks like the horizon (+3 for us). In playoff week 15 the RB we send is worth
+    # 12 and the WR we receive 0: our FLEX drops from 12 to our WR's 3, so -9.
+    with_rest_of_season(context, {7: "regular", 15: "playoff"},
+                        {("103", 15): 12.0, ("203", 15): 0.0})
+    result = score(context, playing=all_playing(5, 6, 7, 15))
+
+    ros = result["rest_of_season"]
+    assert [(w["week"], w["kind"], w["weight"], w["our_delta"], w["counterparty_delta"])
+            for w in ros["weeks"]] == [
+        (7, "regular", service.ROS_REGULAR_WEIGHT, 3.0, -3.0),
+        (15, "playoff", service.PLAYOFF_WEEK_WEIGHT, -9.0, 11.0),
+    ]
+    assert ros["scored_weeks"] == [7, 15]
+    assert ros["complete"] is True
+    assert ros["our_lineup_gain"] == pytest.approx(-6.0)
+    assert ros["playoff_lineup_gain"] == pytest.approx(-9.0)
+    assert ros["counterparty_lineup_change"] == pytest.approx(8.0)
+    expected = 0.5 * 3.0 + 1.0 * -9.0
+    assert ros["value"] == pytest.approx(expected)
+    assert ros["costs_playoff_value"] is True
+    s = result["score"]
+    assert s["rest_of_season_value"] == pytest.approx(expected)
+    assert s["components"]["rest_of_season"]["value"] == pytest.approx(expected)
+    assert s["components"]["rest_of_season"]["in_final_score"] is True
+    # G*/C* are untouched; only our R is added, never the counterparty's ROS change.
+    assert s["our_weighted_gain"] == pytest.approx(horizon_only["our_weighted_gain"])
+    assert s["counterparty_weighted_benefit"] == pytest.approx(
+        horizon_only["counterparty_weighted_benefit"]
+    )
+    assert s["final_score"] == pytest.approx(horizon_only["final_score"] + expected)
+    # The horizon and its lineups stay the horizon's.
+    assert result["horizon"]["scored_weeks"] == [5, 6]
+    assert [w["week"] for w in result["roster_impact"]["us"]["weeks"]] == [5, 6]
+    TradeScore.model_validate(result)
+
+
+def test_playoff_gain_does_not_flag_costs_playoff_value(context):
+    with_rest_of_season(context, {15: "playoff"})
+    result = score(context, playing=all_playing(5, 6, 15))
+    assert result["rest_of_season"]["playoff_lineup_gain"] == pytest.approx(3.0)
+    assert result["rest_of_season"]["costs_playoff_value"] is False
+    assert result["score"]["rest_of_season_value"] == pytest.approx(3.0)
+
+
+def test_rest_of_season_without_projections_is_unavailable_not_zero(context):
+    horizon_only = score(deepcopy(context))["score"]["final_score"]
+    overrides = {
+        (p["espn_id"], week): None
+        for team in context["teams"].values() for p in team["roster"] for week in (7, 15)
+    }
+    with_rest_of_season(context, {7: "regular", 15: "playoff"}, overrides)
+    result = score(context, playing=all_playing(5, 6, 7, 15))
+
+    ros = result["rest_of_season"]
+    assert ros["value"] is None
+    assert ros["unavailable_reasons"] == ["no_scored_weeks"]
+    assert [w["week"] for w in ros["unscored_weeks"]] == [7, 15]
+    assert all(w["reasons"] for w in ros["unscored_weeks"])
+    assert ros["playoff_lineup_gain"] is None
+    assert ros["costs_playoff_value"] is False
+    assert result["score"]["rest_of_season_value"] is None
+    assert result["score"]["components"]["rest_of_season"] == {
+        "value": None, "in_final_score": False, "unavailable_reasons": ["no_scored_weeks"],
+    }
+    # A lagging far-week refresh never withholds the horizon score.
+    assert result["score"]["final_score"] == pytest.approx(horizon_only)
+    assert result["score"]["final_score_unavailable_reasons"] == []
+    TradeScore.model_validate(result)
+
+
+def test_partly_scored_rest_of_season_counts_only_its_scored_weeks(context):
+    with_rest_of_season(context, {7: "regular", 15: "playoff"}, {("203", 15): None})
+    result = score(context, playing=all_playing(5, 6, 7, 15))
+    ros = result["rest_of_season"]
+    assert ros["scored_weeks"] == [7]
+    assert [w["week"] for w in ros["unscored_weeks"]] == [15]
+    assert ros["complete"] is False
+    assert ros["value"] == pytest.approx(0.5 * 3.0)
+    assert ros["playoff_lineup_gain"] is None
+
+
+def test_rest_of_season_week_without_nfl_schedule_follows_horizon_rules(context):
+    # As in the horizon: with every metric present the week still scores, but a traded
+    # player missing his projection can't be told apart from a bye, so it is unscored.
+    with_rest_of_season(context, {15: "playoff", 16: "playoff"}, {("203", 16): None})
+    result = score(context, playing={**all_playing(5, 6), 15: None, 16: None})
+    assert result["rest_of_season"]["scored_weeks"] == [15]
+    assert [w["week"] for w in result["rest_of_season"]["unscored_weeks"]] == [16]
+
+
+def test_service_reads_the_nfl_schedule_through_the_last_rest_of_season_week(live, context):
+    with_rest_of_season(context, {7: "regular", 8: "playoff"})
+    result = call()
+    assert [c.args for c in live[2].call_args_list] == [
+        (2026, 5), (2026, 6), (2026, 7), (2026, 8),
+    ]
+    assert result["rest_of_season"]["scored_weeks"] == [7, 8]

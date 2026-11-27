@@ -23,13 +23,21 @@ def candidate_player(espn_id, position):
     }
 
 
-def item_row(key="a" * 64, final_score=3.5):
+ROS = {
+    "weeks": [{"week": w, "kind": "playoff" if w >= 15 else "regular"} for w in (9, 15, 16)],
+    "scored_weeks": [9, 15], "value": -1.5, "playoff_lineup_gain": -2.0,
+    "costs_playoff_value": True,
+}
+
+
+def item_row(key="a" * 64, final_score=3.5, rest_of_season=ROS):
     return (
         key, "2", "Team 2", "1for1",
         [candidate_player("105", "RB")], [candidate_player("203", "RB")],
         "proposable", [], final_score, 2.0, 2.5, 0.0, 1.0, 0.5,
         {"start_week": 5, "end_week": 8, "scored_weeks": [5, 6, 7], "complete_horizon": False},
         {"us": COVERAGE, "counterparty": COVERAGE},
+        rest_of_season,
     )
 
 
@@ -69,6 +77,20 @@ def test_candidates_route_shapes_the_stored_run(client):
     assert item["complete_horizon"] is False
     assert item["status"] == "proposable" and item["reasons"] == []
     assert item["candidate_key"] == "a" * 64
+    assert item["rest_of_season_value"] == -1.5
+    assert item["playoff_lineup_gain"] == -2.0
+    assert item["costs_playoff_value"] is True
+    assert item["rest_of_season_weeks"] == [9, 15, 16]
+    assert item["rest_of_season_scored_weeks"] == [9, 15]
+
+
+def test_candidates_scored_before_the_rest_of_season_term_show_it_unavailable(client):
+    _, factory = fake_cursor(rows=[item_row(rest_of_season=None)])
+    item = get(client, factory).json()["items"][0]
+    assert item["rest_of_season_value"] is None
+    assert item["playoff_lineup_gain"] is None
+    assert item["costs_playoff_value"] is False
+    assert item["rest_of_season_weeks"] == []
 
 
 def test_candidates_route_defaults_to_proposable_by_final_score(client):
@@ -98,7 +120,10 @@ def test_candidates_route_passes_every_filter_sort_and_page(client):
     assert params == ["123", 2026, 5, "2", "RB", "WR", "2for1", 10, 20]
 
 
-@pytest.mark.parametrize("sort,column", [("our_gain", "our_lineup_gain"), ("final_score", "final_score")])
+@pytest.mark.parametrize("sort,column", [
+    ("our_gain", "our_lineup_gain"), ("final_score", "final_score"),
+    ("rest_of_season", "rest_of_season_value"),
+])
 def test_candidates_route_sort_columns(client, sort, column):
     cursor, factory = fake_cursor()
     get(client, factory, sort=sort)

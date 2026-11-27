@@ -73,6 +73,11 @@
   last entry is `SCORING_VERSION`), so a stored `scoring_version` always describes its row.
   Stored-evidence schemas (`TradeScore`, `InboxScore`) accept every known version; v1 has no
   components.
+  The `rest_of_season` component (R, #328) scores the weeks after the horizon through the last
+  fantasy playoff week (`trade_context.rest_of_season`, from `src/league_schedule.py`) from
+  those weeks' own rows, which come from `draft_prep_refresh --rest-of-season`. While none can
+  be scored it has `in_final_score: false`, so a lagging far-week refresh never nulls
+  `final_score`. G*/C*, the candidate prefilter and `bye_outlook` stay on the horizon.
 - `trade_candidate_service` (`GET /v1/trade/candidates`, MCP `list_trade_candidates`) is filled
   by `python -m src.jobs.trade_candidates`. It enumerates 1for1/2for1/1for2 packages (shape named
   from our side), scores a prefiltered shortlist with `shape_trade_score` over one shared context,

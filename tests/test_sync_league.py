@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -82,6 +83,44 @@ def test_fetch_league_config_translates_slot_ids_to_position_labels():
         "QB": 1, "RB": 2, "WR": 2, "TE": 1, "RB/WR/TE": 1, "BE": 7, "IR": 1,
     }
     assert "2" not in config["lineup_slot_counts"]
+
+
+def test_fetch_league_config_carries_playoff_settings():
+    raw = {
+        "status": {"finalScoringPeriod": 17},
+        "settings": {
+            **RAW_MSETTINGS["settings"],
+            "scheduleSettings": {
+                "matchupPeriodCount": 14,
+                "matchupPeriods": {str(w): [w] for w in range(1, 18)},
+                "playoffTeamCount": 6,
+                "playoffMatchupPeriodLength": 1,
+            },
+            "tradeSettings": {"deadlineDate": 1796313600000},
+        },
+    }
+    config = sl.fetch_league_config(MagicMock(), raw)
+    assert config["playoff_settings"]["playoff_weeks"] == [15, 16, 17]
+    assert config["playoff_settings"]["trade_deadline"] == "2026-12-03T16:00:00+00:00"
+    # Missing schedule settings store an empty playoff list, not an error.
+    assert sl.fetch_league_config(MagicMock(), RAW_MSETTINGS)["playoff_settings"][
+        "playoff_weeks"
+    ] == []
+
+
+def test_persist_league_settings_writes_playoff_settings():
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    config = {
+        "name": "L", "team_count": 10, "scoring_type": "PPR",
+        "lineup_slot_counts": {"QB": 1}, "scoring_settings": {},
+        "playoff_settings": {"playoff_weeks": [15, 16, 17]},
+    }
+    sl.persist_league_settings(conn, "123", 2026, config)
+    sql, params = cursor.execute.call_args.args
+    assert "playoff_settings = EXCLUDED.playoff_settings" in sql
+    assert sql.count("%s") == len(params)
+    assert json.loads(params[7]) == {"playoff_weeks": [15, 16, 17]}
 
 
 def test_build_roster_rows_maps_espn_id_to_player_id():

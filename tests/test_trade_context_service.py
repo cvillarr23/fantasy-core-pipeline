@@ -234,7 +234,10 @@ def test_historical_request_marks_current_snapshot_and_avoids_score_leakage(raw)
     result = shape(raw, week=2, horizon=1)
     assert result["roster_snapshot"]["matches_as_of_week"] is False
     assert result["teams"]["1"]["strength"]["points_per_week"] == 100
-    assert list(result["teams"]["1"]["roster"][0]["metrics"]) == ["2"]
+    # Week 2's horizon plus the rest-of-season weeks 3-6, never the completed week 1.
+    assert list(result["teams"]["1"]["roster"][0]["metrics"]) == ["2", "3", "4", "5", "6"]
+    # missing_metric_count covers the horizon only; ROS gaps don't inflate it.
+    assert result["coverage"]["missing_metric_count"] == 3
 
 
 def test_missing_schedule_is_unknown_not_a_bye(raw):
@@ -410,6 +413,38 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
         datetime.fromisoformat(result["roster_snapshot"]["fetched_at"]).tzinfo
         is not None
     )
+
+
+def test_service_loads_metrics_through_the_last_playoff_week(monkeypatch, raw):
+    raw["settings"]["scheduleSettings"].update(
+        {"playoffTeamCount": 4, "playoffMatchupPeriodLength": 1}
+    )
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "123")
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [("500", "100"), ("100", "500")],
+        [("500", 3, 4.0, 12.0), ("100", 3, -2.0, 7.0)],
+        [("500", 9, 80.0, 50.0, 2.0)],
+    ]
+
+    @contextmanager
+    def db():
+        yield cursor
+
+    with patch.object(service, "build_league") as build, patch.object(
+        service, "fetch_raw_league_data", return_value=raw
+    ) as fetch, patch.object(service, "get_db_cursor", db), patch.object(
+        service, "load_stored_events", return_value={}
+    ) as history:
+        result = service.get_league_trade_context("123", 2026, 3, 2)
+    build.assert_called_once_with(2026, request_timeout_seconds=10)
+    fetch.assert_called_once_with(build.return_value, include_schedule=True)
+    assert cursor.execute.call_count == 3
+    assert set(cursor.execute.call_args_list[0].args[1][0]) == {"100", "500", "-1"}
+    assert cursor.execute.call_args_list[1].args[1][:3] == (2026, 3, 8)
+    assert result["end_week"] == 4
+    assert result["teams"]["1"]["roster"][0]["metrics"]["3"]["vorp_score"] == 4.0
+
 
 
 def test_ambiguous_crosswalk_is_reported_as_unmapped(monkeypatch, raw):
@@ -677,3 +712,39 @@ def test_context_lists_committed_players_outside_the_cache(monkeypatch, raw, no_
         {"espn_id": "100", "offer_keys": ["k1", "k2"]},
         {"espn_id": "500", "offer_keys": ["k1"]},
     ]
+
+
+def test_rest_of_season_runs_past_the_horizon_through_the_playoffs(raw):
+    raw["settings"]["scheduleSettings"].update(
+        {"playoffTeamCount": 4, "playoffMatchupPeriodLength": 1}
+    )
+    result = shape(raw, week=3, horizon=2)
+    assert (result["start_week"], result["end_week"]) == (3, 4)
+    assert result["rest_of_season"] == {
+        "weeks": [
+            {"week": 5, "kind": "regular"},
+            {"week": 6, "kind": "regular"},
+            {"week": 7, "kind": "playoff"},
+            {"week": 8, "kind": "playoff"},
+        ],
+        "playoff_weeks": [7, 8],
+    }
+    # Each player carries metrics for every horizon and rest-of-season week.
+    assert list(result["teams"]["1"]["roster"][0]["metrics"]) == [str(w) for w in range(3, 9)]
+    # The fantasy schedule (G*/C* evidence) still stops at the horizon.
+    assert [row["week"] for row in result["teams"]["1"]["schedule"]] == [3, 4]
+
+
+def test_rest_of_season_during_the_playoffs_has_only_the_remaining_playoff_weeks(raw):
+    raw["settings"]["scheduleSettings"].update(
+        {"playoffTeamCount": 4, "playoffMatchupPeriodLength": 1}
+    )
+    result = shape(raw, week=8, horizon=4)
+    assert result["end_week"] == 6
+    assert result["rest_of_season"]["weeks"] == [{"week": 8, "kind": "playoff"}]
+
+
+def test_rest_of_season_without_playoff_settings_is_the_rest_of_the_regular_season(raw):
+    result = shape(raw, week=3, horizon=4)
+    assert result["end_week"] == 6
+    assert result["rest_of_season"] == {"weeks": [], "playoff_weeks": []}

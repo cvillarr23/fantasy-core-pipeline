@@ -167,3 +167,97 @@ def test_entrypoint_adopts_the_launcher_run_so_stages_become_children(monkeypatc
     assert stage_env == [(None, "launcher-run")] * len(job.STAGES)
     assert adopt.call_args.args[0] == "launcher-run"
     assert finish.call_args.args[:2] == ("launcher-run", "success")
+
+
+def ros_main(monkeypatch, upcoming, last_playoff_week, outcomes=None, argv=("--rest-of-season",)):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "1248158344")
+    with patch.object(job, "resolve_upcoming_week", return_value=upcoming), \
+         patch.object(job, "load_last_playoff_week", return_value=last_playoff_week) as last, \
+         patch.object(job.subprocess, "run", side_effect=outcomes) as run:
+        code = job.main(list(argv))
+    weeks = [int(c.args[0][-1]) for c in run.call_args_list]
+    return code, sorted(set(weeks)), run, last
+
+
+def test_rest_of_season_refreshes_past_the_horizon_through_the_last_playoff_week(monkeypatch):
+    code, weeks, run, last = ros_main(monkeypatch, upcoming=8, last_playoff_week=17)
+    assert code == 0
+    # The daily fan-out covers 8..11; this picks up 12..17.
+    assert weeks == list(range(12, 18))
+    assert run.call_count == len(weeks) * len(job.STAGES)
+    last.assert_called_once_with("1248158344", 2026)
+
+
+def test_rest_of_season_keeps_going_after_a_failed_week(monkeypatch):
+    failure = subprocess.CalledProcessError(1, "stage")
+    code, weeks, _, _ = ros_main(
+        monkeypatch, upcoming=12, last_playoff_week=17,
+        outcomes=[failure] + [None] * (len(job.STAGES) * 1),
+    )
+    assert code == 1
+    assert weeks == [16, 17]
+
+
+@pytest.mark.parametrize("upcoming,last_week", [(12, None), (14, 17), (None, 17)])
+def test_rest_of_season_noops(monkeypatch, upcoming, last_week):
+    code, weeks, run, _ = ros_main(monkeypatch, upcoming=upcoming, last_playoff_week=last_week)
+    assert code == 0
+    run.assert_not_called()
+
+
+def test_rest_of_season_fails_without_a_configured_league(monkeypatch):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    monkeypatch.delenv("ESPN_LEAGUE_ID", raising=False)
+    with patch.object(job, "resolve_upcoming_week", return_value=8), \
+         patch.object(job, "load_last_playoff_week") as last, \
+         patch.object(job.subprocess, "run") as run:
+        assert job.main(["--rest-of-season"]) == 1
+    last.assert_not_called()
+    run.assert_not_called()
+
+
+def test_rest_of_season_fails_when_playoff_settings_cannot_be_read(monkeypatch):
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "1248158344")
+    with patch.object(job, "resolve_upcoming_week", return_value=8), \
+         patch.object(job, "load_last_playoff_week", side_effect=RuntimeError("db down")), \
+         patch.object(job.subprocess, "run") as run:
+        assert job.main(["--rest-of-season"]) == 1
+    run.assert_not_called()
+
+
+def test_rest_of_season_and_week_offset_are_exclusive():
+    with pytest.raises(SystemExit):
+        job.main(["--rest-of-season", "--week-offset", "1"])
+
+
+def test_last_playoff_week_reads_only_the_configured_league():
+    """Two leagues share the season (ours and a practice draft league synced later); the
+    other league's settings must never be read, whichever was synced last."""
+    from contextlib import contextmanager
+
+    rows = {
+        ("1248158344", 2026): {"playoff_weeks": [15, 16, 17]},
+        ("460500313", 2026): None,
+        ("1248158344", 2025): {"playoff_weeks": [15, 16]},
+    }
+
+    class Cursor:
+        def execute(self, sql, params):
+            assert "league_id = %s AND season = %s" in sql
+            self.params = params
+
+        def fetchone(self):
+            return (rows[self.params],) if self.params in rows else None
+
+    @contextmanager
+    def db():
+        yield Cursor()
+
+    with patch.object(job, "get_db_cursor", db):
+        assert job.load_last_playoff_week("1248158344", 2026) == 17
+        assert job.load_last_playoff_week("1248158344", 2025) == 16
+        # The practice league's null settings, and a league never synced, mean nothing to do.
+        assert job.load_last_playoff_week("460500313", 2026) is None
+        assert job.load_last_playoff_week("999", 2026) is None

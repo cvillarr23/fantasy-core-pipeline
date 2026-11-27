@@ -187,7 +187,7 @@ erDiagram
 
 | Table | Holds | Written by |
 |---|---|---|
-| `league_settings` | Team count, scoring and `lineup_slot_counts` (JSONB). One row per league. | `sync_league` |
+| `league_settings` | Team count, scoring, `lineup_slot_counts` and `playoff_settings` (JSONB). One row per league. | `sync_league` |
 | `league_teams` | Team id to display name, plus `ir_slots_used`. | `sync_league` |
 | `league_rosters` | Which player sits in which slot on which team, with `is_starter` and ESPN's `espn_injury_status`. | `sync_league`, and a live refresh when the waiver routes find rosters stale. |
 
@@ -217,7 +217,7 @@ erDiagram
 | `job_overrides` | Pause window and audit details for a job or chain. A NULL `paused_until` pauses until the row is deleted. | Unified job launcher. |
 | `launcher_heartbeat` | The launcher's last heartbeat and a JSON object of queue depths; the singleton row has `id=1`. | Unified job launcher. |
 | `trade_candidate_runs` | The latest trade-candidate run per league, season and week: `run_id` (the `run_log` id), `computed_at`, horizon and `counts`. A missing row means the job never ran for that week. | `python -m src.jobs.trade_candidates` |
-| `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
+| `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields (including `rest_of_season_value`, null when unavailable, and `costs_playoff_value`) and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
 
 ### Signals and metrics
 
@@ -244,7 +244,7 @@ Several JSONB columns hold different shapes depending on the row. Version string
 |---|---|---|
 | `execution_log.counter_offer->'evaluation'` (offers) | `proposal-evaluation-v1` | `trade_offer_service._stored_evaluation` |
 | `execution_log.counter_offer->'evaluation'` (inbox) | `incoming-trade-evaluation-v1` | `trade_inbox_service._evaluation` |
-| `counter_offer->'score'->scoring_version` | `trade-score-v2` (stored `trade-score-v1` still reads; it has no `score.components`) | `trade_score_service.SCORING_VERSION` |
+| `counter_offer->'score'->scoring_version` | `trade-score-v3` since the rest-of-season term (stored `trade-score-v2` and `trade-score-v1` still read; v1 has no `score.components`) | `trade_score_service.SCORING_VERSION` |
 | `counter_offer->>'offer_key'` hash input | `trade-offer-v1` | `trade_offer_service.compute_offer_key` |
 | `counter_offer->>'decision_key'` hash input | `trade-response-v1` | `trade_inbox_service.compute_decision_key` |
 
@@ -346,6 +346,7 @@ The column is `inputs`, but request payloads call the same object `decision_inpu
 |---|---|
 | `league_settings.lineup_slot_counts` | Slot name to count, such as `{"QB": 1, "RB": 2, "BE": 6, "IR": 1}`. The `BE` count drives bench size. |
 | `league_settings.scoring_settings` | ESPN's scoring settings, as synced. |
+| `league_settings.playoff_settings` | `{regular_season_end_week, playoff_team_count, playoff_matchup_period_length, playoff_weeks, trade_deadline}` from ESPN mSettings (`src/league_schedule.py`). `playoff_weeks` is `[]` when ESPN's settings are missing. `trade_deadline` is ISO-8601 UTC and is stored only. `draft_prep_refresh --rest-of-season` reads it. |
 | `backtest_results.summary_json` | The full lineup, waiver and draft breakdown behind the point totals. |
 | `fantasy_*_week_scores.payload` | The raw ESPN scoring payload kept for audit. |
 | `activity_actions.payload`, `.evidence` | The queued message body, and what verification found. Secret-looking keys are redacted from the stored payload. |

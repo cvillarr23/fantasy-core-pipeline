@@ -246,7 +246,7 @@ def test_candidate_rows_carry_players_and_the_full_score(context):
     }
     assert row["counterparty_name"] == "Team 2"
     assert row["score"]["raw_vorp"]["incoming_total"] == 1.0
-    assert row["score"]["scoring_version"] == "trade-score-v2"
+    assert row["score"]["scoring_version"] == "trade-score-v3"
 
 
 def test_solve_cache_returns_the_uncached_score(context):
@@ -294,6 +294,14 @@ def test_store_run_replaces_the_week_in_one_transaction(context):
     params = cursor.executemany.call_args.args[1]
     assert len(params) == 2
     assert params[0][4] == "run-1" and params[0][7] == rows[0]["candidate_key"]
+    # Placeholders match the column list, and R and its flag land in their own columns.
+    sql = cursor.executemany.call_args.args[0]
+    columns = sql.split("(", 1)[1].split(")", 1)[0].split(",")
+    assert sql.count("%s") == len(columns) == len(params[0])
+    names = [c.strip() for c in columns]
+    ros = rows[0]["score"]["rest_of_season"]
+    assert params[0][names.index("rest_of_season_value")] == ros["value"]
+    assert params[0][names.index("costs_playoff_value")] is ros["costs_playoff_value"]
 
 
 def test_store_run_with_no_rows_still_clears_the_week():
@@ -303,3 +311,30 @@ def test_store_run_with_no_rows_still_clears_the_week():
     assert run_id
     assert cursor.execute.call_count == 2
     cursor.executemany.assert_not_called()
+
+
+def test_rest_of_season_cost_lowers_final_score_but_never_changes_the_status(context):
+    from tests.test_trade_score_service import with_rest_of_season
+
+    baseline, _ = service.build_candidates(deepcopy(context), "1", PLAYING, {})
+    # Our bench RB 105 is a playoff-week stud: sending him wins the horizon, loses week 15.
+    with_rest_of_season(context, {15: "playoff"}, {("105", 15): 20.0})
+    rows, _ = service.build_candidates(context, "1", {**PLAYING, 15: set(ALL_TEAMS)}, {})
+
+    def find(rows):
+        return next(r for r in rows if [p["espn_id"] for p in r["send"]] == ["105"]
+                    and [p["espn_id"] for p in r["receive"]] == ["203"])
+
+    before, after = find(baseline), find(rows)
+    assert before["status"] == after["status"] == "proposable"
+    assert after["reasons"] == []
+    ros = after["score"]["rest_of_season"]
+    assert ros["costs_playoff_value"] is True
+    # RB slot: 105 (20) before, the incoming 203 (4) after.
+    assert ros["value"] == pytest.approx(-16.0)
+    assert after["score"]["score"]["final_score"] == pytest.approx(
+        before["score"]["score"]["final_score"] - 16.0
+    )
+    assert {r["candidate_key"]: r["status"] for r in rows} == {
+        r["candidate_key"]: r["status"] for r in baseline
+    }

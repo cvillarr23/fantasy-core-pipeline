@@ -10,7 +10,7 @@ from src.schemas.trade_score import ByeCoverage, ScoreTeam
 CandidateShape = Literal["1for1", "2for1", "1for2"]
 CandidateStatus = Literal["proposable", "needs_drop", "one_sided"]
 CandidateStatusFilter = Literal["proposable", "needs_drop", "one_sided", "all"]
-CandidateSort = Literal["final_score", "our_gain", "their_benefit"]
+CandidateSort = Literal["final_score", "our_gain", "their_benefit", "rest_of_season"]
 
 
 class CandidatePlayer(BaseModel):
@@ -35,6 +35,13 @@ class TradeCandidate(BaseModel):
     counterparty_lineup_change: float | None
     counterparty_weighted_benefit: float | None
     our_schedule_adjustment: float | None
+    # R, the rest-of-season term in final_score: null when unavailable (not 0).
+    rest_of_season_value: float | None
+    playoff_lineup_gain: float | None
+    # Our fantasy playoff weeks lose lineup value. Informational, never a gate.
+    costs_playoff_value: bool
+    rest_of_season_weeks: list[int]
+    rest_of_season_scored_weeks: list[int]
     scored_weeks: list[int]
     horizon_weeks: list[int]
     complete_horizon: bool

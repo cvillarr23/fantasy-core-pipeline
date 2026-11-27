@@ -61,6 +61,9 @@ class ScoreWeights(BaseModel):
     strength_weight: float
     z_clamp: float
     indirect_factor: float
+    # Absent from stored evidence scored before the rest-of-season term (#328).
+    ros_regular_weight: float | None = None
+    playoff_week_weight: float | None = None
 
 
 class Starter(BaseModel):
@@ -133,7 +136,7 @@ class ScheduleTerms(BaseModel):
 
 # Every scoring_version a stored evaluation may carry, oldest first; the last one is what the
 # live scorer emits (trade_score_service.SCORING_VERSION). A score change appends one entry.
-KNOWN_SCORING_VERSIONS = ("trade-score-v1", "trade-score-v2")
+KNOWN_SCORING_VERSIONS = ("trade-score-v1", "trade-score-v2", "trade-score-v3")
 ScoringVersion = Literal[KNOWN_SCORING_VERSIONS]
 
 
@@ -144,12 +147,36 @@ class ScoreComponent(BaseModel):
     unavailable_reasons: list[str]
 
 
+class RestOfSeasonWeek(BaseModel):
+    week: int
+    kind: Literal["regular", "playoff"]
+    weight: float
+    our_delta: float | None
+    counterparty_delta: float | None
+
+
+class RestOfSeason(BaseModel):
+    """The R term: weeks after the horizon through the last fantasy playoff week."""
+    weeks: list[RestOfSeasonWeek]
+    scored_weeks: list[int]
+    unscored_weeks: list[UnscoredWeek]
+    complete: bool
+    our_lineup_gain: float | None
+    playoff_lineup_gain: float | None
+    counterparty_lineup_change: float | None
+    value: float | None
+    unavailable_reasons: list[str]
+    costs_playoff_value: bool
+
+
 class ScoreTerms(BaseModel):
     our_lineup_gain: float | None
     counterparty_lineup_change: float | None
     our_weighted_gain: float | None
     our_schedule_adjustment: float | None
     counterparty_weighted_benefit: float | None
+    # Null when rest-of-season weeks exist but none could be scored (unavailable, not 0).
+    rest_of_season_value: float | None = None
     final_score: float | None
     final_score_unavailable_reasons: list[str]
     # Keyed by component name; set from trade-score-v2 on, absent from stored v1 evidence.
@@ -178,6 +205,7 @@ class TradeScore(BaseModel):
     roster_impact: RosterImpact
     bye_coverage: ByeCoverage
     schedule: ScheduleTerms
+    rest_of_season: RestOfSeason | None = None
     score: ScoreTerms
     coverage: ScoreCoverage
     roster_snapshot: RosterSnapshot

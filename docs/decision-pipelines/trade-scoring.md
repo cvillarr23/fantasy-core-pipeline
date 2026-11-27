@@ -1,6 +1,6 @@
 ---
 title: Trade scoring
-description: How optimal starter changes and fantasy schedules produce G*, C* and the final score.
+description: How optimal starter changes and fantasy schedules produce G*, C*, the rest-of-season term R and the final score.
 sidebar_position: 6
 ---
 
@@ -16,8 +16,10 @@ flowchart LR
     D -->|negative counterparty deltas| I[C*]
     W -->|our opponent multiplier| G
     W -->|direct or indirect weight| I
+    C -->|weeks after the horizon through the playoffs| R[R]
     G -->|weighted gain| F[Final score]
     I -->|weighted benefit| F
+    R -->|rest-of-season value| F
 ```
 
 ## What can you propose?
@@ -32,7 +34,7 @@ flowchart LR
 
 For each horizon week, the scorer exchanges players and solves each team's starters before and after. Bench and IR have no standalone value; the scorer uses exact-week VORP without the lineup-only defense multiplier.
 
-## How are G*, C* and the final score calculated?
+## How are G*, C*, R and the final score calculated?
 
 Signs are from our perspective. `ΔL` is after minus before optimal starter VORP for one week.
 
@@ -42,9 +44,27 @@ I = Σ ΔL_them,w
 m(z) = 1 + 0.25 × clamp(z, −2, 2)
 G* = Σ ΔL_us,w × m(our fantasy opponent's z)
 C* = Σ −ΔL_them,w × counterparty_weight_w
-final_score = G* + C*
+R = Σ ΔL_us,w × k_w over the rest-of-season weeks
+final_score = G* + C* + R
 our_schedule_adjustment = G* − G
 ```
+
+The rest-of-season weeks run from the week after the horizon through the league's last fantasy
+playoff week. ESPN's `playoffTeamCount` and `playoffMatchupPeriodLength` give the playoff weeks:
+ceil(log2(teams)) rounds right after the regular season, which is weeks 15–17 here. Each week is
+scored like a horizon week, from its own exact-week rows, which come from `draft_prep_refresh
+--rest-of-season`.
+
+| Rest-of-season week | k | Why |
+| --- | --- | --- |
+| Fantasy playoff week | 1.0 | A playoff loss ends the season |
+| Regular week past the horizon | 0.5 | Far-out projections are noisier, and only seeding is at stake |
+
+R counts only our side, with no opponent multiplier, because those pairings aren't known yet.
+The counterparty's rest-of-season change is reported, not scored. `costs_playoff_value` flags a
+package whose playoff weeks lose us lineup value. It ranks the package lower and is never a gate.
+If rest-of-season weeks exist but none can be scored, R is null (`no_scored_weeks`). It is then
+left out of `final_score` instead of withholding it. With no rest-of-season weeks left, R is 0.
 
 | Weight | Rule |
 | --- | --- |

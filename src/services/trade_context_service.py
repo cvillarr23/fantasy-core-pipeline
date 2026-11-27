@@ -11,6 +11,7 @@ from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 
 from src.database import get_db_cursor
 from src.services.espn_ownership import load_espn_ownership
+from src.league_schedule import playoff_weeks
 from src.nfl_byes import bye_weeks_or_empty
 from src.optimization.bye_outlook import attach_bye_outlooks
 from src.espn_positions import DEFAULT_POSITIONS
@@ -66,6 +67,17 @@ def _regular_periods(raw):
         return periods
     except (KeyError, TypeError) as error:
         raise TradeContextUnavailable("Missing ESPN schedule settings.") from error
+
+
+def _rest_of_season_weeks(raw, week, end_week, regular_end):
+    """[{week, kind}] after the horizon through the last fantasy playoff week: regular-season
+    weeks the horizon didn't reach, then the playoff weeks. Empty once the season is over."""
+    playoffs = playoff_weeks(raw)
+    last = max(playoffs) if playoffs else regular_end
+    return [
+        {"week": target_week, "kind": "playoff" if target_week in playoffs else "regular"}
+        for target_week in range(max(week, end_week + 1), last + 1)
+    ]
 
 
 def _source_rosters(raw, league_id, season):
@@ -177,6 +189,8 @@ def shape_trade_context(
     period_by_week = {
         week: period for period, weeks in periods.items() for week in weeks
     }
+    rest_of_season = _rest_of_season_weeks(raw, week, end_week, max(period_by_week))
+    metric_weeks = weeks + [entry["week"] for entry in rest_of_season]
     teams = {
         str(team["id"]): {"team_id": str(team["id"]), "name": _extract_team_name(team)}
         for team in source_teams
@@ -218,7 +232,7 @@ def shape_trade_context(
                 or {}
             )
             player_metrics = {}
-            for target_week in weeks:
+            for target_week in metric_weeks:
                 values = (
                     metrics.get((player_id, target_week), {})
                     if player_id is not None
@@ -228,7 +242,8 @@ def shape_trade_context(
                     key: _number(values.get(key))
                     for key in ("vorp_score", "projected_points")
                 }
-                missing_metrics += int(any(value is None for value in values.values()))
+                if target_week <= end_week:
+                    missing_metrics += int(any(value is None for value in values.values()))
                 player_metrics[str(target_week)] = values
             roster.append(
                 {
@@ -358,6 +373,12 @@ def shape_trade_context(
         "start_week": week,
         "end_week": end_week,
         "regular_season_end_week": max(period_by_week),
+        # Scored by the trade score's rest-of-season term only; G*/C*, the candidate
+        # prefilter and bye_outlook stay on start_week..end_week.
+        "rest_of_season": {
+            "weeks": rest_of_season,
+            "playoff_weeks": [e["week"] for e in rest_of_season if e["kind"] == "playoff"],
+        },
         "lineup_slot_counts": _lineup_slot_counts_by_label(raw_counts),
         "roster_snapshot": {
             "kind": "current",
@@ -408,10 +429,10 @@ def get_league_trade_context(
         fetched_at = datetime.now(timezone.utc).isoformat()
         _, espn_ids = _source_rosters(raw, league_id, season)
         periods = _regular_periods(raw)
-        end_week = min(
-            week + horizon - 1,
-            max(week for weeks in periods.values() for week in weeks),
-        )
+        regular_end = max(week for weeks in periods.values() for week in weeks)
+        end_week = min(week + horizon - 1, regular_end)
+        rest_of_season = _rest_of_season_weeks(raw, week, end_week, regular_end)
+        last_metric_week = max([end_week] + [e["week"] for e in rest_of_season])
         identities, metrics, espn_ownership = {}, {}, {}
         if espn_ids:
             with get_db_cursor() as cursor:
@@ -428,11 +449,11 @@ def get_league_trade_context(
                     for espn, ids in by_espn.items()
                     if len(ids) == 1
                 }
-                if week <= end_week:
+                if week <= last_metric_week:
                     cursor.execute(
                         """SELECT player_id, week, vorp_score, projected_points FROM weekly_stats
                         WHERE season = %s AND week BETWEEN %s AND %s AND player_id = ANY(%s);""",
-                        (season, week, end_week, list(identities.values())),
+                        (season, week, last_metric_week, list(identities.values())),
                     )
                     metrics = {
                         (player_id, target_week): {
