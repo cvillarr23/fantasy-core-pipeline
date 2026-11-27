@@ -67,7 +67,7 @@ ratio = clamp(positive_VORP_free_agent_count / expected_depth, 0, 1)
 scarcity_multiplier = 1 + 0.35 × (1 − ratio)
 vorp_score = vorp_base × applicable_scarcity_multiplier
 market_multiplier = clamp(1 + w × (start_pctile − 0.5), 1 − w/2, 1 + w/2)
-vorp_score = vorp_score × market_multiplier   (÷ when vorp_score < 0)
+vorp_score = vorp_score + |vorp_score| × (market_multiplier − 1)
 ```
 
 | Input | Rule |
@@ -85,7 +85,7 @@ vorp_score = vorp_score × market_multiplier   (÷ when vorp_score < 0)
 | Market score, live (`espn`) | ESPN `percent_started`: each player's latest `espn_player_ownership` week at or before the target week, same season |
 | Market score, backtest (`ecr`) | Negated FantasyPros weekly positional ECR (rank 1 scores highest) from the latest `fp_weekly_ecr` scrape week at or before the target week. Both sources share one percentile function |
 | Missing market data | `market_multiplier` = 1.0 |
-| Negative `vorp_score` | Divided by the multiplier, so a higher start% always raises the score |
+| Negative `vorp_score` | The adjustment scales the magnitude, so a higher start% always raises the score and a multiplier of 1 changes nothing |
 | Market in backtests | `season_replay --espn-market-weight` (default 0.0) and `--market-source` (`espn` or `ecr`); replays never read the env var. `market_weight_sweep` chooses the weight |
 
 :::tip[Predict the result]
@@ -96,7 +96,8 @@ vorp_score = vorp_score × market_multiplier   (÷ when vorp_score < 0)
 
 | Roster state | Baseline |
 | --- | --- |
-| Populated rosters | Highest adjusted projection among non-starters/free agents at the position |
+| Populated rosters | Highest adjusted projection among free agents (unrostered) at the position; other teams' benches are not candidates |
+| Populated rosters, no free agent at the position | Structural rank N+1 |
 | Pre-draft | First player beyond structural starter demand: rank N+1 |
 | Pool shorter than demand | Pool minimum |
 | Empty position pool | QB 10; RB/WR 8; TE 5; K/D-ST 7 |

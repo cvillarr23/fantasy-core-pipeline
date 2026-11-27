@@ -266,42 +266,36 @@ def test_baseline_empty_pool_uses_default_baselines():
     assert baselines == vm.DEFAULT_BASELINES
 
 
-def test_baseline_uses_best_actual_non_starter_when_rosters_populated():
-    """Post-draft, rank N+1 in raw sorted order is not reliable - a benched
-    high-projection player can occupy that rank without being a starter. The baseline
-    must be the best player NOT currently starting (a true replacement/waiver pickup),
-    even if raw rank alone would have picked someone else."""
+BASELINE_SCHEMA = {
+    "player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64,
+    "is_rostered": pl.Boolean, "is_starter": pl.Boolean,
+}
+
+
+def test_baseline_is_best_free_agent_not_a_benched_player_on_another_team():
+    """A benched stud on another team can't be picked up, so he must not set the baseline
+    (#464: JSN on a bench pushed the W13 WR baseline to 28.0 and zeroed every WR's VORP)."""
     league_config = {"team_count": 1, "lineup_slot_counts": {"RB": 1}}
     df = pl.DataFrame(
         [
-            # Rank 1 by projection, but rostered as a bench player -> not the baseline.
-            {"player_id": "bench_star", "position": "RB", "adjusted_projected_points": 20.0, "is_starter": False},
-            {"player_id": "starter", "position": "RB", "adjusted_projected_points": 15.0, "is_starter": True},
-            # Best actual non-starter/free agent -> this is the true replacement.
-            {"player_id": "waiver_pickup", "position": "RB", "adjusted_projected_points": 10.0, "is_starter": False},
-            {"player_id": "deep_bench", "position": "RB", "adjusted_projected_points": 5.0, "is_starter": False},
+            ("bench_star", "RB", 20.0, True, False),
+            ("starter", "RB", 15.0, True, True),
+            ("waiver_pickup", "RB", 10.0, False, None),
+            ("deep_fa", "RB", 5.0, False, None),
         ],
-        schema={"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64, "is_starter": pl.Boolean},
+        schema=BASELINE_SCHEMA, orient="row",
     )
 
     baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=True)
 
-    # Raw rank_at=1 (1 team x 1 RB slot) would have landed on "starter" (15.0) by rank
-    # alone; the real answer is the best non-starter, "bench_star" (20.0).
-    assert baselines["RB"] == 20.0
+    assert baselines["RB"] == 10.0
 
 
-def test_baseline_falls_back_to_structural_rank_when_rosters_populated_but_no_non_starter_found():
-    """Defensive fallback: if every player at a position is somehow marked a starter
-    (shouldn't happen with real data, but must not crash), fall back to the structural
-    rank_at approach rather than erroring."""
+def test_baseline_falls_back_to_structural_rank_when_position_has_no_free_agents():
     league_config = {"team_count": 1, "lineup_slot_counts": {"RB": 1}}
     df = pl.DataFrame(
-        [
-            {"player_id": "a", "position": "RB", "adjusted_projected_points": 20.0, "is_starter": True},
-            {"player_id": "b", "position": "RB", "adjusted_projected_points": 15.0, "is_starter": True},
-        ],
-        schema={"player_id": pl.Utf8, "position": pl.Utf8, "adjusted_projected_points": pl.Float64, "is_starter": pl.Boolean},
+        [("a", "RB", 20.0, True, True), ("b", "RB", 15.0, True, False)],
+        schema=BASELINE_SCHEMA, orient="row",
     )
 
     baselines = vm.calculate_replacement_baselines(df, league_config, {}, rosters_populated=True)
@@ -665,15 +659,29 @@ def test_market_single_known_player_in_position_is_neutral():
     assert m["only"] == 1.0
 
 
-def test_market_multiplier_divides_negative_vorp_so_high_start_percent_still_helps():
-    df = _market_frame([("popular", "WR", -2.0), ("ignored", "WR", -2.0)])
+def test_market_multiplier_negative_vorp_higher_multiplier_gives_higher_score():
+    df = _market_frame([("popular", "WR", -2.0), ("mid", "WR", -2.0), ("ignored", "WR", -2.0)])
+    ownership = _ownership([("popular", 90.0), ("mid", 40.0), ("ignored", 5.0)])
+
+    out = vm.apply_market_multiplier(df, ownership, weight=0.2)
+    vorp = dict(zip(out["player_id"], out["vorp_score"]))
+    mult = _multipliers(out)
+
+    assert mult["popular"] > mult["mid"] > mult["ignored"]
+    assert vorp["popular"] > vorp["mid"] > vorp["ignored"]
+    assert vorp["popular"] == pytest.approx(-2.0 + 2.0 * (mult["popular"] - 1))
+    assert vorp["popular"] > -2.0 > vorp["ignored"]
+
+
+def test_market_multiplier_positive_vorp_scales_up_with_multiplier():
+    df = _market_frame([("popular", "WR", 4.0), ("ignored", "WR", 4.0)])
     ownership = _ownership([("popular", 90.0), ("ignored", 5.0)])
 
     out = vm.apply_market_multiplier(df, ownership, weight=0.2)
     vorp = dict(zip(out["player_id"], out["vorp_score"]))
 
-    assert vorp["popular"] > -2.0 > vorp["ignored"]
-    assert vorp["popular"] == -2.0 / 1.1
+    assert vorp["popular"] == pytest.approx(4.0 * 1.1)
+    assert vorp["ignored"] == pytest.approx(4.0 * 0.9)
 
 
 def test_load_market_percent_started_takes_latest_week_at_or_before_target():
