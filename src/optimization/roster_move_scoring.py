@@ -10,13 +10,16 @@ other week, so a stud is never dropped or traded away for one idle week, while a
 which byes leave the lineup thin shows up as a real lineup loss that a move can repair.
 
 Roster entries use the trade context's player shape: espn_id, player_id, name, position,
-nfl_team, injury_status, slot, metrics {str(week): {vorp_score, ...}}. Nothing is filled
-in: a missing projection is "no_metrics" (or "nfl_bye" when the NFL schedule confirms
-the team is idle), never a zero.
+nfl_team, injury_status, slot, metrics {str(week): {vorp_score, ...}}, and optionally
+injury (src/injury_timeline: with it, Out/IR players sit until their expected return week
+and a Questionable/Doubtful as-of week is discounted). Nothing is filled in: a missing
+projection is "no_metrics" (or "nfl_bye" when the NFL schedule confirms the team is idle),
+never a zero.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from src.injury_timeline import OUT_STATUSES, availability
 from src.nfl_byes import to_nflverse_team
 from src.optimization.lineup_solver import (
     BENCH_AND_IR_SLOT_NAMES,
@@ -25,7 +28,6 @@ from src.optimization.lineup_solver import (
     hold_slots_without_metrics,
 )
 
-OUT_STATUSES = {"OUT", "INJURY_RESERVE"}
 SUPPORTED_STARTER_SLOTS = {"QB", "RB", "WR", "TE", "K", "D/ST", *FLEX_SLOT_ELIGIBLE_POSITIONS}
 # Reasons a player sits a week without making the roster's lineup unknowable.
 SITS_KNOWINGLY = {"out", "nfl_bye"}
@@ -45,11 +47,10 @@ def lineup_solve_cache():
         _solve_cache.reset(token)
 
 
-def exclusion(player, week, as_of_week, playing):
-    """Why a player can't be in the lineup pool this week, or None if they can."""
-    if week == as_of_week and (
-        player.get("injury_status") in OUT_STATUSES or player.get("slot") == "IR"
-    ):
+def exclusion(player, week, as_of_week, playing, end_week=None):
+    """Why a player can't be in the lineup pool this week, or None if they can. end_week
+    (the horizon's last week) bounds an undated injured-reserve stay (src/injury_timeline)."""
+    if availability(player, week, as_of_week, end_week)[0] == 0.0:
         return "out"
     if player.get("player_id") is None:
         return "unmapped"
@@ -66,21 +67,36 @@ def exclusion(player, week, as_of_week, playing):
     return "no_metrics"
 
 
-def lineup_pool(roster, week, as_of_week, playing):
-    """(solver pool, {espn_id: exclusion reason}) for one week."""
+def pool_vorp(player, week, as_of_week, end_week=None):
+    """(VORP the solver sees, injury adjustment or None) for a player exclusion() let in.
+    An injury discount scales only a positive VORP, so a tag never makes anyone look
+    better."""
+    vorp = float(player["metrics"][str(week)]["vorp_score"])
+    factor, reason = availability(player, week, as_of_week, end_week)
+    if factor >= 1.0 or vorp <= 0:
+        return vorp, None
+    return vorp * factor, {"espn_id": player["espn_id"], "factor": factor, "reason": reason}
+
+
+def lineup_pool(roster, week, as_of_week, playing, adjustments=None, end_week=None):
+    """(solver pool, {espn_id: exclusion reason}) for one week. Injury discounts applied
+    to the pool are appended to `adjustments` when a list is given."""
     pool, excluded = [], {}
     for player in roster:
-        reason = exclusion(player, week, as_of_week, playing)
+        reason = exclusion(player, week, as_of_week, playing, end_week)
         if reason:
             excluded[player["espn_id"]] = reason
             continue
+        vorp, adjustment = pool_vorp(player, week, as_of_week, end_week)
+        if adjustment is not None and adjustments is not None:
+            adjustments.append(adjustment)
         pool.append(
             {
                 "player_id": player["player_id"],
                 "espn_id": player["espn_id"],
                 "name": player.get("name"),
                 "position": player["position"],
-                "vorp_score": float(player["metrics"][str(week)]["vorp_score"]),
+                "vorp_score": vorp,
             }
         )
     return pool, excluded
@@ -134,12 +150,19 @@ def has_unsupported_slot(slot_counts):
     )
 
 
-def compare_week(before_roster, after_roster, moved_ids, week, as_of_week, slot_counts, playing):
+def compare_week(
+    before_roster, after_roster, moved_ids, week, as_of_week, slot_counts, playing, end_week=None,
+):
     """One roster's before/after optimal lineup for one week, or (None, reasons) if the
     week can't be scored. A moved player missing metrics for a reason other than a
     confirmed bye or Out makes the week unscorable rather than counting him as zero."""
-    before_pool, before_excluded = lineup_pool(before_roster, week, as_of_week, playing)
-    after_pool, after_excluded = lineup_pool(after_roster, week, as_of_week, playing)
+    adjustments = []
+    before_pool, before_excluded = lineup_pool(
+        before_roster, week, as_of_week, playing, adjustments, end_week
+    )
+    after_pool, after_excluded = lineup_pool(
+        after_roster, week, as_of_week, playing, adjustments, end_week
+    )
     excluded = {**before_excluded, **after_excluded}
     reasons = set()
     for espn_id in moved_ids:
@@ -179,6 +202,10 @@ def compare_week(before_roster, after_roster, moved_ids, week, as_of_week, slot_
             {"espn_id": espn_id, "reason": reason}
             for espn_id, reason in sorted(excluded.items())
         ],
+        # A traded player is in both pools; list each discount once.
+        "injury_adjustments": sorted(
+            {a["espn_id"]: a for a in adjustments}.values(), key=lambda a: a["espn_id"]
+        ),
     }, set()
 
 

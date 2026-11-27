@@ -78,6 +78,19 @@
   those weeks' own rows, which come from `draft_prep_refresh --rest-of-season`. While none can
   be scored it has `in_final_score: false`, so a lagging far-week refresh never nulls
   `final_score`. G*/C*, the candidate prefilter and `bye_outlook` stay on the horizon.
+- Injury timelines (#330, `trade-score-v4`): `src/injury_timeline.availability` decides each
+  week's availability, and `roster_move_scoring.exclusion`/`pool_vorp` apply it, so the solver
+  and the candidate prefilter see the same values. A roster entry opts in by carrying an
+  `injury` key: the trade context sets it only for a player with a `player_injuries` row
+  (`load_player_injuries`, keyed by ESPN id only) when the NFL schedule could be read. Entries
+  without it keep the old "Out in the as-of week only" rule, so an empty feed or unreadable
+  schedule scores as before. `build_bye_outlook` drops the key, so outlooks (/roster, chat,
+  MCP, waivers, `bye_coverage`) are unchanged. ESPN's live `injury_status` decides status; the
+  feed adds only `return_date`, mapped to a week by `nfl_byes.load_team_game_dates`. Pass
+  `end_week` wherever availability is read for trade scoring: an undated IR stay sits the
+  horizon only. `tradeable()` and `weeks_out` go through `availability` too. Any prefilter
+  bound that reads a VORP must go through `pool_vorp` (the brute-force tests include injured
+  leagues).
 - `trade_candidate_service` (`GET /v1/trade/candidates`, MCP `list_trade_candidates`) is filled
   by `python -m src.jobs.trade_candidates`. It enumerates 1for1/2for1/1for2 packages (shape named
   from our side), scores a prefiltered shortlist with `shape_trade_score` over one shared context,

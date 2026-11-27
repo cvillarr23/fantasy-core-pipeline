@@ -1581,7 +1581,7 @@ def test_list_exposes_valid_evidence_verbatim(client, context, caplog):  # noqa:
 
 
 def test_list_still_reads_stored_v1_evidence(client, context, caplog):  # noqa: F811
-    # Offers scored before trade-score-v2: summary and breakdown both say v1, no components.
+    # Offers scored before trade-score-v3: summary and breakdown both say v1, no components.
     entry = row()
     entry["counter_offer"]["score"]["scoring_version"] = "trade-score-v1"
     stored = evidence(context)

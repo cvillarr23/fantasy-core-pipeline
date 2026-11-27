@@ -197,9 +197,11 @@ def no_live_nfl_bye_schedule():
     from src import nfl_byes
 
     nfl_byes.load_bye_weeks.cache_clear()
+    nfl_byes.load_team_game_dates.cache_clear()
     with patch("src.nfl_byes.load_schedule", side_effect=RuntimeError("no live NFL schedule in tests")):
         yield
     nfl_byes.load_bye_weeks.cache_clear()
+    nfl_byes.load_team_game_dates.cache_clear()
 
 
 @pytest.fixture(autouse=True)

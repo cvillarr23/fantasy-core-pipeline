@@ -494,8 +494,9 @@ has no value, `final_score` is null and takes that component's reasons. A compon
 (`our_weighted_gain`, ...) repeat the same numbers.
 
 The constants are echoed in `weights`, and `scoring_version` names the formula
-(`trade-score-v2` added `components`, `trade-score-v3` the rest-of-season term R; stored
-evidence may still say an earlier version, and `trade-score-v1` has no `components`).
+(`trade-score-v2` added `components`, `trade-score-v3` the rest-of-season term R,
+`trade-score-v4` injury timelines; stored evidence may still say an earlier version, and
+`trade-score-v1` has no `components`).
 `raw_vorp` is `/v1/trade/evaluate`'s result for the as-of week, using the mapped internal
 IDs. Per-week `starters_before`/`starters_after`, `held_slots` and `excluded_players`,
 plus the per-week schedule rows, are the evidence an explanation should quote. Uneven
@@ -517,6 +518,31 @@ Nothing is filled in:
   (far-week projections not refreshed yet), R is null with `no_scored_weeks`, its component
   has `in_final_score: false`, and `final_score` = G* + C*. Show it as unavailable, not 0.
   With no rest-of-season weeks left, R is 0.
+
+Injuries (`trade-score-v4`) change each week's lineup inputs, not the formula
+(`src/injury_timeline.py`):
+
+- Status is ESPN's live fantasy `injuryStatus`. The expected return date comes from ESPN's
+  public injuries feed (`sync_injuries` → `player_injuries`). It maps to the first week
+  whose game for the player's NFL team falls on or after it, so a bye is skipped.
+- A player opts in only when `player_injuries` has a row on him and the NFL schedule could
+  be read. Everyone else, and everyone while the table is empty or the schedule is
+  unreadable, keeps the old rule: Out only in the as-of week, no Questionable discount.
+- An Out, injured-reserve or suspended player (or one in an IR slot) sits the as-of week
+  and every week before his return week. With no date, injured reserve sits the horizon
+  but counts in the rest-of-season weeks; a plain Out is back the next week.
+- Questionable and Doubtful scale a positive VORP by 0.75 and 0.25 in the as-of week only
+  (`weights.questionable_availability` / `doubtful_availability`). A negative VORP is never
+  raised.
+- Each week lists its `injury_adjustments`. `injuries` gives every traded player's status,
+  return date, `expected_return_week` and `weeks_out`.
+- `injuries[...].weeks_out` lists every scored week he misses, horizon and rest of season.
+- Candidates include an opted-in Out or injured-reserve player who is back by the last
+  scored week, rest of season included (buy low, sell high), but never one in an IR slot or
+  an Out player without injury data. Candidate players carry `injury_status`,
+  `expected_return_week` and `weeks_out_in_horizon`.
+- Bye outlooks (`/roster`, chat, MCP, waivers) and `bye_coverage` ignore injury timelines
+  and keep the old rule.
 
 The daily refresher attempts the upcoming week and three following weeks, capped at week 18.
 `draft_prep_refresh --rest-of-season` refreshes the weeks after that horizon through the last

@@ -643,6 +643,26 @@ CREATE TABLE IF NOT EXISTS espn_player_ownership (
 );
 """
 
+# ESPN's current injury report, one row per injured player, from ESPN's public NFL injuries
+# feed (src/ingestion/sync_injuries.py). Keyed by ESPN athlete id, the same id as
+# players.espn_id and the trade context's espn_id; it is never resolved through player_id.
+# Each sync replaces the whole table: a player missing from the feed is healthy. status is the
+# feed's label ("Out", "Injured Reserve", ...); ESPN's live fantasy injuryStatus stays the
+# authority on status, and this table adds the expected return_date that status lacks.
+CREATE_PLAYER_INJURIES_TABLE = """
+CREATE TABLE IF NOT EXISTS player_injuries (
+    espn_id VARCHAR(20) PRIMARY KEY,
+    status TEXT NOT NULL,
+    fantasy_status TEXT,
+    nfl_team VARCHAR(5),
+    injury_type TEXT,
+    injury_detail TEXT,
+    return_date DATE,
+    reported_at TIMESTAMPTZ,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
 CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_execution_log_trade_offer_key
     ON execution_log ((counter_offer->>'offer_key'))

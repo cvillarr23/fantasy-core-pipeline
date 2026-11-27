@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.optimization import roster_move_scoring
+from src.schemas.trade_candidates import TradeCandidate
 from src.services import trade_candidate_service as service
 from src.services.trade_score_service import shape_trade_score
 from src.services.trade_service import summarize_raw_vorp
@@ -203,6 +204,100 @@ def test_out_and_ir_players_are_never_traded(context):
     assert not traded & {"203", "305", "101"}
 
 
+def timeline(p, status, return_week=None):
+    """Opts a player into src/injury_timeline's return-week rules."""
+    p["injury_status"] = status
+    p["injury"] = {"expected_return_week": return_week}
+    return p
+
+
+def received_ids(context):
+    return {p["espn_id"] for _, _, receive in service.enumerate_packages(context, "1") for p in receive}
+
+
+def by_id(context, espn_id):
+    return next(p for t in context["teams"].values() for p in t["roster"] if p["espn_id"] == espn_id)
+
+
+def test_out_player_back_by_the_last_scored_week_can_be_traded(context):
+    timeline(by_id(context, "203"), "OUT", return_week=6)     # back for the horizon's last week
+    timeline(by_id(context, "204"), "INJURY_RESERVE", return_week=7)
+    timeline(by_id(context, "205"), "OUT")                     # no date: back next week
+    timeline(by_id(context, "202"), "INJURY_RESERVE")          # no date: sits the horizon
+    received = received_ids(context)
+    assert {"203", "205"} <= received
+    assert not received & {"202", "204"}
+    # An IR slot stays out however soon he's back.
+    by_id(context, "203")["slot"] = "IR"
+    assert "203" not in received_ids(context)
+
+
+def test_rest_of_season_weeks_count_toward_a_return(context):
+    # Week 7 is scored as rest of season: the week-7 return and the undated injured-reserve
+    # player (who sits only the horizon) are both back by then.
+    context["rest_of_season"] = {"weeks": [{"week": 7, "kind": "regular"}], "playoff_weeks": []}
+    timeline(by_id(context, "204"), "INJURY_RESERVE", return_week=7)
+    timeline(by_id(context, "202"), "INJURY_RESERVE")
+    timeline(by_id(context, "205"), "OUT", return_week=8)
+    received = received_ids(context)
+    assert {"202", "204"} <= received
+    assert "205" not in received
+    assert all(service.availability(by_id(context, "202"), w, 5, 6)[0] == 0.0 for w in (5, 6))
+    assert service.availability(by_id(context, "202"), 7, 5, 6) == (1.0, None)
+
+
+def test_out_player_without_injury_data_stays_out_of_the_universe(context):
+    # No `injury` key (empty feed or no schedule): the old rule, never a candidate.
+    by_id(context, "205")["injury_status"] = "OUT"
+    by_id(context, "204")["injury_status"] = "INJURY_RESERVE"
+    assert not received_ids(context) & {"204", "205"}
+
+
+def test_candidate_players_carry_their_injury_timeline(context):
+    timeline(context["teams"]["2"]["roster"][4], "OUT", return_week=6)
+    rows, _ = service.build_candidates(context, "1", PLAYING, {}, max_candidates=1000)
+    row = next(r for r in rows if [p["espn_id"] for p in r["receive"]] == ["203"])
+    assert {k: row["receive"][0][k] for k in ("injury_status", "expected_return_week", "weeks_out_in_horizon")} == {
+        "injury_status": "OUT", "expected_return_week": 6, "weeks_out_in_horizon": 1,
+    }
+    TradeCandidate.model_validate({**row, **{
+        "counterparty": {"team_id": "2", "name": "Team 2"}, "final_score": None,
+        "our_lineup_gain": None, "our_weighted_gain": None, "counterparty_lineup_change": None,
+        "counterparty_weighted_benefit": None, "our_schedule_adjustment": None,
+        "scored_weeks": [], "horizon_weeks": [5, 6], "complete_horizon": False,
+        "rest_of_season_value": None, "playoff_lineup_gain": None, "costs_playoff_value": False,
+        "rest_of_season_weeks": [], "rest_of_season_scored_weeks": [],
+        "bye_coverage": row["score"]["bye_coverage"],
+    }})
+
+
+def random_injured_league(seed):
+    """random_league with every player opted into timelines and a random status: risk
+    tags scale VORP and Out players sit some weeks, which the prefilter must still bound."""
+    context = random_league(seed)
+    rng = random.Random(seed + 1000)
+    for team_id, t in context["teams"].items():
+        # A fifth player (the roster limit) so one injury doesn't leave the lineup unfillable.
+        t["roster"].append(player(f"{team_id}09", rng.choice(["RB", "WR"]), round(rng.uniform(0, 8), 1)))
+        for p in t["roster"]:
+            status = rng.choice([None] * 5 + ["QUESTIONABLE", "DOUBTFUL", "OUT", "INJURY_RESERVE"])
+            timeline(p, status, rng.choice([None, 5, 6, 7]))
+    return context
+
+
+def test_prefilter_is_sound_on_random_leagues_with_injuries():
+    injured_proposable = 0
+    # Seeds whose leagues have proposable packages moving an injured player (1 and 5) plus
+    # one with only healthy ones; more seeds just cost time.
+    for seed in (1, 5, 6):
+        context = random_injured_league(seed)
+        injured = {p["espn_id"] for t in context["teams"].values() for p in t["roster"] if p["injury_status"]}
+        results = brute_force(context)
+        assert all(r[3] for r in results if r[4] == "proposable"), seed
+        injured_proposable += sum(r[4] == "proposable" and bool(set(r[1] + r[2]) & injured) for r in results)
+    assert injured_proposable, "the random leagues should exercise a proposable package moving an injured player"
+
+
 def test_committed_players_leave_only_our_side(context):
     context["committed_players"] = [
         {"espn_id": "101", "offer_keys": ["k"]},
@@ -243,10 +338,11 @@ def test_candidate_rows_carry_players_and_the_full_score(context):
     assert row["receive"][0] == {
         "espn_id": "203", "player_id": "s203", "name": "Player 203", "position": "RB",
         "nfl_team": "BUF", "vorp": 4.0, "nfl_bye_week": 7,
+        "injury_status": None, "expected_return_week": None, "weeks_out_in_horizon": 0,
     }
     assert row["counterparty_name"] == "Team 2"
     assert row["score"]["raw_vorp"]["incoming_total"] == 1.0
-    assert row["score"]["scoring_version"] == "trade-score-v3"
+    assert row["score"]["scoring_version"] == "trade-score-v4"
 
 
 def test_solve_cache_returns_the_uncached_score(context):

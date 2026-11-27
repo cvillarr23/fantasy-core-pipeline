@@ -27,7 +27,7 @@ def test_score_route_runs_the_real_scorer_over_the_shared_context(client, contex
         response = client.post("/v1/trade/score", json=BODY)
     assert response.status_code == 200
     body = response.json()
-    assert body["scoring_version"] == "trade-score-v3"
+    assert body["scoring_version"] == "trade-score-v4"
     assert body["raw_vorp"]["delta_vorp"] == 3.0
     assert body["score"]["our_lineup_gain"] == 6.0
     assert body["horizon"]["scored_weeks"] == [5, 6]
