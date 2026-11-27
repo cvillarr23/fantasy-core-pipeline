@@ -2830,7 +2830,10 @@
           "scoring_version": {
             "anyOf": [
               {
-                "const": "trade-score-v1",
+                "enum": [
+                  "trade-score-v1",
+                  "trade-score-v2"
+                ],
                 "type": "string"
               },
               {
@@ -7602,6 +7605,40 @@
         "title": "ScoreBreakdownLine",
         "type": "object"
       },
+      "ScoreComponent": {
+        "description": "One term of final_score (or, with in_final_score false, a reported-only signal).",
+        "properties": {
+          "in_final_score": {
+            "title": "In Final Score",
+            "type": "boolean"
+          },
+          "unavailable_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unavailable Reasons",
+            "type": "array"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value",
+          "in_final_score",
+          "unavailable_reasons"
+        ],
+        "title": "ScoreComponent",
+        "type": "object"
+      },
       "ScoreCoverage": {
         "properties": {
           "nfl_schedule_unavailable_weeks": {
@@ -7693,6 +7730,20 @@
       },
       "ScoreTerms": {
         "properties": {
+          "components": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ScoreComponent"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Components"
+          },
           "counterparty_lineup_change": {
             "anyOf": [
               {
@@ -9800,7 +9851,10 @@
             "$ref": "#/components/schemas/ScoreTerms"
           },
           "scoring_version": {
-            "const": "trade-score-v1",
+            "enum": [
+              "trade-score-v1",
+              "trade-score-v2"
+            ],
             "title": "Scoring Version",
             "type": "string"
           },

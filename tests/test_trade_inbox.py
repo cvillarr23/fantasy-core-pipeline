@@ -76,7 +76,7 @@ def row(tx="123", status="open", final=4.0):
             missed_reads=0,
             score=dict(
                 state="scored",
-                scoring_version="trade-score-v1",
+                scoring_version="trade-score-v2",
                 as_of_week=5,
                 final_score=final,
                 complete_horizon=True,
@@ -1579,6 +1579,22 @@ def test_list_exposes_valid_evidence_verbatim(client, context, caplog):  # noqa:
     assert not caplog.records
 
 
+def test_list_still_reads_stored_v1_evidence(client, context, caplog):  # noqa: F811
+    # Offers scored before trade-score-v2: summary and breakdown both say v1, no components.
+    entry = row()
+    entry["counter_offer"]["score"]["scoring_version"] = "trade-score-v1"
+    stored = evidence(context)
+    stored["score"]["scoring_version"] = "trade-score-v1"
+    del stored["score"]["score"]["components"]
+    entry["counter_offer"]["evaluation"] = stored
+    with caplog.at_level("WARNING"):
+        [offer] = list_response(client, [entry])
+    assert offer["evaluation"]["score"]["scoring_version"] == "trade-score-v1"
+    assert offer["evaluation"]["score"]["score"]["components"] is None
+    assert offer["score"]["scoring_version"] == "trade-score-v1"
+    assert not caplog.records
+
+
 @pytest.mark.parametrize("explicit_null", [False, True])
 def test_absent_evidence_is_null_without_warning(client, caplog, explicit_null):
     entry = row()
@@ -1631,7 +1647,7 @@ def _drop(path):
         (_drop(["version"]), "version"),
         (lambda stored, entry: "x", "version"),
         (lambda stored, entry: [], "version"),
-        (_evidence_set(["score", "scoring_version"], "trade-score-v2"), "invalid"),
+        (_evidence_set(["score", "scoring_version"], "trade-score-v3"), "invalid"),
         (_drop(["score", "roster_impact"]), "invalid"),
         (
             _evidence_set(["score", "horizon", "unscored_weeks"], [{"week": 7}]),

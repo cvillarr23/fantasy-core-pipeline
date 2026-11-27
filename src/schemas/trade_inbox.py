@@ -15,7 +15,7 @@ from pydantic import (
 )
 
 from src.schemas.trade import OfferPlayer
-from src.schemas.trade_score import TradeScore, TradeScoreRequest
+from src.schemas.trade_score import ScoringVersion, TradeScore, TradeScoreRequest
 
 InboxStatus = Literal[
     "open",
@@ -128,7 +128,7 @@ class InboxScore(BaseModel):
     state: Literal[
         "scored", "incomplete", "unavailable", "unscorable", "stale_ownership"
     ]
-    scoring_version: Literal["trade-score-v1"] | None
+    scoring_version: ScoringVersion | None
     as_of_week: int
     final_score: StrictFloat | StrictInt | None
     complete_horizon: bool | None

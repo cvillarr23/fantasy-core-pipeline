@@ -66,6 +66,13 @@
   week is scored only from its own `weekly_stats` rows, never carried forward. The formula
   constants live in the service docstring and the README "Trade scoring" section; change
   `SCORING_VERSION` if they change.
+  `score.components` (`trade-score-v2`) names each term `{value, in_final_score,
+  unavailable_reasons}`, and `_final_from_components` derives `final_score` from it. Add a new
+  term as one more component rather than special-casing `final_score`. Every ticket that changes
+  the score appends one version to `KNOWN_SCORING_VERSIONS` (`src/schemas/trade_score.py`; the
+  last entry is `SCORING_VERSION`), so a stored `scoring_version` always describes its row.
+  Stored-evidence schemas (`TradeScore`, `InboxScore`) accept every known version; v1 has no
+  components.
 - `trade_candidate_service` (`GET /v1/trade/candidates`, MCP `list_trade_candidates`) is filled
   by `python -m src.jobs.trade_candidates`. It enumerates 1for1/2for1/1for2 packages (shape named
   from our side), scores a prefiltered shortlist with `shape_trade_score` over one shared context,

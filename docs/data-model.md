@@ -244,7 +244,7 @@ Several JSONB columns hold different shapes depending on the row. Version string
 |---|---|---|
 | `execution_log.counter_offer->'evaluation'` (offers) | `proposal-evaluation-v1` | `trade_offer_service._stored_evaluation` |
 | `execution_log.counter_offer->'evaluation'` (inbox) | `incoming-trade-evaluation-v1` | `trade_inbox_service._evaluation` |
-| `counter_offer->'score'->scoring_version` | `trade-score-v1` | `trade_score_service.SCORING_VERSION` |
+| `counter_offer->'score'->scoring_version` | `trade-score-v2` (stored `trade-score-v1` still reads; it has no `score.components`) | `trade_score_service.SCORING_VERSION` |
 | `counter_offer->>'offer_key'` hash input | `trade-offer-v1` | `trade_offer_service.compute_offer_key` |
 | `counter_offer->>'decision_key'` hash input | `trade-response-v1` | `trade_inbox_service.compute_decision_key` |
 
