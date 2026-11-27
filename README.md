@@ -476,6 +476,16 @@ after minus before.
 - `counterparty_weighted_benefit` C* = Σ −(their ΔL) × c. In a week they play us,
   c = our own m. Otherwise c = 0.25 × m(their opponent's z), so weakening them ahead of
   tougher matchups counts more, but less than head-to-head.
+- `roster_spot_value` prices the roster spot a trade frees or takes, and `roster_spot` holds
+  the evidence (the free agent added or player dropped, per-week deltas). A 2-for-1 frees a
+  spot: it is worth the best free agent's marginal lineup gain when added to our post-trade
+  roster, so a free agent who would only sit on the bench is worth 0. A 1-for-2 that overfills
+  the roster forces a drop: it costs the cheapest drop's lineup loss, usually 0 unless byes
+  or injuries make him start. A 1-for-1 is 0. One add or drop is chosen for the whole
+  horizon and each week is weighted by m(our opponent's z), like G*. The free-agent pool
+  is the best 8 unrostered players per position (mapped, on no ESPN roster, with horizon
+  VORP), and the 3 best per position are tried. A missing pool leaves the term and
+  `final_score` null (`roster_spot_value_unavailable`).
 - `rest_of_season_value` R = Σ our ΔL × k over the **rest-of-season** weeks: every week
   after the horizon through the league's last fantasy playoff week (ESPN's
   `playoffTeamCount` and `playoffMatchupPeriodLength`; weeks 15–17 for this league). k = 1.0
@@ -484,7 +494,7 @@ after minus before.
   multiplier applies. Only our side counts. The counterparty's change is reported in
   `rest_of_season` as evidence. `rest_of_season.costs_playoff_value` flags a package whose
   playoff weeks lose us lineup value. It's informational and never a gate.
-- `final_score` = G* + C* + R.
+- `final_score` = G* + C* + R + `roster_spot_value`.
 
 `score.components` lists every term by name as `{value, in_final_score,
 unavailable_reasons}`. `final_score` is the sum of the components whose `in_final_score`
@@ -495,12 +505,12 @@ has no value, `final_score` is null and takes that component's reasons. A compon
 
 The constants are echoed in `weights`, and `scoring_version` names the formula
 (`trade-score-v2` added `components`, `trade-score-v3` the rest-of-season term R,
-`trade-score-v4` injury timelines; stored evidence may still say an earlier version, and
-`trade-score-v1` has no `components`).
+`trade-score-v4` injury timelines, `trade-score-v5` the `roster_spot` component; stored evidence may
+still say an earlier version, and `trade-score-v1` has no `components`).
 `raw_vorp` is `/v1/trade/evaluate`'s result for the as-of week, using the mapped internal
 IDs. Per-week `starters_before`/`starters_after`, `held_slots` and `excluded_players`,
 plus the per-week schedule rows, are the evidence an explanation should quote. Uneven
-trades set `exceeds_roster_limit`; drops are not simulated.
+trades set `exceeds_roster_limit`; a forced drop is priced by `roster_spot_value`.
 
 Nothing is filled in:
 

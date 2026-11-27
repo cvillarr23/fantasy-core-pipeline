@@ -25,13 +25,14 @@ weekly_stats.vorp_score; bench and IR are worth nothing). ΔL is after minus bef
   change is evidence. costs_playoff_value flags a package whose playoff weeks lose us lineup
   value (informational, never a gate).
 - final_score is the sum of score.components whose in_final_score is true: our_weighted_gain
-  (G*), counterparty_weighted_benefit (C*) and rest_of_season (R), so final_score = G* + C* + R.
+  (G*), counterparty_weighted_benefit (C*), rest_of_season (R) and roster_spot (below), so
+  final_score = G* + C* + R + roster_spot.
   Each component is {value, in_final_score, unavailable_reasons}. An in-final component with
   no value withholds final_score and lends it its reasons. A new term is one more entry.
 
 R is an additive refinement, so it never withholds final_score: with no rest-of-season week
 scored (the far-week projections not refreshed yet) its component has no value and is left
-out of final_score (in_final_score false, reason no_scored_weeks), so final_score = G* + C*.
+out of final_score (in_final_score false, reason no_scored_weeks).
 With no rest-of-season weeks left, R is 0.
 
 Injuries (trade-score-v4) shape each week's inputs rather than adding a term, by the rules in
@@ -41,6 +42,14 @@ the rest-of-season weeks, and a Questionable/Doubtful player's positive VORP is 
 QUESTIONABLE_AVAILABILITY (0.75) or DOUBTFUL_AVAILABILITY (0.25) in the as-of week only.
 Each week lists its injury_adjustments, and `injuries` gives every traded player's timeline.
 With no injury data for a player (no feed row, or no NFL schedule) the old rule holds.
+
+roster_spot_value prices the roster spot a trade frees or takes. A 2-for-1 frees a spot: it
+is worth the best free agent's marginal lineup gain when added to our post-trade roster, so a
+free agent who would only sit on the bench is worth 0 and a position we can't start adds
+nothing. A 1-for-2 that overfills the roster forces a drop: it costs the cheapest drop's lineup
+loss, usually 0 unless a bye or injury makes him start. One add or drop is chosen for the whole
+horizon, each week's delta is weighted by m(our opponent's z) like G*, and a 1-for-1 is 0.
+It is the "roster_spot" component.
 
 bye_coverage lists the bye-crunch weeks (src/optimization/bye_outlook) each side has
 before and after, so a proposal can say which bye weeks it fixes. It is evidence only;
@@ -73,6 +82,9 @@ ROS_REGULAR_WEIGHT = 0.5
 PLAYOFF_WEEK_WEIGHT = 1.0
 ROS_WEIGHTS = {"regular": ROS_REGULAR_WEIGHT, "playoff": PLAYOFF_WEEK_WEIGHT}
 _TOLERANCE = 1e-9
+
+# Free agents tried per position when valuing a freed roster spot.
+ROSTER_SPOT_CANDIDATES_PER_POSITION = 3
 
 _ESPN_PLAYER_ID = re.compile(r"-?[1-9]\d*")
 _ESPN_TEAM_ID = re.compile(r"[1-9]\d*")
@@ -144,6 +156,100 @@ def _team_week(before_roster, after_roster, traded_ids, week, context, playing):
 
 def _roster_size(roster):
     return sum(1 for player in roster if player.get("slot") != "IR")
+
+
+def _spot_candidates(free_agents):
+    """The best few free agents per position by mean horizon VORP (deterministic)."""
+    by_position = {}
+    for player in free_agents:
+        values = [
+            m["vorp_score"] for m in (player.get("metrics") or {}).values()
+            if m.get("vorp_score") is not None
+        ]
+        if player.get("position") is None or not values:
+            continue
+        by_position.setdefault(player["position"], []).append(
+            (-sum(values) / len(values), player["espn_id"], player)
+        )
+    return [
+        player
+        for position in sorted(by_position)
+        for _, _, player in sorted(by_position[position], key=lambda item: item[:2])[
+            :ROSTER_SPOT_CANDIDATES_PER_POSITION
+        ]
+    ]
+
+
+def _option_deltas(before_roster, after_roster, moved_id, scored, context, teams_playing_by_week):
+    """{week: lineup delta} for one add or drop, or None if any scored week can't be solved."""
+    deltas = {}
+    for week in scored:
+        result, _ = _team_week(
+            before_roster, after_roster, {moved_id}, week, context, teams_playing_by_week.get(week)
+        )
+        if result is None:
+            return None
+        deltas[week] = result["delta"]
+    return deltas
+
+
+def _roster_spot(
+    context, before_roster, after_roster, send_count, receive_count, scored, teams_playing_by_week
+):
+    """(evidence, per-week unweighted deltas) for the spot a trade frees or takes, or
+    (evidence, None) when it can't be valued. kind is freed_spot, forced_drop or none.
+
+    A freed spot counts only when the roster was full before the trade: with an open spot we
+    could add the free agent without trading. Only the horizon weeks are scored (the weeks
+    G* covers); the rest-of-season weeks R covers carry no roster-spot value."""
+    limit = sum(int(c) for slot, c in context["lineup_slot_counts"].items() if slot != "IR")
+    spots = send_count - receive_count if _roster_size(before_roster) >= limit else 0
+    forced_drop = receive_count - send_count > 0 and _roster_size(after_roster) > limit
+    evidence = {"kind": "none", "player": None, "weeks": [], "total": 0.0,
+                "candidates_considered": 0, "unavailable_reason": None}
+    if spots <= 0 and not forced_drop:
+        return evidence, {week: 0.0 for week in scored}
+    if not scored:
+        return evidence, None
+    kind = "freed_spot" if spots > 0 else "forced_drop"
+    evidence["kind"] = kind
+    free_agents = context.get("free_agents")
+    if kind == "freed_spot":
+        if not free_agents:
+            evidence["unavailable_reason"] = "free_agents_unavailable"
+            return evidence, None
+        options = [
+            (fa, after_roster + [fa], after_roster) for fa in _spot_candidates(free_agents)
+        ]
+    else:
+        options = [
+            (p, [q for q in after_roster if q["espn_id"] != p["espn_id"]], after_roster)
+            for p in after_roster if p.get("slot") != "IR"
+        ]
+    best = None
+    options.sort(key=lambda option: option[0]["espn_id"])
+    for player, after, before in options:
+        evidence["candidates_considered"] += 1
+        deltas = _option_deltas(before, after, player["espn_id"], scored, context, teams_playing_by_week)
+        if deltas is None:
+            continue
+        # Options run in ESPN id order and only a strictly better one replaces the pick.
+        total = sum(deltas.values())
+        if best is None or total > best[0]:
+            best = (total, player, deltas)
+    if best is None:
+        evidence["unavailable_reason"] = (
+            "no_free_agent_scorable" if kind == "freed_spot" else "no_drop_scorable"
+        )
+        return evidence, None
+    _, player, deltas = best
+    if kind == "freed_spot" and sum(deltas.values()) <= 0:
+        # Nothing on the market beats the bench; the spot is worth nothing, not a negative.
+        player, deltas = None, {week: 0.0 for week in scored}
+    evidence["player"] = None if player is None else _traded_summary(player)
+    evidence["weeks"] = [{"week": w, "delta": d} for w, d in deltas.items()]
+    evidence["total"] = sum(deltas.values())
+    return evidence, deltas
 
 
 def _schedule_row(context, our_team_id, counterparty_team_id, week):
@@ -347,10 +453,13 @@ def shape_trade_score(
 
     rest_of_season = _rest_of_season(context, rosters, traded, teams_playing_by_week)
     ros_value = rest_of_season["value"]
-    our_weighted = benefit = None
-    our_reasons, their_reasons = [], []
+    roster_spot, spot_deltas = _roster_spot(
+        context, *rosters["us"], len(send), len(receive), scored, teams_playing_by_week
+    )
+    our_weighted = benefit = spot_value = None
+    our_reasons, their_reasons, spot_reasons = [], [], []
     if not scored:
-        our_reasons = their_reasons = ["no_scored_weeks"]
+        our_reasons = their_reasons = spot_reasons = ["no_scored_weeks"]
         our_multipliers = their_weights = []
     else:
         our_multipliers = [schedule_by_week[w]["our_multiplier"] for w in scored]
@@ -363,6 +472,12 @@ def shape_trade_score(
             their_reasons = ["unknown_counterparty_opponent_strength"]
         else:
             benefit = sum(-their_deltas[w] * c for w, c in zip(scored, their_weights))
+        if spot_deltas is None:
+            spot_reasons = ["roster_spot_value_unavailable"]
+        elif None in our_multipliers:
+            spot_reasons = ["unknown_our_opponent_strength"]
+        else:
+            spot_value = sum(spot_deltas[w] * m for w, m in zip(scored, our_multipliers))
     components = {
         "our_weighted_gain": _component(our_weighted, our_reasons),
         "counterparty_weighted_benefit": _component(benefit, their_reasons),
@@ -370,6 +485,7 @@ def shape_trade_score(
         "rest_of_season": _component(
             ros_value, rest_of_season["unavailable_reasons"], in_final_score=ros_value is not None,
         ),
+        "roster_spot": _component(spot_value, spot_reasons),
     }
     final, reasons = _final_from_components(components)
     if final is not None and not any(our_multipliers) and not any(their_weights):
@@ -442,6 +558,7 @@ def shape_trade_score(
         "injuries": {
             p["espn_id"]: _traded_injury(p, context) for p in send + receive
         },
+        "roster_spot": roster_spot,
         "schedule": {"weeks": schedule},
         "rest_of_season": rest_of_season,
         "score": {
@@ -451,6 +568,7 @@ def shape_trade_score(
             "our_schedule_adjustment": None if our_weighted is None else our_weighted - gain,
             "counterparty_weighted_benefit": benefit,
             "rest_of_season_value": ros_value,
+            "roster_spot_value": spot_value,
             "final_score": final,
             "final_score_unavailable_reasons": reasons,
             "components": components,

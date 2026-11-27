@@ -218,7 +218,7 @@ erDiagram
 | `job_overrides` | Pause window and audit details for a job or chain. A NULL `paused_until` pauses until the row is deleted. | Unified job launcher. |
 | `launcher_heartbeat` | The launcher's last heartbeat and a JSON object of queue depths; the singleton row has `id=1`. | Unified job launcher. |
 | `trade_candidate_runs` | The latest trade-candidate run per league, season and week: `run_id` (the `run_log` id), `computed_at`, horizon and `counts`. A missing row means the job never ran for that week. | `python -m src.jobs.trade_candidates` |
-| `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields (including `rest_of_season_value`, null when unavailable, and `costs_playoff_value`) and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
+| `trade_candidates` | One scored package per row for that run: both sides' ESPN ids, positions and player snapshots, `status`, `reasons`, the key score fields (including `rest_of_season_value`, `costs_playoff_value` and `roster_spot_value`, the first and last null when unavailable) and the full trade score in `score`. A run replaces its week's rows in one transaction. | `python -m src.jobs.trade_candidates` |
 
 ### Signals and metrics
 
@@ -245,7 +245,7 @@ Several JSONB columns hold different shapes depending on the row. Version string
 |---|---|---|
 | `execution_log.counter_offer->'evaluation'` (offers) | `proposal-evaluation-v1` | `trade_offer_service._stored_evaluation` |
 | `execution_log.counter_offer->'evaluation'` (inbox) | `incoming-trade-evaluation-v1` | `trade_inbox_service._evaluation` |
-| `counter_offer->'score'->scoring_version` | `trade-score-v4` since injury timelines (stored `trade-score-v3`, `trade-score-v2` and `trade-score-v1` still read; v1 has no `score.components`) | `trade_score_service.SCORING_VERSION` |
+| `counter_offer->'score'->scoring_version` | `trade-score-v5` since the roster-spot term (stored `trade-score-v4`, `v3`, `v2` and `v1` still read; v4 and earlier have no `roster_spot` component, v1 no `score.components`) | `trade_score_service.SCORING_VERSION` |
 | `counter_offer->>'offer_key'` hash input | `trade-offer-v1` | `trade_offer_service.compute_offer_key` |
 | `counter_offer->>'decision_key'` hash input | `trade-response-v1` | `trade_inbox_service.compute_decision_key` |
 

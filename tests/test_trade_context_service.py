@@ -380,6 +380,7 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
         [("500", 9, 80.0, 50.0, 2.0)],
         [("100", "Out", "OUT", "Ankle", date(2026, 10, 4),
           datetime(2026, 9, 30, 18, 0, tzinfo=timezone.utc))],
+        [("900", "9000", "Free Agent", "WR", "KC", None, 3, 6.0, 11.0)],
     ]
 
     @contextmanager
@@ -396,11 +397,26 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
         result = service.get_league_trade_context("123", 2026, 3, 4)
     build.assert_called_once_with(2026, request_timeout_seconds=10)
     fetch.assert_called_once_with(build.return_value, include_schedule=True)
-    assert cursor.execute.call_count == 4
+    assert cursor.execute.call_count == 5
     assert set(cursor.execute.call_args_list[0].args[1][0]) == {"100", "500", "-1"}
     assert cursor.execute.call_args_list[1].args[1][:3] == (2026, 3, 6)
     # One ownership query for every rostered player, as of the requested week.
     assert cursor.execute.call_args_list[2].args[1][1:] == (2026, 3)
+    # The unrostered pool excludes every ESPN-rostered id and is shaped like a roster player.
+    assert set(cursor.execute.call_args_list[4].args[1][3]) == {"100", "500", "-1"}
+    assert result["free_agents"] == [
+        {
+            "espn_id": "9000", "player_id": "900", "name": "Free Agent", "position": "WR",
+            "nfl_team": "KC", "slot": None, "eligible_slots": [], "injury_status": None,
+            "metrics": {
+                "3": {"vorp_score": 6.0, "projected_points": 11.0},
+                "4": {"vorp_score": None, "projected_points": None},
+                "5": {"vorp_score": None, "projected_points": None},
+                "6": {"vorp_score": None, "projected_points": None},
+            },
+            "espn": None,
+        }
+    ]
     assert result["teams"]["1"]["roster"][0]["player_id"] == "500"
     players = [p for team in result["teams"].values() for p in team["roster"]]
     assert next(p for p in players if p["player_id"] == "500")["espn"] == {
@@ -442,6 +458,7 @@ def test_service_loads_metrics_through_the_last_playoff_week(monkeypatch, raw):
         [("500", 3, 4.0, 12.0), ("100", 3, -2.0, 7.0)],
         [("500", 9, 80.0, 50.0, 2.0)],
         [],
+        [],
     ]
 
     @contextmanager
@@ -456,11 +473,32 @@ def test_service_loads_metrics_through_the_last_playoff_week(monkeypatch, raw):
         result = service.get_league_trade_context("123", 2026, 3, 2)
     build.assert_called_once_with(2026, request_timeout_seconds=10)
     fetch.assert_called_once_with(build.return_value, include_schedule=True)
-    assert cursor.execute.call_count == 4
+    assert cursor.execute.call_count == 5
     assert set(cursor.execute.call_args_list[0].args[1][0]) == {"100", "500", "-1"}
     assert cursor.execute.call_args_list[1].args[1][:3] == (2026, 3, 8)
     assert result["end_week"] == 4
     assert result["teams"]["1"]["roster"][0]["metrics"]["3"]["vorp_score"] == 4.0
+
+
+
+@pytest.mark.parametrize(
+    "label,code", [("Out", "OUT"), ("IR", "INJURY_RESERVE"), ("Questionable", None), (None, None)]
+)
+def test_free_agent_injury_labels_are_normalized_to_the_lineup_helpers_codes(label, code):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("900", "9000", "Free Agent", "WR", "KC", label, 3, 6.0, 11.0)]
+    (entry,) = service.load_free_agent_rows(cursor, 2026, 3, 3, {"100"})
+    assert entry["injury_status"] == code
+
+
+def test_an_injured_free_agent_is_not_a_starter_in_the_as_of_week():
+    from src.optimization.roster_move_scoring import exclusion
+
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("900", "9000", "Free Agent", "WR", "KC", "Out", 3, 6.0, 11.0)]
+    (entry,) = service.load_free_agent_rows(cursor, 2026, 3, 3, set())
+    (shaped,) = service._shape_free_agents([entry], [3])
+    assert exclusion(shaped, 3, 3, None) == "out"
 
 
 def test_ambiguous_crosswalk_is_reported_as_unmapped(monkeypatch, raw):
@@ -468,6 +506,7 @@ def test_ambiguous_crosswalk_is_reported_as_unmapped(monkeypatch, raw):
     cursor = MagicMock()
     cursor.fetchall.side_effect = [
         [("500", "100"), ("other", "100"), ("100", "500")],
+        [],
         [],
         [],
         [],
@@ -488,7 +527,7 @@ def test_ambiguous_crosswalk_is_reported_as_unmapped(monkeypatch, raw):
 def test_service_does_not_use_cached_database_roster_ownership(monkeypatch, raw):
     monkeypatch.setenv("ESPN_LEAGUE_ID", "123")
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [[], [], []]
+    cursor.fetchall.side_effect = [[], [], [], []]
 
     @contextmanager
     def db():
@@ -714,7 +753,7 @@ def test_context_lists_committed_players_outside_the_cache(monkeypatch, raw, no_
     monkeypatch.setenv("ESPN_LEAGUE_ID", "123")
     no_committed_offers.return_value = {"500": ["k1"], "100": ["k1", "k2"]}
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [[], [], []]
+    cursor.fetchall.side_effect = [[], [], [], []]
 
     @contextmanager
     def db():

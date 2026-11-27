@@ -74,3 +74,31 @@ def test_rest_and_mcp_share_the_same_context_service(client):
     ) as mcp:
         assert mcp_server.get_league_trade_context_model("123", 2026, 3, 4) == payload
     mcp.assert_called_once_with("123", 2026, 3, 4)
+
+
+def test_rest_and_mcp_strip_the_free_agent_pool_from_the_context(client):
+    payload = {
+        "league_id": "123", "season": 2026, "as_of_week": 3, "start_week": 3, "end_week": 6,
+        "regular_season_end_week": 6, "rest_of_season": {"weeks": [], "playoff_weeks": []},
+        "lineup_slot_counts": {"RB": 2},
+        "roster_snapshot": {
+            "kind": "current", "source": "ESPN mRoster",
+            "fetched_at": "2026-10-05T12:00:00+00:00", "observed_week": 3,
+            "matches_as_of_week": True,
+        },
+        "strength_metric": {
+            "name": "completed_fantasy_points_per_week_z",
+            "source": "ESPN completed regular-season matchup totals",
+            "league_mean": None, "league_stddev": None, "teams_with_strength": 0,
+        },
+        "coverage": {"unmapped_espn_ids": [], "missing_metric_count": 0},
+        "teams": {},
+        "committed_players": [],
+    }
+    with_pool = {**payload, "free_agents": [{"espn_id": "9000", "player_id": "900"}]}
+    with patch("src.api.trade.get_league_trade_context", return_value=with_pool):
+        response = client.get("/v1/trade/context?league_id=123&season=2026&week=3&horizon=4")
+    assert response.status_code == 200
+    assert "free_agents" not in response.json()
+    with patch("src.api.mcp_server.get_league_trade_context", return_value=with_pool):
+        assert "free_agents" not in mcp_server.get_league_trade_context_model("123", 2026, 3, 4)

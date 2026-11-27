@@ -2861,7 +2861,8 @@
                   "trade-score-v1",
                   "trade-score-v2",
                   "trade-score-v3",
-                  "trade-score-v4"
+                  "trade-score-v4",
+                  "trade-score-v5"
                 ],
                 "type": "string"
               },
@@ -7023,6 +7024,66 @@
         "title": "RosterSnapshot",
         "type": "object"
       },
+      "RosterSpot": {
+        "description": "Evidence for roster_spot_value: the free agent added or player dropped, and the\nunweighted per-week lineup deltas behind it.",
+        "properties": {
+          "candidates_considered": {
+            "title": "Candidates Considered",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "freed_spot",
+              "forced_drop",
+              "none"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "player": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TradedPlayer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total": {
+            "title": "Total",
+            "type": "number"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          },
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/SpotWeek"
+            },
+            "title": "Weeks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "player",
+          "weeks",
+          "total",
+          "candidates_considered",
+          "unavailable_reason"
+        ],
+        "title": "RosterSpot",
+        "type": "object"
+      },
       "RumorActionTriggerRequest": {
         "properties": {
           "season": {
@@ -8183,6 +8244,17 @@
               }
             ],
             "title": "Rest Of Season Value"
+          },
+          "roster_spot_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roster Spot Value"
           }
         },
         "required": [
@@ -8565,6 +8637,24 @@
           "slot"
         ],
         "title": "SlotMoveInstruction",
+        "type": "object"
+      },
+      "SpotWeek": {
+        "properties": {
+          "delta": {
+            "title": "Delta",
+            "type": "number"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week",
+          "delta"
+        ],
+        "title": "SpotWeek",
         "type": "object"
       },
       "StartRunRequest": {
@@ -9569,6 +9659,17 @@
             "title": "Rest Of Season Weeks",
             "type": "array"
           },
+          "roster_spot_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roster Spot Value"
+          },
           "scored_weeks": {
             "items": {
               "type": "integer"
@@ -9619,6 +9720,7 @@
           "costs_playoff_value",
           "rest_of_season_weeks",
           "rest_of_season_scored_weeks",
+          "roster_spot_value",
           "scored_weeks",
           "horizon_weeks",
           "complete_horizon",
@@ -10324,6 +10426,16 @@
           "roster_snapshot": {
             "$ref": "#/components/schemas/RosterSnapshot"
           },
+          "roster_spot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RosterSpot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schedule": {
             "$ref": "#/components/schemas/ScheduleTerms"
           },
@@ -10335,7 +10447,8 @@
               "trade-score-v1",
               "trade-score-v2",
               "trade-score-v3",
-              "trade-score-v4"
+              "trade-score-v4",
+              "trade-score-v5"
             ],
             "title": "Scoring Version",
             "type": "string"

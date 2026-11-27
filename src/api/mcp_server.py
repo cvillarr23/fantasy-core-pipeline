@@ -215,7 +215,9 @@ def get_league_trade_context_model(
     Unknown pairings, identity mappings and metrics remain explicit. This is current
     ownership, not a historical roster reconstruction. NFL matchup difficulty is separate.
     """
-    return get_league_trade_context(league_id, season, week, horizon)
+    context = get_league_trade_context(league_id, season, week, horizon)
+    # The free-agent pool is a scorer input, not part of the published context.
+    return {key: value for key, value in context.items() if key != "free_agents"}
 
 
 @mcp.tool()
