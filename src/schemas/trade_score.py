@@ -64,6 +64,9 @@ class ScoreWeights(BaseModel):
     # Absent from stored evidence scored before the rest-of-season term (#328).
     ros_regular_weight: float | None = None
     playoff_week_weight: float | None = None
+    # trade-score-v4+.
+    questionable_availability: float | None = None
+    doubtful_availability: float | None = None
 
 
 class Starter(BaseModel):
@@ -79,6 +82,13 @@ class ExcludedPlayer(BaseModel):
     reason: Literal["out", "nfl_bye", "no_metrics", "unmapped", "unknown_position"]
 
 
+class InjuryAdjustment(BaseModel):
+    """A Questionable/Doubtful player's VORP scaled by factor for that week's solve."""
+    espn_id: str
+    factor: float
+    reason: str
+
+
 class LineupWeek(BaseModel):
     week: int
     before: float
@@ -88,6 +98,8 @@ class LineupWeek(BaseModel):
     starters_after: list[Starter]
     held_slots: list[str]
     excluded_players: list[ExcludedPlayer]
+    # trade-score-v4+; empty in older stored evidence.
+    injury_adjustments: list[InjuryAdjustment] = []
 
 
 class TeamRosterImpact(BaseModel):
@@ -136,7 +148,10 @@ class ScheduleTerms(BaseModel):
 
 # Every scoring_version a stored evaluation may carry, oldest first; the last one is what the
 # live scorer emits (trade_score_service.SCORING_VERSION). A score change appends one entry.
-KNOWN_SCORING_VERSIONS = ("trade-score-v1", "trade-score-v2", "trade-score-v3")
+# v4 (#330 part 2): injury timelines shape each week's lineup inputs.
+KNOWN_SCORING_VERSIONS = (
+    "trade-score-v1", "trade-score-v2", "trade-score-v3", "trade-score-v4",
+)
 ScoringVersion = Literal[KNOWN_SCORING_VERSIONS]
 
 
@@ -183,6 +198,19 @@ class ScoreTerms(BaseModel):
     components: dict[str, ScoreComponent] | None = None
 
 
+class PlayerInjury(BaseModel):
+    """ESPN's live status plus the public injuries feed's expected return, for one traded
+    player; return_date and expected_return_week are null when the feed has no date."""
+    injury_status: str | None
+    slot: str | None
+    return_date: str | None
+    expected_return_week: int | None
+    injury_type: str | None
+    reported_at: str | None
+    weeks_out: list[int]
+    as_of_week_availability: float
+
+
 class ScoreCoverage(BaseModel):
     unmapped_traded_espn_ids: list[str]
     partial_roster_weeks: list[int]
@@ -204,6 +232,8 @@ class TradeScore(BaseModel):
     weights: ScoreWeights
     roster_impact: RosterImpact
     bye_coverage: ByeCoverage
+    # Traded players only, keyed by ESPN id (trade-score-v4+; absent from older evidence).
+    injuries: dict[str, PlayerInjury] | None = None
     schedule: ScheduleTerms
     rest_of_season: RestOfSeason | None = None
     score: ScoreTerms

@@ -180,6 +180,7 @@ erDiagram
 |---|---|---|
 | `players` | One row per player: name, position, team, injury status and the three id spaces. | `sync_players` (Sleeper). `sync_id_crosswalk`, `sync_skill_position_crosswalk` and `sync_kicker_dst` backfill `espn_id` and `gsis_id`. |
 | `weekly_stats` | One row per player per week: nflverse usage metrics, projections, actual points and the VORP audit columns. | `metrics_extractor` (usage metrics), `sync_projections` and `sync_kicker_dst` (`projected_points`), `vorp_matrix` (VORP columns), `sync_actual_scores` (`actual_points`). |
+| `player_injuries` | ESPN's current injury report: one row per injured player keyed by `espn_id` (never `player_id`), with the feed's `status`, `fantasy_status`, injury type and detail, `return_date` and `reported_at`. Replaced wholesale on every sync, so a missing row means healthy. ESPN's live fantasy `injuryStatus` stays the authority on status; this table only adds the return date. The trade context maps it onto `expected_return_week`. | `sync_injuries` |
 | `espn_player_ownership` | One row per player per week: ESPN's percent owned, percent started, 24h change in percent owned and positional rank. Every metric is nullable. Older weeks are kept as history. `vorp_matrix` reads `percent_started` when `ESPN_MARKET_WEIGHT` is nonzero. Backtests never write stand-in data here: their FantasyPros ECR goes in `fp_weekly_ecr`, which exists only in `backtest_<season>` schemas (`backtest_schema.BACKTEST_ONLY_DDL`). | `sync_espn_ownership` |
 | `defense_position_strength` | Last season's points allowed by defense and position, as a z-score. Used only when `MATCHUP_WEIGHTING_ENABLED=true`. | `sync_defense_strength` |
 
@@ -244,7 +245,7 @@ Several JSONB columns hold different shapes depending on the row. Version string
 |---|---|---|
 | `execution_log.counter_offer->'evaluation'` (offers) | `proposal-evaluation-v1` | `trade_offer_service._stored_evaluation` |
 | `execution_log.counter_offer->'evaluation'` (inbox) | `incoming-trade-evaluation-v1` | `trade_inbox_service._evaluation` |
-| `counter_offer->'score'->scoring_version` | `trade-score-v3` since the rest-of-season term (stored `trade-score-v2` and `trade-score-v1` still read; v1 has no `score.components`) | `trade_score_service.SCORING_VERSION` |
+| `counter_offer->'score'->scoring_version` | `trade-score-v4` since injury timelines (stored `trade-score-v3`, `trade-score-v2` and `trade-score-v1` still read; v1 has no `score.components`) | `trade_score_service.SCORING_VERSION` |
 | `counter_offer->>'offer_key'` hash input | `trade-offer-v1` | `trade_offer_service.compute_offer_key` |
 | `counter_offer->>'decision_key'` hash input | `trade-response-v1` | `trade_inbox_service.compute_decision_key` |
 

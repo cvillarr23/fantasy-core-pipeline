@@ -7,6 +7,7 @@ Separate from src.nfl_schedule because metrics_extractor (which owns team-code
 normalization) already imports that module.
 """
 import logging
+from datetime import date
 from functools import lru_cache
 
 import polars as pl
@@ -60,6 +61,36 @@ def bye_weeks_or_empty(season: int) -> dict:
         return load_bye_weeks(season)
     except Exception as exc:
         logger.warning(f"NFL bye weeks unavailable for {season}: {exc}")
+        return {}
+
+
+def team_game_dates_from_schedule(df_schedules: pl.DataFrame) -> dict:
+    """Pure. Team -> its regular-season [(week, game date)], for mapping an expected return
+    date onto a week (src/injury_timeline)."""
+    games: dict = {}
+    regular = df_schedules.filter(pl.col("game_type") == "REG")
+    for week, gameday, home, away in regular.select(["week", "gameday", "home_team", "away_team"]).iter_rows():
+        if not gameday:
+            continue
+        game_date = date.fromisoformat(str(gameday)[:10])
+        for team in (home, away):
+            games.setdefault(normalize_team(team), []).append((int(week), game_date))
+    return {team: sorted(dates) for team, dates in games.items()}
+
+
+@lru_cache(maxsize=4)
+def load_team_game_dates(season: int) -> dict:
+    """Cached per season like load_bye_weeks; a failed read raises and isn't cached."""
+    return team_game_dates_from_schedule(load_schedule(season, attempts=1))
+
+
+def team_game_dates_or_empty(season: int) -> dict:
+    """load_team_game_dates, or {} when the schedule can't be read: return weeks are then
+    unknown rather than failing the caller."""
+    try:
+        return load_team_game_dates(season)
+    except Exception as exc:
+        logger.warning(f"NFL game dates unavailable for {season}: {exc}")
         return {}
 
 

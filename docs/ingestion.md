@@ -45,6 +45,7 @@ flowchart TD
 | `sync_kicker_dst` | ESPN `kona_player_info` | `players.espn_id`, `weekly_stats.projected_points` for K and D/ST | Takes `--season` and `--week`. A matched player with no projection gets no row, never a 0.0 row. |
 | `sync_skill_position_crosswalk` | ESPN `kona_player_info`, no ownership filter | `players.espn_id` | Fills the QB, RB, WR and TE players the crosswalk missed. Matches by name and team. |
 | `sync_espn_ownership` | ESPN `kona_player_info`, sorted by percent owned | `espn_player_ownership` | Percent owned, percent started, 24h change and positional rank for about the 1000 most-owned players. ESPN's `-1` and missing fields are stored as NULL. Takes optional `--season` and `--week`, defaulting to the current season and upcoming week. A rerun in the same week upserts that week's row. |
+| `sync_injuries` | ESPN's public NFL injuries feed (`site.api.espn.com/.../nfl/injuries`) | `player_injuries` | One row per injured player, keyed by ESPN athlete id (parsed from the athlete's `/id/<n>/` link), with status, injury and `returnDate`. Each run replaces the table, since a player missing from the feed is healthy. An empty or unparsable feed fails and keeps the old snapshot. No arguments. Trade scoring maps `return_date` onto a week ([injury timelines](../README.md#trade-scoring)). |
 | `sync_projections` | Sleeper projections | `weekly_stats.projected_points` | QB, RB, WR and TE only. Takes `--season` and `--week`. |
 | `metrics_extractor` | nflverse play-by-play, snaps, schedule | `weekly_stats` usage and betting columns | Defaults to the last completed week. See below. |
 | `vorp_matrix` | `weekly_stats`, `league_settings` | `weekly_stats` VORP columns | Takes `--season` and `--week`. |
@@ -125,7 +126,7 @@ Team codes are nflverse codes (`WAS`, not ESPN's `WSH`), the same as `players.te
 | `fantasy-rumor-action-trigger` | Daily 21:45, plus `rumor.signal_created` once the catalog subscribes it | `rumor_action_service` |
 
 :::warning[Not scheduled]
-No CronJob runs `sync_id_crosswalk`, `sync_skill_position_crosswalk` or `sync_defense_strength`. Run them by hand after a large `sync_players` change, in the order shown above.
+No CronJob runs `sync_id_crosswalk`, `sync_skill_position_crosswalk` or `sync_defense_strength`. `sync_injuries` needs a launcher catalog entry in fantasy-infra (`injury-sync`, ahead of `trade-candidates`); until it has one, trade scoring sees no return dates and falls back to the no-date rules. Run them by hand after a large `sync_players` change, in the order shown above.
 :::
 
 ## How does `metrics_extractor` pick a week?
