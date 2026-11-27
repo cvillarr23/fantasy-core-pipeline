@@ -106,6 +106,17 @@ class CommittedPlayer(BaseModel):
     offer_keys: list[str]
 
 
+class RestOfSeasonContextWeek(BaseModel):
+    week: int
+    kind: Literal["regular", "playoff"]
+
+
+class RestOfSeasonContext(BaseModel):
+    """Weeks after the horizon through the last fantasy playoff week (#328)."""
+    weeks: list[RestOfSeasonContextWeek]
+    playoff_weeks: list[int]
+
+
 class LeagueTradeContext(BaseModel):
     league_id: str
     season: int
@@ -113,6 +124,7 @@ class LeagueTradeContext(BaseModel):
     start_week: int
     end_week: int
     regular_season_end_week: int
+    rest_of_season: RestOfSeasonContext
     lineup_slot_counts: dict[str, int]
     roster_snapshot: RosterSnapshot
     strength_metric: StrengthMetric

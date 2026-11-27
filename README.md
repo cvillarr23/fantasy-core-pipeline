@@ -476,18 +476,26 @@ after minus before.
 - `counterparty_weighted_benefit` C* = Σ −(their ΔL) × c. In a week they play us,
   c = our own m. Otherwise c = 0.25 × m(their opponent's z), so weakening them ahead of
   tougher matchups counts more, but less than head-to-head.
-- `final_score` = G* + C*.
+- `rest_of_season_value` R = Σ our ΔL × k over the **rest-of-season** weeks: every week
+  after the horizon through the league's last fantasy playoff week (ESPN's
+  `playoffTeamCount` and `playoffMatchupPeriodLength`; weeks 15–17 for this league). k = 1.0
+  for a playoff week and 0.5 for a regular-season week the horizon didn't reach, since
+  projections that far out are noisier and those games only decide seeding. No opponent
+  multiplier applies. Only our side counts. The counterparty's change is reported in
+  `rest_of_season` as evidence. `rest_of_season.costs_playoff_value` flags a package whose
+  playoff weeks lose us lineup value. It's informational and never a gate.
+- `final_score` = G* + C* + R.
 
 `score.components` lists every term by name as `{value, in_final_score,
 unavailable_reasons}`. `final_score` is the sum of the components whose `in_final_score`
-is true (today `our_weighted_gain` and `counterparty_weighted_benefit`). When one of those
+is true (today `our_weighted_gain`, `counterparty_weighted_benefit` and `rest_of_season`). When one of those
 has no value, `final_score` is null and takes that component's reasons. A component with
 `in_final_score: false` is reported but doesn't count toward the score. The flat fields
 (`our_weighted_gain`, ...) repeat the same numbers.
 
 The constants are echoed in `weights`, and `scoring_version` names the formula
-(`trade-score-v2` since `components` was added; stored evidence may still say
-`trade-score-v1`, which has no `components`).
+(`trade-score-v2` added `components`, `trade-score-v3` the rest-of-season term R; stored
+evidence may still say an earlier version, and `trade-score-v1` has no `components`).
 `raw_vorp` is `/v1/trade/evaluate`'s result for the as-of week, using the mapped internal
 IDs. Per-week `starters_before`/`starters_after`, `held_slots` and `excluded_players`,
 plus the per-week schedule rows, are the evidence an explanation should quote. Uneven
@@ -505,8 +513,14 @@ Nothing is filled in:
 - If the NFL schedule can't be read, a missing projection can't be confirmed as a bye.
 - Unknown opponent strength or pairing leaves G*, C* or `final_score` null, with a reason.
 - An empty or bye-only horizon has no final score.
+- R never withholds `final_score`. When rest-of-season weeks exist but none can be scored
+  (far-week projections not refreshed yet), R is null with `no_scored_weeks`, its component
+  has `in_final_score: false`, and `final_score` = G* + C*. Show it as unavailable, not 0.
+  With no rest-of-season weeks left, R is 0.
 
 The daily refresher attempts the upcoming week and three following weeks, capped at week 18.
+`draft_prep_refresh --rest-of-season` refreshes the weeks after that horizon through the last
+fantasy playoff week (from `league_settings.playoff_settings`). R depends on it.
 Missing metrics or failed refresh stages can still leave horizon weeks unscored; inspect
 `complete_horizon` and the coverage reasons. See [projections and VORP](docs/decision-pipelines/projections-and-vorp.md).
 

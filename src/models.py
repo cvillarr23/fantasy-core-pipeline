@@ -178,6 +178,14 @@ CREATE TABLE IF NOT EXISTS league_settings (
 );
 """
 
+# Fantasy playoff weeks and trade deadline from ESPN mSettings (src/league_schedule.py):
+# regular_season_end_week, playoff_team_count, playoff_matchup_period_length, playoff_weeks
+# and trade_deadline. Read by `draft_prep_refresh --rest-of-season` to know how far ahead to
+# refresh projections for the trade score's rest-of-season term (#328).
+ADD_LEAGUE_SETTINGS_PLAYOFF_SETTINGS_COLUMN = """
+ALTER TABLE league_settings ADD COLUMN IF NOT EXISTS playoff_settings JSONB;
+"""
+
 # Team-id -> display-name mapping, synced from ESPN alongside rosters (sync_league.py).
 # Kept separate from league_settings (one row per league) since this is one row per team.
 # PK is (league_id, team_id) rather than just team_id in case a future multi-league setup
@@ -613,6 +621,8 @@ CREATE TABLE IF NOT EXISTS trade_candidates (
     score JSONB NOT NULL,
     PRIMARY KEY (league_id, season, week, candidate_key)
 );
+ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS rest_of_season_value DOUBLE PRECISION;
+ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS costs_playoff_value BOOLEAN;
 """
 
 # ESPN's league-wide market signal per player per week, refreshed daily by

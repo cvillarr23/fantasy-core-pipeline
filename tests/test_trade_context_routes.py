@@ -42,6 +42,7 @@ def test_rest_and_mcp_share_the_same_context_service(client):
         "start_week": 3,
         "end_week": 6,
         "regular_season_end_week": 6,
+        "rest_of_season": {"weeks": [], "playoff_weeks": []},
         "lineup_slot_counts": {"RB": 2},
         "roster_snapshot": {
             "kind": "current",

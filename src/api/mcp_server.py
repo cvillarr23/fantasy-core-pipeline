@@ -282,7 +282,9 @@ def list_trade_candidates(
     worker's staging gates: proposable, needs_drop (only a roster limit fails) or
     one_sided (reasons lists the failed gates). Filters: counterparty_team_id,
     receive_position / send_position, shape, status ("all" for every status). sort is
-    final_score, our_gain or their_benefit (the counterparty's lineup change). Player ids
+    final_score, our_gain, their_benefit (the counterparty's lineup change) or rest_of_season
+    (R, our weighted rest-of-season and playoff-week value; null when unavailable, sorted
+    last). costs_playoff_value flags a package that loses us playoff-week value. Player ids
     are ESPN ids. Re-score a candidate live with score_trade_proposal before acting on it,
     since rosters may have changed since computed_at.
     """

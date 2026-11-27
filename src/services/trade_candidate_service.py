@@ -61,7 +61,9 @@ from src.optimization.roster_move_scoring import (
     solve_lineup,
 )
 from src.services.trade_context_service import get_league_trade_context
-from src.services.trade_score_service import load_teams_playing_by_week, shape_trade_score
+from src.services.trade_score_service import (
+    load_teams_playing_by_week, scored_week_range, shape_trade_score,
+)
 from src.services.trade_service import load_vorp_by_player, summarize_raw_vorp
 
 logger = logging.getLogger("TradeCandidateService")
@@ -73,6 +75,7 @@ SORT_COLUMNS = {
     "final_score": "final_score",
     "our_gain": "our_lineup_gain",
     "their_benefit": "counterparty_lineup_change",
+    "rest_of_season": "rest_of_season_value",
 }
 _TOLERANCE = 1e-9
 # A team whose current roster can't field a lineup in a week makes that week unscorable for
@@ -403,7 +406,7 @@ def generate_trade_candidates(league_id, season, week, horizon, our_team_id,
     context = get_league_trade_context(league_id, season, week, horizon)
     if our_team_id not in context["teams"]:
         raise ValueError(f"Unknown ESPN team {our_team_id} in this league.")
-    teams_playing = load_teams_playing_by_week(season, context["start_week"], context["end_week"])
+    teams_playing = load_teams_playing_by_week(season, *scored_week_range(context))
     player_ids = sorted({
         p["player_id"]
         for team in context["teams"].values()
@@ -443,9 +446,10 @@ def store_run(league_id, season, week, horizon, our_team_id, rows, counts, run_i
                         send_players, receive_players, status, reasons, final_score,
                         our_lineup_gain, our_weighted_gain, counterparty_lineup_change,
                         counterparty_weighted_benefit, our_schedule_adjustment,
+                        rest_of_season_value, costs_playoff_value,
                         scored_week_count, complete_horizon, score)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
                 [_row_params(league_id, season, week, horizon, run_id, computed_at, our_team_id, row)
                  for row in rows],
             )
@@ -454,6 +458,7 @@ def store_run(league_id, season, week, horizon, our_team_id, rows, counts, run_i
 
 def _row_params(league_id, season, week, horizon, run_id, computed_at, our_team_id, row):
     terms = row["score"]["score"]
+    ros = row["score"]["rest_of_season"]
     return (
         league_id, season, week, horizon, run_id, computed_at, our_team_id,
         row["candidate_key"], row["counterparty_team_id"], row["counterparty_name"], row["shape"],
@@ -462,7 +467,8 @@ def _row_params(league_id, season, week, horizon, run_id, computed_at, our_team_
         Json(row["send"]), Json(row["receive"]), row["status"], row["reasons"],
         terms["final_score"], terms["our_lineup_gain"], terms["our_weighted_gain"],
         terms["counterparty_lineup_change"], terms["counterparty_weighted_benefit"],
-        terms["our_schedule_adjustment"], len(row["score"]["horizon"]["scored_weeks"]),
+        terms["our_schedule_adjustment"], terms["rest_of_season_value"],
+        ros["costs_playoff_value"], len(row["score"]["horizon"]["scored_weeks"]),
         row["score"]["horizon"]["complete_horizon"], Json(row["score"]),
     )
 
@@ -471,7 +477,7 @@ _ITEM_COLUMNS = (
     "candidate_key, counterparty_team_id, counterparty_name, shape, send_players, "
     "receive_players, status, reasons, final_score, our_lineup_gain, our_weighted_gain, "
     "counterparty_lineup_change, counterparty_weighted_benefit, our_schedule_adjustment, "
-    "score->'horizon', score->'bye_coverage'"
+    "score->'horizon', score->'bye_coverage', score->'rest_of_season'"
 )
 
 
@@ -546,7 +552,10 @@ def list_trade_candidates(
 
 def _item(row):
     (key, counterparty_team_id, counterparty_name, shape, send, receive, status, reasons,
-     final_score, gain, weighted_gain, change, benefit, adjustment, horizon, bye_coverage) = row
+     final_score, gain, weighted_gain, change, benefit, adjustment, horizon, bye_coverage,
+     rest_of_season) = row
+    # Rows stored before the rest-of-season term (#328) have no score->'rest_of_season'.
+    rest_of_season = rest_of_season or {}
     return {
         "candidate_key": key,
         "counterparty": {"team_id": counterparty_team_id, "name": counterparty_name},
@@ -559,6 +568,11 @@ def _item(row):
         "counterparty_lineup_change": change,
         "counterparty_weighted_benefit": benefit,
         "our_schedule_adjustment": adjustment,
+        "rest_of_season_value": rest_of_season.get("value"),
+        "playoff_lineup_gain": rest_of_season.get("playoff_lineup_gain"),
+        "costs_playoff_value": bool(rest_of_season.get("costs_playoff_value")),
+        "rest_of_season_weeks": [w["week"] for w in rest_of_season.get("weeks", [])],
+        "rest_of_season_scored_weeks": rest_of_season.get("scored_weeks", []),
         "scored_weeks": horizon["scored_weeks"],
         "horizon_weeks": list(range(horizon["start_week"], horizon["end_week"] + 1)),
         "complete_horizon": horizon["complete_horizon"],

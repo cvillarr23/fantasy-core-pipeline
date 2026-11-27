@@ -16,6 +16,7 @@ from espn_api.football import League
 from espn_api.football.constant import POSITION_MAP
 
 from src.ingestion.espn_client import TimedEspnFantasyRequests
+from src.league_schedule import playoff_settings
 
 logger = logging.getLogger("LeagueSync")
 
@@ -99,14 +100,16 @@ def fetch_league_config(league: League, raw: dict) -> dict:
         "name": league.settings.name,
         "lineup_slot_counts": _lineup_slot_counts_by_label(raw_slot_counts),
         "scoring_settings": settings.get("scoringSettings", {}),
+        "playoff_settings": playoff_settings(raw),
     }
 
 
 def persist_league_settings(conn, league_id: str, season: int, config: dict) -> None:
     upsert_query = """
         INSERT INTO league_settings
-            (league_id, season, name, team_count, scoring_type, lineup_slot_counts, scoring_settings, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            (league_id, season, name, team_count, scoring_type, lineup_slot_counts, scoring_settings,
+             playoff_settings, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT (league_id) DO UPDATE SET
             season = EXCLUDED.season,
             name = EXCLUDED.name,
@@ -114,12 +117,14 @@ def persist_league_settings(conn, league_id: str, season: int, config: dict) -> 
             scoring_type = EXCLUDED.scoring_type,
             lineup_slot_counts = EXCLUDED.lineup_slot_counts,
             scoring_settings = EXCLUDED.scoring_settings,
+            playoff_settings = EXCLUDED.playoff_settings,
             updated_at = CURRENT_TIMESTAMP;
     """
     with conn.cursor() as cursor:
         cursor.execute(upsert_query, (
             league_id, season, config["name"], config["team_count"], config["scoring_type"],
             json.dumps(config["lineup_slot_counts"]), json.dumps(config["scoring_settings"]),
+            json.dumps(config.get("playoff_settings")),
         ))
 
 

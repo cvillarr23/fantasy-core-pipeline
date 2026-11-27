@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.schemas.trade_score import TradeScore
+from src.services.trade_score_service import SCORING_VERSION
 from src.services import trade_inbox_service as service
 from tests.test_trade_score_service import context  # noqa: F401
 from tests.test_trade_score_service import score as shape_score
@@ -76,7 +77,7 @@ def row(tx="123", status="open", final=4.0):
             missed_reads=0,
             score=dict(
                 state="scored",
-                scoring_version="trade-score-v2",
+                scoring_version=SCORING_VERSION,
                 as_of_week=5,
                 final_score=final,
                 complete_horizon=True,
@@ -1647,7 +1648,7 @@ def _drop(path):
         (_drop(["version"]), "version"),
         (lambda stored, entry: "x", "version"),
         (lambda stored, entry: [], "version"),
-        (_evidence_set(["score", "scoring_version"], "trade-score-v3"), "invalid"),
+        (_evidence_set(["score", "scoring_version"], "trade-score-v99"), "invalid"),
         (_drop(["score", "roster_impact"]), "invalid"),
         (
             _evidence_set(["score", "horizon", "unscored_weeks"], [{"week": 7}]),

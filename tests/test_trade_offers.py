@@ -894,7 +894,7 @@ def _drop(path):
         lambda _: "x",
         lambda _: [],
         lambda _: 5,
-        _set(["score", "scoring_version"], "trade-score-v3"),
+        _set(["score", "scoring_version"], "trade-score-v99"),
         _drop(["score", "roster_impact"]),
         _set(["request", "extra"], True),
         _set(["ranking", "basis"], "other"),

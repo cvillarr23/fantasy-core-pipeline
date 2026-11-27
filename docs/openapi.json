@@ -2832,7 +2832,8 @@
               {
                 "enum": [
                   "trade-score-v1",
-                  "trade-score-v2"
+                  "trade-score-v2",
+                  "trade-score-v3"
                 ],
                 "type": "string"
               },
@@ -4166,6 +4167,9 @@
             "title": "Regular Season End Week",
             "type": "integer"
           },
+          "rest_of_season": {
+            "$ref": "#/components/schemas/RestOfSeasonContext"
+          },
           "roster_snapshot": {
             "$ref": "#/components/schemas/RosterSnapshot"
           },
@@ -4195,6 +4199,7 @@
           "start_week",
           "end_week",
           "regular_season_end_week",
+          "rest_of_season",
           "lineup_slot_counts",
           "roster_snapshot",
           "strength_metric",
@@ -6475,6 +6480,203 @@
         "title": "ResourceSuggestionsResponse",
         "type": "object"
       },
+      "RestOfSeason": {
+        "description": "The R term: weeks after the horizon through the last fantasy playoff week.",
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "costs_playoff_value": {
+            "title": "Costs Playoff Value",
+            "type": "boolean"
+          },
+          "counterparty_lineup_change": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Lineup Change"
+          },
+          "our_lineup_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Our Lineup Gain"
+          },
+          "playoff_lineup_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Playoff Lineup Gain"
+          },
+          "scored_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Scored Weeks",
+            "type": "array"
+          },
+          "unavailable_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unavailable Reasons",
+            "type": "array"
+          },
+          "unscored_weeks": {
+            "items": {
+              "$ref": "#/components/schemas/UnscoredWeek"
+            },
+            "title": "Unscored Weeks",
+            "type": "array"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/RestOfSeasonWeek"
+            },
+            "title": "Weeks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "weeks",
+          "scored_weeks",
+          "unscored_weeks",
+          "complete",
+          "our_lineup_gain",
+          "playoff_lineup_gain",
+          "counterparty_lineup_change",
+          "value",
+          "unavailable_reasons",
+          "costs_playoff_value"
+        ],
+        "title": "RestOfSeason",
+        "type": "object"
+      },
+      "RestOfSeasonContext": {
+        "description": "Weeks after the horizon through the last fantasy playoff week (#328).",
+        "properties": {
+          "playoff_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Playoff Weeks",
+            "type": "array"
+          },
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/RestOfSeasonContextWeek"
+            },
+            "title": "Weeks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "weeks",
+          "playoff_weeks"
+        ],
+        "title": "RestOfSeasonContext",
+        "type": "object"
+      },
+      "RestOfSeasonContextWeek": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "regular",
+              "playoff"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week",
+          "kind"
+        ],
+        "title": "RestOfSeasonContextWeek",
+        "type": "object"
+      },
+      "RestOfSeasonWeek": {
+        "properties": {
+          "counterparty_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Delta"
+          },
+          "kind": {
+            "enum": [
+              "regular",
+              "playoff"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "our_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Our Delta"
+          },
+          "week": {
+            "title": "Week",
+            "type": "integer"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "week",
+          "kind",
+          "weight",
+          "our_delta",
+          "counterparty_delta"
+        ],
+        "title": "RestOfSeasonWeek",
+        "type": "object"
+      },
       "RetryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -7816,6 +8018,17 @@
               }
             ],
             "title": "Our Weighted Gain"
+          },
+          "rest_of_season_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rest Of Season Value"
           }
         },
         "required": [
@@ -7835,6 +8048,28 @@
           "indirect_factor": {
             "title": "Indirect Factor",
             "type": "number"
+          },
+          "playoff_week_weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Playoff Week Weight"
+          },
+          "ros_regular_weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ros Regular Weight"
           },
           "strength_weight": {
             "title": "Strength Weight",
@@ -9028,6 +9263,10 @@
             "title": "Complete Horizon",
             "type": "boolean"
           },
+          "costs_playoff_value": {
+            "title": "Costs Playoff Value",
+            "type": "boolean"
+          },
           "counterparty": {
             "$ref": "#/components/schemas/ScoreTeam"
           },
@@ -9104,6 +9343,17 @@
             ],
             "title": "Our Weighted Gain"
           },
+          "playoff_lineup_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Playoff Lineup Gain"
+          },
           "reasons": {
             "items": {
               "type": "string"
@@ -9116,6 +9366,31 @@
               "$ref": "#/components/schemas/CandidatePlayer"
             },
             "title": "Receive",
+            "type": "array"
+          },
+          "rest_of_season_scored_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Rest Of Season Scored Weeks",
+            "type": "array"
+          },
+          "rest_of_season_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rest Of Season Value"
+          },
+          "rest_of_season_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Rest Of Season Weeks",
             "type": "array"
           },
           "scored_weeks": {
@@ -9163,6 +9438,11 @@
           "counterparty_lineup_change",
           "counterparty_weighted_benefit",
           "our_schedule_adjustment",
+          "rest_of_season_value",
+          "playoff_lineup_gain",
+          "costs_playoff_value",
+          "rest_of_season_weeks",
+          "rest_of_season_scored_weeks",
           "scored_weeks",
           "horizon_weeks",
           "complete_horizon",
@@ -9838,6 +10118,16 @@
             "title": "Receive",
             "type": "array"
           },
+          "rest_of_season": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RestOfSeason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "roster_impact": {
             "$ref": "#/components/schemas/RosterImpact"
           },
@@ -9853,7 +10143,8 @@
           "scoring_version": {
             "enum": [
               "trade-score-v1",
-              "trade-score-v2"
+              "trade-score-v2",
+              "trade-score-v3"
             ],
             "title": "Scoring Version",
             "type": "string"
@@ -13731,7 +14022,8 @@
               "enum": [
                 "final_score",
                 "our_gain",
-                "their_benefit"
+                "their_benefit",
+                "rest_of_season"
               ],
               "title": "Sort",
               "type": "string"

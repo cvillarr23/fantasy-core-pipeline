@@ -15,6 +15,7 @@ from src.models import (
     ADD_LEAGUE_ROSTERS_IS_STARTER_COLUMN,
     ADD_LEAGUE_ROSTERS_ESPN_INJURY_STATUS_COLUMN,
     ADD_LEAGUE_TEAMS_IR_SLOTS_USED_COLUMN,
+    ADD_LEAGUE_SETTINGS_PLAYOFF_SETTINGS_COLUMN,
     CREATE_LEAGUE_SETTINGS_TABLE,
     CREATE_LEAGUE_TEAMS_TABLE,
     CREATE_EXECUTION_LOG_TABLE,
@@ -98,6 +99,7 @@ def run_migrations():
 
             logger.info("Validating 'league_settings' configuration table...")
             cursor.execute(CREATE_LEAGUE_SETTINGS_TABLE)
+            cursor.execute(ADD_LEAGUE_SETTINGS_PLAYOFF_SETTINGS_COLUMN)
 
             logger.info("Validating 'league_teams' name-mapping table...")
             cursor.execute(CREATE_LEAGUE_TEAMS_TABLE)
