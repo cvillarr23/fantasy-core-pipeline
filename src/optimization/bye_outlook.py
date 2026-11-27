@@ -5,6 +5,7 @@ the trade context (every team's outlook) and roster_outlook_service (one team's)
 """
 import statistics
 
+from src.injury_timeline import without_timeline
 from src.nfl_byes import bye_week_for, teams_playing_from_byes
 from src.optimization.roster_move_scoring import lineup_week
 
@@ -16,7 +17,12 @@ def build_bye_outlook(roster, weeks, as_of_week, slot_counts, playing_by_week):
     A week is a crunch when players on bye leave a starter seat empty, or force more
     below-replacement starters (VORP <= 0, i.e. worse than a typical free agent) than
     the roster's median week. That is the hole a waiver add or trade can actually fill;
-    a stud's ordinary bye backed by a decent bench is not one."""
+    a stud's ordinary bye backed by a decent bench is not one.
+
+    Outlooks keep the pre-timeline injury rule (Out in the as-of week only): trade-context
+    entries carry src/injury_timeline's `injury` key for trade scoring, so it's dropped
+    here, and /roster, chat, MCP and waivers see the same outlook as before."""
+    roster = [without_timeline(player) for player in roster]
     rows = []
     for week in weeks:
         row = lineup_week(roster, week, as_of_week, slot_counts, playing_by_week.get(week))

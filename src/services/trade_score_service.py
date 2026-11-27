@@ -36,10 +36,11 @@ With no rest-of-season weeks left, R is 0.
 
 Injuries (trade-score-v4) shape each week's inputs rather than adding a term, by the rules in
 src/injury_timeline: an Out or IR player sits until his expected return week (ESPN's injuries
-feed, mapped onto his team's schedule), an IR player with no date sits the whole horizon,
-and a Questionable/Doubtful player's positive VORP is scaled by QUESTIONABLE_AVAILABILITY
-(0.75) or DOUBTFUL_AVAILABILITY (0.25) in the as-of week only. Each week lists its
-injury_adjustments, and `injuries` gives every traded player's timeline.
+feed, mapped onto his team's schedule), an IR player with no date sits the horizon but not
+the rest-of-season weeks, and a Questionable/Doubtful player's positive VORP is scaled by
+QUESTIONABLE_AVAILABILITY (0.75) or DOUBTFUL_AVAILABILITY (0.25) in the as-of week only.
+Each week lists its injury_adjustments, and `injuries` gives every traded player's timeline.
+With no injury data for a player (no feed row, or no NFL schedule) the old rule holds.
 
 bye_coverage lists the bye-crunch weeks (src/optimization/bye_outlook) each side has
 before and after, so a proposal can say which bye weeks it fixes. It is evidence only;
@@ -137,7 +138,7 @@ def _team_week(before_roster, after_roster, traded_ids, week, context, playing):
     """One team's before/after lineup for one week, or (None, reasons) if unscorable."""
     return compare_week(
         before_roster, after_roster, traded_ids, week, context["as_of_week"],
-        context["lineup_slot_counts"], playing,
+        context["lineup_slot_counts"], playing, end_week=context["end_week"],
     )
 
 
@@ -208,6 +209,12 @@ def _ros_entries(context):
     return (context.get("rest_of_season") or {}).get("weeks", [])
 
 
+def scored_weeks(context):
+    """Every week the scorer reads, in order: the horizon, then the rest-of-season weeks."""
+    horizon = range(context["start_week"], context["end_week"] + 1)
+    return [*horizon, *(entry["week"] for entry in _ros_entries(context))]
+
+
 def scored_week_range(context):
     """(first, last) week the scorer reads: the horizon plus the rest-of-season weeks, for
     load_teams_playing_by_week."""
@@ -264,7 +271,10 @@ def _rest_of_season(context, rosters, traded, teams_playing_by_week):
     }
 
 
-def _traded_injury(player, weeks, as_of_week):
+def _traded_injury(player, context):
+    """The traded player's timeline; weeks_out covers every scored week, horizon and rest of
+    season, by the same availability() rule the lineups use."""
+    as_of_week, end_week = context["as_of_week"], context["end_week"]
     injury = player.get("injury") or {}
     return {
         "injury_status": player.get("injury_status"),
@@ -273,8 +283,10 @@ def _traded_injury(player, weeks, as_of_week):
         "expected_return_week": injury.get("expected_return_week"),
         "injury_type": injury.get("injury_type"),
         "reported_at": injury.get("reported_at"),
-        "weeks_out": [w for w in weeks if availability(player, w, as_of_week)[0] == 0.0],
-        "as_of_week_availability": availability(player, as_of_week, as_of_week)[0],
+        "weeks_out": [
+            w for w in scored_weeks(context) if availability(player, w, as_of_week, end_week)[0] == 0.0
+        ],
+        "as_of_week_availability": availability(player, as_of_week, as_of_week, end_week)[0],
     }
 
 
@@ -428,7 +440,7 @@ def shape_trade_score(
         # every bye week through the per-week lineups.
         "bye_coverage": {"us": bye_coverage("us"), "counterparty": bye_coverage("counterparty")},
         "injuries": {
-            p["espn_id"]: _traded_injury(p, weeks, context["as_of_week"]) for p in send + receive
+            p["espn_id"]: _traded_injury(p, context) for p in send + receive
         },
         "schedule": {"weeks": schedule},
         "rest_of_season": rest_of_season,

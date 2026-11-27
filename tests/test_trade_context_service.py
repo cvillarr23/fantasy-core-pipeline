@@ -390,7 +390,9 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
         service, "fetch_raw_league_data", return_value=raw
     ) as fetch, patch.object(service, "get_db_cursor", db), patch.object(
         service, "load_stored_events", return_value={}
-    ) as history:
+    ) as history, patch.object(
+        service, "team_game_dates_or_empty", return_value=team_games(raw, "100")
+    ):
         result = service.get_league_trade_context("123", 2026, 3, 4)
     build.assert_called_once_with(2026, request_timeout_seconds=10)
     fetch.assert_called_once_with(build.return_value, include_schedule=True)
@@ -412,11 +414,11 @@ def test_service_fetches_bounded_live_snapshot_and_batched_identity_metrics(
     assert by_espn["100"]["injury"] == {
         "status": "Out", "fantasy_status": "OUT", "injury_type": "Ankle",
         "return_date": "2026-10-04",
-        # No NFL schedule in tests, so the date can't be mapped onto a week.
-        "expected_return_week": None,
+        "expected_return_week": 4,
         "reported_at": "2026-09-30T18:00:00+00:00",
     }
-    assert by_espn["500"]["injury"] is None
+    # The feed has nothing on 500, so he keeps the old rule.
+    assert "injury" not in by_espn["500"]
     history.assert_called_once_with("123", 2026)
     assert result["strength_metric"]["teams_with_strength"] == 4
     assert result["strength_metric"]["source"] == (
@@ -763,17 +765,56 @@ def test_rest_of_season_without_playoff_settings_is_the_rest_of_the_regular_seas
     result = shape(raw, week=3, horizon=4)
     assert result["end_week"] == 6
     assert result["rest_of_season"] == {"weeks": [], "playoff_weeks": []}
+def team_games(raw, espn_id):
+    """game_dates for this player's NFL team: games on Sundays of weeks 3 and 4."""
+    player = next(
+        e["playerPoolEntry"]["player"]
+        for t in raw["teams"] for e in t["roster"]["entries"]
+        if str(e["playerPoolEntry"]["player"]["id"]) == espn_id
+    )
+    team = service.to_nflverse_team(service.PRO_TEAM_MAP[player["proTeamId"]])
+    return {team: [(3, date(2026, 9, 27)), (4, date(2026, 10, 4))]}
+
+
+def injury_keys(result):
+    return {p["espn_id"]: "injury" in p for team in result["teams"].values() for p in team["roster"]}
+
+
 def test_injury_return_date_maps_onto_the_players_team_schedule(raw):
-    # Player 100's team; its week 4 game is the first on or after the return date.
-    player = raw["teams"][0]["roster"]["entries"][0]["playerPoolEntry"]["player"]
-    team = service.PRO_TEAM_MAP[player["proTeamId"]]
-    games = {service.to_nflverse_team(team): [(3, date(2026, 9, 27)), (4, date(2026, 10, 4))]}
+    # The week 4 game is the first on or after the return date.
     injuries = {"100": {"status": "Out", "return_date": date(2026, 9, 29)}}
-    result = shape(raw, injuries=injuries, game_dates=games)
+    result = shape(raw, injuries=injuries, game_dates=team_games(raw, "100"))
     entry = next(p for p in result["teams"]["1"]["roster"] if p["espn_id"] == "100")
     assert entry["injury"]["expected_return_week"] == 4
 
 
+def test_feed_row_without_a_date_still_opts_the_player_in(raw):
+    injuries = {"100": {"status": "Injured Reserve", "return_date": None}}
+    result = shape(raw, injuries=injuries, game_dates=team_games(raw, "100"))
+    entry = next(p for p in result["teams"]["1"]["roster"] if p["espn_id"] == "100")
+    assert entry["injury"]["expected_return_week"] is None
+
+
 def test_context_without_injuries_leaves_players_on_the_old_rule(raw):
     # No injury key at all, so src/injury_timeline keeps "Out only in the as-of week".
-    assert all("injury" not in p for team in shape(raw)["teams"].values() for p in team["roster"])
+    assert not any(injury_keys(shape(raw)).values())
+
+
+def test_empty_injuries_table_opts_no_one_in(raw):
+    # player_injuries not synced yet: the trade context passes {}.
+    result = shape(raw, injuries={}, game_dates=team_games(raw, "100"))
+    assert not any(injury_keys(result).values())
+
+
+def test_unreadable_nfl_schedule_opts_no_one_in(raw):
+    # team_game_dates_or_empty gives {} when nflverse can't be read, so no return date
+    # could be placed and every player keeps the old rule.
+    injuries = {"100": {"status": "Out", "return_date": date(2026, 9, 29)},
+                "500": {"status": "Injured Reserve", "return_date": None}}
+    assert not any(injury_keys(shape(raw, injuries=injuries, game_dates={})).values())
+
+
+def test_return_date_his_team_schedule_cant_place_keeps_the_old_rule(raw):
+    games = {"ZZZ": [(3, date(2026, 9, 27))]}
+    injuries = {"100": {"status": "Out", "return_date": date(2026, 9, 29)}}
+    assert not any(injury_keys(shape(raw, injuries=injuries, game_dates=games)).values())

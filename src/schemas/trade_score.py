@@ -207,6 +207,7 @@ class PlayerInjury(BaseModel):
     expected_return_week: int | None
     injury_type: str | None
     reported_at: str | None
+    # Every scored week he misses, horizon and rest of season.
     weeks_out: list[int]
     as_of_week_availability: float
 

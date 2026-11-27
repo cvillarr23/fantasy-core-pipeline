@@ -11,7 +11,9 @@ not a field, but every `athlete.links` href carries `/id/<espn id>/`, the same i
 
 Each run replaces the table in one transaction, since a player missing from the feed is
 healthy. A feed with no entries, or entries whose ids none parse, fails the run and keeps
-the previous snapshot.
+the previous snapshot. So does a feed with no injured player at all during the NFL season
+(September through January), when every team has some: that is a feed change (a dropped
+`status` field reads as Active), not a healthy league, and would wipe the table.
 """
 import logging
 import re
@@ -30,6 +32,8 @@ INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injur
 FETCH_TIMEOUT_SECONDS = (5, 60)
 FETCH_ATTEMPTS = 3
 _ATHLETE_ID = re.compile(r"/id/(\d+)(?:/|$)")
+# Regular season and playoffs; outside them an all-healthy feed is believable.
+IN_SEASON_MONTHS = {9, 10, 11, 12, 1}
 
 
 def fetch_injury_feed(get=requests.get, attempts=FETCH_ATTEMPTS) -> dict:
@@ -119,11 +123,16 @@ def replace_injuries(conn, rows: list) -> int:
     return len(rows)
 
 
-def sync_injuries(fetch=fetch_injury_feed) -> dict:
+def sync_injuries(fetch=fetch_injury_feed, today=None) -> dict:
     feed = fetch()
     rows, counts = parse_injury_feed(feed)
     if not counts["entries"]:
         raise RuntimeError("ESPN's injury feed had no entries; keeping the existing snapshot")
+    today = today or datetime.now(timezone.utc).date()
+    if not counts["injured_entries"] and today.month in IN_SEASON_MONTHS:
+        raise RuntimeError(
+            "ESPN's injury feed listed no injured player in season; keeping the existing snapshot"
+        )
     if counts["injured_entries"] and not rows:
         raise RuntimeError("No injured athlete's ESPN id could be parsed; keeping the existing snapshot")
     if counts["unparsed_ids"]:

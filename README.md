@@ -525,17 +525,24 @@ Injuries (`trade-score-v4`) change each week's lineup inputs, not the formula
 - Status is ESPN's live fantasy `injuryStatus`. The expected return date comes from ESPN's
   public injuries feed (`sync_injuries` → `player_injuries`). It maps to the first week
   whose game for the player's NFL team falls on or after it, so a bye is skipped.
+- A player opts in only when `player_injuries` has a row on him and the NFL schedule could
+  be read. Everyone else, and everyone while the table is empty or the schedule is
+  unreadable, keeps the old rule: Out only in the as-of week, no Questionable discount.
 - An Out, injured-reserve or suspended player (or one in an IR slot) sits the as-of week
-  and every week before his return week. With no date, injured reserve sits the whole
-  horizon; a plain Out is back the next week.
+  and every week before his return week. With no date, injured reserve sits the horizon
+  but counts in the rest-of-season weeks; a plain Out is back the next week.
 - Questionable and Doubtful scale a positive VORP by 0.75 and 0.25 in the as-of week only
   (`weights.questionable_availability` / `doubtful_availability`). A negative VORP is never
   raised.
 - Each week lists its `injury_adjustments`. `injuries` gives every traded player's status,
   return date, `expected_return_week` and `weeks_out`.
-- Candidates include an Out or injured-reserve player whose return week falls inside the
-  horizon (buy low, sell high), but never one in an IR slot. Candidate players carry
-  `injury_status`, `expected_return_week` and `weeks_out_in_horizon`.
+- `injuries[...].weeks_out` lists every scored week he misses, horizon and rest of season.
+- Candidates include an opted-in Out or injured-reserve player who is back by the last
+  scored week, rest of season included (buy low, sell high), but never one in an IR slot or
+  an Out player without injury data. Candidate players carry `injury_status`,
+  `expected_return_week` and `weeks_out_in_horizon`.
+- Bye outlooks (`/roster`, chat, MCP, waivers) and `bye_coverage` ignore injury timelines
+  and keep the old rule.
 
 The daily refresher attempts the upcoming week and three following weeks, capped at week 18.
 `draft_prep_refresh --rest-of-season` refreshes the weeks after that horizon through the last

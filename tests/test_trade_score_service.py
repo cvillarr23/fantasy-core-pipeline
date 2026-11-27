@@ -776,6 +776,26 @@ def test_injured_reserve_without_a_date_sits_the_whole_horizon(context):
     assert our_deltas(score(context)) == [-1.0, -1.0]
 
 
+def test_injured_reserve_without_a_date_counts_in_rest_of_season_weeks(context):
+    # He sits the horizon only: week 7 and playoff week 15 score him like a healthy player.
+    with_rest_of_season(context, {7: "regular", 15: "playoff"})
+    injure(context, "203", "INJURY_RESERVE")
+    result = score(context, playing=all_playing(5, 6, 7, 15))
+    assert our_deltas(result) == [-1.0, -1.0]
+    assert [w["our_delta"] for w in result["rest_of_season"]["weeks"]] == [3.0, 3.0]
+    assert result["injuries"]["203"]["weeks_out"] == [5, 6]
+    TradeScore.model_validate(result)
+
+
+def test_a_dated_return_after_the_horizon_holds_into_rest_of_season_weeks(context):
+    with_rest_of_season(context, {7: "regular", 15: "playoff"})
+    injure(context, "203", "OUT", return_week=15)
+    result = score(context, playing=all_playing(5, 6, 7, 15))
+    assert [w["our_delta"] for w in result["rest_of_season"]["weeks"]] == [-1.0, 3.0]
+    # weeks_out lists every scored week he misses, horizon and rest of season alike.
+    assert result["injuries"]["203"]["weeks_out"] == [5, 6, 7]
+
+
 def test_player_without_an_injury_key_keeps_the_as_of_week_only_rule(context):
     # Callers that don't load injuries (waivers, outlooks) see the pre-timeline behaviour.
     injure(context, "203", "INJURY_RESERVE", return_week="absent")

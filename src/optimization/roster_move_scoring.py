@@ -47,9 +47,10 @@ def lineup_solve_cache():
         _solve_cache.reset(token)
 
 
-def exclusion(player, week, as_of_week, playing):
-    """Why a player can't be in the lineup pool this week, or None if they can."""
-    if availability(player, week, as_of_week)[0] == 0.0:
+def exclusion(player, week, as_of_week, playing, end_week=None):
+    """Why a player can't be in the lineup pool this week, or None if they can. end_week
+    (the horizon's last week) bounds an undated injured-reserve stay (src/injury_timeline)."""
+    if availability(player, week, as_of_week, end_week)[0] == 0.0:
         return "out"
     if player.get("player_id") is None:
         return "unmapped"
@@ -66,27 +67,27 @@ def exclusion(player, week, as_of_week, playing):
     return "no_metrics"
 
 
-def pool_vorp(player, week, as_of_week):
+def pool_vorp(player, week, as_of_week, end_week=None):
     """(VORP the solver sees, injury adjustment or None) for a player exclusion() let in.
     An injury discount scales only a positive VORP, so a tag never makes anyone look
     better."""
     vorp = float(player["metrics"][str(week)]["vorp_score"])
-    factor, reason = availability(player, week, as_of_week)
+    factor, reason = availability(player, week, as_of_week, end_week)
     if factor >= 1.0 or vorp <= 0:
         return vorp, None
     return vorp * factor, {"espn_id": player["espn_id"], "factor": factor, "reason": reason}
 
 
-def lineup_pool(roster, week, as_of_week, playing, adjustments=None):
+def lineup_pool(roster, week, as_of_week, playing, adjustments=None, end_week=None):
     """(solver pool, {espn_id: exclusion reason}) for one week. Injury discounts applied
     to the pool are appended to `adjustments` when a list is given."""
     pool, excluded = [], {}
     for player in roster:
-        reason = exclusion(player, week, as_of_week, playing)
+        reason = exclusion(player, week, as_of_week, playing, end_week)
         if reason:
             excluded[player["espn_id"]] = reason
             continue
-        vorp, adjustment = pool_vorp(player, week, as_of_week)
+        vorp, adjustment = pool_vorp(player, week, as_of_week, end_week)
         if adjustment is not None and adjustments is not None:
             adjustments.append(adjustment)
         pool.append(
@@ -149,13 +150,19 @@ def has_unsupported_slot(slot_counts):
     )
 
 
-def compare_week(before_roster, after_roster, moved_ids, week, as_of_week, slot_counts, playing):
+def compare_week(
+    before_roster, after_roster, moved_ids, week, as_of_week, slot_counts, playing, end_week=None,
+):
     """One roster's before/after optimal lineup for one week, or (None, reasons) if the
     week can't be scored. A moved player missing metrics for a reason other than a
     confirmed bye or Out makes the week unscorable rather than counting him as zero."""
     adjustments = []
-    before_pool, before_excluded = lineup_pool(before_roster, week, as_of_week, playing, adjustments)
-    after_pool, after_excluded = lineup_pool(after_roster, week, as_of_week, playing, adjustments)
+    before_pool, before_excluded = lineup_pool(
+        before_roster, week, as_of_week, playing, adjustments, end_week
+    )
+    after_pool, after_excluded = lineup_pool(
+        after_roster, week, as_of_week, playing, adjustments, end_week
+    )
     excluded = {**before_excluded, **after_excluded}
     reasons = set()
     for espn_id in moved_ids:

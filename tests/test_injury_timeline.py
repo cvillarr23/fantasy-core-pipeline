@@ -73,3 +73,11 @@ def test_questionable_and_doubtful_are_discounted_in_the_as_of_week_only():
     assert availability(player("DOUBTFUL", return_week=5), 5, 5) == (DOUBTFUL_AVAILABILITY, "doubtful")
     assert availability(player("QUESTIONABLE", return_week=None), 6, 5) == (1.0, None)
     assert availability(player("ACTIVE", return_week=None), 5, 5) == (1.0, None)
+
+
+def test_undated_injured_reserve_sits_through_end_week_only():
+    for p in (player("INJURY_RESERVE", return_week=None), player("OUT", slot="IR", return_week=None)):
+        assert [availability(p, w, 5, end_week=6)[0] for w in (5, 6, 7, 15)] == [0.0, 0.0, 1.0, 1.0]
+        assert weeks_out(p, [5, 6, 7, 15], 5, end_week=6) == 2
+    # A dated return isn't bounded by the horizon.
+    assert weeks_out(player("INJURY_RESERVE", return_week=15), [5, 6, 7, 15], 5, end_week=6) == 3

@@ -7,16 +7,18 @@ expected return date comes from ESPN's public injuries feed (`player_injuries`, 
 src/ingestion/sync_injuries) and is mapped to the first week whose game for the player's
 NFL team falls on or after it, so a bye is skipped rather than counted as the return.
 
-A roster entry opts in by carrying an `injury` key (None when the feed has nothing on the
-player). Entries without the key keep the old rule, Out only in the as-of week, so other
-callers of roster_move_scoring are unchanged until they load injuries too.
+A roster entry opts in by carrying an `injury` key, which the trade context sets only when
+it has injury data for the player: a player_injuries row, and an NFL schedule to map its
+return date onto. Entries without the key keep the old rule, Out only in the as-of week, so
+other callers of roster_move_scoring (and a trade context with no feed or schedule) are
+unchanged.
 
-Rules, for a week of the horizon:
+Rules, for a scored week (the horizon, then any rest-of-season weeks):
 - Out, on injured reserve or suspended (or in an IR slot): out in the as-of week, and in
   every week before the expected return week. With no return week, INJURY_RESERVE (or an
-  injured player in an IR slot) stays out for the whole horizon, since he can't start until
-  activated. A plain Out, or a healthy player still in an IR slot, is back the next week,
-  since nothing better is known.
+  injured player in an IR slot) stays out through end_week, the horizon's last week, since
+  he can't start until activated; rest-of-season weeks count him. A plain Out, or a healthy
+  player still in an IR slot, is back the next week, since nothing better is known.
 - Questionable or Doubtful in the as-of week only: a positive VORP is scaled by
   QUESTIONABLE_AVAILABILITY or DOUBTFUL_AVAILABILITY, the expected share of the game he
   plays. A negative VORP is left alone so a tag never makes a player look better. Later
@@ -52,9 +54,10 @@ def expected_return_week(return_date, game_dates):
     return games[-1][0] + 1
 
 
-def availability(player, week, as_of_week):
+def availability(player, week, as_of_week, end_week=None):
     """(factor, reason): 0.0 with "out" when the player can't play this week, a factor
-    below 1 with the status it came from, or (1.0, None)."""
+    below 1 with the status it came from, or (1.0, None). end_week is the horizon's last
+    week, which bounds an undated injured-reserve stay (None: no bound)."""
     status = player.get("injury_status")
     in_ir_slot = player.get("slot") == "IR"
     timeline_aware = "injury" in player
@@ -69,7 +72,10 @@ def availability(player, week, as_of_week):
         if return_week is not None:
             return (0.0, "out") if week < return_week else (1.0, None)
         # A healthy player still in an IR slot is activated next week, like a plain Out.
-        if status in UNTIL_ACTIVATED_STATUSES or (in_ir_slot and status in TIMELINE_STATUSES):
+        until_activated = status in UNTIL_ACTIVATED_STATUSES or (
+            in_ir_slot and status in TIMELINE_STATUSES
+        )
+        if until_activated and (end_week is None or week <= end_week):
             return 0.0, "out"
         return 1.0, None
     if week == as_of_week and status in AS_OF_WEEK_AVAILABILITY:
@@ -77,6 +83,11 @@ def availability(player, week, as_of_week):
     return 1.0, None
 
 
-def weeks_out(player, weeks, as_of_week):
+def weeks_out(player, weeks, as_of_week, end_week=None):
     """How many of `weeks` the player is out."""
-    return sum(1 for week in weeks if availability(player, week, as_of_week)[0] == 0.0)
+    return sum(1 for week in weeks if availability(player, week, as_of_week, end_week)[0] == 0.0)
+
+
+def without_timeline(player):
+    """The entry without its `injury` key, so it follows the old as-of-week-only rule."""
+    return {key: value for key, value in player.items() if key != "injury"}

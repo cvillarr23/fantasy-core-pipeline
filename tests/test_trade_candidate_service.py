@@ -211,18 +211,46 @@ def timeline(p, status, return_week=None):
     return p
 
 
-def test_out_player_returning_inside_the_horizon_can_be_traded(context):
-    back, late, undated = (context["teams"]["2"]["roster"][i] for i in (4, 2, 3))
-    timeline(back, "OUT", return_week=6)        # back for the horizon's last week
-    timeline(late, "INJURY_RESERVE", return_week=7)
-    timeline(undated, "OUT")
-    received = {p["espn_id"] for _, _, receive in service.enumerate_packages(context, "1") for p in receive}
-    assert "203" in received
-    assert not received & {"204", "205"}
+def received_ids(context):
+    return {p["espn_id"] for _, _, receive in service.enumerate_packages(context, "1") for p in receive}
+
+
+def by_id(context, espn_id):
+    return next(p for t in context["teams"].values() for p in t["roster"] if p["espn_id"] == espn_id)
+
+
+def test_out_player_back_by_the_last_scored_week_can_be_traded(context):
+    timeline(by_id(context, "203"), "OUT", return_week=6)     # back for the horizon's last week
+    timeline(by_id(context, "204"), "INJURY_RESERVE", return_week=7)
+    timeline(by_id(context, "205"), "OUT")                     # no date: back next week
+    timeline(by_id(context, "202"), "INJURY_RESERVE")          # no date: sits the horizon
+    received = received_ids(context)
+    assert {"203", "205"} <= received
+    assert not received & {"202", "204"}
     # An IR slot stays out however soon he's back.
-    context["teams"]["2"]["roster"][4]["slot"] = "IR"
-    received = {p["espn_id"] for _, _, receive in service.enumerate_packages(context, "1") for p in receive}
-    assert "203" not in received
+    by_id(context, "203")["slot"] = "IR"
+    assert "203" not in received_ids(context)
+
+
+def test_rest_of_season_weeks_count_toward_a_return(context):
+    # Week 7 is scored as rest of season: the week-7 return and the undated injured-reserve
+    # player (who sits only the horizon) are both back by then.
+    context["rest_of_season"] = {"weeks": [{"week": 7, "kind": "regular"}], "playoff_weeks": []}
+    timeline(by_id(context, "204"), "INJURY_RESERVE", return_week=7)
+    timeline(by_id(context, "202"), "INJURY_RESERVE")
+    timeline(by_id(context, "205"), "OUT", return_week=8)
+    received = received_ids(context)
+    assert {"202", "204"} <= received
+    assert "205" not in received
+    assert all(service.availability(by_id(context, "202"), w, 5, 6)[0] == 0.0 for w in (5, 6))
+    assert service.availability(by_id(context, "202"), 7, 5, 6) == (1.0, None)
+
+
+def test_out_player_without_injury_data_stays_out_of_the_universe(context):
+    # No `injury` key (empty feed or no schedule): the old rule, never a candidate.
+    by_id(context, "205")["injury_status"] = "OUT"
+    by_id(context, "204")["injury_status"] = "INJURY_RESERVE"
+    assert not received_ids(context) & {"204", "205"}
 
 
 def test_candidate_players_carry_their_injury_timeline(context):

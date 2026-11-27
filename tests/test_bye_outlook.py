@@ -133,3 +133,48 @@ def test_a_bye_forcing_a_below_replacement_starter_is_a_crunch():
     assert result["crunch_weeks"] == [7]
     assert week7["unfilled_slots"] == []
     assert week7["replacement_level_starters"] == 1
+
+
+def injured_roster(with_timeline):
+    """An undated injured-reserve RB starter and a Questionable RB starter; with_timeline
+    adds the `injury` key the trade context sets for trade scoring."""
+    roster = [dict(p) for p in ROSTER]
+    roster[1].update(injury_status="INJURY_RESERVE", slot="RB")
+    roster[2].update(injury_status="QUESTIONABLE", slot="RB")
+    if with_timeline:
+        roster[1]["injury"] = {"expected_return_week": None}
+        roster[2]["injury"] = {"expected_return_week": None}
+    return roster
+
+
+def outlook_context(roster):
+    return {
+        "league_id": "9", "season": 2026, "as_of_week": 5, "start_week": 5, "end_week": 8,
+        "lineup_slot_counts": SLOTS,
+        "teams": {"1": {"team_id": "1", "name": "Us", "roster": roster}},
+    }
+
+
+def test_attach_bye_outlooks_ignores_injury_timelines():
+    with_injury, without = outlook_context(injured_roster(True)), outlook_context(injured_roster(False))
+    for context in (with_injury, without):
+        pure.attach_bye_outlooks(context, {"BUF": 7, "KC": 10, "DAL": 9})
+    outlook_with = with_injury["teams"]["1"]["bye_outlook"]
+    assert outlook_with == without["teams"]["1"]["bye_outlook"]
+    # The old rule: the injured-reserve starter is out in the as-of week only, and the
+    # Questionable one counts in full.
+    by_week = {w["week"]: w for w in outlook_with["weeks"]}
+    assert by_week[6]["value"] == pytest.approx(6.0 + 10.0 + 8.0 + 5.0)
+    assert by_week[5]["value"] == pytest.approx(6.0 + 8.0 + 2.0 + 5.0)
+    # Trade scoring still reads the timeline off the shared context.
+    assert with_injury["teams"]["1"]["roster"][1]["injury"] == {"expected_return_week": None}
+
+
+def test_get_bye_outlook_ignores_injury_timelines():
+    results = []
+    for with_timeline in (True, False):
+        context = outlook_context(injured_roster(with_timeline))
+        with patch("src.services.roster_outlook_service.get_league_trade_context", return_value=context), \
+             patch("src.services.roster_outlook_service.bye_weeks_or_empty", return_value={"BUF": 7, "KC": 10}):
+            results.append(outlook.get_bye_outlook("9", 2026, 5, 4, "1"))
+    assert results[0] == results[1]

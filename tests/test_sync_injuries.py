@@ -67,12 +67,12 @@ def fake_connection(conn):
     yield conn
 
 
-def run_sync(data):
+def run_sync(data, today=date(2026, 11, 27)):
     conn = MagicMock()
     cursor = conn.cursor.return_value.__enter__.return_value
     with patch.object(sync, "get_db_connection", lambda: fake_connection(conn)), \
             patch.object(sync, "execute_values") as execute_values:
-        result = sync.sync_injuries(fetch=lambda: data)
+        result = sync.sync_injuries(fetch=lambda: data, today=today)
     return result, cursor, execute_values
 
 
@@ -84,13 +84,30 @@ def test_sync_replaces_the_whole_snapshot():
     assert sorted(row[0] for row in inserted) == ["3043078", "4430841", "4678008", "4683153", "4870808"]
 
 
-def test_feed_with_only_healthy_players_clears_the_table():
-    data = feed()
+def healthy_only(data):
     data["injuries"] = [{"injuries": [e for e in entries(data) if e["status"] == "Active"]}]
-    result, cursor, execute_values = run_sync(data)
+    return data
+
+
+def test_feed_with_only_healthy_players_clears_the_table_in_the_offseason():
+    result, cursor, execute_values = run_sync(healthy_only(feed()), today=date(2026, 6, 1))
     assert result["written"] == 0
     cursor.execute.assert_called_once_with("DELETE FROM player_injuries;")
     execute_values.assert_not_called()
+
+
+@pytest.mark.parametrize("mutate", [
+    healthy_only,
+    # A dropped `status` field reads as Active for every entry.
+    lambda data: [e.pop("status", None) for e in entries(data)],
+])
+def test_feed_with_no_injured_player_in_season_keeps_the_existing_snapshot(mutate):
+    data = feed()
+    mutate(data)
+    with patch.object(sync, "get_db_connection") as connection:
+        with pytest.raises(RuntimeError, match="no injured player in season"):
+            sync.sync_injuries(fetch=lambda: data, today=date(2026, 11, 27))
+    connection.assert_not_called()
 
 
 @pytest.mark.parametrize("mutate", [

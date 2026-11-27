@@ -159,19 +159,21 @@ def _espn_payload(espn_ownership, player_id):
 
 
 def _injury_payload(row, nfl_team, game_dates):
-    """A player_injuries row plus the week it implies, or None when the feed has nothing."""
-    if row is None:
+    """A player_injuries row plus the week it implies, or None when there's no injury data
+    to go on: no feed row, no NFL schedule, or a return date his team's games can't place."""
+    if row is None or not game_dates:
         return None
     return_date = row.get("return_date")
+    return_week = expected_return_week(return_date, game_dates.get(to_nflverse_team(nfl_team)))
+    if return_date is not None and return_week is None:
+        return None
     reported_at = row.get("reported_at")
     return {
         "status": row.get("status"),
         "fantasy_status": row.get("fantasy_status"),
         "injury_type": row.get("injury_type"),
         "return_date": return_date.isoformat() if return_date else None,
-        "expected_return_week": expected_return_week(
-            return_date, game_dates.get(to_nflverse_team(nfl_team))
-        ),
+        "expected_return_week": return_week,
         "reported_at": reported_at.isoformat() if reported_at else None,
     }
 
@@ -209,9 +211,11 @@ def shape_trade_context(
     schedule average is available only when every non-bye week has a known pairing
     and opponent strength. This is descriptive evidence, not a win-probability model.
 
-    With `injuries` ({espn_id: player_injuries row}), every roster player gets an `injury`
-    key (None when the feed has nothing on him), which opts him into src/injury_timeline's
-    return-week rules; `game_dates` maps the return date onto his team's schedule.
+    With `injuries` ({espn_id: player_injuries row}) and `game_dates` (team -> its games, to
+    map a return date onto a week), a roster player the feed has a row on gets an `injury`
+    key, which opts him into src/injury_timeline's return-week rules. Everyone else, and
+    everyone when the feed is empty or the schedule couldn't be read, carries no key and
+    keeps the old "Out in the as-of week only" rule.
     """
     source_teams, _ = _source_rosters(raw, league_id, season)
     periods = _regular_periods(raw)
@@ -282,11 +286,8 @@ def shape_trade_context(
                     missing_metrics += int(any(value is None for value in values.values()))
                 player_metrics[str(target_week)] = values
             nfl_team = PRO_TEAM_MAP.get(player.get("proTeamId"))
-            entry_injury = {}
-            if injuries is not None:
-                entry_injury["injury"] = _injury_payload(
-                    injuries.get(espn_id), nfl_team, game_dates or {}
-                )
+            injury = _injury_payload((injuries or {}).get(espn_id), nfl_team, game_dates)
+            entry_injury = {} if injury is None else {"injury": injury}
             roster.append(
                 {
                     "espn_id": espn_id,
