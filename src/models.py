@@ -616,6 +616,7 @@ CREATE TABLE IF NOT EXISTS trade_candidates (
     counterparty_lineup_change DOUBLE PRECISION,
     counterparty_weighted_benefit DOUBLE PRECISION,
     our_schedule_adjustment DOUBLE PRECISION,
+    roster_spot_value DOUBLE PRECISION,
     scored_week_count INT NOT NULL,
     complete_horizon BOOLEAN NOT NULL,
     score JSONB NOT NULL,
@@ -623,6 +624,7 @@ CREATE TABLE IF NOT EXISTS trade_candidates (
 );
 ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS rest_of_season_value DOUBLE PRECISION;
 ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS costs_playoff_value BOOLEAN;
+ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS roster_spot_value DOUBLE PRECISION;
 """
 
 # ESPN's league-wide market signal per player per week, refreshed daily by

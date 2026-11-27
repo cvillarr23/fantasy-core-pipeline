@@ -46,6 +46,7 @@ class TradeCandidate(BaseModel):
     costs_playoff_value: bool
     rest_of_season_weeks: list[int]
     rest_of_season_scored_weeks: list[int]
+    roster_spot_value: float | None
     scored_weeks: list[int]
     horizon_weeks: list[int]
     complete_horizon: bool

@@ -272,7 +272,10 @@ def enumerate_packages(context, our_team_id):
 
 
 class Prefilter:
-    """Per-team, per-week baselines computed once, then a cheap check per package."""
+    """Per-team, per-week baselines computed once, then a cheap check per package.
+
+    roster_spot_value never decides what is kept: it changes final_score only, and the
+    proposable gates (gain, hurt, roster limit, mapping) don't read it."""
 
     def __init__(self, context, teams_playing_by_week):
         self.context = context
@@ -467,10 +470,10 @@ def store_run(league_id, season, week, horizon, our_team_id, rows, counts, run_i
                         send_players, receive_players, status, reasons, final_score,
                         our_lineup_gain, our_weighted_gain, counterparty_lineup_change,
                         counterparty_weighted_benefit, our_schedule_adjustment,
-                        rest_of_season_value, costs_playoff_value,
+                        rest_of_season_value, costs_playoff_value, roster_spot_value,
                         scored_week_count, complete_horizon, score)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
                 [_row_params(league_id, season, week, horizon, run_id, computed_at, our_team_id, row)
                  for row in rows],
             )
@@ -489,7 +492,8 @@ def _row_params(league_id, season, week, horizon, run_id, computed_at, our_team_
         terms["final_score"], terms["our_lineup_gain"], terms["our_weighted_gain"],
         terms["counterparty_lineup_change"], terms["counterparty_weighted_benefit"],
         terms["our_schedule_adjustment"], terms["rest_of_season_value"],
-        ros["costs_playoff_value"], len(row["score"]["horizon"]["scored_weeks"]),
+        ros["costs_playoff_value"], terms["roster_spot_value"],
+        len(row["score"]["horizon"]["scored_weeks"]),
         row["score"]["horizon"]["complete_horizon"], Json(row["score"]),
     )
 
@@ -498,7 +502,7 @@ _ITEM_COLUMNS = (
     "candidate_key, counterparty_team_id, counterparty_name, shape, send_players, "
     "receive_players, status, reasons, final_score, our_lineup_gain, our_weighted_gain, "
     "counterparty_lineup_change, counterparty_weighted_benefit, our_schedule_adjustment, "
-    "score->'horizon', score->'bye_coverage', score->'rest_of_season'"
+    "score->'horizon', score->'bye_coverage', score->'rest_of_season', roster_spot_value"
 )
 
 
@@ -574,7 +578,7 @@ def list_trade_candidates(
 def _item(row):
     (key, counterparty_team_id, counterparty_name, shape, send, receive, status, reasons,
      final_score, gain, weighted_gain, change, benefit, adjustment, horizon, bye_coverage,
-     rest_of_season) = row
+     rest_of_season, spot_value) = row
     # Rows stored before the rest-of-season term (#328) have no score->'rest_of_season'.
     rest_of_season = rest_of_season or {}
     return {
@@ -594,6 +598,7 @@ def _item(row):
         "costs_playoff_value": bool(rest_of_season.get("costs_playoff_value")),
         "rest_of_season_weeks": [w["week"] for w in rest_of_season.get("weeks", [])],
         "rest_of_season_scored_weeks": rest_of_season.get("scored_weeks", []),
+        "roster_spot_value": spot_value,
         "scored_weeks": horizon["scored_weeks"],
         "horizon_weeks": list(range(horizon["start_week"], horizon["end_week"] + 1)),
         "complete_horizon": horizon["complete_horizon"],

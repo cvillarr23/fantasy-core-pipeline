@@ -149,8 +149,9 @@ class ScheduleTerms(BaseModel):
 # Every scoring_version a stored evaluation may carry, oldest first; the last one is what the
 # live scorer emits (trade_score_service.SCORING_VERSION). A score change appends one entry.
 # v4 (#330 part 2): injury timelines shape each week's lineup inputs.
+# v5 (#331): roster_spot joins final_score.
 KNOWN_SCORING_VERSIONS = (
-    "trade-score-v1", "trade-score-v2", "trade-score-v3", "trade-score-v4",
+    "trade-score-v1", "trade-score-v2", "trade-score-v3", "trade-score-v4", "trade-score-v5",
 )
 ScoringVersion = Literal[KNOWN_SCORING_VERSIONS]
 
@@ -184,6 +185,23 @@ class RestOfSeason(BaseModel):
     costs_playoff_value: bool
 
 
+class SpotWeek(BaseModel):
+    week: int
+    delta: float
+
+
+class RosterSpot(BaseModel):
+    """Evidence for roster_spot_value: the free agent added or player dropped, and the
+    unweighted per-week lineup deltas behind it."""
+
+    kind: Literal["freed_spot", "forced_drop", "none"]
+    player: TradedPlayer | None
+    weeks: list[SpotWeek]
+    total: float
+    candidates_considered: int
+    unavailable_reason: str | None
+
+
 class ScoreTerms(BaseModel):
     our_lineup_gain: float | None
     counterparty_lineup_change: float | None
@@ -192,6 +210,8 @@ class ScoreTerms(BaseModel):
     counterparty_weighted_benefit: float | None
     # Null when rest-of-season weeks exist but none could be scored (unavailable, not 0).
     rest_of_season_value: float | None = None
+    # Absent from stored v1/v2 evidence, which predates the roster-spot term.
+    roster_spot_value: float | None = None
     final_score: float | None
     final_score_unavailable_reasons: list[str]
     # Keyed by component name; set from trade-score-v2 on, absent from stored v1 evidence.
@@ -235,6 +255,7 @@ class TradeScore(BaseModel):
     bye_coverage: ByeCoverage
     # Traded players only, keyed by ESPN id (trade-score-v4+; absent from older evidence).
     injuries: dict[str, PlayerInjury] | None = None
+    roster_spot: RosterSpot | None = None
     schedule: ScheduleTerms
     rest_of_season: RestOfSeason | None = None
     score: ScoreTerms

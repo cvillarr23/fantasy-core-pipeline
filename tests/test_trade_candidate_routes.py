@@ -37,7 +37,7 @@ def item_row(key="a" * 64, final_score=3.5, rest_of_season=ROS):
         "proposable", [], final_score, 2.0, 2.5, 0.0, 1.0, 0.5,
         {"start_week": 5, "end_week": 8, "scored_weeks": [5, 6, 7], "complete_horizon": False},
         {"us": COVERAGE, "counterparty": COVERAGE},
-        rest_of_season,
+        rest_of_season, 0.75,
     )
 
 
@@ -82,6 +82,7 @@ def test_candidates_route_shapes_the_stored_run(client):
     assert item["costs_playoff_value"] is True
     assert item["rest_of_season_weeks"] == [9, 15, 16]
     assert item["rest_of_season_scored_weeks"] == [9, 15]
+    assert item["roster_spot_value"] == 0.75
 
 
 def test_candidates_scored_before_the_rest_of_season_term_show_it_unavailable(client):

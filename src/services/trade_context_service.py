@@ -28,6 +28,13 @@ from src.services.trade_offer_service import committed_outgoing_players
 from src.services.score_history import load_stored_events
 
 
+# Free agents kept per position in the context's pool (best by mean horizon VORP).
+FREE_AGENT_POOL_PER_POSITION = 8
+# players.injury_status holds Sleeper's labels; the lineup helpers match ESPN's codes
+# (roster_move_scoring.OUT_STATUSES), as backtesting.waiver_strategy maps them.
+_OUT_INJURY_CODES = {"OUT": "OUT", "IR": "INJURY_RESERVE", "INJURY_RESERVE": "INJURY_RESERVE"}
+
+
 class TradeContextUnavailable(Exception):
     """Source context is incomplete or does not describe the requested league."""
 
@@ -450,6 +457,74 @@ def shape_trade_context(
     }
 
 
+def _shape_free_agents(rows, weeks):
+    """Unrostered players in the roster-player shape, so the lineup helpers treat them like
+    any other roster entry. None (not an empty list) when the pool wasn't loaded, so the
+    roster-spot term reads "unavailable" instead of "nobody to add"."""
+    if rows is None:
+        return None
+    pool = []
+    for row in rows:
+        by_week = row["metrics"]
+        pool.append(
+            {
+                "espn_id": row["espn_id"],
+                "player_id": row["player_id"],
+                "name": row.get("name"),
+                "position": row.get("position"),
+                "nfl_team": row.get("nfl_team"),
+                "slot": None,
+                "eligible_slots": [],
+                "injury_status": row.get("injury_status"),
+                "metrics": {
+                    str(week): {
+                        key: _number((by_week.get(week) or {}).get(key))
+                        for key in ("vorp_score", "projected_points")
+                    }
+                    for week in weeks
+                },
+                "espn": None,
+            }
+        )
+    return pool
+
+
+def load_free_agent_rows(cursor, season, start_week, end_week, rostered_espn_ids):
+    """The best unrostered players by mean horizon VORP, FREE_AGENT_POOL_PER_POSITION per
+    position. A free agent is a mapped player on no ESPN roster in the live snapshot (not
+    league_rosters, which can lag a claim), with a vorp_score in the horizon."""
+    cursor.execute(
+        """SELECT p.player_id, p.espn_id, p.name, p.position, p.team, p.injury_status,
+                  s.week, s.vorp_score, s.projected_points
+           FROM players p JOIN weekly_stats s ON s.player_id = p.player_id
+           WHERE s.season = %s AND s.week BETWEEN %s AND %s AND s.vorp_score IS NOT NULL
+             AND p.espn_id IS NOT NULL AND TRIM(p.espn_id) <> '' AND p.position IS NOT NULL
+             AND NOT (p.espn_id = ANY(%s));""",
+        (season, start_week, end_week, sorted(rostered_espn_ids)),
+    )
+    players = {}
+    for player_id, espn_id, name, position, team, injury, week, vorp, projected in cursor.fetchall():
+        entry = players.setdefault(
+            player_id,
+            {"player_id": player_id, "espn_id": espn_id, "name": name, "position": position,
+             "nfl_team": team,
+             "injury_status": _OUT_INJURY_CODES.get(str(injury or "").strip().upper()),
+             "metrics": {}},
+        )
+        entry["metrics"][week] = {"vorp_score": vorp, "projected_points": projected}
+    by_position = defaultdict(list)
+    for entry in players.values():
+        values = [m["vorp_score"] for m in entry["metrics"].values()]
+        by_position[entry["position"]].append((-sum(values) / len(values), entry["espn_id"], entry))
+    return [
+        entry
+        for position in sorted(by_position)
+        for _, _, entry in sorted(by_position[position], key=lambda item: item[:2])[
+            :FREE_AGENT_POOL_PER_POSITION
+        ]
+    ]
+
+
 def get_league_trade_context(
     league_id: str, season: int, week: int, horizon: int = 4
 ) -> dict:
@@ -478,6 +553,7 @@ def get_league_trade_context(
         rest_of_season = _rest_of_season_weeks(raw, week, end_week, regular_end)
         last_metric_week = max([end_week] + [e["week"] for e in rest_of_season])
         identities, metrics, espn_ownership, injuries = {}, {}, {}, {}
+        free_agent_rows = None
         if espn_ids:
             with get_db_cursor() as cursor:
                 cursor.execute(
@@ -510,6 +586,10 @@ def get_league_trade_context(
                     cursor, list(identities.values()), season, week
                 )
                 injuries = load_player_injuries(cursor, espn_ids)
+                if week <= end_week:
+                    free_agent_rows = load_free_agent_rows(
+                        cursor, season, week, end_week, espn_ids
+                    )
         context = shape_trade_context(
             raw,
             identities,
@@ -523,6 +603,11 @@ def get_league_trade_context(
             espn_ownership=espn_ownership,
             injuries=injuries,
             game_dates=team_game_dates_or_empty(season),
+        )
+        # Scorer-only input, not part of the public context schema: the pool stays out of
+        # shape_trade_context's output and of the /v1/trade/context response.
+        context["free_agents"] = _shape_free_agents(
+            free_agent_rows, list(range(week, end_week + 1))
         )
         # Both teams' NFL byes and bye-crunch weeks, so trade proposals and negotiations
         # can target a partner whose byes complement ours.

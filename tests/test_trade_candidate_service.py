@@ -266,7 +266,7 @@ def test_candidate_players_carry_their_injury_timeline(context):
         "counterparty_weighted_benefit": None, "our_schedule_adjustment": None,
         "scored_weeks": [], "horizon_weeks": [5, 6], "complete_horizon": False,
         "rest_of_season_value": None, "playoff_lineup_gain": None, "costs_playoff_value": False,
-        "rest_of_season_weeks": [], "rest_of_season_scored_weeks": [],
+        "rest_of_season_weeks": [], "rest_of_season_scored_weeks": [], "roster_spot_value": None,
         "bye_coverage": row["score"]["bye_coverage"],
     }})
 
@@ -342,7 +342,7 @@ def test_candidate_rows_carry_players_and_the_full_score(context):
     }
     assert row["counterparty_name"] == "Team 2"
     assert row["score"]["raw_vorp"]["incoming_total"] == 1.0
-    assert row["score"]["scoring_version"] == "trade-score-v4"
+    assert row["score"]["scoring_version"] == "trade-score-v5"
 
 
 def test_solve_cache_returns_the_uncached_score(context):
@@ -434,3 +434,20 @@ def test_rest_of_season_cost_lowers_final_score_but_never_changes_the_status(con
     assert {r["candidate_key"]: r["status"] for r in rows} == {
         r["candidate_key"]: r["status"] for r in baseline
     }
+
+
+def test_candidate_rows_report_the_roster_spot_term_by_shape(context):
+    context["free_agents"] = [player("9001", "RB", 8.0)]
+    rows, _ = service.build_candidates(context, "1", PLAYING, {}, max_candidates=1000)
+    by_shape = {}
+    for row in rows:
+        if row["score"]["horizon"]["scored_weeks"] and row["score"]["score"]["final_score"] is not None:
+            by_shape.setdefault(row["shape"], []).append(row["score"]["score"])
+    assert {t["roster_spot_value"] for t in by_shape["1for1"]} == {0.0}
+    assert any(t["roster_spot_value"] for t in by_shape["2for1"])
+    assert all(t["roster_spot_value"] >= 0 for t in by_shape["2for1"])
+    cursor = MagicMock()
+    with patch.object(service, "get_db_cursor", lambda: fake_cursor(cursor)):
+        service.store_run("123", 2026, 5, 2, "1", rows[:3], {}, run_id="run-1")
+    params = cursor.executemany.call_args.args[1]
+    assert [p[-5] for p in params] == [r["score"]["score"]["roster_spot_value"] for r in rows[:3]]

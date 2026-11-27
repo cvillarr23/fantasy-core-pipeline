@@ -285,11 +285,14 @@ def test_final_score_is_the_sum_of_in_final_components(context):
     s = score(context)["score"]
     components = s["components"]
     assert set(components) == {
-        "our_weighted_gain", "counterparty_weighted_benefit", "rest_of_season",
+        "our_weighted_gain", "counterparty_weighted_benefit", "rest_of_season", "roster_spot",
     }
     # No rest-of-season window in this context: R is 0 and counts.
     assert components["rest_of_season"] == {
         "value": 0.0, "in_final_score": True, "unavailable_reasons": [],
+    }
+    assert components["roster_spot"] == {
+        "value": s["roster_spot_value"], "in_final_score": True, "unavailable_reasons": [],
     }
     assert components["our_weighted_gain"] == {
         "value": s["our_weighted_gain"], "in_final_score": True, "unavailable_reasons": [],
@@ -832,3 +835,158 @@ def test_healthy_traded_players_report_a_clean_timeline(context):
         "expected_return_week": None, "injury_type": None, "reported_at": None,
         "weeks_out": [], "as_of_week_availability": 1.0,
     }
+
+
+# --- roster spot: the spot a 2-for-1 frees and the drop a 1-for-2 forces -------------------
+
+
+def with_free_agents(context, *free_agents):
+    context = deepcopy(context)
+    context["free_agents"] = [
+        {**fa, "slot": None} for fa in free_agents
+    ]
+    return context
+
+
+def with_roster_size(context, size):
+    """Pads our roster with zero-value bench players up to size (the limit here is 6)."""
+    context = deepcopy(context)
+    roster = context["teams"]["1"]["roster"]
+    roster += [player(f"9{len(roster) + i}0", "TE", 0.0) for i in range(size - len(roster))]
+    return context
+
+
+def test_two_for_one_values_the_freed_spot_as_the_best_free_agents_lineup_gain(context):
+    context = with_free_agents(
+        with_roster_size(context, 6),
+        player("9001", "RB", 8.0),  # beats the 7.0 WR we receive in the FLEX slot: +1 a week
+        player("9002", "RB", 2.0),  # would only sit on the bench: worth nothing
+        player("9003", "WR", 6.5),
+    )
+    result = score(context, send=("103", "104"), receive=("203",))
+
+    spot = result["roster_spot"]
+    assert spot["kind"] == "freed_spot"
+    assert spot["player"]["espn_id"] == "9001"
+    assert [w["delta"] for w in spot["weeks"]] == [1.0, 1.0]
+    assert spot["total"] == pytest.approx(2.0)
+    s = result["score"]
+    assert s["roster_spot_value"] == pytest.approx(m(1.0) + m(0.5))
+    # Reported separately and counted in the final score.
+    assert s["final_score"] == pytest.approx(
+        s["our_weighted_gain"] + s["counterparty_weighted_benefit"] + s["roster_spot_value"]
+    )
+    TradeScore.model_validate(result)
+
+
+def test_freed_spot_is_worth_nothing_when_no_free_agent_would_start(context):
+    context = with_free_agents(context, player("9002", "RB", 2.0), player("9004", "QB", 1.0))
+    result = score(context, send=("103", "104"), receive=("203",))
+
+    assert result["score"]["roster_spot_value"] == 0.0
+    assert result["roster_spot"]["player"] is None
+
+
+def test_freed_spot_ignores_a_free_agent_on_bye_that_week(context):
+    on_bye = player("9005", "RB", {5: 30.0, 6: 30.0}, nfl_team="NYJ")
+    context = with_free_agents(context, on_bye)
+    playing = {week: set(ALL_TEAMS) for week in WEEKS}
+    result = score(context, send=("103", "104"), receive=("203",), playing=playing)
+
+    assert result["score"]["roster_spot_value"] == 0.0
+    assert result["roster_spot"]["player"] is None
+
+
+def test_a_spot_that_was_already_open_is_not_credited_to_the_trade(context):
+    # 5 of 6 spots: a 2-for-1 ends at 4, but we could add the free agent without trading.
+    context = with_free_agents(with_roster_size(context, 5), player("9001", "RB", 8.0))
+    result = score(context, send=("103", "104"), receive=("203",))
+
+    assert result["roster_impact"]["us"]["roster_size_before"] == 5
+    assert result["roster_spot"]["kind"] == "none"
+    assert result["score"]["roster_spot_value"] == 0.0
+
+
+def test_empty_free_agent_pool_is_unavailable_not_zero(context):
+    context = with_free_agents(with_roster_size(context, 6))
+    assert context["free_agents"] == []
+    result = score(context, send=("103", "104"), receive=("203",))
+
+    s = result["score"]
+    assert s["roster_spot_value"] is None and s["final_score"] is None
+    assert "roster_spot_value_unavailable" in s["final_score_unavailable_reasons"]
+    assert result["roster_spot"]["unavailable_reason"] == "free_agents_unavailable"
+    TradeScore.model_validate(result)
+
+
+def test_one_for_one_has_no_roster_spot_term(context):
+    context = with_free_agents(context, player("9001", "RB", 8.0))
+    result = score(context)
+
+    assert result["score"]["roster_spot_value"] == 0.0
+    assert result["roster_spot"] == {
+        "kind": "none", "player": None, "weeks": [], "total": 0.0,
+        "candidates_considered": 0, "unavailable_reason": None,
+    }
+    s = result["score"]
+    assert s["final_score"] == pytest.approx(
+        s["our_weighted_gain"] + s["counterparty_weighted_benefit"]
+    )
+
+
+def test_missing_free_agent_pool_withholds_the_final_score_instead_of_zeroing(context):
+    assert "free_agents" not in context
+    result = score(with_roster_size(context, 6), send=("103", "104"), receive=("203",))
+
+    s = result["score"]
+    assert s["roster_spot_value"] is None and s["final_score"] is None
+    assert "roster_spot_value_unavailable" in s["final_score_unavailable_reasons"]
+    assert result["roster_spot"]["unavailable_reason"] == "free_agents_unavailable"
+    TradeScore.model_validate(result)
+
+
+def test_one_for_two_that_overfills_the_roster_charges_the_cheapest_drop(context):
+    # Limit is 6 (QB, RB, FLEX, 3 BE). Six rostered players plus one net add is seven.
+    context = deepcopy(context)
+    context["teams"]["1"]["roster"] += [player("105", "WR", 0.5), player("106", "TE", 0.4)]
+    result = score(context, send=("103",), receive=("203", "204"))
+
+    assert result["roster_impact"]["us"]["exceeds_roster_limit"] is True
+    spot = result["roster_spot"]
+    assert spot["kind"] == "forced_drop"
+    assert spot["total"] <= 0
+    # A zero-cost bench drop exists, so the lineup doesn't lose anything here.
+    assert result["score"]["roster_spot_value"] == pytest.approx(0.0)
+    assert spot["player"]["espn_id"] in {"104", "105", "106", "204"}
+
+
+def test_forced_drop_costs_the_lineup_when_every_player_starts_in_some_week(context):
+    context = deepcopy(context)
+    context["lineup_slot_counts"] = {"RB": 1, "WR": 1, "RB/WR/TE": 1, "BE": 0, "IR": 1}
+    # Week 5 everyone plays; week 6 KC is idle. Each of the five players we'd hold after the
+    # trade starts in at least one of the two weeks, so no drop is free.
+    context["teams"]["1"]["roster"] = [
+        player("101", "RB", 9.0, nfl_team="KC", slot="RB"),
+        player("102", "WR", 7.0, nfl_team="DAL", slot="WR"),
+        player("103", "RB", 8.0, nfl_team="DAL", slot="RB/WR/TE"),
+        player("104", "TE", 0.1, nfl_team="DAL"),
+    ]
+    context["teams"]["2"]["roster"] = [
+        player("211", "WR", 10.0, nfl_team="KC"),
+        player("212", "WR", 5.0, nfl_team="BUF"),
+        player("213", "RB", 3.0, nfl_team="BUF"),
+        player("214", "RB", 3.0, nfl_team="DAL"),
+        player("215", "WR", 2.0, nfl_team="BUF"),
+        player("216", "WR", 2.0, nfl_team="DAL"),
+    ]
+    playing = {5: set(ALL_TEAMS), 6: {"BUF", "DAL", "PHI"}}
+    result = score(context, send=("104",), receive=("211", "212"), playing=playing)
+
+    spot = result["roster_spot"]
+    assert spot["kind"] == "forced_drop"
+    assert spot["total"] < 0
+    assert all(w["delta"] <= 0 for w in spot["weeks"])
+    assert result["score"]["roster_spot_value"] < 0
+    assert result["score"]["roster_spot_value"] == pytest.approx(
+        sum(w["delta"] * m_ for w, m_ in zip(spot["weeks"], (m(1.0), m(0.5))))
+    )
