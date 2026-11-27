@@ -83,6 +83,25 @@ left out of `final_score` instead of withholding it. With no rest-of-season week
 There is no built-in acceptance threshold here. Human approval and worker gates apply separately; the [shadow policy](incoming-trades.md#shadow-policy) only records hypothetical verdicts.
 :::
 
+## How likely is the counterparty to accept?
+
+`acceptance` estimates whether the other manager would accept, and `score.components.acceptance_likelihood` echoes its likelihood with `in_final_score: false`. It ranks candidates and picks alternatives. It is **not** a term in `final_score` and never a gate. Its constants live in `src/services/trade_acceptance.py`, and `model_version` (`acceptance-v1`) changes when they do.
+
+```text
+league_rate  = (accepted_all + 4 × 0.15) / (offers_all + 4)
+manager_rate = (accepted + 3 × league_rate) / (offers + 3)
+logit(p) = logit(manager_rate) + activity + fairness + market,  p clamped to [0.01, 0.95]
+```
+
+| Term | Rule |
+| --- | --- |
+| History (`base_logit`) | Our resolved outgoing offers to this manager this season, shrunk toward the league rate. `accepted` and `vetoed` count as yes; `declined` and `expired` as no; `withdrawn`/`cancelled` (our doing) don't count. |
+| `activity` | `0.35 × clamp(z, −2, 2)`, z being this manager's completed trades this season (ESPN `transactionCounter`) plus the offers they sent us, standardized over every team except ours |
+| `fairness` | `1.5 × (I − G) / (\|I\| + \|G\| + 1)`: a trade lopsided in our favor scores lower. G and I are the unweighted horizon lineup changes (ours and theirs), not the rest-of-season value R or `roster_spot` |
+| `market` | `1.0 × clamp(Δ / 100, −1, 1)`, Δ being ESPN percent owned of what they receive minus what they send |
+
+A missing input adds 0 and is named in `unavailable_inputs` (`offer_history`, `no_offer_history`, `activity`, `fairness`, `market`), so a likelihood is always present: with nothing known it is the 0.15 prior. Outcome history comes from [offer resolutions](outgoing-trades.md#how-is-an-offer-resolved), so it stays empty until the worker reports them.
+
 ## When is a week unscored?
 
 | Condition | Treatment |

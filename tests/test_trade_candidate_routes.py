@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.api import mcp_server
+from src.services.trade_acceptance import estimate_acceptance
 from src.services.trade_context_service import TradeContextUnavailable
 
 COVERAGE = {"crunch_weeks_before": [], "crunch_weeks_after": [], "fixed": [], "created": []}
@@ -30,7 +31,12 @@ ROS = {
 }
 
 
-def item_row(key="a" * 64, final_score=3.5, rest_of_season=ROS):
+def acceptance_block():
+    context = {"teams": {"1": {}, "2": {}}, "acceptance_evidence": None}
+    return estimate_acceptance(context, "1", "2", [], [], 2.0, 0.0)
+
+
+def item_row(key="a" * 64, final_score=3.5, rest_of_season=ROS, acceptance=None):
     return (
         key, "2", "Team 2", "1for1",
         [candidate_player("105", "RB")], [candidate_player("203", "RB")],
@@ -38,6 +44,10 @@ def item_row(key="a" * 64, final_score=3.5, rest_of_season=ROS):
         {"start_week": 5, "end_week": 8, "scored_weeks": [5, 6, 7], "complete_horizon": False},
         {"us": COVERAGE, "counterparty": COVERAGE},
         rest_of_season, 0.75,
+        None if acceptance is None else acceptance["likelihood"],
+        None if acceptance is None else (
+            final_score * acceptance["likelihood"] if final_score >= 0 else final_score),
+        acceptance,
     )
 
 
@@ -94,6 +104,23 @@ def test_candidates_scored_before_the_rest_of_season_term_show_it_unavailable(cl
     assert item["rest_of_season_weeks"] == []
 
 
+def test_candidates_route_returns_the_acceptance_estimate(client):
+    acceptance = acceptance_block()
+    _, factory = fake_cursor(rows=[item_row(acceptance=acceptance)])
+    item = get(client, factory).json()["items"][0]
+    assert item["acceptance_likelihood"] == pytest.approx(acceptance["likelihood"])
+    assert item["expected_score"] == pytest.approx(3.5 * acceptance["likelihood"])
+    assert item["acceptance"]["model_version"] == "acceptance-v1"
+    assert item["status"] == "proposable"
+
+
+def test_candidates_route_serves_rows_stored_before_the_acceptance_estimate(client):
+    _, factory = fake_cursor()
+    item = get(client, factory).json()["items"][0]
+    assert item["acceptance_likelihood"] is None and item["expected_score"] is None
+    assert item["acceptance"] is None
+
+
 def test_candidates_route_defaults_to_proposable_by_final_score(client):
     cursor, factory = fake_cursor()
     get(client, factory)
@@ -124,6 +151,7 @@ def test_candidates_route_passes_every_filter_sort_and_page(client):
 @pytest.mark.parametrize("sort,column", [
     ("our_gain", "our_lineup_gain"), ("final_score", "final_score"),
     ("rest_of_season", "rest_of_season_value"),
+    ("expected_score", "expected_score"), ("acceptance", "acceptance_likelihood"),
 ])
 def test_candidates_route_sort_columns(client, sort, column):
     cursor, factory = fake_cursor()

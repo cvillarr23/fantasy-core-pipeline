@@ -290,6 +290,27 @@ def committed_outgoing_players(league_id, season):
     return committed
 
 
+def offer_outcome_counts(league_id, season):
+    """{counterparty team id: {outcome: distinct offers}} for our resolved outgoing offers
+    this season, the acceptance estimate's history (trade_acceptance)."""
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT team_id, outcome, count(*) FROM ("
+            "SELECT DISTINCT counter_offer->>'offer_key' AS offer_key, "
+            "counter_offer->>'to_team_id' AS team_id, "
+            "outcome_details->'resolution'->>'outcome' AS outcome FROM execution_log "
+            "WHERE transaction_type = 'trade_offer_submit' AND league_id = %s AND season = %s "
+            "AND COALESCE(outcome_details, '{}'::jsonb) ? 'resolution') resolved "
+            "WHERE team_id IS NOT NULL AND outcome IS NOT NULL GROUP BY team_id, outcome",
+            (league_id, season),
+        )
+        rows = cursor.fetchall()
+    counts = {}
+    for team_id, outcome, count in rows:
+        counts.setdefault(team_id, {})[outcome] = count
+    return counts
+
+
 def _response(key, approval, duplicate=False):
     return dict(
         offer_key=key,

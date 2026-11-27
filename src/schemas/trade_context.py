@@ -69,6 +69,13 @@ class ByeOutlook(BaseModel):
     weeks: list[ByeOutlookWeek]
 
 
+class TeamActivity(BaseModel):
+    """This season's counts from ESPN's mTeam transactionCounter."""
+
+    trades: int
+    acquisitions: int
+
+
 class TradeContextTeam(BaseModel):
     team_id: str
     name: str
@@ -78,6 +85,7 @@ class TradeContextTeam(BaseModel):
     schedule_coverage: ScheduleCoverage
     schedule_strength_z: float | None
     bye_outlook: ByeOutlook | None = None
+    activity: TeamActivity | None = None
 
 
 class RosterSnapshot(BaseModel):
@@ -117,6 +125,14 @@ class RestOfSeasonContext(BaseModel):
     playoff_weeks: list[int]
 
 
+class AcceptanceEvidence(BaseModel):
+    """Per-team inputs to the acceptance estimate, keyed by ESPN team id: our outgoing
+    offers' resolved outcomes (outcome -> distinct offers) and offers each team sent us."""
+
+    offer_outcomes: dict[str, dict[str, int]] = Field(default_factory=dict)
+    offers_to_us: dict[str, int] = Field(default_factory=dict)
+
+
 class LeagueTradeContext(BaseModel):
     league_id: str
     season: int
@@ -132,3 +148,4 @@ class LeagueTradeContext(BaseModel):
     teams: dict[str, TradeContextTeam]
     # Our players in an unresolved outgoing offer: not available to send in another trade.
     committed_players: list[CommittedPlayer] = Field(default_factory=list)
+    acceptance_evidence: AcceptanceEvidence | None = None

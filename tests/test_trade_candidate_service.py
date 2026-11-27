@@ -8,7 +8,7 @@ import pytest
 from src.optimization import roster_move_scoring
 from src.schemas.trade_candidates import TradeCandidate
 from src.services import trade_candidate_service as service
-from src.services.trade_score_service import shape_trade_score
+from src.services.trade_score_service import SCORING_VERSION, shape_trade_score
 from src.services.trade_service import summarize_raw_vorp
 from tests.test_trade_score_service import ALL_TEAMS, WEEKS, player, team, week_row
 
@@ -342,7 +342,32 @@ def test_candidate_rows_carry_players_and_the_full_score(context):
     }
     assert row["counterparty_name"] == "Team 2"
     assert row["score"]["raw_vorp"]["incoming_total"] == 1.0
-    assert row["score"]["scoring_version"] == "trade-score-v5"
+    assert row["score"]["scoring_version"] == SCORING_VERSION
+
+
+def _scored(final, likelihood):
+    acceptance = None if likelihood is None else {"likelihood": likelihood}
+    return {"score": {"final_score": final}, "acceptance": acceptance}
+
+
+def test_expected_score_scales_gains_by_likelihood_and_leaves_losses_alone():
+    assert service.expected_score(_scored(4.0, 0.25)) == pytest.approx(1.0)
+    assert service.expected_score(_scored(0.0, 0.25)) == 0.0
+    assert service.expected_score(_scored(-4.0, 0.25)) == -4.0
+    assert service.expected_score(_scored(None, 0.25)) is None
+    assert service.expected_score(_scored(4.0, None)) is None
+
+
+def test_expected_score_ranks_a_likely_bad_trade_above_an_unlikely_one():
+    unlikely = service.expected_score(_scored(-4.0, 0.05))
+    likely = service.expected_score(_scored(-4.0, 0.60))
+    # final x p would give -0.2 vs -2.4 and put the unlikely bad trade first.
+    assert unlikely == likely == -4.0
+    worse = service.expected_score(_scored(-6.0, 0.90))
+    ordered = sorted([worse, unlikely], reverse=True)
+    assert ordered == [-4.0, -6.0]
+    # A bad trade never outranks a good one, however unlikely the good one is.
+    assert service.expected_score(_scored(0.5, 0.01)) > unlikely
 
 
 def test_solve_cache_returns_the_uncached_score(context):
@@ -400,6 +425,32 @@ def test_store_run_replaces_the_week_in_one_transaction(context):
     assert params[0][names.index("costs_playoff_value")] is ros["costs_playoff_value"]
 
 
+def test_store_run_stores_acceptance_for_sorting_without_changing_status(context):
+    rows, counts = service.build_candidates(context, "1", PLAYING, {}, max_candidates=2)
+    for row in rows:
+        likelihood = row["score"]["acceptance"]["likelihood"]
+        assert 0 < likelihood < 1
+        assert row["status"] == service.classify(service.eligibility_reasons(row["score"]))
+    cursor = MagicMock()
+    with patch.object(service, "get_db_cursor", lambda: fake_cursor(cursor)):
+        service.store_run("123", 2026, 5, 2, "1", rows, counts, run_id="run-1")
+    sql, params = cursor.executemany.call_args.args
+    assert sql.count("%s") == len(params[0])
+    stored_likelihood, stored_expected = params[0][-2:]
+    assert stored_likelihood == rows[0]["score"]["acceptance"]["likelihood"]
+    final = rows[0]["score"]["score"]["final_score"]
+    assert stored_expected == (
+        None if final is None
+        else final * stored_likelihood if final >= 0 else final
+    )
+
+
+def test_expected_score_is_null_when_final_score_or_likelihood_is():
+    assert service.expected_score({"score": {"final_score": None}, "acceptance": {"likelihood": 0.2}}) is None
+    assert service.expected_score({"score": {"final_score": 3.0}}) is None
+    assert service.expected_score({"score": {"final_score": 3.0}, "acceptance": {"likelihood": 0.5}}) == 1.5
+
+
 def test_store_run_with_no_rows_still_clears_the_week():
     cursor = MagicMock()
     with patch.object(service, "get_db_cursor", lambda: fake_cursor(cursor)):
@@ -450,4 +501,4 @@ def test_candidate_rows_report_the_roster_spot_term_by_shape(context):
     with patch.object(service, "get_db_cursor", lambda: fake_cursor(cursor)):
         service.store_run("123", 2026, 5, 2, "1", rows[:3], {}, run_id="run-1")
     params = cursor.executemany.call_args.args[1]
-    assert [p[-5] for p in params] == [r["score"]["score"]["roster_spot_value"] for r in rows[:3]]
+    assert [p[-6] for p in params] == [r["score"]["score"]["roster_spot_value"] for r in rows[:3]]

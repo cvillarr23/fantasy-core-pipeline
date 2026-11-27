@@ -55,6 +55,11 @@ bye_coverage lists the bye-crunch weeks (src/optimization/bye_outlook) each side
 before and after, so a proposal can say which bye weeks it fixes. It is evidence only;
 the lineup terms above already count every bye week.
 
+acceptance estimates how likely the counterparty is to accept (src/services/
+trade_acceptance, its own model version), echoed as the acceptance_likelihood component
+with in_final_score false: it ranks, never scores or gates. Unlike the terms below it falls
+back to a prior when inputs are missing, naming them in unavailable_inputs.
+
 Nothing is filled in. A week lacking a traded player's metrics, mapping or a fillable
 lineup is unscored rather than counted as zero, and unknown opponent strength or pairing
 withholds the weighted terms instead of treating that opponent as average. The raw
@@ -69,6 +74,7 @@ from src.optimization.bye_outlook import build_bye_outlook
 from src.optimization.lineup_solver import load_teams_playing
 from src.optimization.roster_move_scoring import compare_week
 from src.schemas.trade_score import KNOWN_SCORING_VERSIONS
+from src.services.trade_acceptance import estimate_acceptance
 from src.services.trade_context_service import get_league_trade_context
 from src.services.trade_service import evaluate_trade
 
@@ -478,6 +484,9 @@ def shape_trade_score(
             spot_reasons = ["unknown_our_opponent_strength"]
         else:
             spot_value = sum(spot_deltas[w] * m for w, m in zip(scored, our_multipliers))
+    acceptance = estimate_acceptance(
+        context, our_team_id, counterparty_team_id, send, receive, gain, change,
+    )
     components = {
         "our_weighted_gain": _component(our_weighted, our_reasons),
         "counterparty_weighted_benefit": _component(benefit, their_reasons),
@@ -486,6 +495,8 @@ def shape_trade_score(
             ros_value, rest_of_season["unavailable_reasons"], in_final_score=ros_value is not None,
         ),
         "roster_spot": _component(spot_value, spot_reasons),
+        # Ranks candidates and alternatives; never part of final_score or a gate.
+        "acceptance_likelihood": _component(acceptance["likelihood"], [], in_final_score=False),
     }
     final, reasons = _final_from_components(components)
     if final is not None and not any(our_multipliers) and not any(their_weights):
@@ -559,6 +570,8 @@ def shape_trade_score(
             p["espn_id"]: _traded_injury(p, context) for p in send + receive
         },
         "roster_spot": roster_spot,
+        # The evidence behind components.acceptance_likelihood.
+        "acceptance": acceptance,
         "schedule": {"weeks": schedule},
         "rest_of_season": rest_of_season,
         "score": {

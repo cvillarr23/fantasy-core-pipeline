@@ -24,7 +24,8 @@ from src.ingestion.sync_league import (
     fetch_raw_league_data,
 )
 from src.services.read_cache import cached
-from src.services.trade_offer_service import committed_outgoing_players
+from src.services.trade_inbox_service import incoming_offer_counts
+from src.services.trade_offer_service import committed_outgoing_players, offer_outcome_counts
 from src.services.score_history import load_stored_events
 
 
@@ -114,6 +115,18 @@ def _source_rosters(raw, league_id, season):
                 )
             owners.add(player_id)
     return teams, owners
+
+
+def _activity(source):
+    """This season's completed trades and acquisitions from ESPN's mTeam
+    transactionCounter, or None when ESPN didn't send it. Acceptance evidence only."""
+    counter = source.get("transactionCounter")
+    if not isinstance(counter, dict):
+        return None
+    values = {key: counter.get(key) for key in ("trades", "acquisitions")}
+    if not all(type(value) is int and value >= 0 for value in values.values()):
+        return None
+    return values
 
 
 def _schedule_events(raw, teams, periods):
@@ -346,6 +359,7 @@ def shape_trade_context(
             "z_score": None,
             "unavailable_history_periods": unavailable_history_periods,
         }
+        teams[team_id]["activity"] = _activity(source)
     observed = [
         team["strength"]["points_per_week"]
         for team in teams.values()
@@ -615,9 +629,14 @@ def get_league_trade_context(
 
     context = cached(["trade-context", league_id, season, week, horizon], 60, load)
     # Read per call, outside the 60s cache: a resolution or new submission must show at once.
+    # Offer outcomes feed the acceptance estimate (trade_acceptance) the same way.
     committed = committed_outgoing_players(league_id, season)
     return {
         **context,
+        "acceptance_evidence": {
+            "offer_outcomes": offer_outcome_counts(league_id, season),
+            "offers_to_us": incoming_offer_counts(league_id, season),
+        },
         "committed_players": [
             {"espn_id": espn_id, "offer_keys": keys}
             for espn_id, keys in sorted(committed.items())

@@ -5,12 +5,14 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from src.schemas.trade_score import ByeCoverage, ScoreTeam
+from src.schemas.trade_score import AcceptanceEstimate, ByeCoverage, ScoreTeam
 
 CandidateShape = Literal["1for1", "2for1", "1for2"]
 CandidateStatus = Literal["proposable", "needs_drop", "one_sided"]
 CandidateStatusFilter = Literal["proposable", "needs_drop", "one_sided", "all"]
-CandidateSort = Literal["final_score", "our_gain", "their_benefit", "rest_of_season"]
+CandidateSort = Literal[
+    "final_score", "our_gain", "their_benefit", "rest_of_season", "expected_score", "acceptance",
+]
 
 
 class CandidatePlayer(BaseModel):
@@ -51,6 +53,11 @@ class TradeCandidate(BaseModel):
     horizon_weeks: list[int]
     complete_horizon: bool
     bye_coverage: ByeCoverage
+    # Null on rows stored before the acceptance estimate existed.
+    acceptance_likelihood: float | None = None
+    # final_score x acceptance_likelihood; null when either is.
+    expected_score: float | None = None
+    acceptance: AcceptanceEstimate | None = None
     status: CandidateStatus
     reasons: list[str]
 

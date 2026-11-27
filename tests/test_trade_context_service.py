@@ -25,6 +25,13 @@ def no_committed_offers():
         yield committed
 
 
+@pytest.fixture(autouse=True)
+def no_offer_history():
+    with patch.object(service, "offer_outcome_counts", return_value={}) as outcomes, \
+            patch.object(service, "incoming_offer_counts", return_value={}):
+        yield outcomes
+
+
 @pytest.fixture
 def raw():
     return {
@@ -45,6 +52,7 @@ def raw():
             {
                 "id": 1,
                 "name": "Us",
+                "transactionCounter": {"acquisitions": 4, "drops": 4, "trades": 1, "moveToIR": 0},
                 "roster": {
                     "entries": [
                         {
@@ -599,6 +607,9 @@ def test_populated_context_matches_the_public_response_schema(raw):
 
     result = attach_bye_outlooks(shape(raw), {"KC": 9, "BUF": 7})
     result["committed_players"] = [{"espn_id": "100", "offer_keys": ["k"]}]
+    result["acceptance_evidence"] = {
+        "offer_outcomes": {"2": {"declined": 1}}, "offers_to_us": {"2": 1},
+    }
     assert LeagueTradeContext.model_validate(result).model_dump() == result
 
 
@@ -804,6 +815,8 @@ def test_rest_of_season_without_playoff_settings_is_the_rest_of_the_regular_seas
     result = shape(raw, week=3, horizon=4)
     assert result["end_week"] == 6
     assert result["rest_of_season"] == {"weeks": [], "playoff_weeks": []}
+
+
 def team_games(raw, espn_id):
     """game_dates for this player's NFL team: games on Sundays of weeks 3 and 4."""
     player = next(
@@ -857,3 +870,39 @@ def test_return_date_his_team_schedule_cant_place_keeps_the_old_rule(raw):
     games = {"ZZZ": [(3, date(2026, 9, 27))]}
     injuries = {"100": {"status": "Out", "return_date": date(2026, 9, 29)}}
     assert not any(injury_keys(shape(raw, injuries=injuries, game_dates=games)).values())
+
+
+def test_team_activity_comes_from_espn_transaction_counter(raw):
+    teams = shape(raw)["teams"]
+    assert teams["1"]["activity"] == {"trades": 1, "acquisitions": 4}
+    # ESPN didn't send a counter for this team: unknown, not zero.
+    assert teams["2"]["activity"] is None
+
+
+def test_malformed_transaction_counter_is_unknown(raw):
+    raw["teams"][0]["transactionCounter"] = {"trades": -1, "acquisitions": 2}
+    assert shape(raw)["teams"]["1"]["activity"] is None
+
+
+def test_context_reads_acceptance_evidence_outside_the_cache(monkeypatch, raw, no_offer_history):
+    monkeypatch.setenv("ESPN_LEAGUE_ID", "123")
+    no_offer_history.return_value = {"2": {"accepted": 1, "declined": 2}}
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[], [], [], []]
+
+    @contextmanager
+    def db():
+        yield cursor
+
+    with patch.object(service, "build_league"), patch.object(
+        service, "fetch_raw_league_data", return_value=raw
+    ), patch.object(service, "get_db_cursor", db), patch.object(
+        service, "incoming_offer_counts", return_value={"3": 2}
+    ) as incoming:
+        result = service.get_league_trade_context("123", 2026, 3, 4)
+    no_offer_history.assert_called_once_with("123", 2026)
+    incoming.assert_called_once_with("123", 2026)
+    assert result["acceptance_evidence"] == {
+        "offer_outcomes": {"2": {"accepted": 1, "declined": 2}},
+        "offers_to_us": {"3": 2},
+    }

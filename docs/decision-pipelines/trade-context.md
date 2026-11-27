@@ -56,6 +56,10 @@ Positive z means stronger fantasy scoring. It describes completed points, not wi
 
 An offer stops counting when its [resolution is recorded](./outgoing-trades.md#how-is-an-offer-resolved) or after `OUTGOING_COMMIT_HOURS` (default 72) from its `executed_at`, whichever comes first. The list is read on every call, not from the 60-second cache.
 
+## What is the acceptance evidence?
+
+Each team carries `activity` (`trades`, `acquisitions` this season, from ESPN's mTeam `transactionCounter`), or null when ESPN didn't send it. `acceptance_evidence` holds, per ESPN team id, `offer_outcomes` (our resolved outgoing offers by outcome, each offer counted once) and `offers_to_us` (distinct offers that team sent us). Like committed players it is read on every call. The [trade score](trade-scoring.md#how-likely-is-the-counterparty-to-accept) uses both for its acceptance estimate.
+
 ## What does schedule coverage mean?
 
 | Weekly status | Meaning |

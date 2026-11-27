@@ -217,3 +217,47 @@ def test_dismissed_offer_leaves_the_list_and_cannot_be_approved(postgres):
     with pytest.raises(service.OfferConflict):
         service.approve_offer(key, "conor")
     assert service.dismiss_offer(key, "conor")["duplicate"] is True
+
+
+def _insert_offer(cursor, key, to_team_id, status, season=2026, resolution=None):
+    details = {} if resolution is None else {"resolution": {"outcome": resolution}}
+    cursor.execute(
+        "INSERT INTO execution_log (transaction_type, status, league_id, season, counter_offer, "
+        "outcome_details) VALUES ('trade_offer_submit', %s, '123456789', %s, %s::jsonb, %s::jsonb)",
+        (status, season, json.dumps({"offer_key": key, "to_team_id": to_team_id}),
+         json.dumps(details)),
+    )
+
+
+def test_offer_outcome_counts_count_each_resolved_offer_once(postgres):
+    db, key, _ = postgres
+    with db() as cursor:
+        cursor.execute("UPDATE execution_log SET status = 'submitted'")
+    service.resolve_offer(key, "declined")
+    with db() as cursor:
+        _insert_offer(cursor, "k2", "3", "submitted", resolution="accepted")
+        _insert_offer(cursor, "k2", "3", "approved", resolution="accepted")
+        _insert_offer(cursor, "k3", "5", "submitted", resolution="withdrawn")
+        _insert_offer(cursor, "k4", "5", "submitted")
+        _insert_offer(cursor, "k5", "3", "submitted", season=2025, resolution="accepted")
+    # The fixture's two rows share one offer key, so its decline counts once.
+    assert service.offer_outcome_counts("123456789", 2026) == {
+        "3": {"declined": 1, "accepted": 1},
+        "5": {"withdrawn": 1},
+    }
+
+
+def test_incoming_offer_counts_count_distinct_espn_offers_per_proposer(postgres):
+    from src.services import trade_inbox_service
+
+    db, _, _ = postgres
+    with db() as cursor:
+        for proposer, tx, season in (("3", "t1", 2026), ("3", "t1", 2026), ("3", "t2", 2026),
+                                     ("5", "t3", 2026), ("5", "t4", 2025)):
+            cursor.execute(
+                "INSERT INTO execution_log (transaction_type, status, league_id, season, "
+                "counter_offer) VALUES ('trade_inbox', 'open', '123456789', %s, %s::jsonb)",
+                (season, json.dumps({"proposing_team_id": proposer, "espn_transaction_id": tx})),
+            )
+    with patch.object(trade_inbox_service, "get_db_cursor", db):
+        assert trade_inbox_service.incoming_offer_counts("123456789", 2026) == {"3": 2, "5": 1}
