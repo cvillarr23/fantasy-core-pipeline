@@ -478,7 +478,16 @@ after minus before.
   tougher matchups counts more, but less than head-to-head.
 - `final_score` = G* + C*.
 
-The constants are echoed in `weights`, and `scoring_version` names the formula.
+`score.components` lists every term by name as `{value, in_final_score,
+unavailable_reasons}`. `final_score` is the sum of the components whose `in_final_score`
+is true (today `our_weighted_gain` and `counterparty_weighted_benefit`). When one of those
+has no value, `final_score` is null and takes that component's reasons. A component with
+`in_final_score: false` is reported but doesn't count toward the score. The flat fields
+(`our_weighted_gain`, ...) repeat the same numbers.
+
+The constants are echoed in `weights`, and `scoring_version` names the formula
+(`trade-score-v2` since `components` was added; stored evidence may still say
+`trade-score-v1`, which has no `components`).
 `raw_vorp` is `/v1/trade/evaluate`'s result for the as-of week, using the mapped internal
 IDs. Per-week `starters_before`/`starters_after`, `held_slots` and `excluded_players`,
 plus the per-week schedule rows, are the evidence an explanation should quote. Uneven

@@ -128,7 +128,7 @@ class InboxScore(BaseModel):
     state: Literal[
         "scored", "incomplete", "unavailable", "unscorable", "stale_ownership"
     ]
-    scoring_version: Literal["trade-score-v1"] | None
+    scoring_version: Literal["trade-score-v1", "trade-score-v2"] | None
     as_of_week: int
     final_score: StrictFloat | StrictInt | None
     complete_horizon: bool | None

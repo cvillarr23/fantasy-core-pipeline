@@ -131,6 +131,16 @@ class ScheduleTerms(BaseModel):
     weeks: list[ScheduleWeek]
 
 
+ScoringVersion = Literal["trade-score-v1", "trade-score-v2"]
+
+
+class ScoreComponent(BaseModel):
+    """One term of final_score (or, with in_final_score false, a reported-only signal)."""
+    value: float | None
+    in_final_score: bool
+    unavailable_reasons: list[str]
+
+
 class ScoreTerms(BaseModel):
     our_lineup_gain: float | None
     counterparty_lineup_change: float | None
@@ -139,6 +149,8 @@ class ScoreTerms(BaseModel):
     counterparty_weighted_benefit: float | None
     final_score: float | None
     final_score_unavailable_reasons: list[str]
+    # Keyed by component name; always set by trade-score-v2, absent from stored v1 evidence.
+    components: dict[str, ScoreComponent] | None = None
 
 
 class ScoreCoverage(BaseModel):
@@ -148,7 +160,8 @@ class ScoreCoverage(BaseModel):
 
 
 class TradeScore(BaseModel):
-    scoring_version: Literal["trade-score-v1"]
+    # The live scorer emits v2; v1 is still accepted so stored worker evidence keeps reading.
+    scoring_version: ScoringVersion
     league_id: str
     season: int
     as_of_week: int

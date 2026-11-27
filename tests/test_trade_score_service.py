@@ -273,6 +273,39 @@ def test_unknown_strength_keeps_lineup_terms_but_withholds_weighted_scores(conte
     assert s["final_score_unavailable_reasons"] == ["unknown_our_opponent_strength"]
 
 
+def test_final_score_is_the_sum_of_in_final_components(context):
+    s = score(context)["score"]
+    components = s["components"]
+    assert set(components) == {"our_weighted_gain", "counterparty_weighted_benefit"}
+    assert components["our_weighted_gain"] == {
+        "value": s["our_weighted_gain"], "in_final_score": True, "unavailable_reasons": [],
+    }
+    assert components["counterparty_weighted_benefit"]["value"] == s["counterparty_weighted_benefit"]
+    assert s["final_score"] == pytest.approx(sum(c["value"] for c in components.values()))
+
+
+def test_component_without_value_withholds_final_and_lends_its_reasons(context):
+    set_z("1", 5, None)(context)
+    components = score(context)["score"]["components"]
+    assert components["our_weighted_gain"] == {
+        "value": None, "in_final_score": True,
+        "unavailable_reasons": ["unknown_our_opponent_strength"],
+    }
+    assert components["counterparty_weighted_benefit"]["value"] is not None
+
+
+def test_final_from_components_ignores_reported_only_terms():
+    components = {
+        "a": service._component(2.0, []),
+        "b": service._component(None, ["no_b"], in_final_score=False),
+        "c": service._component(-0.5, []),
+    }
+    assert service._final_from_components(components) == (1.5, [])
+    components["a"] = service._component(None, ["no_a", "shared"])
+    components["c"] = service._component(None, ["shared"])
+    assert service._final_from_components(components) == (None, ["no_a", "shared"])
+
+
 def test_unavailable_pairing_is_unknown_not_a_bye(context):
     context["teams"]["2"]["schedule"][0] = week_row(5, None, None, status="unavailable")
     result = score(context)

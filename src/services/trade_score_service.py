@@ -16,7 +16,10 @@ weekly_stats.vorp_score; bench and IR are worth nothing). ΔL is after minus bef
   week they play us (a point taken from our opponent equals a point added to us), and
   INDIRECT_FACTOR * m(their opponent's z) otherwise: weakening a rival only helps our
   standings indirectly, and more so ahead of their tougher matchups.
-- final_score = G* + C*.
+- final_score is the sum of score.components whose in_final_score is true; today those
+  are our_weighted_gain (G*) and counterparty_weighted_benefit (C*), so final_score = G* + C*.
+  Each component is {value, in_final_score, unavailable_reasons}. An in-final component with
+  no value withholds final_score and lends it its reasons. A new term is one more entry.
 
 bye_coverage lists the bye-crunch weeks (src/optimization/bye_outlook) each side has
 before and after, so a proposal can say which bye weeks it fixes. It is evidence only;
@@ -39,7 +42,7 @@ from src.services.trade_service import evaluate_trade
 
 logger = logging.getLogger("TradeScoreService")
 
-SCORING_VERSION = "trade-score-v1"
+SCORING_VERSION = "trade-score-v2"
 STRENGTH_WEIGHT = 0.25
 Z_CLAMP = 2.0
 INDIRECT_FACTOR = 0.25
@@ -158,6 +161,22 @@ def _schedule_row(context, our_team_id, counterparty_team_id, week):
     }
 
 
+def _component(value, reasons, in_final_score=True):
+    return {"value": value, "in_final_score": in_final_score, "unavailable_reasons": reasons}
+
+
+def _final_from_components(components):
+    """(final_score, reasons): the sum of the in-final components, or None with the reasons
+    of every in-final component that has no value."""
+    reasons = []
+    for component in components.values():
+        if component["in_final_score"] and component["value"] is None:
+            reasons.extend(r for r in component["unavailable_reasons"] if r not in reasons)
+    if reasons:
+        return None, reasons
+    return sum(c["value"] for c in components.values() if c["in_final_score"]), []
+
+
 def _traded_summary(player):
     return {key: player.get(key) for key in ("espn_id", "player_id", "name", "position", "nfl_team")}
 
@@ -213,26 +232,29 @@ def shape_trade_score(
     gain = sum(our_deltas.values()) if scored else None
     change = sum(their_deltas.values()) if scored else None
 
-    reasons = []
-    our_weighted = benefit = final = None
+    our_weighted = benefit = None
+    our_reasons, their_reasons = [], []
     if not scored:
-        reasons.append("no_scored_weeks")
+        our_reasons = their_reasons = ["no_scored_weeks"]
+        our_multipliers = their_weights = []
     else:
         our_multipliers = [schedule_by_week[w]["our_multiplier"] for w in scored]
         their_weights = [schedule_by_week[w]["counterparty_weight"] for w in scored]
         if None in our_multipliers:
-            reasons.append("unknown_our_opponent_strength")
+            our_reasons = ["unknown_our_opponent_strength"]
         else:
             our_weighted = sum(our_deltas[w] * m for w, m in zip(scored, our_multipliers))
         if None in their_weights:
-            reasons.append("unknown_counterparty_opponent_strength")
+            their_reasons = ["unknown_counterparty_opponent_strength"]
         else:
             benefit = sum(-their_deltas[w] * c for w, c in zip(scored, their_weights))
-        if not reasons:
-            if not any(our_multipliers) and not any(their_weights):
-                reasons.append("no_matchup_weeks")
-            else:
-                final = our_weighted + benefit
+    components = {
+        "our_weighted_gain": _component(our_weighted, our_reasons),
+        "counterparty_weighted_benefit": _component(benefit, their_reasons),
+    }
+    final, reasons = _final_from_components(components)
+    if final is not None and not any(our_multipliers) and not any(their_weights):
+        final, reasons = None, ["no_matchup_weeks"]
 
     slot_counts = context["lineup_slot_counts"]
     roster_limit = sum(int(count) for slot, count in slot_counts.items() if slot != "IR")
@@ -303,6 +325,7 @@ def shape_trade_score(
             "counterparty_weighted_benefit": benefit,
             "final_score": final,
             "final_score_unavailable_reasons": reasons,
+            "components": components,
         },
         "coverage": {
             "unmapped_traded_espn_ids": unmapped,

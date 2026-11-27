@@ -246,7 +246,7 @@ def test_candidate_rows_carry_players_and_the_full_score(context):
     }
     assert row["counterparty_name"] == "Team 2"
     assert row["score"]["raw_vorp"]["incoming_total"] == 1.0
-    assert row["score"]["scoring_version"] == "trade-score-v1"
+    assert row["score"]["scoring_version"] == "trade-score-v2"
 
 
 def test_solve_cache_returns_the_uncached_score(context):

@@ -841,6 +841,18 @@ def test_list_passes_stored_evaluation_through(client, context):  # noqa: F811
     assert offers[1]["message"] == "  Fair deal?  "
 
 
+def test_list_still_reads_stored_v1_evaluation(client, context):  # noqa: F811
+    # Proposals staged before trade-score-v2 carry no score.components.
+    stored = proposal_evaluation(context, "  Fair deal?  ")
+    stored["score"]["scoring_version"] = "trade-score-v1"
+    del stored["score"]["score"]["components"]
+    offers = list_offers_response(client, [staged("  Fair deal?  ", stored)])
+    evaluation = offers[1]["evaluation"]
+    assert evaluation["score"]["scoring_version"] == "trade-score-v1"
+    assert evaluation["score"]["score"]["components"] is None
+    assert evaluation["score"]["score"]["final_score"] == stored["score"]["score"]["final_score"]
+
+
 @pytest.mark.parametrize("explicit_null", [False, True])
 def test_list_rows_without_evaluation_return_null(client, caplog, explicit_null):
     row = staged()
@@ -882,7 +894,7 @@ def _drop(path):
         lambda _: "x",
         lambda _: [],
         lambda _: 5,
-        _set(["score", "scoring_version"], "trade-score-v2"),
+        _set(["score", "scoring_version"], "trade-score-v3"),
         _drop(["score", "roster_impact"]),
         _set(["request", "extra"], True),
         _set(["ranking", "basis"], "other"),
