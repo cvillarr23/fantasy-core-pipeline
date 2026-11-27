@@ -205,13 +205,14 @@ def calculate_replacement_baselines(
     df: pl.DataFrame, league_config: dict, flex_alloc: dict, rosters_populated: bool
 ) -> dict:
     """
-    Once real rosters exist (`rosters_populated`), the baseline is the best actual
-    non-starter (or free agent) at the position - rank N+1 in raw sorted order is not
-    reliable post-draft, since a benched high-projection player occupies a slot in that
-    ranking without being a starter. Pre-draft (rosters_populated=False, the only state
-    that exists before the Sept 8 draft), there is no starter data to consult, so this
-    falls back to the structural rank_at[pos] = starting slots (including FLEX share)
-    across the league - i.e. rank N+1, the first non-starter, per the issue's spec.
+    Once real rosters exist (`rosters_populated`), the baseline is the best free agent
+    (`~is_rostered`) at the position: the player a manager can actually pick up. Players on
+    any team's bench are not replacement candidates - a benched stud on another team can't be
+    claimed, so counting him inflated every baseline (#464). Pre-draft (rosters_populated=False,
+    the only state that exists before the Sept 8 draft), there is no roster data to consult, so
+    this falls back to the structural rank_at[pos] = starting slots (including FLEX share)
+    across the league - i.e. rank N+1, the first non-starter, per the issue's spec. The same
+    structural fallback applies when the position's free-agent pool is empty.
     Falls back further to the pool's minimum if it's shorter than that, or to
     DEFAULT_BASELINES if the pool is empty.
     """
@@ -228,11 +229,9 @@ def calculate_replacement_baselines(
             continue
 
         if rosters_populated:
-            # is_starter is NULL for free agents (not on any roster) - fill_null(False)
-            # correctly treats them as eligible replacement candidates, not starters.
-            non_starters = pool.filter(~pl.col("is_starter").fill_null(False))
-            if not non_starters.is_empty():
-                baselines[pos] = float(non_starters.row(0, named=True)["adjusted_projected_points"])
+            free_agents = pool.filter(~pl.col("is_rostered"))
+            if not free_agents.is_empty():
+                baselines[pos] = float(free_agents.row(0, named=True)["adjusted_projected_points"])
                 continue
 
         rank_at = lineup_slot_counts.get(pos, 0) * team_count + flex_alloc.get(pos, 0)
@@ -362,14 +361,11 @@ def compute_market_multiplier(df: pl.DataFrame, market: pl.DataFrame, weight: fl
 
 
 def _market_adjusted_vorp() -> pl.Expr:
-    """vorp_score is signed, so a multiplier above 1 would push a below-replacement player
-    further down. Dividing negative scores keeps the direction: a higher start% always
-    raises the score, a lower one always lowers it."""
-    return (
-        pl.when(pl.col("vorp_score") < 0)
-        .then(pl.col("vorp_score") / pl.col("market_multiplier"))
-        .otherwise(pl.col("vorp_score") * pl.col("market_multiplier"))
-    )
+    """vorp_score is signed, so a plain product would push a below-replacement player further
+    down when the multiplier is above 1. Scaling the magnitude instead, vorp + |vorp| * (mult - 1),
+    always moves the score in the favorable direction: a higher start% raises it, a lower one
+    lowers it, and a multiplier of 1 leaves it unchanged."""
+    return pl.col("vorp_score") + pl.col("vorp_score").abs() * (pl.col("market_multiplier") - 1)
 
 
 def apply_market_multiplier(df: pl.DataFrame, market: pl.DataFrame, weight: float) -> pl.DataFrame:
