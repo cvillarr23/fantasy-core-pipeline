@@ -105,13 +105,14 @@ def _refresh_horizon(season: int, first_week: int) -> int:
     return 1 if failed else 0
 
 
-def load_last_playoff_week(season: int) -> int | None:
-    """The league's last fantasy playoff week for this season, or None if not synced."""
+def load_last_playoff_week(league_id: str, season: int) -> int | None:
+    """The configured league's last fantasy playoff week for this season, or None if not
+    synced. Filtered by league: league_settings also holds other leagues (a practice
+    draft league), whose playoff settings must never stand in for ours."""
     with get_db_cursor() as cursor:
         cursor.execute(
-            """SELECT playoff_settings FROM league_settings WHERE season = %s
-               ORDER BY updated_at DESC NULLS LAST LIMIT 1;""",
-            (season,),
+            "SELECT playoff_settings FROM league_settings WHERE league_id = %s AND season = %s;",
+            (league_id, season),
         )
         row = cursor.fetchone()
     weeks = ((row[0] if row else None) or {}).get("playoff_weeks") or []
@@ -121,7 +122,7 @@ def load_last_playoff_week(season: int) -> int | None:
 def _refresh_rest_of_season(season: int, first_week: int) -> int:
     """Refreshes each week after the horizon through the last playoff week, in turn."""
     try:
-        last_week = load_last_playoff_week(season)
+        last_week = load_last_playoff_week(os.environ["ESPN_LEAGUE_ID"], season)
     except Exception:
         logger.exception("Unable to read the league's playoff settings")
         return 1
