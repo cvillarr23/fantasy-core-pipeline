@@ -76,7 +76,7 @@ def row(tx="123", status="open", final=4.0):
             missed_reads=0,
             score=dict(
                 state="scored",
-                scoring_version="trade-score-v2",
+                scoring_version="trade-score-v3",
                 as_of_week=5,
                 final_score=final,
                 complete_horizon=True,
@@ -1580,7 +1580,7 @@ def test_list_exposes_valid_evidence_verbatim(client, context, caplog):  # noqa:
 
 
 def test_list_still_reads_stored_v1_evidence(client, context, caplog):  # noqa: F811
-    # Offers scored before trade-score-v2: summary and breakdown both say v1, no components.
+    # Offers scored before trade-score-v3: summary and breakdown both say v1, no components.
     entry = row()
     entry["counter_offer"]["score"]["scoring_version"] = "trade-score-v1"
     stored = evidence(context)
@@ -1647,7 +1647,7 @@ def _drop(path):
         (_drop(["version"]), "version"),
         (lambda stored, entry: "x", "version"),
         (lambda stored, entry: [], "version"),
-        (_evidence_set(["score", "scoring_version"], "trade-score-v3"), "invalid"),
+        (_evidence_set(["score", "scoring_version"], "trade-score-v4"), "invalid"),
         (_drop(["score", "roster_impact"]), "invalid"),
         (
             _evidence_set(["score", "horizon", "unscored_weeks"], [{"week": 7}]),

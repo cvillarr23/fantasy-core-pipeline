@@ -12,6 +12,12 @@ Classification uses the worker's gates (fantasy-browser-worker eligibilityReason
 - needs_drop: only exceeds_roster_limit fails, so the offer would need a drop.
 - one_sided: anything else; reasons lists the failed gates.
 
+Injured players (src/injury_timeline): an Out or injured-reserve player is in the universe
+only when his expected return week falls inside the horizon, so a package can buy low on
+someone coming back (or sell him); the scorer counts him as out until then. A player in an
+IR slot stays out of it. Candidate players carry injury_status, expected_return_week and
+weeks_out_in_horizon.
+
 Players in one of our unresolved outgoing offers (`context["committed_players"]`) are
 never sent again: ESPN still lists them on our roster, so without this a second package
 could give away a player we have already promised. Only our side is filtered; the other
@@ -53,11 +59,12 @@ from src.optimization.lineup_solver import (
     HOLDABLE_WITHOUT_METRICS,
     hold_slots_without_metrics,
 )
+from src.injury_timeline import OUT_STATUSES, weeks_out
 from src.optimization.roster_move_scoring import (
-    OUT_STATUSES,
     exclusion,
     lineup_pool,
     lineup_solve_cache,
+    pool_vorp,
     solve_lineup,
 )
 from src.services.trade_context_service import get_league_trade_context
@@ -138,14 +145,15 @@ def position_groups(slot_counts):
     return groups
 
 
-def tradeable(player):
-    """In the package universe: mapped, positioned, and neither Out nor in an IR slot."""
-    return (
-        player.get("slot") != "IR"
-        and player.get("injury_status") not in OUT_STATUSES
-        and player.get("player_id") is not None
-        and player.get("position") is not None
-    )
+def tradeable(player, end_week=None):
+    """In the package universe: mapped, positioned, not in an IR slot, and not Out unless
+    he's expected back by end_week (the horizon's last week)."""
+    if player.get("slot") == "IR" or player.get("player_id") is None or player.get("position") is None:
+        return False
+    if player.get("injury_status") not in OUT_STATUSES:
+        return True
+    return_week = (player.get("injury") or {}).get("expected_return_week")
+    return end_week is not None and return_week is not None and return_week <= end_week
 
 
 def _baseline(roster, week, context, playing, groups):
@@ -179,7 +187,7 @@ def _baseline(roster, week, context, playing, groups):
 def _week_vorp(player, week, context, playing):
     if exclusion(player, week, context["as_of_week"], playing):
         return None
-    return float(player["metrics"][str(week)]["vorp_score"])
+    return pool_vorp(player, week, context["as_of_week"])[0]
 
 
 def _gain_bound(baseline, incoming, week, context, playing):
@@ -216,7 +224,8 @@ def _loss_bound(baseline, outgoing, incoming, week, context, playing, groups):
     for player in outgoing:
         if player["espn_id"] not in baseline["starters"] or player["position"] in HOLDABLE_WITHOUT_METRICS:
             continue
-        value = float(player["metrics"][str(week)]["vorp_score"])
+        # A baseline starter passed exclusion() this week, so his pool value exists.
+        value = pool_vorp(player, week, context["as_of_week"])[0]
         group = groups.get(player["position"], {player["position"]})
         replacements = [baseline["best_bench"].get(player["position"], -math.inf)] + [
             v for position, v in incoming_values if position in group
@@ -238,14 +247,15 @@ def enumerate_packages(context, our_team_id):
     """Every (counterparty, send, receive) in the candidate universe, in a fixed order."""
     teams = context["teams"]
     committed = committed_espn_ids(context)
+    end_week = context["end_week"]
     ours = [
         p for p in teams[our_team_id]["roster"]
-        if tradeable(p) and p["espn_id"] not in committed
+        if tradeable(p, end_week) and p["espn_id"] not in committed
     ]
     for counterparty_team_id in sorted(teams, key=int):
         if counterparty_team_id == our_team_id:
             continue
-        theirs = [p for p in teams[counterparty_team_id]["roster"] if tradeable(p)]
+        theirs = [p for p in teams[counterparty_team_id]["roster"] if tradeable(p, end_week)]
         for send_count, receive_count in ((1, 1), (2, 1), (1, 2)):
             for send in itertools.combinations(ours, send_count):
                 for receive in itertools.combinations(theirs, receive_count):
@@ -298,8 +308,10 @@ class Prefilter:
         return we_gain and they_can_hold, rank
 
 
-def _candidate_player(player, as_of_week):
+def _candidate_player(player, context):
+    as_of_week = context["as_of_week"]
     vorp = ((player.get("metrics") or {}).get(str(as_of_week)) or {}).get("vorp_score")
+    weeks = range(context["start_week"], context["end_week"] + 1)
     return {
         "espn_id": player["espn_id"],
         "player_id": player.get("player_id"),
@@ -308,6 +320,9 @@ def _candidate_player(player, as_of_week):
         "nfl_team": player.get("nfl_team"),
         "vorp": vorp,
         "nfl_bye_week": player.get("nfl_bye_week"),
+        "injury_status": player.get("injury_status"),
+        "expected_return_week": (player.get("injury") or {}).get("expected_return_week"),
+        "weeks_out_in_horizon": weeks_out(player, weeks, as_of_week),
     }
 
 
@@ -376,8 +391,8 @@ def _build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_playe
             "counterparty_team_id": counterparty_team_id,
             "counterparty_name": teams[counterparty_team_id]["name"],
             "shape": shape_of(send, receive),
-            "send": [_candidate_player(p, context["as_of_week"]) for p in send],
-            "receive": [_candidate_player(p, context["as_of_week"]) for p in receive],
+            "send": [_candidate_player(p, context) for p in send],
+            "receive": [_candidate_player(p, context) for p in receive],
             "status": status,
             "reasons": reasons,
             "score": score,
@@ -389,7 +404,7 @@ def _build_candidates(context, our_team_id, teams_playing_by_week, vorp_by_playe
         "scored": len(rows),
         "excluded_committed": sum(
             1 for p in teams[our_team_id]["roster"]
-            if tradeable(p) and p["espn_id"] in committed
+            if tradeable(p, context["end_week"]) and p["espn_id"] in committed
         ),
         **{status: sum(1 for row in rows if row["status"] == status) for status in STATUSES},
     }

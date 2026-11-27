@@ -73,6 +73,15 @@
   last entry is `SCORING_VERSION`), so a stored `scoring_version` always describes its row.
   Stored-evidence schemas (`TradeScore`, `InboxScore`) accept every known version; v1 has no
   components.
+- Injury timelines (#330, `trade-score-v3`): `src/injury_timeline.availability` decides each
+  week's availability, and `roster_move_scoring.exclusion`/`pool_vorp` apply it, so the solver
+  and the candidate prefilter see the same values. A roster entry opts in by carrying an
+  `injury` key: the trade context sets it for every player (`player_injuries` via
+  `load_player_injuries`, keyed by ESPN id only). Entries without it keep the old "Out in the
+  as-of week only" rule, so waivers and outlooks are unchanged. ESPN's live `injury_status`
+  decides status; the feed adds only `return_date`, mapped to a week by
+  `nfl_byes.load_team_game_dates`. Any prefilter bound that reads a VORP must go through
+  `pool_vorp` (the brute-force tests include injured leagues).
 - `trade_candidate_service` (`GET /v1/trade/candidates`, MCP `list_trade_candidates`) is filled
   by `python -m src.jobs.trade_candidates`. It enumerates 1for1/2for1/1for2 packages (shape named
   from our side), scores a prefiltered shortlist with `shape_trade_score` over one shared context,

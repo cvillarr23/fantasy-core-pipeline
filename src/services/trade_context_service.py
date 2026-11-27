@@ -11,7 +11,8 @@ from espn_api.football.constant import POSITION_MAP, PRO_TEAM_MAP
 
 from src.database import get_db_cursor
 from src.services.espn_ownership import load_espn_ownership
-from src.nfl_byes import bye_weeks_or_empty
+from src.injury_timeline import expected_return_week
+from src.nfl_byes import bye_weeks_or_empty, team_game_dates_or_empty, to_nflverse_team
 from src.optimization.bye_outlook import attach_bye_outlooks
 from src.espn_positions import DEFAULT_POSITIONS
 from src.ingestion.sync_league import (
@@ -145,6 +146,35 @@ def _espn_payload(espn_ownership, player_id):
     return espn.model_dump() if espn is not None else None
 
 
+def _injury_payload(row, nfl_team, game_dates):
+    """A player_injuries row plus the week it implies, or None when the feed has nothing."""
+    if row is None:
+        return None
+    return_date = row.get("return_date")
+    reported_at = row.get("reported_at")
+    return {
+        "status": row.get("status"),
+        "fantasy_status": row.get("fantasy_status"),
+        "injury_type": row.get("injury_type"),
+        "return_date": return_date.isoformat() if return_date else None,
+        "expected_return_week": expected_return_week(
+            return_date, game_dates.get(to_nflverse_team(nfl_team))
+        ),
+        "reported_at": reported_at.isoformat() if reported_at else None,
+    }
+
+
+def load_player_injuries(cursor, espn_ids):
+    """{espn_id: player_injuries row} for these ESPN ids, in one query."""
+    cursor.execute(
+        """SELECT espn_id, status, fantasy_status, injury_type, return_date, reported_at
+        FROM player_injuries WHERE espn_id = ANY(%s);""",
+        (sorted(espn_ids),),
+    )
+    columns = ("espn_id", "status", "fantasy_status", "injury_type", "return_date", "reported_at")
+    return {row[0]: dict(zip(columns, row)) for row in cursor.fetchall()}
+
+
 def shape_trade_context(
     raw,
     identities,
@@ -156,6 +186,8 @@ def shape_trade_context(
     fetched_at,
     stored_events=None,
     espn_ownership=None,
+    injuries=None,
+    game_dates=None,
 ):
     """Shape current ownership with schedule/history evidence and no future leakage.
 
@@ -164,6 +196,10 @@ def shape_trade_context(
     Multiweek matchup totals are divided by their actual scoring-week counts. A team's
     schedule average is available only when every non-bye week has a known pairing
     and opponent strength. This is descriptive evidence, not a win-probability model.
+
+    With `injuries` ({espn_id: player_injuries row}), every roster player gets an `injury`
+    key (None when the feed has nothing on him), which opts him into src/injury_timeline's
+    return-week rules; `game_dates` maps the return date onto his team's schedule.
     """
     source_teams, _ = _source_rosters(raw, league_id, season)
     periods = _regular_periods(raw)
@@ -230,13 +266,19 @@ def shape_trade_context(
                 }
                 missing_metrics += int(any(value is None for value in values.values()))
                 player_metrics[str(target_week)] = values
+            nfl_team = PRO_TEAM_MAP.get(player.get("proTeamId"))
+            entry_injury = {}
+            if injuries is not None:
+                entry_injury["injury"] = _injury_payload(
+                    injuries.get(espn_id), nfl_team, game_dates or {}
+                )
             roster.append(
                 {
                     "espn_id": espn_id,
                     "player_id": player_id,
                     "name": player.get("fullName"),
                     "position": DEFAULT_POSITIONS.get(player.get("defaultPositionId")),
-                    "nfl_team": PRO_TEAM_MAP.get(player.get("proTeamId")),
+                    "nfl_team": nfl_team,
                     "slot": POSITION_MAP.get(entry.get("lineupSlotId")),
                     "eligible_slots": [
                         POSITION_MAP[slot]
@@ -246,6 +288,7 @@ def shape_trade_context(
                     "injury_status": player.get("injuryStatus"),
                     "metrics": player_metrics,
                     "espn": _espn_payload(espn_ownership, player_id),
+                    **entry_injury,
                 }
             )
         teams[team_id]["roster"] = roster
@@ -412,7 +455,7 @@ def get_league_trade_context(
             week + horizon - 1,
             max(week for weeks in periods.values() for week in weeks),
         )
-        identities, metrics, espn_ownership = {}, {}, {}
+        identities, metrics, espn_ownership, injuries = {}, {}, {}, {}
         if espn_ids:
             with get_db_cursor() as cursor:
                 cursor.execute(
@@ -444,6 +487,7 @@ def get_league_trade_context(
                 espn_ownership = load_espn_ownership(
                     cursor, list(identities.values()), season, week
                 )
+                injuries = load_player_injuries(cursor, espn_ids)
         context = shape_trade_context(
             raw,
             identities,
@@ -455,6 +499,8 @@ def get_league_trade_context(
             fetched_at,
             stored_events=load_stored_events(league_id, season),
             espn_ownership=espn_ownership,
+            injuries=injuries,
+            game_dates=team_game_dates_or_empty(season),
         )
         # Both teams' NFL byes and bye-crunch weeks, so trade proposals and negotiations
         # can target a partner whose byes complement ours.

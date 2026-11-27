@@ -523,6 +523,28 @@
             "title": "Espn Id",
             "type": "string"
           },
+          "expected_return_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Return Week"
+          },
+          "injury_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Injury Status"
+          },
           "name": {
             "anyOf": [
               {
@@ -588,6 +610,11 @@
               }
             ],
             "title": "Vorp"
+          },
+          "weeks_out_in_horizon": {
+            "default": 0,
+            "title": "Weeks Out In Horizon",
+            "type": "integer"
           }
         },
         "required": [
@@ -2832,7 +2859,8 @@
               {
                 "enum": [
                   "trade-score-v1",
-                  "trade-score-v2"
+                  "trade-score-v2",
+                  "trade-score-v3"
                 ],
                 "type": "string"
               },
@@ -3463,6 +3491,30 @@
           "offset"
         ],
         "title": "IncomingTradeList",
+        "type": "object"
+      },
+      "InjuryAdjustment": {
+        "description": "A Questionable/Doubtful player's VORP scaled by factor for that week's solve.",
+        "properties": {
+          "espn_id": {
+            "title": "Espn Id",
+            "type": "string"
+          },
+          "factor": {
+            "title": "Factor",
+            "type": "number"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "espn_id",
+          "factor",
+          "reason"
+        ],
+        "title": "InjuryAdjustment",
         "type": "object"
       },
       "IrMoveInstruction": {
@@ -4456,6 +4508,14 @@
               "type": "string"
             },
             "title": "Held Slots",
+            "type": "array"
+          },
+          "injury_adjustments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/InjuryAdjustment"
+            },
+            "title": "Injury Adjustments",
             "type": "array"
           },
           "starters_after": {
@@ -5611,6 +5671,100 @@
           "text"
         ],
         "title": "PitchEvidence",
+        "type": "object"
+      },
+      "PlayerInjury": {
+        "description": "ESPN's live status plus the public injuries feed's expected return, for one traded\nplayer; return_date and expected_return_week are null when the feed has no date.",
+        "properties": {
+          "as_of_week_availability": {
+            "title": "As Of Week Availability",
+            "type": "number"
+          },
+          "expected_return_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Return Week"
+          },
+          "injury_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Injury Status"
+          },
+          "injury_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Injury Type"
+          },
+          "reported_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported At"
+          },
+          "return_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Date"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot"
+          },
+          "weeks_out": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Weeks Out",
+            "type": "array"
+          }
+        },
+        "required": [
+          "injury_status",
+          "slot",
+          "return_date",
+          "expected_return_week",
+          "injury_type",
+          "reported_at",
+          "weeks_out",
+          "as_of_week_availability"
+        ],
+        "title": "PlayerInjury",
         "type": "object"
       },
       "PlayerLine": {
@@ -7832,9 +7986,31 @@
       },
       "ScoreWeights": {
         "properties": {
+          "doubtful_availability": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doubtful Availability"
+          },
           "indirect_factor": {
             "title": "Indirect Factor",
             "type": "number"
+          },
+          "questionable_availability": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Questionable Availability"
           },
           "strength_weight": {
             "title": "Strength Weight",
@@ -9821,6 +9997,20 @@
           "horizon": {
             "$ref": "#/components/schemas/ScoreHorizon"
           },
+          "injuries": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/PlayerInjury"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Injuries"
+          },
           "league_id": {
             "title": "League Id",
             "type": "string"
@@ -9853,7 +10043,8 @@
           "scoring_version": {
             "enum": [
               "trade-score-v1",
-              "trade-score-v2"
+              "trade-score-v2",
+              "trade-score-v3"
             ],
             "title": "Scoring Version",
             "type": "string"

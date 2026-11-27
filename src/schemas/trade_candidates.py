@@ -21,6 +21,10 @@ class CandidatePlayer(BaseModel):
     nfl_team: str | None
     vorp: float | None
     nfl_bye_week: int | None
+    # ESPN's live status and src/injury_timeline's reading of it; absent from older runs.
+    injury_status: str | None = None
+    expected_return_week: int | None = None
+    weeks_out_in_horizon: int = 0
 
 
 class TradeCandidate(BaseModel):

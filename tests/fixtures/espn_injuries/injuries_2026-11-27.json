@@ -1,0 +1,385 @@
+{
+ "timestamp": "2026-11-27T01:43:06Z",
+ "status": "success",
+ "season": {
+  "year": 2026,
+  "type": 2,
+  "name": "Regular Season",
+  "displayName": "2026"
+ },
+ "injuries": [
+  {
+   "id": "22",
+   "displayName": "Arizona Cardinals",
+   "injuries": [
+    {
+     "id": "649947",
+     "status": "Questionable",
+     "date": "2026-11-26T20:11Z",
+     "shortComment": "Beck (back) was listed as a non-participant on Thursday's injury report, Darren Urban of the Cardinals' official site reports.",
+     "type": {
+      "id": "2",
+      "name": "INJURY_STATUS_QUESTIONABLE",
+      "description": "questionable",
+      "abbreviation": "Q"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "type": "Back",
+      "location": "Torso",
+      "detail": "Spasms",
+      "side": "Not Specified",
+      "returnDate": "2026-11-29"
+     },
+     "athlete": {
+      "displayName": "Carson Beck",
+      "position": {
+       "abbreviation": "QB"
+      },
+      "team": {
+       "abbreviation": "ARI"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/_/id/4430841/carson-beck",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       },
+       {
+        "language": "en-US",
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/stats/_/id/4430841/carson-beck",
+        "text": "Stats",
+        "shortText": "Stats",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "649757",
+     "status": "Active",
+     "date": "2026-11-25T21:42Z",
+     "shortComment": "Slovis was claimed off waivers by the Cardinals on Wednesday, Josh Weinfuss of ESPN reports.",
+     "type": {
+      "id": "0",
+      "name": "INJURY_STATUS_ACTIVE",
+      "description": "active",
+      "abbreviation": "A"
+     },
+     "athlete": {
+      "displayName": "Kedon Slovis",
+      "position": {
+       "abbreviation": "QB"
+      },
+      "team": {
+       "abbreviation": "ARI"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/_/id/4428512/kedon-slovis",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       },
+       {
+        "language": "en-US",
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/stats/_/id/4428512/kedon-slovis",
+        "text": "Stats",
+        "shortText": "Stats",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "649737",
+     "status": "Injured Reserve",
+     "date": "2026-11-25T19:50Z",
+     "shortComment": "Head coach Mike LaFleur said Wednesday that the Cardinals will evaluate Love (ankle) again Monday to hone in on a return date for the running back, Bo Brack of GoPHNX.com reports.",
+     "type": {
+      "id": "5",
+      "name": "INJURY_STATUS_IR",
+      "description": "Injured Reserve",
+      "abbreviation": "IR"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "IR",
+       "abbreviation": "IR"
+      },
+      "type": "Ankle",
+      "location": "Leg",
+      "detail": "Sprain",
+      "side": "Right",
+      "returnDate": "2026-12-06"
+     },
+     "athlete": {
+      "displayName": "Jeremiyah Love",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "team": {
+       "abbreviation": "ARI"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/_/id/4870808/jeremiyah-love",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       },
+       {
+        "language": "en-US",
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/stats/_/id/4870808/jeremiyah-love",
+        "text": "Stats",
+        "shortText": "Stats",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "33",
+   "displayName": "Baltimore Ravens",
+   "injuries": [
+    {
+     "id": "649966",
+     "status": "Questionable",
+     "date": "2026-11-26T21:50Z",
+     "shortComment": "Henry (concussion) was listed as a full participant in Thursday's practice.",
+     "type": {
+      "id": "2",
+      "name": "INJURY_STATUS_QUESTIONABLE",
+      "description": "questionable",
+      "abbreviation": "Q"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "type": "Concussion",
+      "location": "Head",
+      "detail": "Concussion",
+      "side": "Not Specified",
+      "returnDate": "2026-11-29"
+     },
+     "athlete": {
+      "displayName": "Derrick Henry",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "team": {
+       "abbreviation": "BAL"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/_/id/3043078/derrick-henry",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       },
+       {
+        "language": "en-US",
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/stats/_/id/3043078/derrick-henry",
+        "text": "Stats",
+        "shortText": "Stats",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "2",
+   "displayName": "Buffalo Bills",
+   "injuries": [
+    {
+     "id": "-2085071",
+     "status": "Out",
+     "date": "2026-11-26T23:53Z",
+     "shortComment": "inactive",
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "INACTIVE",
+       "abbreviation": "INACTIVE"
+      },
+      "type": "Coach's Decision",
+      "location": "Other",
+      "detail": "Not Specified",
+      "side": "Not Specified",
+      "returnDate": "2026-12-06"
+     },
+     "athlete": {
+      "displayName": "Skyler Bell",
+      "position": {
+       "abbreviation": "WR"
+      },
+      "team": {
+       "abbreviation": "BUF"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/_/id/4683153/skyler-bell",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       },
+       {
+        "language": "en-US",
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/stats/_/id/4683153/skyler-bell",
+        "text": "Stats",
+        "shortText": "Stats",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "29",
+   "displayName": "Carolina Panthers",
+   "injuries": [
+    {
+     "id": "649977",
+     "status": "Injured Reserve",
+     "date": "2026-11-26T22:16Z",
+     "shortComment": "Brooks (groin) was estimated as a full practice participant on Thursday's report, Mike Kaye of ESPN.com reports.",
+     "type": {
+      "id": "5",
+      "name": "INJURY_STATUS_IR",
+      "description": "Injured Reserve",
+      "abbreviation": "IR"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "IR-R",
+       "abbreviation": "IR-R"
+      },
+      "type": "Groin",
+      "location": "Groin",
+      "detail": "Surgery",
+      "side": "Not Specified",
+      "returnDate": "2026-11-30"
+     },
+     "athlete": {
+      "displayName": "Jonathon Brooks",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "team": {
+       "abbreviation": "CAR"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/_/id/4678008/jonathon-brooks",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       },
+       {
+        "language": "en-US",
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nfl/player/stats/_/id/4678008/jonathon-brooks",
+        "text": "Stats",
+        "shortText": "Stats",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

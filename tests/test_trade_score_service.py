@@ -183,6 +183,8 @@ def test_formula_separates_our_gain_counterparty_impact_and_schedule_terms(conte
         "strength_weight": service.STRENGTH_WEIGHT,
         "z_clamp": service.Z_CLAMP,
         "indirect_factor": service.INDIRECT_FACTOR,
+        "questionable_availability": service.QUESTIONABLE_AVAILABILITY,
+        "doubtful_availability": service.DOUBTFUL_AVAILABILITY,
     }
     TradeScore.model_validate(result)
 
@@ -602,3 +604,78 @@ def test_bye_coverage_reports_a_crunch_a_trade_creates(context):
     result = score(context, send=("103",), receive=("201",), playing=playing)
 
     assert result["bye_coverage"]["us"]["created"] == [6]
+
+
+# ---- injury timelines (src/injury_timeline), opted in by an `injury` key on the player ----
+
+
+def injure(context, espn_id, status, return_week="none", slot=None):
+    for t in context["teams"].values():
+        for p in t["roster"]:
+            if p["espn_id"] == espn_id:
+                p["injury_status"] = status
+                if return_week != "absent":
+                    p["injury"] = {"expected_return_week": None if return_week == "none" else return_week,
+                                   "return_date": "2026-10-11", "injury_type": "Ankle",
+                                   "reported_at": "2026-10-05T12:00:00+00:00"}
+                if slot:
+                    p["slot"] = slot
+
+
+def our_deltas(result):
+    return [w["delta"] for w in result["roster_impact"]["us"]["weeks"]]
+
+
+def test_out_player_counts_from_his_return_week(context):
+    injure(context, "203", "OUT", return_week=6)
+    result = score(context)
+    # Week 5 he sits, so FLEX falls to our WR 104 (3.0): 18 - 19. Week 6 he's back: +3.
+    assert our_deltas(result) == [-1.0, 3.0]
+    week5 = result["roster_impact"]["us"]["weeks"][0]
+    assert {"espn_id": "203", "reason": "out"} in week5["excluded_players"]
+    assert result["injuries"]["203"]["weeks_out"] == [5]
+    assert result["injuries"]["203"]["expected_return_week"] == 6
+    TradeScore.model_validate(result)
+
+
+def test_injured_reserve_without_a_date_sits_the_whole_horizon(context):
+    injure(context, "203", "INJURY_RESERVE")
+    assert our_deltas(score(context)) == [-1.0, -1.0]
+
+
+def test_player_without_an_injury_key_keeps_the_as_of_week_only_rule(context):
+    # Callers that don't load injuries (waivers, outlooks) see the pre-timeline behaviour.
+    injure(context, "203", "INJURY_RESERVE", return_week="absent")
+    assert our_deltas(score(context)) == [-1.0, 3.0]
+
+
+def test_questionable_discounts_positive_vorp_in_the_as_of_week_only(context):
+    injure(context, "203", "QUESTIONABLE")
+    result = score(context)
+    q = service.QUESTIONABLE_AVAILABILITY
+    week5, week6 = result["roster_impact"]["us"]["weeks"]
+    assert week5["delta"] == pytest.approx(7.0 * q - 4.0)
+    assert week6["delta"] == pytest.approx(3.0)
+    assert week5["injury_adjustments"] == [{"espn_id": "203", "factor": q, "reason": "questionable"}]
+    assert week6["injury_adjustments"] == []
+    # The counterparty's "before" lineup starts him discounted too.
+    their5 = result["roster_impact"]["counterparty"]["weeks"][0]
+    assert their5["before"] == pytest.approx(6.0 + 8.0 + 7.0 * q)
+    assert result["injuries"]["203"]["as_of_week_availability"] == q
+    TradeScore.model_validate(result)
+
+
+def test_a_risk_tag_never_raises_a_negative_vorp(context):
+    context["teams"]["1"]["roster"][3]["metrics"]["5"]["vorp_score"] = -2.0
+    injure(context, "104", "DOUBTFUL")
+    week5 = score(context)["roster_impact"]["us"]["weeks"][0]
+    assert week5["injury_adjustments"] == []
+
+
+def test_healthy_traded_players_report_a_clean_timeline(context):
+    result = score(context)
+    assert result["injuries"]["103"] == {
+        "injury_status": None, "slot": "RB/WR/TE", "return_date": None,
+        "expected_return_week": None, "injury_type": None, "reported_at": None,
+        "weeks_out": [], "as_of_week_availability": 1.0,
+    }

@@ -21,6 +21,13 @@ weekly_stats.vorp_score; bench and IR are worth nothing). ΔL is after minus bef
   Each component is {value, in_final_score, unavailable_reasons}. An in-final component with
   no value withholds final_score and lends it its reasons. A new term is one more entry.
 
+Injuries (trade-score-v3) shape each week's inputs rather than adding a term, by the rules in
+src/injury_timeline: an Out or IR player sits until his expected return week (ESPN's injuries
+feed, mapped onto his team's schedule), an IR player with no date sits the whole horizon,
+and a Questionable/Doubtful player's positive VORP is scaled by QUESTIONABLE_AVAILABILITY
+(0.75) or DOUBTFUL_AVAILABILITY (0.25) in the as-of week only. Each week lists its
+injury_adjustments, and `injuries` gives every traded player's timeline.
+
 bye_coverage lists the bye-crunch weeks (src/optimization/bye_outlook) each side has
 before and after, so a proposal can say which bye weeks it fixes. It is evidence only;
 the lineup terms above already count every bye week.
@@ -34,6 +41,7 @@ single-week VORP totals come from trade_service.evaluate_trade unchanged.
 import logging
 import re
 
+from src.injury_timeline import DOUBTFUL_AVAILABILITY, QUESTIONABLE_AVAILABILITY, availability
 from src.optimization.bye_outlook import build_bye_outlook
 from src.optimization.lineup_solver import load_teams_playing
 from src.optimization.roster_move_scoring import compare_week
@@ -178,6 +186,20 @@ def _final_from_components(components):
     return sum(c["value"] for c in components.values() if c["in_final_score"]), []
 
 
+def _traded_injury(player, weeks, as_of_week):
+    injury = player.get("injury") or {}
+    return {
+        "injury_status": player.get("injury_status"),
+        "slot": player.get("slot"),
+        "return_date": injury.get("return_date"),
+        "expected_return_week": injury.get("expected_return_week"),
+        "injury_type": injury.get("injury_type"),
+        "reported_at": injury.get("reported_at"),
+        "weeks_out": [w for w in weeks if availability(player, w, as_of_week)[0] == 0.0],
+        "as_of_week_availability": availability(player, as_of_week, as_of_week)[0],
+    }
+
+
 def _traded_summary(player):
     return {key: player.get(key) for key in ("espn_id", "player_id", "name", "position", "nfl_team")}
 
@@ -312,11 +334,16 @@ def shape_trade_score(
             "strength_weight": STRENGTH_WEIGHT,
             "z_clamp": Z_CLAMP,
             "indirect_factor": INDIRECT_FACTOR,
+            "questionable_availability": QUESTIONABLE_AVAILABILITY,
+            "doubtful_availability": DOUBTFUL_AVAILABILITY,
         },
         "roster_impact": {"us": impact("us"), "counterparty": impact("counterparty")},
         # Evidence for proposals and pitches, not a score term: final_score already counts
         # every bye week through the per-week lineups.
         "bye_coverage": {"us": bye_coverage("us"), "counterparty": bye_coverage("counterparty")},
+        "injuries": {
+            p["espn_id"]: _traded_injury(p, weeks, context["as_of_week"]) for p in send + receive
+        },
         "schedule": {"weeks": schedule},
         "score": {
             "our_lineup_gain": gain,

@@ -506,6 +506,24 @@ Nothing is filled in:
 - Unknown opponent strength or pairing leaves G*, C* or `final_score` null, with a reason.
 - An empty or bye-only horizon has no final score.
 
+Injuries (`trade-score-v3`) change each week's lineup inputs, not the formula
+(`src/injury_timeline.py`):
+
+- Status is ESPN's live fantasy `injuryStatus`. The expected return date comes from ESPN's
+  public injuries feed (`sync_injuries` → `player_injuries`). It maps to the first week
+  whose game for the player's NFL team falls on or after it, so a bye is skipped.
+- An Out, injured-reserve or suspended player (or one in an IR slot) sits the as-of week
+  and every week before his return week. With no date, injured reserve sits the whole
+  horizon; a plain Out is back the next week.
+- Questionable and Doubtful scale a positive VORP by 0.75 and 0.25 in the as-of week only
+  (`weights.questionable_availability` / `doubtful_availability`). A negative VORP is never
+  raised.
+- Each week lists its `injury_adjustments`. `injuries` gives every traded player's status,
+  return date, `expected_return_week` and `weeks_out`.
+- Candidates include an Out or injured-reserve player whose return week falls inside the
+  horizon (buy low, sell high), but never one in an IR slot. Candidate players carry
+  `injury_status`, `expected_return_week` and `weeks_out_in_horizon`.
+
 The daily refresher attempts the upcoming week and three following weeks, capped at week 18.
 Missing metrics or failed refresh stages can still leave horizon weeks unscored; inspect
 `complete_horizon` and the coverage reasons. See [projections and VORP](docs/decision-pipelines/projections-and-vorp.md).
