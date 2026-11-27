@@ -131,7 +131,10 @@ class ScheduleTerms(BaseModel):
     weeks: list[ScheduleWeek]
 
 
-ScoringVersion = Literal["trade-score-v1", "trade-score-v2"]
+# Every scoring_version a stored evaluation may carry, oldest first; the last one is what the
+# live scorer emits (trade_score_service.SCORING_VERSION). A score change appends one entry.
+KNOWN_SCORING_VERSIONS = ("trade-score-v1", "trade-score-v2")
+ScoringVersion = Literal[KNOWN_SCORING_VERSIONS]
 
 
 class ScoreComponent(BaseModel):
@@ -149,7 +152,7 @@ class ScoreTerms(BaseModel):
     counterparty_weighted_benefit: float | None
     final_score: float | None
     final_score_unavailable_reasons: list[str]
-    # Keyed by component name; always set by trade-score-v2, absent from stored v1 evidence.
+    # Keyed by component name; set from trade-score-v2 on, absent from stored v1 evidence.
     components: dict[str, ScoreComponent] | None = None
 
 
@@ -160,7 +163,7 @@ class ScoreCoverage(BaseModel):
 
 
 class TradeScore(BaseModel):
-    # The live scorer emits v2; v1 is still accepted so stored worker evidence keeps reading.
+    # Older versions stay accepted so stored worker evidence keeps reading.
     scoring_version: ScoringVersion
     league_id: str
     season: int

@@ -37,12 +37,13 @@ import re
 from src.optimization.bye_outlook import build_bye_outlook
 from src.optimization.lineup_solver import load_teams_playing
 from src.optimization.roster_move_scoring import compare_week
+from src.schemas.trade_score import KNOWN_SCORING_VERSIONS
 from src.services.trade_context_service import get_league_trade_context
 from src.services.trade_service import evaluate_trade
 
 logger = logging.getLogger("TradeScoreService")
 
-SCORING_VERSION = "trade-score-v2"
+SCORING_VERSION = KNOWN_SCORING_VERSIONS[-1]
 STRENGTH_WEIGHT = 0.25
 Z_CLAMP = 2.0
 INDIRECT_FACTOR = 0.25
