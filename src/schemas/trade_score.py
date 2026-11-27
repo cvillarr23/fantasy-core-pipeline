@@ -150,8 +150,10 @@ class ScheduleTerms(BaseModel):
 # live scorer emits (trade_score_service.SCORING_VERSION). A score change appends one entry.
 # v4 (#330 part 2): injury timelines shape each week's lineup inputs.
 # v5 (#331): roster_spot joins final_score.
+# v6 (#329): acceptance_likelihood and the acceptance block (a ranking aid, not a score term).
 KNOWN_SCORING_VERSIONS = (
     "trade-score-v1", "trade-score-v2", "trade-score-v3", "trade-score-v4", "trade-score-v5",
+    "trade-score-v6",
 )
 ScoringVersion = Literal[KNOWN_SCORING_VERSIONS]
 
@@ -232,6 +234,70 @@ class PlayerInjury(BaseModel):
     as_of_week_availability: float
 
 
+class AcceptanceHistory(BaseModel):
+    offers: int
+    accepted: int
+    declined: int
+    expired: int
+    league_offers: int
+    league_accepted: int
+    league_rate: float
+    rate: float
+
+
+class AcceptanceActivity(BaseModel):
+    trades: int | None
+    offers_to_us: int
+    z: float | None
+
+
+class AcceptanceFairness(BaseModel):
+    our_lineup_gain: float | None
+    counterparty_lineup_change: float | None
+    balance: float | None
+
+
+class AcceptanceMarket(BaseModel):
+    percent_owned_received: float | None
+    percent_owned_sent: float | None
+
+
+class AcceptanceInputs(BaseModel):
+    history: AcceptanceHistory
+    activity: AcceptanceActivity
+    fairness: AcceptanceFairness
+    market: AcceptanceMarket
+
+
+class AcceptanceTerms(BaseModel):
+    base_logit: float
+    activity: float | None
+    fairness: float | None
+    market: float | None
+
+
+class AcceptanceWeights(BaseModel):
+    prior_acceptance: float
+    prior_weight: float
+    manager_weight: float
+    activity_weight: float
+    fairness_weight: float
+    market_weight: float
+    z_clamp: float
+
+
+class AcceptanceEstimate(BaseModel):
+    """How likely the counterparty is to accept (src/services/trade_acceptance). Ranks
+    candidates; never a score term or a gate."""
+
+    model_version: Literal["acceptance-v1"]
+    likelihood: float
+    terms: AcceptanceTerms
+    inputs: AcceptanceInputs
+    unavailable_inputs: list[str]
+    weights: AcceptanceWeights
+
+
 class ScoreCoverage(BaseModel):
     unmapped_traded_espn_ids: list[str]
     partial_roster_weeks: list[int]
@@ -256,6 +322,8 @@ class TradeScore(BaseModel):
     # Traded players only, keyed by ESPN id (trade-score-v4+; absent from older evidence).
     injuries: dict[str, PlayerInjury] | None = None
     roster_spot: RosterSpot | None = None
+    # Absent from evaluations stored before the acceptance estimate existed.
+    acceptance: AcceptanceEstimate | None = None
     schedule: ScheduleTerms
     rest_of_season: RestOfSeason | None = None
     score: ScoreTerms

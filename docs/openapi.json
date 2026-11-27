@@ -1,6 +1,347 @@
 {
   "components": {
     "schemas": {
+      "AcceptanceActivity": {
+        "properties": {
+          "offers_to_us": {
+            "title": "Offers To Us",
+            "type": "integer"
+          },
+          "trades": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trades"
+          },
+          "z": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Z"
+          }
+        },
+        "required": [
+          "trades",
+          "offers_to_us",
+          "z"
+        ],
+        "title": "AcceptanceActivity",
+        "type": "object"
+      },
+      "AcceptanceEstimate": {
+        "description": "How likely the counterparty is to accept (src/services/trade_acceptance). Ranks\ncandidates; never a score term or a gate.",
+        "properties": {
+          "inputs": {
+            "$ref": "#/components/schemas/AcceptanceInputs"
+          },
+          "likelihood": {
+            "title": "Likelihood",
+            "type": "number"
+          },
+          "model_version": {
+            "const": "acceptance-v1",
+            "title": "Model Version",
+            "type": "string"
+          },
+          "terms": {
+            "$ref": "#/components/schemas/AcceptanceTerms"
+          },
+          "unavailable_inputs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unavailable Inputs",
+            "type": "array"
+          },
+          "weights": {
+            "$ref": "#/components/schemas/AcceptanceWeights"
+          }
+        },
+        "required": [
+          "model_version",
+          "likelihood",
+          "terms",
+          "inputs",
+          "unavailable_inputs",
+          "weights"
+        ],
+        "title": "AcceptanceEstimate",
+        "type": "object"
+      },
+      "AcceptanceEvidence": {
+        "description": "Per-team inputs to the acceptance estimate, keyed by ESPN team id: our outgoing\noffers' resolved outcomes (outcome -> distinct offers) and offers each team sent us.",
+        "properties": {
+          "offer_outcomes": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "title": "Offer Outcomes",
+            "type": "object"
+          },
+          "offers_to_us": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Offers To Us",
+            "type": "object"
+          }
+        },
+        "title": "AcceptanceEvidence",
+        "type": "object"
+      },
+      "AcceptanceFairness": {
+        "properties": {
+          "balance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Balance"
+          },
+          "counterparty_lineup_change": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Lineup Change"
+          },
+          "our_lineup_gain": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Our Lineup Gain"
+          }
+        },
+        "required": [
+          "our_lineup_gain",
+          "counterparty_lineup_change",
+          "balance"
+        ],
+        "title": "AcceptanceFairness",
+        "type": "object"
+      },
+      "AcceptanceHistory": {
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "integer"
+          },
+          "declined": {
+            "title": "Declined",
+            "type": "integer"
+          },
+          "expired": {
+            "title": "Expired",
+            "type": "integer"
+          },
+          "league_accepted": {
+            "title": "League Accepted",
+            "type": "integer"
+          },
+          "league_offers": {
+            "title": "League Offers",
+            "type": "integer"
+          },
+          "league_rate": {
+            "title": "League Rate",
+            "type": "number"
+          },
+          "offers": {
+            "title": "Offers",
+            "type": "integer"
+          },
+          "rate": {
+            "title": "Rate",
+            "type": "number"
+          }
+        },
+        "required": [
+          "offers",
+          "accepted",
+          "declined",
+          "expired",
+          "league_offers",
+          "league_accepted",
+          "league_rate",
+          "rate"
+        ],
+        "title": "AcceptanceHistory",
+        "type": "object"
+      },
+      "AcceptanceInputs": {
+        "properties": {
+          "activity": {
+            "$ref": "#/components/schemas/AcceptanceActivity"
+          },
+          "fairness": {
+            "$ref": "#/components/schemas/AcceptanceFairness"
+          },
+          "history": {
+            "$ref": "#/components/schemas/AcceptanceHistory"
+          },
+          "market": {
+            "$ref": "#/components/schemas/AcceptanceMarket"
+          }
+        },
+        "required": [
+          "history",
+          "activity",
+          "fairness",
+          "market"
+        ],
+        "title": "AcceptanceInputs",
+        "type": "object"
+      },
+      "AcceptanceMarket": {
+        "properties": {
+          "percent_owned_received": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Owned Received"
+          },
+          "percent_owned_sent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Owned Sent"
+          }
+        },
+        "required": [
+          "percent_owned_received",
+          "percent_owned_sent"
+        ],
+        "title": "AcceptanceMarket",
+        "type": "object"
+      },
+      "AcceptanceTerms": {
+        "properties": {
+          "activity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity"
+          },
+          "base_logit": {
+            "title": "Base Logit",
+            "type": "number"
+          },
+          "fairness": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fairness"
+          },
+          "market": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market"
+          }
+        },
+        "required": [
+          "base_logit",
+          "activity",
+          "fairness",
+          "market"
+        ],
+        "title": "AcceptanceTerms",
+        "type": "object"
+      },
+      "AcceptanceWeights": {
+        "properties": {
+          "activity_weight": {
+            "title": "Activity Weight",
+            "type": "number"
+          },
+          "fairness_weight": {
+            "title": "Fairness Weight",
+            "type": "number"
+          },
+          "manager_weight": {
+            "title": "Manager Weight",
+            "type": "number"
+          },
+          "market_weight": {
+            "title": "Market Weight",
+            "type": "number"
+          },
+          "prior_acceptance": {
+            "title": "Prior Acceptance",
+            "type": "number"
+          },
+          "prior_weight": {
+            "title": "Prior Weight",
+            "type": "number"
+          },
+          "z_clamp": {
+            "title": "Z Clamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "prior_acceptance",
+          "prior_weight",
+          "manager_weight",
+          "activity_weight",
+          "fairness_weight",
+          "market_weight",
+          "z_clamp"
+        ],
+        "title": "AcceptanceWeights",
+        "type": "object"
+      },
       "ApprovalDecisionResponse": {
         "properties": {
           "end_reason": {
@@ -2862,7 +3203,8 @@
                   "trade-score-v2",
                   "trade-score-v3",
                   "trade-score-v4",
-                  "trade-score-v5"
+                  "trade-score-v5",
+                  "trade-score-v6"
                 ],
                 "type": "string"
               },
@@ -4187,6 +4529,16 @@
       },
       "LeagueTradeContext": {
         "properties": {
+          "acceptance_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AcceptanceEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "as_of_week": {
             "title": "As Of Week",
             "type": "integer"
@@ -8875,6 +9227,25 @@
         "title": "SwapInstruction",
         "type": "object"
       },
+      "TeamActivity": {
+        "description": "This season's counts from ESPN's mTeam transactionCounter.",
+        "properties": {
+          "acquisitions": {
+            "title": "Acquisitions",
+            "type": "integer"
+          },
+          "trades": {
+            "title": "Trades",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "trades",
+          "acquisitions"
+        ],
+        "title": "TeamActivity",
+        "type": "object"
+      },
       "TeamAggregate": {
         "properties": {
           "most_recent_pick_expected_round": {
@@ -9518,6 +9889,27 @@
       },
       "TradeCandidate": {
         "properties": {
+          "acceptance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AcceptanceEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "acceptance_likelihood": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acceptance Likelihood"
+          },
           "bye_coverage": {
             "$ref": "#/components/schemas/ByeCoverage"
           },
@@ -9557,6 +9949,17 @@
               }
             ],
             "title": "Counterparty Weighted Benefit"
+          },
+          "expected_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Score"
           },
           "final_score": {
             "anyOf": [
@@ -9915,6 +10318,16 @@
       },
       "TradeContextTeam": {
         "properties": {
+          "activity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TeamActivity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "bye_outlook": {
             "anyOf": [
               {
@@ -10363,6 +10776,16 @@
       },
       "TradeScore": {
         "properties": {
+          "acceptance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AcceptanceEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "as_of_week": {
             "title": "As Of Week",
             "type": "integer"
@@ -10448,7 +10871,8 @@
               "trade-score-v2",
               "trade-score-v3",
               "trade-score-v4",
-              "trade-score-v5"
+              "trade-score-v5",
+              "trade-score-v6"
             ],
             "title": "Scoring Version",
             "type": "string"
@@ -14327,7 +14751,9 @@
                 "final_score",
                 "our_gain",
                 "their_benefit",
-                "rest_of_season"
+                "rest_of_season",
+                "expected_score",
+                "acceptance"
               ],
               "title": "Sort",
               "type": "string"

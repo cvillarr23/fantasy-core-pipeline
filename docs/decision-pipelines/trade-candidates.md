@@ -78,7 +78,7 @@ The reason codes are the worker's own `eligibilityReasons`, so a `proposable` ca
 | `receive_position`, `send_position` | Any traded player on that side has this position |
 | `shape` | `1for1`, `2for1`, `1for2` |
 | `status` | `proposable` (default), `needs_drop`, `one_sided`, `all` |
-| `sort` | `final_score` (default), `our_gain` (G), `their_benefit` (their lineup change I). Descending, nulls last, then `candidate_key`. |
+| `sort` | `final_score` (default), `our_gain` (G), `their_benefit` (their lineup change I), `rest_of_season` (rest-of-season value R), `acceptance` (acceptance likelihood), `expected_score` (final score × acceptance likelihood when the final score is not negative, else the final score unchanged, so an unlikely bad trade never outranks a likely one). Descending, nulls last, then `candidate_key`. |
 | `limit`, `offset` | 1–200 (default 50); ≥ 0 |
 
 | Field | Meaning |
@@ -91,6 +91,7 @@ The reason codes are the worker's own `eligibilityReasons`, so a `proposable` ca
 | `items[].final_score`, `our_lineup_gain`, `our_weighted_gain`, `counterparty_lineup_change`, `counterparty_weighted_benefit`, `our_schedule_adjustment` | Final score, G, G*, I and C* from the [trade score](trade-scoring.md#how-are-g-c-and-the-final-score-calculated), plus the schedule adjustment G* − G |
 | `items[].scored_weeks`, `horizon_weeks`, `complete_horizon` | Horizon coverage |
 | `items[].bye_coverage` | Each side's bye-crunch weeks, before and after |
+| `items[].acceptance_likelihood`, `expected_score`, `acceptance` | The score's [acceptance estimate](trade-scoring.md#how-likely-is-the-counterparty-to-accept), `final_score` × that likelihood, and the full estimate. Null on rows stored before it existed. It ranks only; it never changes `status`. |
 | `items[].status`, `reasons`, `shape` | Classification above |
 | `items[].candidate_key` | sha256 of league, season, both teams and the sorted ids on each side. The week is left out, so the key stays the same across runs. |
 

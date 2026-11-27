@@ -625,6 +625,9 @@ CREATE TABLE IF NOT EXISTS trade_candidates (
 ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS rest_of_season_value DOUBLE PRECISION;
 ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS costs_playoff_value BOOLEAN;
 ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS roster_spot_value DOUBLE PRECISION;
+-- Copies of score->'acceptance' for sorting (trade_acceptance): rank only, never a gate.
+ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS acceptance_likelihood DOUBLE PRECISION;
+ALTER TABLE trade_candidates ADD COLUMN IF NOT EXISTS expected_score DOUBLE PRECISION;
 """
 
 # ESPN's league-wide market signal per player per week, refreshed daily by

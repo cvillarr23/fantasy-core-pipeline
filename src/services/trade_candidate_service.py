@@ -43,6 +43,12 @@ projections yet) is skipped: the scorer can't score that week for any package in
 the team.
 
 Ties count as passing, so float noise in the solver can't make the prefilter unsound.
+
+Each row also stores the score's acceptance likelihood (src/services/trade_acceptance) and
+expected_score = final_score x likelihood when final_score >= 0, so a caller can sort by how
+likely a good package is to be accepted. A negative final_score is left as it is: scaling it
+would pull a bad trade toward 0 and rank an unlikely bad trade above a likely one. Neither
+changes classification or the prefilter.
 """
 
 import hashlib
@@ -85,6 +91,8 @@ SORT_COLUMNS = {
     "our_gain": "our_lineup_gain",
     "their_benefit": "counterparty_lineup_change",
     "rest_of_season": "rest_of_season_value",
+    "expected_score": "expected_score",
+    "acceptance": "acceptance_likelihood",
 }
 _TOLERANCE = 1e-9
 # A team whose current roster can't field a lineup in a week makes that week unscorable for
@@ -471,13 +479,25 @@ def store_run(league_id, season, week, horizon, our_team_id, rows, counts, run_i
                         our_lineup_gain, our_weighted_gain, counterparty_lineup_change,
                         counterparty_weighted_benefit, our_schedule_adjustment,
                         rest_of_season_value, costs_playoff_value, roster_spot_value,
-                        scored_week_count, complete_horizon, score)
+                        scored_week_count, complete_horizon, score, acceptance_likelihood,
+                        expected_score)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
                 [_row_params(league_id, season, week, horizon, run_id, computed_at, our_team_id, row)
                  for row in rows],
             )
     return run_id, computed_at
+
+
+def expected_score(score):
+    """final_score x acceptance likelihood when final_score >= 0; a negative final_score is
+    returned unchanged (x p would pull it toward 0 and favour unlikely bad trades); None when
+    either input is missing."""
+    final = score["score"]["final_score"]
+    likelihood = (score.get("acceptance") or {}).get("likelihood")
+    if final is None or likelihood is None:
+        return None
+    return final * likelihood if final >= 0 else final
 
 
 def _row_params(league_id, season, week, horizon, run_id, computed_at, our_team_id, row):
@@ -495,6 +515,7 @@ def _row_params(league_id, season, week, horizon, run_id, computed_at, our_team_
         ros["costs_playoff_value"], terms["roster_spot_value"],
         len(row["score"]["horizon"]["scored_weeks"]),
         row["score"]["horizon"]["complete_horizon"], Json(row["score"]),
+        (row["score"].get("acceptance") or {}).get("likelihood"), expected_score(row["score"]),
     )
 
 
@@ -502,7 +523,8 @@ _ITEM_COLUMNS = (
     "candidate_key, counterparty_team_id, counterparty_name, shape, send_players, "
     "receive_players, status, reasons, final_score, our_lineup_gain, our_weighted_gain, "
     "counterparty_lineup_change, counterparty_weighted_benefit, our_schedule_adjustment, "
-    "score->'horizon', score->'bye_coverage', score->'rest_of_season', roster_spot_value"
+    "score->'horizon', score->'bye_coverage', score->'rest_of_season', roster_spot_value, "
+    "acceptance_likelihood, expected_score, score->'acceptance'"
 )
 
 
@@ -578,7 +600,7 @@ def list_trade_candidates(
 def _item(row):
     (key, counterparty_team_id, counterparty_name, shape, send, receive, status, reasons,
      final_score, gain, weighted_gain, change, benefit, adjustment, horizon, bye_coverage,
-     rest_of_season, spot_value) = row
+     rest_of_season, spot_value, acceptance_likelihood, expected, acceptance) = row
     # Rows stored before the rest-of-season term (#328) have no score->'rest_of_season'.
     rest_of_season = rest_of_season or {}
     return {
@@ -603,6 +625,9 @@ def _item(row):
         "horizon_weeks": list(range(horizon["start_week"], horizon["end_week"] + 1)),
         "complete_horizon": horizon["complete_horizon"],
         "bye_coverage": bye_coverage,
+        "acceptance_likelihood": acceptance_likelihood,
+        "expected_score": expected,
+        "acceptance": acceptance,
         "status": status,
         "reasons": reasons,
     }

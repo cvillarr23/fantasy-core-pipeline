@@ -96,7 +96,11 @@
   from our side), scores a prefiltered shortlist with `shape_trade_score` over one shared context,
   and classifies them with the worker's `eligibilityReasons` codes. The prefilter must never drop
   a package that full scoring marks `proposable`: the brute-force test enforces that, so change it
-  only alongside its soundness note. `lineup_solve_cache()` memoizes solves for the batch only;
+  only alongside its soundness note. Each row also stores the score's acceptance likelihood
+  (`trade_acceptance`, evidence from `acceptance_evidence` and team `activity` in the trade
+  context) and `expected_score`, for sorting only: it never changes classification or the
+  prefilter. Its offer history stays empty until the worker reports resolutions
+  (fantasy-browser-worker#224). `lineup_solve_cache()` memoizes solves for the batch only;
   `POST /v1/trade/score` never uses it. 404 means no `trade_candidate_runs` row for that week.
 - `GET /v1/trade/offers` returns `evaluation` (`ProposalEvaluation` in `src/schemas/trade.py`,
   reusing `TradeScore`), the worker's stored score evidence for generated proposals. It is

@@ -286,6 +286,7 @@ def test_final_score_is_the_sum_of_in_final_components(context):
     components = s["components"]
     assert set(components) == {
         "our_weighted_gain", "counterparty_weighted_benefit", "rest_of_season", "roster_spot",
+        "acceptance_likelihood",
     }
     # No rest-of-season window in this context: R is 0 and counts.
     assert components["rest_of_season"] == {
@@ -298,7 +299,9 @@ def test_final_score_is_the_sum_of_in_final_components(context):
         "value": s["our_weighted_gain"], "in_final_score": True, "unavailable_reasons": [],
     }
     assert components["counterparty_weighted_benefit"]["value"] == s["counterparty_weighted_benefit"]
-    assert s["final_score"] == pytest.approx(sum(c["value"] for c in components.values()))
+    assert s["final_score"] == pytest.approx(
+        sum(c["value"] for c in components.values() if c["in_final_score"])
+    )
 
 
 def test_component_without_value_withholds_final_and_lends_its_reasons(context):
@@ -990,3 +993,28 @@ def test_forced_drop_costs_the_lineup_when_every_player_starts_in_some_week(cont
     assert result["score"]["roster_spot_value"] == pytest.approx(
         sum(w["delta"] * m_ for w, m_ in zip(spot["weeks"], (m(1.0), m(0.5))))
     )
+
+
+def test_acceptance_is_evidence_and_leaves_final_score_alone(context):
+    from src.services import trade_acceptance
+
+    baseline = score(context)
+    context["acceptance_evidence"] = {"offer_outcomes": {"2": {"declined": 3}}, "offers_to_us": {}}
+    result = score(context)
+    estimate = result["acceptance"]
+    component = result["score"]["components"]["acceptance_likelihood"]
+    assert component == {
+        "value": estimate["likelihood"], "in_final_score": False, "unavailable_reasons": [],
+    }
+    without = lambda terms: {**terms, "components": {
+        k: v for k, v in terms["components"].items() if k != "acceptance_likelihood"}}
+    assert without(result["score"]) == without(baseline["score"])
+    assert estimate["model_version"] == trade_acceptance.ACCEPTANCE_MODEL_VERSION
+    assert estimate["likelihood"] < baseline["acceptance"]["likelihood"]
+    assert estimate["inputs"]["fairness"] == {
+        "our_lineup_gain": result["score"]["our_lineup_gain"],
+        "counterparty_lineup_change": result["score"]["counterparty_lineup_change"],
+        "balance": estimate["inputs"]["fairness"]["balance"],
+    }
+    # A context without the per-call evidence (the candidate job's tests) still estimates.
+    assert "offer_history" in baseline["acceptance"]["unavailable_inputs"]

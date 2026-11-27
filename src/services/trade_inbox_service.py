@@ -336,6 +336,21 @@ def _our_counter(row, names):
     )
 
 
+def incoming_offer_counts(league_id, season):
+    """{proposing team id: distinct ESPN offers they sent us} this season, activity evidence
+    for the acceptance estimate (trade_acceptance)."""
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT counter_offer->>'proposing_team_id', "
+            "count(DISTINCT counter_offer->>'espn_transaction_id') FROM execution_log "
+            "WHERE transaction_type = 'trade_inbox' AND league_id = %s AND season = %s "
+            "AND counter_offer->>'proposing_team_id' IS NOT NULL "
+            "GROUP BY counter_offer->>'proposing_team_id'",
+            (league_id, season),
+        )
+        return {team_id: count for team_id, count in cursor.fetchall()}
+
+
 def list_incoming(
     status="live", visibility="visible", league_id=None, season=None, limit=50, offset=0
 ):

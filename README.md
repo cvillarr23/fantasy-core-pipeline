@@ -505,7 +505,8 @@ has no value, `final_score` is null and takes that component's reasons. A compon
 
 The constants are echoed in `weights`, and `scoring_version` names the formula
 (`trade-score-v2` added `components`, `trade-score-v3` the rest-of-season term R,
-`trade-score-v4` injury timelines, `trade-score-v5` the `roster_spot` component; stored evidence may
+`trade-score-v4` injury timelines, `trade-score-v5` the `roster_spot` component, `trade-score-v6` the
+`acceptance_likelihood` component and `acceptance` block; stored evidence may
 still say an earlier version, and `trade-score-v1` has no `components`).
 `raw_vorp` is `/v1/trade/evaluate`'s result for the as-of week, using the mapped internal
 IDs. Per-week `starters_before`/`starters_after`, `held_slots` and `excluded_players`,
@@ -553,6 +554,10 @@ Injuries (`trade-score-v4`) change each week's lineup inputs, not the formula
   `expected_return_week` and `weeks_out_in_horizon`.
 - Bye outlooks (`/roster`, chat, MCP, waivers) and `bye_coverage` ignore injury timelines
   and keep the old rule.
+`acceptance` estimates how likely the counterparty is to accept, from our outgoing
+offers' outcomes, the manager's trade activity, the G/I balance and ESPN percent owned. It
+ranks candidates (`GET /v1/trade/candidates?sort=expected_score`) and never enters
+`final_score` or a gate. Formula and constants: [trade scoring](docs/decision-pipelines/trade-scoring.md#how-likely-is-the-counterparty-to-accept).
 
 The daily refresher attempts the upcoming week and three following weeks, capped at week 18.
 `draft_prep_refresh --rest-of-season` refreshes the weeks after that horizon through the last
