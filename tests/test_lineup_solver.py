@@ -1096,6 +1096,8 @@ def test_evaluate_lineup_returns_swaps_with_source_and_never_publishes():
     assert swap["decision_inputs"]["source_mode"] == "rolling_prior_weeks"
     assert result["source"]["held_slots"] == ["D/ST", "K"]
     assert {p["player_id"] for p in result["roster_pool"]} >= {"wr_bench", "wr_old"}
+    # The starters the diff ran against, so a swap's moves can name the slot they leave.
+    assert result["current_starters"]["wr_old"]["slot_position"]
 
 
 def test_evaluate_lineup_raises_on_insufficient_input():

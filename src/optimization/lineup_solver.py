@@ -492,7 +492,7 @@ def _slot_key(slot_position: str) -> str:
     return "RB/WR/TE" if base == "FLEX" else base
 
 
-def _worker_slot(slot_position: str) -> str:
+def worker_slot(slot_position: str) -> str:
     """The slot name the browser worker resolves (lineup_slots.json). league_rosters stores
     the flex slot as "RB/WR/TE", which the worker rejects as unrecognised - a permanent
     failure that discards the whole message - so it is published as ESPN's "FLEX"."""
@@ -592,7 +592,7 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
         swaps.append({
             "drop_player_id": end,
             "add_player_id": add_id,
-            "slot": _worker_slot(slot_of[chain[0]]),
+            "slot": worker_slot(slot_of[chain[0]]),
             "matchup_multiplier": matchup_multiplier,
             # CORE-17 (#35): the numbers that justified this swap, for bot_decisions'
             # audit trail. season/week deliberately not included here - this is a pure
@@ -616,9 +616,9 @@ def compute_lineup_swaps(optimal_starters: list, current_starters: dict) -> list
         swap.setdefault("moves", []).append({
             "kind": "move",
             "player_id": pid,
-            "slot": _worker_slot(new_slot),
+            "slot": worker_slot(new_slot),
             "decision_inputs": {
-                "reason": f"frees {_worker_slot(slot_of[pid])} for {optimal_by_id[swap['add_player_id']].get('name', swap['add_player_id'])}",
+                "reason": f"frees {worker_slot(slot_of[pid])} for {optimal_by_id[swap['add_player_id']].get('name', swap['add_player_id'])}",
             },
         })
 
@@ -749,7 +749,8 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int, now: datetime 
     page's swap badge, and rumor bench_watch actions, so all three see the same
     upcoming-week data. A player whose game has kicked off (by `now`, default the current
     time) is locked: a starter keeps his seat, a bench player can't be started.
-    Returns {"swaps", "optimal_starters", "roster_pool", "source"}; raises
+    Returns {"swaps", "optimal_starters", "roster_pool", "source", "current_starters"}
+    (the starters the diff ran against, so a swap's moves can name the slot they leave); raises
     InsufficientLineupInputError when there isn't enough data to decide."""
     now = now or datetime.now(timezone.utc)
     with tracer.start_as_current_span("lineup_solver.load_roster_pool"):
@@ -794,7 +795,7 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int, now: datetime 
 
     if _nothing_left_to_decide(lineup_slot_counts, roster_pool):
         logger.info(f"Every starter seat or pool player for Team {team_id} is locked by kickoff; no swaps to make.")
-        return {"swaps": [], "optimal_starters": [], "roster_pool": roster_pool, "source": source}
+        return {"swaps": [], "optimal_starters": [], "roster_pool": roster_pool, "source": source, "current_starters": {}}
 
     with tracer.start_as_current_span("lineup_solver.build_and_solve_lineup"):
         optimal_starters = build_and_solve_lineup(roster_pool, lineup_slot_counts=lineup_slot_counts, allow_unfilled=True)
@@ -816,7 +817,10 @@ def evaluate_lineup(cursor, team_id: str, season: int, week: int, now: datetime 
         # season/week are lifted into bot_decisions' own columns by the trigger route.
         for entry in (swap, *swap.get("moves", [])):
             entry["decision_inputs"].update(source, season=season, week=week)
-    return {"swaps": swaps, "optimal_starters": optimal_starters, "roster_pool": roster_pool, "source": source}
+    return {
+        "swaps": swaps, "optimal_starters": optimal_starters, "roster_pool": roster_pool, "source": source,
+        "current_starters": current_starters,
+    }
 
 
 def optimize_weekly_lineup(team_id: str, season: int, week: int, dry_run: bool = False) -> int:

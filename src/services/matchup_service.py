@@ -18,6 +18,7 @@ from src.nfl_schedule import WeekResolutionError, require_upcoming_week
 from src.optimization.lineup_solver import (
     InsufficientLineupInputError,
     evaluate_lineup,
+    worker_slot,
 )
 from src.espn_scoring import score_breakdown
 from src.services.live_service import load_rule_points_or_none, player_ids_by_espn_id
@@ -302,8 +303,12 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
     """Read-only: reuses lineup_solver's pregame evaluation to see what the optimizer
     would start, but never publishes - this is a display-only badge, not an action.
     Missing lineup inputs mean no badges (logged), not a failed matchup page. Returns
-    {drop_espn_id: {"bench_for": add_player_name, "add_player_id": add_espn_id}}: the solver
-    works on internal players.player_id, but matchup and roster lines carry ESPN's id."""
+    {drop_espn_id: {"bench_for": add_player_name, "add_player_id": add_espn_id,
+    "slot": slot_the_add_ends_in, "moves": [{"player_id", "name", "from_slot", "to_slot"}]}}.
+    The solver works on internal players.player_id, but matchup and roster lines carry ESPN's
+    id, so every id here is ESPN's and never falls back to an internal one. A chain swap's
+    displaced starters are in `moves` (empty for a plain swap); a swap with any player
+    lacking an ESPN id, name or current slot is skipped whole, since half a chain misleads."""
     try:
         with get_db_cursor() as cursor:
             evaluation = evaluate_lineup(cursor, team_id, season, week)
@@ -316,6 +321,7 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
         return {}
 
     names_by_id = {p["player_id"]: p["name"] for p in evaluation["roster_pool"]}
+    current_starters = evaluation.get("current_starters", {})
     suggestions = {}
     for swap in evaluation["swaps"]:
         drop_espn_id = espn_ids.get(swap["drop_player_id"])
@@ -323,12 +329,35 @@ def suggest_lineup_swaps(team_id: str, season: int, week: int) -> dict:
         if drop_espn_id is None or add_espn_id is None:
             logger.warning(f"Skipping swap badge for player {swap['drop_player_id']} -> {swap['add_player_id']}: no ESPN id")
             continue
-        suggestions[drop_espn_id] = {"bench_for": names_by_id[swap["add_player_id"]], "add_player_id": add_espn_id}
+        moves = []
+        for move in swap.get("moves", []):
+            pid = move["player_id"]
+            if pid not in espn_ids or pid not in names_by_id or pid not in current_starters:
+                moves = None
+                break
+            moves.append({
+                "player_id": espn_ids[pid],
+                "name": names_by_id[pid],
+                "from_slot": worker_slot(current_starters[pid]["slot_position"]),
+                "to_slot": move["slot"],
+            })
+        if moves is None:
+            logger.warning(f"Skipping swap badge for player {swap['drop_player_id']} -> {swap['add_player_id']}: a displaced starter has no ESPN id, name or slot")
+            continue
+        suggestions[drop_espn_id] = {
+            "bench_for": names_by_id[swap["add_player_id"]],
+            "add_player_id": add_espn_id,
+            "slot": swap["slot"],
+            "moves": moves,
+        }
     return suggestions
 
 
 def _swap_player_ids(swaps: list) -> list:
-    return sorted({pid for swap in swaps for pid in (swap["drop_player_id"], swap["add_player_id"])})
+    return sorted({
+        pid for swap in swaps
+        for pid in (swap["drop_player_id"], swap["add_player_id"], *(m["player_id"] for m in swap.get("moves", [])))
+    })
 
 
 def _espn_ids_by_player_id(cursor, player_ids: list) -> dict:
