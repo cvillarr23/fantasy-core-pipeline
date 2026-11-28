@@ -315,7 +315,7 @@ def test_suggest_lineup_swaps_maps_drop_id_to_add_players_name():
          patch("src.optimization.lineup_solver.publish_lineup_swaps") as mock_publish:
         result = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
 
-    assert result == {"5001": {"bench_for": "Better Back", "add_player_id": "5002"}}
+    assert result == {"5001": {"bench_for": "Better Back", "add_player_id": "5002", "slot": "RB", "moves": []}}
     mock_publish.assert_not_called()
     mock_evaluate.assert_called_once_with(cursor, "team1", 2026, 2)
 
@@ -355,7 +355,9 @@ def test_suggest_lineup_swap_lands_on_the_line_with_the_bench_players_espn_id():
         swaps = matchup_service.suggest_lineup_swaps("team1", 2026, 2)
     matchup_service._apply_badges([starter], {}, swaps)
 
-    assert starter["suggested_swap"] == {"bench_for": "Bench Back", "add_player_id": bench["player_id"]}
+    assert starter["suggested_swap"] == {
+        "bench_for": "Bench Back", "add_player_id": bench["player_id"], "slot": "RB", "moves": [],
+    }
 
 
 def test_suggest_lineup_swaps_shows_no_badges_on_insufficient_input(caplog):
@@ -814,3 +816,61 @@ def test_stored_matchup_without_stored_stats_never_reads_the_rules(monkeypatch):
 
     assert result["our_team"]["starters"][0]["breakdown"] is None
     rules.assert_not_called()
+
+
+def test_suggest_lineup_swaps_carries_slot_and_moves_for_a_chain_swap():
+    """2026 W12, team 8: bench Chase Brown (RB) for Brenton Strange (TE) in FLEX, which only
+    works if Tony Pollard moves FLEX -> RB. Internal ids overlap ESPN's id space on purpose
+    ("4430539" is Strange's ESPN id and also Brown's internal id): nothing may be mixed up."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("brown", "4242335"), ("strange", "4430539"), ("pollard", "3916148")]
+    evaluation = {
+        "swaps": [{
+            "drop_player_id": "brown", "add_player_id": "strange", "slot": "FLEX", "matchup_multiplier": 1.0,
+            "moves": [{"kind": "move", "player_id": "pollard", "slot": "RB", "decision_inputs": {}}],
+        }],
+        "roster_pool": [
+            {"player_id": "strange", "name": "Brenton Strange", "position": "TE", "vorp_score": 9.0},
+            {"player_id": "pollard", "name": "Tony Pollard", "position": "RB", "vorp_score": 8.0},
+        ],
+        "current_starters": {
+            "brown": {"position": "RB", "slot_position": "RB1"},
+            "pollard": {"position": "RB", "slot_position": "RB/WR/TE"},
+        },
+        "optimal_starters": [], "source": {},
+    }
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation):
+        result = matchup_service.suggest_lineup_swaps("8", 2026, 12)
+
+    assert result == {"4242335": {
+        "bench_for": "Brenton Strange",
+        "add_player_id": "4430539",
+        "slot": "FLEX",
+        "moves": [{"player_id": "3916148", "name": "Tony Pollard", "from_slot": "FLEX", "to_slot": "RB"}],
+    }}
+
+
+def test_suggest_lineup_swaps_skips_a_chain_whose_displaced_starter_has_no_espn_id(caplog):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("brown", "4242335"), ("strange", "4430539")]
+    evaluation = {
+        "swaps": [{
+            "drop_player_id": "brown", "add_player_id": "strange", "slot": "FLEX", "matchup_multiplier": 1.0,
+            "moves": [{"kind": "move", "player_id": "pollard", "slot": "RB", "decision_inputs": {}}],
+        }],
+        "roster_pool": [
+            {"player_id": "strange", "name": "Brenton Strange", "position": "TE", "vorp_score": 9.0},
+            {"player_id": "pollard", "name": "Tony Pollard", "position": "RB", "vorp_score": 8.0},
+        ],
+        "current_starters": {"pollard": {"position": "RB", "slot_position": "RB/WR/TE"}},
+        "optimal_starters": [], "source": {},
+    }
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)), \
+         patch("src.services.matchup_service.evaluate_lineup", return_value=evaluation):
+        result = matchup_service.suggest_lineup_swaps("8", 2026, 12)
+
+    assert result == {}
+    assert "displaced starter" in caplog.text

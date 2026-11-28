@@ -4772,14 +4772,12 @@
           "suggested_swap": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/SuggestedSwap"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Suggested Swap"
+            ]
           }
         },
         "required": [
@@ -6264,14 +6262,12 @@
           "suggested_swap": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/SuggestedSwap"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Suggested Swap"
+            ]
           }
         },
         "required": [
@@ -9145,6 +9141,79 @@
         "title": "SuggestedResources",
         "type": "object"
       },
+      "SuggestedSwap": {
+        "description": "The solver's lineup hint on the line of the starter it would bench.\n\n`bench_for` is the added player's name, `add_player_id` his ESPN id, `slot` the ESPN slot\nhe ends in, and `moves` the displaced starters (empty for a plain swap). A chain swap is\napplied by benching this line's player, starting the add in `slot`, and re-slotting each\nmove. `slot` is null only for a hint built before the field existed.",
+        "properties": {
+          "add_player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Add Player Id"
+          },
+          "bench_for": {
+            "title": "Bench For",
+            "type": "string"
+          },
+          "moves": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SuggestedSwapMove"
+            },
+            "title": "Moves",
+            "type": "array"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot"
+          }
+        },
+        "required": [
+          "bench_for"
+        ],
+        "title": "SuggestedSwap",
+        "type": "object"
+      },
+      "SuggestedSwapMove": {
+        "description": "A starter who must change slots so the swap's add fits. ESPN ids and ESPN slot names.",
+        "properties": {
+          "from_slot": {
+            "title": "From Slot",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "player_id": {
+            "title": "Player Id",
+            "type": "string"
+          },
+          "to_slot": {
+            "title": "To Slot",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player_id",
+          "name",
+          "from_slot",
+          "to_slot"
+        ],
+        "title": "SuggestedSwapMove",
+        "type": "object"
+      },
       "SwapInstruction": {
         "properties": {
           "add_player_id": {
@@ -11150,6 +11219,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [

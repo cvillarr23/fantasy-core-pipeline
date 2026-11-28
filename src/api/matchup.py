@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.schemas.espn_ownership import EspnOwnership
 from src.schemas.live import GameDetailResponse, LiveBlock, MatchupFeedResponse, ScoreBreakdownLine
+from src.schemas.matchup import SuggestedSwap
 from src.services import live_service
 from src.services.matchup_service import (
     ESPNTimeoutError,
@@ -59,7 +60,7 @@ class PlayerLine(BaseModel):
     breakdown: Optional[List[ScoreBreakdownLine]] = None
     headshot_url: str
     deficit_flag: bool
-    suggested_swap: Optional[dict] = None
+    suggested_swap: Optional[SuggestedSwap] = None
 
 
 class TeamInfo(BaseModel):
@@ -187,7 +188,7 @@ class LineupPlayerLine(BaseModel):
     bye_week: Optional[int] = None
     headshot_url: str
     deficit_flag: bool
-    suggested_swap: Optional[dict] = None
+    suggested_swap: Optional[SuggestedSwap] = None
     net_vorp: Optional[float] = None
     projected_points: Optional[float] = None
     rumor_sentiment: Optional[str] = None
