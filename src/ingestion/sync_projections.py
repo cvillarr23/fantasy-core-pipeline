@@ -72,39 +72,48 @@ def bye_week_player_ids(raw: list) -> set:
 
 
 def build_projection_frame(raw: list) -> pl.DataFrame:
-    """Pure. Shapes the raw Sleeper payload to (player_id, season, week,
-    projected_points), defaulting a missing/null scoring field to 0.0.
+    """Pure. Shapes the raw Sleeper payload to (player_id, season, week, projected_points,
+    sleeper_projected_points). A missing/null scoring field defaults projected_points to 0.0,
+    as before #462, but leaves sleeper_projected_points NULL: Sleeper has no number, and the
+    consensus must not average ESPN's projection with a made-up 0.
 
     Bye-week players get no row, never a 0.0 one, matching sync_kicker_dst: lineup,
     waiver and trade code read a missing row as "on bye", while a 0.0 row looks like a
     startable player with a negative VORP."""
-    schema = {"player_id": pl.Utf8, "season": pl.Int64, "week": pl.Int64, "projected_points": pl.Float64}
+    schema = {
+        "player_id": pl.Utf8, "season": pl.Int64, "week": pl.Int64,
+        "projected_points": pl.Float64, "sleeper_projected_points": pl.Float64,
+    }
     records = []
     for row in raw:
         if _is_bye_row(row):
             continue
-        stats = row.get("stats") or {}
+        points = (row.get("stats") or {}).get(SCORING_FIELD)
         records.append({
             "player_id": row.get("player_id"),
             "season": int(row["season"]) if row.get("season") is not None else None,
             "week": row.get("week"),
-            "projected_points": stats.get(SCORING_FIELD) if stats.get(SCORING_FIELD) is not None else 0.0,
+            "projected_points": points if points is not None else 0.0,
+            "sleeper_projected_points": points,
         })
     return pl.DataFrame(records, schema=schema)
 
 
 def persist_projections(conn, frame: pl.DataFrame, known_player_ids: set) -> int:
     """
-    Upsert that touches only sleeper_projected_points (and projected_points on insert), so
-    CORE-04's advanced-metric columns are never clobbered - the mirror image of
-    metrics_extractor's UPSERT_COLUMNS discipline. projected_points is then recomputed as
-    the ESPN+Sleeper consensus (src/projection_consensus.py), so a row ESPN has already
-    projected keeps its ESPN half.
+    Upsert that touches only the projection columns, so CORE-04's advanced-metric columns are
+    never clobbered - the mirror image of metrics_extractor's UPSERT_COLUMNS discipline.
+    projected_points is then recomputed as the ESPN+Sleeper consensus
+    (src/projection_consensus.py), so a row ESPN has already projected keeps its ESPN half.
+
+    A row Sleeper lists without a number gets sleeper_projected_points NULL and exactly its
+    pre-#462 projected_points (0.0). Its ESPN value is cleared too: sync_espn_projections only
+    blends into rows Sleeper projected, and a kept ESPN value would make the row ESPN-only.
     Filtered to player_ids already present in `players` (FK + implicitly excludes K/DEF,
     which sync_players never inserts).
     """
     rows = [
-        (r["player_id"], r["season"], r["week"], r["projected_points"], r["projected_points"])
+        (r["player_id"], r["season"], r["week"], r["sleeper_projected_points"], r["projected_points"])
         for r in frame.iter_rows(named=True)
         if r["player_id"] in known_player_ids
     ]
@@ -114,7 +123,11 @@ def persist_projections(conn, frame: pl.DataFrame, known_player_ids: set) -> int
         INSERT INTO weekly_stats (player_id, season, week, sleeper_projected_points, projected_points)
         VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (player_id, season, week) DO UPDATE SET
-            sleeper_projected_points = EXCLUDED.sleeper_projected_points;
+            sleeper_projected_points = EXCLUDED.sleeper_projected_points,
+            espn_projected_points = CASE WHEN EXCLUDED.sleeper_projected_points IS NULL
+                THEN NULL ELSE weekly_stats.espn_projected_points END,
+            projected_points = CASE WHEN EXCLUDED.sleeper_projected_points IS NULL
+                THEN EXCLUDED.projected_points ELSE weekly_stats.projected_points END;
     """
     player_ids_by_week = {}
     for player_id, season, week, _, _ in rows:

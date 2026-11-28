@@ -22,7 +22,8 @@ flowchart TD
     subgraph Ingestion
         SP[sync_players] --> SL[sync_league]
         SL --> SPR[sync_projections]
-        SPR --> ME[metrics_extractor]
+        SPR -->|"Sleeper half"| SEP[sync_espn_projections]
+        SEP -->|"consensus projected_points"| ME[metrics_extractor]
     end
 
     ME --> VM["CORE-05: vorp_matrix<br/>(batch VORP + scarcity)"]

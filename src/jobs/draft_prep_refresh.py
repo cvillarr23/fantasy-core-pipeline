@@ -9,6 +9,8 @@ order with a shared 600-second budget.
 - Without it, every week of the horizon (the upcoming week and up to three more) is processed
   in turn: a failed target week stops the run, while a later failed week skips its remaining
   stages and allows the rest of the horizon to refresh.
+- A failed ESPN skill-projection stage (``OPTIONAL_STAGES``) is logged and skipped, so the week
+  still runs vorp_matrix on the Sleeper fallback.
 - With ``--rest-of-season`` it refreshes the weeks after that horizon through the league's last
   fantasy playoff week (``league_settings.playoff_settings``, synced by sync_league), in turn,
   for the trade score's rest-of-season term (#328). A failed week doesn't stop the later ones.
@@ -38,6 +40,12 @@ STAGES = (
     "src.ingestion.sync_espn_projections",
     "src.optimization.vorp_matrix",
 )
+# Stages whose failure is logged and skipped rather than failing the week. The consensus
+# falls back to Sleeper when ESPN's half is missing or stale, and vorp_matrix must still run
+# after sync_projections, or projected_points would be newer than vorp_score. Each gets at
+# most OPTIONAL_STAGE_BUDGET_SECONDS, so it can't eat vorp_matrix's share of the week budget.
+OPTIONAL_STAGES = frozenset({"src.ingestion.sync_espn_projections"})
+OPTIONAL_STAGE_BUDGET_SECONDS = 180
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -156,15 +164,22 @@ def _refresh_week(season: int, week: int) -> bool:
             "Starting season=%s week=%s stage=%s budget_remaining=%.1fs",
             season, week, stage, remaining,
         )
+        optional = stage in OPTIONAL_STAGES
         try:
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(stage, WEEK_BUDGET_SECONDS)
             subprocess.run(
                 [sys.executable, "-u", "-m", stage, "--season", str(season), "--week", str(week)],
                 check=True,
-                timeout=remaining,
+                timeout=min(remaining, OPTIONAL_STAGE_BUDGET_SECONDS) if optional else remaining,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            if optional and remaining > 0:
+                logger.warning(
+                    "Skipped optional season=%s week=%s stage=%s elapsed=%.1fs: %s",
+                    season, week, stage, time.monotonic() - stage_started, exc,
+                )
+                continue
             logger.error(
                 "Failed season=%s week=%s stage=%s elapsed=%.1fs: %s",
                 season, week, stage, time.monotonic() - stage_started, exc,

@@ -206,7 +206,10 @@
   source column, then calls `projection_consensus.recompute_consensus` in the same transaction,
   which leaves rows with neither source alone. `sync_espn_projections` (QB/RB/WR/TE, by
   `players.espn_id` only, after `sync_projections` in draft_prep_refresh) only UPDATEs rows
-  Sleeper wrote, so row existence and the free-agent baseline pool stay Sleeper's. Matchup
+  with `sleeper_projected_points IS NOT NULL`, so row existence and the free-agent baseline
+  pool stay Sleeper's. A Sleeper row with no number stores NULL there, never 0.0. An empty or
+  short ESPN position fails the sync before any write, and draft_prep_refresh's
+  `OPTIONAL_STAGES` logs that failure and still runs `vorp_matrix`. Matchup
   and roster lines serve the stored consensus plus `projection_sources`, looked up by
   `players.espn_id`. Trade-score formulas didn't change, so `SCORING_VERSION` didn't either.
 

@@ -133,3 +133,28 @@ def test_vorp_matrix_reads_the_consensus(postgres):
         adjusted = dict(cursor.fetchall())
     # No implied totals, so matchup_coefficient is 1.0 and adjusted == consensus.
     assert adjusted == {"qb1": 18.0, "wr1": 15.0, "wr2": 12.0}
+
+
+def test_espn_skips_rows_without_a_sleeper_value(postgres):
+    """A metrics-only or pre-#462 row (projected_points 0.0, no Sleeper source) never becomes
+    ESPN-only, even when the schedule's bye map is empty."""
+    _seed_players(postgres)
+    with postgres, postgres.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO weekly_stats (player_id, season, week, targets) VALUES ('wr2', %s, %s, 4);",
+            (SEASON, WEEK),
+        )
+    _espn(postgres, [("wr2", 25.0)])
+    assert _rows(postgres) == {"wr2": (None, None, 0.0)}
+
+
+def test_a_missing_sleeper_number_keeps_the_pre_consensus_zero(postgres):
+    """Sleeper lists the player without a number: the Sleeper source is NULL (not 0.0), ESPN's
+    half is cleared, and projected_points is the same 0.0 it was before #462."""
+    _seed_players(postgres)
+    _sleeper(postgres, {"qb1": 20.0})
+    _espn(postgres, [("qb1", 14.0)])
+    assert _rows(postgres)["qb1"] == (14.0, 20.0, 17.0)
+
+    _sleeper(postgres, {"qb1": None})
+    assert _rows(postgres)["qb1"] == (None, None, 0.0)

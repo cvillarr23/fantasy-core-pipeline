@@ -531,7 +531,9 @@ ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_updated_at TIMES
 # Per-source projections behind the consensus projected_points (#462): see
 # src/projection_consensus.py. Nullable with no DEFAULT: NULL means "this source has no
 # projection for the week", which the consensus skips. Pre-existing rows are not backfilled,
-# so they keep their projected_points with both sources NULL until a sync rewrites them.
+# so they keep their projected_points with both sources NULL until a sync rewrites them. None
+# is needed: sync_projections runs first in each week's draft_prep_refresh stages and fills the
+# Sleeper column, and sync_espn_projections only touches rows whose Sleeper column is set.
 ADD_WEEKLY_STATS_PROJECTION_SOURCE_COLUMNS = """
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS sleeper_projected_points REAL;
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS espn_projected_points REAL;

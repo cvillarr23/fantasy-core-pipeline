@@ -62,8 +62,10 @@ def test_persist_projections_writes_only_the_sleeper_source_on_conflict():
 
     query = mock_cursor.executemany.call_args.args[0]
     set_clause = " ".join(query.split("DO UPDATE SET", 1)[1].split())
-    assert set_clause == "sleeper_projected_points = EXCLUDED.sleeper_projected_points;"
-    assert "espn_projected_points" not in query
+    assert set_clause.startswith("sleeper_projected_points = EXCLUDED.sleeper_projected_points,")
+    # ESPN's half and projected_points change only when Sleeper has no number (see below).
+    assert "ELSE weekly_stats.espn_projected_points END" in set_clause
+    assert "ELSE weekly_stats.projected_points END" in set_clause
     assert "vorp_score" not in query
     assert "actual_points" not in query
     assert mock_cursor.executemany.call_args.args[1] == [("4046", 2024, 1, 16.31, 16.31)]
@@ -155,3 +157,23 @@ def test_delete_bye_week_projections_skips_the_query_with_no_byes():
 
     assert sp.delete_bye_week_projections(mock_conn, 2026, 7, set()) == 0
     mock_conn.cursor.assert_not_called()
+
+
+def test_a_missing_sleeper_number_is_stored_as_null_not_zero():
+    """A Sleeper row without a number keeps projected_points at the pre-#462 0.0, but the
+    Sleeper source is NULL, so the consensus never averages ESPN with a made-up 0."""
+    frame = sp.build_projection_frame([_proj_row(pts_ppr=None)])
+    row = frame.row(0, named=True)
+    assert row["projected_points"] == 0.0
+    assert row["sleeper_projected_points"] is None
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    sp.persist_projections(mock_conn, frame, known_player_ids={"4046"})
+
+    query, rows = mock_cursor.executemany.call_args.args
+    assert rows == [("4046", 2024, 1, None, 0.0)]
+    set_clause = " ".join(query.split("DO UPDATE SET", 1)[1].split())
+    assert "espn_projected_points = CASE WHEN EXCLUDED.sleeper_projected_points IS NULL THEN NULL" in set_clause
+    assert "projected_points = CASE WHEN EXCLUDED.sleeper_projected_points IS NULL THEN EXCLUDED.projected_points" in set_clause

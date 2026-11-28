@@ -33,7 +33,7 @@ def test_main_shares_a_600_second_budget_across_stages(monkeypatch):
          patch.object(job.subprocess, "run") as run:
         assert job.main() == 0
 
-    assert [c.kwargs["timeout"] for c in run.call_args_list] == [599, 590, 580, 570]
+    assert [c.kwargs["timeout"] for c in run.call_args_list] == [599, 590, job.OPTIONAL_STAGE_BUDGET_SECONDS, 570]
 
 
 def test_main_fails_a_week_when_its_shared_budget_is_exhausted(monkeypatch):
@@ -271,3 +271,22 @@ def test_espn_projections_run_after_sleeper_and_before_vorp():
     stages = list(job.STAGES)
     assert stages.index("src.ingestion.sync_projections") < stages.index("src.ingestion.sync_espn_projections")
     assert stages.index("src.ingestion.sync_espn_projections") < stages.index("src.optimization.vorp_matrix")
+
+
+@pytest.mark.parametrize("failure", [subprocess.CalledProcessError(1, "stage"), subprocess.TimeoutExpired("stage", 180)])
+def test_a_failed_espn_stage_still_runs_vorp_matrix(monkeypatch, failure):
+    """The consensus falls back to Sleeper, so an ESPN failure never blocks the week's VORP."""
+    monkeypatch.setenv("CURRENT_YEAR", "2026")
+    espn_stage = job.STAGES.index("src.ingestion.sync_espn_projections")
+
+    def run(cmd, **kwargs):
+        if cmd[3] == "src.ingestion.sync_espn_projections":
+            raise failure
+
+    with patch.object(job, "resolve_upcoming_week", return_value=7), \
+         patch.object(job.subprocess, "run", side_effect=run) as mock_run:
+        assert job.main(["--week-offset", "0"]) == 0
+
+    stages = [c.args[0][3] for c in mock_run.call_args_list]
+    assert stages == list(job.STAGES)
+    assert stages[espn_stage + 1:] == ["src.optimization.vorp_matrix"]

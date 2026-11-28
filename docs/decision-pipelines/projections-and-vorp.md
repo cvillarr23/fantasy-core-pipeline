@@ -65,11 +65,16 @@ The resolver chooses the earliest regular-season week with an unfinished game. A
 | Situation | `projected_points` |
 | --- | --- |
 | Both sources | Their mean |
-| Sleeper only (the ESPN sync hasn't run, or ESPN didn't return the player) | Sleeper's value |
+| Sleeper only (the ESPN sync hasn't run or failed, or ESPN didn't return the player) | Sleeper's value |
+| Sleeper lists the player without a number | 0.0, as before #462; both sources are NULL |
 | ESPN only (K and D/ST) | ESPN's value |
 | Neither source (rows from before #462, metrics-only and backtest rows) | Left as it was |
 
-`sync_espn_projections` only updates rows Sleeper already wrote. It never inserts one, so which players have a row (and "no row means bye") stays Sleeper's call, and the free-agent replacement pool doesn't grow. A player ESPN doesn't project that week, or whose team is on bye per the NFL schedule, gets `espn_projected_points = NULL` and falls back to Sleeper. Players are matched by `players.espn_id` only.
+`sync_espn_projections` only updates rows with a Sleeper value (`sleeper_projected_points IS NOT NULL`). It never inserts one, so which players have a row (and "no row means bye") stays Sleeper's call, and the free-agent replacement pool doesn't grow. A player ESPN doesn't project that week, or whose team is on bye per the NFL schedule, gets `espn_projected_points = NULL` and falls back to Sleeper. Players are matched by `players.espn_id` only.
+
+The ESPN stage is optional in the refresh. It fetches one position at a time with a 30-second request timeout, and an empty or short position (fewer than 32 QB, 64 RB, 96 WR or 32 TE) fails the run before anything is written, so a bad response never clears stored ESPN values. The refresh logs a failed or timed-out ESPN stage (capped at 180 seconds) and still runs `vorp_matrix` on the Sleeper fallback.
+
+On the first run after deploy, every horizon week's skill rows are rewritten once (`projected_points` moves from Sleeper's value to the mean), and that week's `vorp_matrix` shifts VORP to match. Nothing needs a manual fix: lineups, waivers and the matchup page read the new values directly, and trade scores and trade candidates built on Sleeper-only values are recomputed on the next scan.
 
 The ESPN market multiplier (`ESPN_MARKET_WEIGHT`) is unchanged and still applies after the baseline, to `vorp_base`. ESPN's view now enters twice: as half of the projection, and as the start% adjustment. The two are separate signals (ESPN's model and managers' start decisions), and the weight bounds the second one.
 
