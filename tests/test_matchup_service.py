@@ -185,6 +185,7 @@ def test_shape_lineup_player_line_maps_roster_player_fields():
         "suggested_swap": None,
         "net_vorp": None,
         "projected_points": None,
+        "projection_sources": None,
         "rumor_sentiment": None,
         "rumor_confidence": None,
         "rumor_suggested_action": None,
@@ -211,16 +212,19 @@ def test_split_roster_starters_bench_separates_by_lineup_slot():
 
 def test_load_weekly_metrics_by_espn_id_maps_query_rows():
     cursor = MagicMock()
-    cursor.fetchall.return_value = [("100", 12.5, 18.2), ("200", None, 7.5), ("300", None, None), ("400", -3.2, 0.0)]
+    cursor.fetchall.return_value = [
+        ("100", 12.5, 18.2, 20.0, 16.4), ("200", None, 7.5, None, 7.5),
+        ("300", None, None, None, None), ("400", -3.2, 0.0, 0.0, None),
+    ]
 
     with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
         result = matchup_service._load_weekly_metrics_by_espn_id(season=2026, week=2, team_id="8")
 
     assert result == {
-        "100": {"net_vorp": 12.5, "projected_points": 18.2},
-        "200": {"net_vorp": None, "projected_points": 7.5},
-        "300": {"net_vorp": None, "projected_points": None},
-        "400": {"net_vorp": -3.2, "projected_points": 0.0},
+        "100": {"net_vorp": 12.5, "projected_points": 18.2, "projection_sources": {"espn": 20.0, "sleeper": 16.4}},
+        "200": {"net_vorp": None, "projected_points": 7.5, "projection_sources": {"espn": None, "sleeper": 7.5}},
+        "300": {"net_vorp": None, "projected_points": None, "projection_sources": None},
+        "400": {"net_vorp": -3.2, "projected_points": 0.0, "projection_sources": {"espn": 0.0, "sleeper": None}},
     }
     query = " ".join(cursor.execute.call_args[0][0].split())
     assert "LEFT JOIN weekly_stats" in query
@@ -814,3 +818,107 @@ def test_stored_matchup_without_stored_stats_never_reads_the_rules(monkeypatch):
 
     assert result["our_team"]["starters"][0]["breakdown"] is None
     rules.assert_not_called()
+
+
+def _live_matchup_box():
+    return _make_box_score(
+        home_team=_make_team(team_id=8),
+        away_team=_make_team(team_id=9),
+        home_lineup=[
+            _make_box_player(playerId=1, slot_position="WR", projected_points=19.0),
+            _make_box_player(playerId=3, slot_position="BE", projected_points=6.0),
+        ],
+        away_lineup=[_make_box_player(playerId=2, slot_position="QB", projected_points=21.0)],
+    )
+
+
+def _get_live_matchup(box):
+    league = MagicMock()
+    league.box_scores.return_value = [box]
+    with patch("src.services.matchup_service.build_league", return_value=league), \
+         patch("src.services.matchup_service.compute_roster_deficits", return_value={"teams": {}}), \
+         patch("src.services.matchup_service.suggest_lineup_swaps", return_value={}):
+        return matchup_service.get_current_team_matchup(season=2026, week=13)
+
+
+def test_matchup_lines_serve_the_consensus_projection_on_both_sides(monkeypatch):
+    """The displayed projection is the stored consensus the swap badge ranks by (#462). A
+    player with no stored source keeps ESPN's box-score projection; ESPN's team total is
+    untouched."""
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+    requested = {}
+
+    def consensus(espn_ids, season, week):
+        requested.update(espn_ids=espn_ids, season=season, week=week)
+        return {
+            "1": {"projected_points": 16.5, "projection_sources": {"espn": 18.0, "sleeper": 15.0}},
+            "2": {"projected_points": 20.0, "projection_sources": {"espn": None, "sleeper": 20.0}},
+        }
+
+    monkeypatch.setattr(matchup_service, "_load_consensus_projections_by_espn_id", consensus)
+
+    result = _get_live_matchup(_live_matchup_box())
+
+    assert requested == {"espn_ids": ["1", "2", "3"], "season": 2026, "week": 13}
+    ours = result["our_team"]
+    assert ours["starters"][0]["projected_points"] == 16.5
+    assert ours["starters"][0]["projection_sources"] == {"espn": 18.0, "sleeper": 15.0}
+    assert ours["bench"][0]["projected_points"] == 6.0
+    assert ours["bench"][0]["projection_sources"] is None
+    assert result["opponent"]["starters"][0]["projected_points"] == 20.0
+    assert ours["team"]["projected"] == _live_matchup_box().home_projected
+
+
+def test_matchup_keeps_box_projections_when_the_consensus_cannot_be_read(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+
+    def broken(espn_ids, season, week):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(matchup_service, "_load_consensus_projections_by_espn_id", broken)
+
+    result = _get_live_matchup(_live_matchup_box())
+
+    assert [line["projected_points"] for line in result["our_team"]["starters"]] == [19.0]
+    assert result["our_team"]["starters"][0]["projection_sources"] is None
+
+
+def test_stored_matchup_lines_serve_the_consensus_projection(monkeypatch):
+    monkeypatch.setenv("ESPN_TEAM_ID", "8")
+    monkeypatch.setattr(matchup_service, "player_ids_by_espn_id", lambda espn_ids: {})
+    monkeypatch.setattr(
+        matchup_service, "_load_consensus_projections_by_espn_id",
+        lambda espn_ids, season, week: {"1": {"projected_points": 12.0, "projection_sources": {"espn": 12.0, "sleeper": None}}},
+    )
+    ours = {"player_id": "1", "espn_id": "1", "projected_points": 14.0}
+    theirs = {"player_id": "2", "espn_id": "2", "projected_points": 9.0}
+    monkeypatch.setattr(
+        matchup_service, "load_completed_week",
+        lambda season, week: [_stored_side("8", "9", ours), _stored_side("9", "8", theirs)],
+    )
+
+    result = matchup_service.get_current_team_matchup(season=2026, week=12)
+
+    assert result["our_team"]["starters"][0]["projected_points"] == 12.0
+    assert result["opponent"]["starters"][0]["projected_points"] == 9.0
+    assert result["opponent"]["starters"][0]["projection_sources"] is None
+
+
+def test_consensus_lookup_matches_lines_by_espn_id_only():
+    """A line's player_id is ESPN's id, which can equal an unrelated players.player_id; the
+    lookup must go through players.espn_id and key its result by it."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(4046, 16.5, 18.0, 15.0)]
+
+    with patch("src.services.matchup_service.get_db_cursor", lambda: _fake_db_cursor(cursor)):
+        result = matchup_service._load_consensus_projections_by_espn_id(["4046"], season=2026, week=13)
+
+    assert result == {"4046": {"projected_points": 16.5, "projection_sources": {"espn": 18.0, "sleeper": 15.0}}}
+    query, params = cursor.execute.call_args.args
+    query = " ".join(query.split())
+    assert "WHERE p.espn_id = ANY(%s)" in query
+    assert "s.player_id = p.player_id" in query
+    assert "p.player_id = ANY" not in query
+    assert params == (2026, 13, ["4046"])

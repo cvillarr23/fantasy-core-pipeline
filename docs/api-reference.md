@@ -233,7 +233,7 @@ Use `game_status` to tell an unplayed player from a real 0.0:
 - **Live and current weeks** (read from ESPN's box score): both are always numbers. ESPN reports 0.0 for a player whose game hasn't started, so `points: 0.0` with `game_status: not_started` means "not played yet", not "scored nothing". Show a dash.
 - **Stored completed weeks**: `null` means ESPN's history had no value, which is unknown, never zero. A starter on a bye is a true 0.0.
 
-`projected_points` on a player is ESPN's static pregame projection. It doesn't move during the game.
+`projected_points` on a player is the stored ESPN+Sleeper consensus for the week, the same number the lineup optimizer ranks by, with the per-source split in `projection_sources: {espn, sleeper}` (either can be null). A player with no stored projection keeps ESPN's box-score projection, with `projection_sources: null`. Neither moves during the game. `GET /v1/matchup/roster` lines carry the same two fields (`null` when the week has no stored projection).
 
 ### Team `projected` is live
 

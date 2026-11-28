@@ -102,7 +102,7 @@ def test_persist_projections_writes_week_scoped_points():
     assert written == 1
     query, rows = mock_cursor.executemany.call_args.args
     assert "ON CONFLICT (player_id, season, week)" in query
-    assert rows == [("HOU", 2026, 1, 7.25, "HOU")]
+    assert rows == [("HOU", 2026, 1, 7.25, 7.25, "HOU")]
 
 
 def test_persist_projections_writes_team_so_the_pool_query_never_sees_a_null(): # noqa: E501
@@ -120,7 +120,7 @@ def test_persist_projections_writes_team_so_the_pool_query_never_sees_a_null(): 
     query, rows = mock_cursor.executemany.call_args.args
     assert "team" in query
     # ESPN's "WSH" normalized to Sleeper/this repo's "WAS" - same mismatch match_dst_espn_ids handles.
-    assert rows == [("WAS", 2026, 1, 6.5, "WAS")]
+    assert rows == [("WAS", 2026, 1, 6.5, 6.5, "WAS")]
 
 
 def test_persist_projections_skips_players_with_no_projection_for_the_week():
@@ -137,7 +137,7 @@ def test_persist_projections_skips_players_with_no_projection_for_the_week():
 
     assert written == 1
     _, rows = mock_cursor.executemany.call_args.args
-    assert rows == [("SF", 2026, 2, 5.5, "SF")]
+    assert rows == [("SF", 2026, 2, 5.5, 5.5, "SF")]
 
 
 def test_persist_projections_deletes_an_earlier_runs_row_once_espn_drops_the_projection():
@@ -276,8 +276,8 @@ def test_sync_kicker_dst_writes_target_week_projections_for_rostered_kicker_and_
     espn_id_call, projection_call = mock_cursor.executemany.call_args_list
     assert sorted(espn_id_call.args[1]) == [("-16021", "PHI"), ("4567104", "11792")]
     assert sorted(projection_call.args[1]) == [
-        ("11792", 2026, week, 8.4, "MIN"),
-        ("PHI", 2026, week, 7.0, "PHI"),
+        ("11792", 2026, week, 8.4, 8.4, "MIN"),
+        ("PHI", 2026, week, 7.0, 7.0, "PHI"),
     ]
 
 
@@ -296,6 +296,24 @@ def test_persist_projections_treats_espns_zero_point_bye_projection_as_none():
 
     assert written == 1
     _, rows = mock_cursor.executemany.call_args.args
-    assert rows == [("SF", 2026, 6, 5.5, "SF")]
+    assert rows == [("SF", 2026, 6, 5.5, 5.5, "SF")]
     _, params = mock_cursor.execute.call_args.args
     assert params == (["k1"], 2026, 6)
+
+
+def test_persist_projections_writes_the_espn_source_and_recomputes_the_consensus():
+    """ESPN's value goes to espn_projected_points; projected_points is the consensus, which
+    for K/D-ST (no Sleeper source) is ESPN's value."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    espn_player = _espn_player("Houston D/ST", "HOU", -16034, week=1, projected_points=7.25)
+
+    with patch("src.ingestion.sync_kicker_dst.recompute_consensus") as recompute:
+        skd.persist_projections(mock_conn, [("HOU", espn_player)], season=2026, week=1)
+
+    query, _ = mock_cursor.executemany.call_args.args
+    set_clause = " ".join(query.split("DO UPDATE SET", 1)[1].split())
+    assert set_clause == "espn_projected_points = EXCLUDED.espn_projected_points, team = EXCLUDED.team;"
+    assert "sleeper_projected_points" not in query
+    recompute.assert_called_once_with(mock_cursor, 2026, 1, ["HOU"])

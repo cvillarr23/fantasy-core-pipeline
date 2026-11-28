@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS weekly_stats (
     opponent_moneyline INT,
     team_implied_total REAL,
     projected_points REAL DEFAULT 0.0,
+    sleeper_projected_points REAL,
+    espn_projected_points REAL,
     actual_points REAL DEFAULT 0.0,
     vorp_score REAL DEFAULT 0.0,
     PRIMARY KEY (player_id, season, week)
@@ -524,6 +526,15 @@ CREATE TABLE IF NOT EXISTS bot_decisions (
 ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS = """
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_source VARCHAR(80);
 ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS actual_points_updated_at TIMESTAMPTZ;
+"""
+
+# Per-source projections behind the consensus projected_points (#462): see
+# src/projection_consensus.py. Nullable with no DEFAULT: NULL means "this source has no
+# projection for the week", which the consensus skips. Pre-existing rows are not backfilled,
+# so they keep their projected_points with both sources NULL until a sync rewrites them.
+ADD_WEEKLY_STATS_PROJECTION_SOURCE_COLUMNS = """
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS sleeper_projected_points REAL;
+ALTER TABLE weekly_stats ADD COLUMN IF NOT EXISTS espn_projected_points REAL;
 """
 
 CREATE_FANTASY_SCORE_HISTORY_TABLES = """

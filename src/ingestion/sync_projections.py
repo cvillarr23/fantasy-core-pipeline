@@ -1,7 +1,8 @@
 """
-Syncs Sleeper's weekly fantasy projections into weekly_stats.projected_points. Nothing
-else populated projected_points before this module existed, so every VORP score computed
-against this column previously ran against the `0.0` DEFAULT.
+Syncs Sleeper's weekly fantasy projections into weekly_stats.sleeper_projected_points, and
+recomputes projected_points as the ESPN+Sleeper consensus (#462, src/projection_consensus.py).
+Nothing else populated projected_points before this module existed, so every VORP score
+computed against this column previously ran against the `0.0` DEFAULT.
 """
 import argparse
 import logging
@@ -10,6 +11,7 @@ import polars as pl
 import requests
 
 from src.database import get_db_connection
+from src.projection_consensus import recompute_consensus
 from src.services import run_log_service
 
 logger = logging.getLogger("ProjectionsSync")
@@ -93,25 +95,34 @@ def build_projection_frame(raw: list) -> pl.DataFrame:
 
 def persist_projections(conn, frame: pl.DataFrame, known_player_ids: set) -> int:
     """
-    Upsert that touches only projected_points, so CORE-04's advanced-metric columns are
-    never clobbered - the mirror image of metrics_extractor's UPSERT_COLUMNS discipline.
+    Upsert that touches only sleeper_projected_points (and projected_points on insert), so
+    CORE-04's advanced-metric columns are never clobbered - the mirror image of
+    metrics_extractor's UPSERT_COLUMNS discipline. projected_points is then recomputed as
+    the ESPN+Sleeper consensus (src/projection_consensus.py), so a row ESPN has already
+    projected keeps its ESPN half.
     Filtered to player_ids already present in `players` (FK + implicitly excludes K/DEF,
     which sync_players never inserts).
     """
     rows = [
-        (r["player_id"], r["season"], r["week"], r["projected_points"])
+        (r["player_id"], r["season"], r["week"], r["projected_points"], r["projected_points"])
         for r in frame.iter_rows(named=True)
         if r["player_id"] in known_player_ids
     ]
     if not rows:
         return 0
     upsert_query = """
-        INSERT INTO weekly_stats (player_id, season, week, projected_points)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (player_id, season, week) DO UPDATE SET projected_points = EXCLUDED.projected_points;
+        INSERT INTO weekly_stats (player_id, season, week, sleeper_projected_points, projected_points)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (player_id, season, week) DO UPDATE SET
+            sleeper_projected_points = EXCLUDED.sleeper_projected_points;
     """
+    player_ids_by_week = {}
+    for player_id, season, week, _, _ in rows:
+        player_ids_by_week.setdefault((season, week), []).append(player_id)
     with conn.cursor() as cursor:
         cursor.executemany(upsert_query, rows)
+        for (season, week), player_ids in player_ids_by_week.items():
+            recompute_consensus(cursor, season, week, player_ids)
     return len(rows)
 
 
@@ -148,7 +159,7 @@ def sync_projections(season: int, week: int) -> int:
     if removed:
         logger.info(f"Removed {removed} stale projection row(s) for players on bye in week {week}.")
 
-    logger.info(f"Persisted {written} projected_points row(s) for {season} week {week}.")
+    logger.info(f"Persisted {written} Sleeper projection row(s) for {season} week {week}.")
     return written
 
 

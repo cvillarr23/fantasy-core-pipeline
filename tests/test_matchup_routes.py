@@ -179,8 +179,8 @@ def test_roster_current_week_projections_with_real_service(client, monkeypatch):
     # NULL from a missing weekly row or a NULL column stays unknown; an unmapped
     # live ESPN player (5) is absent from these database results altogether.
     cursor.fetchall.side_effect = [
-        [("1", 4.0, 15.5), ("2", None, 9.2), ("3", None, None),
-         ("4", None, None), ("6", 0.0, 0.0)],
+        [("1", 4.0, 15.5, 16.0, 15.0), ("2", None, 9.2, None, 9.2), ("3", None, None, None, None),
+         ("4", None, None, None, None), ("6", 0.0, 0.0, None, 0.0)],
         [("p1", "1"), ("p2", "2")],  # roster player_id -> espn_id
         [("p1", 5, 90.0, 75.0, 1.0)],  # ownership: only player 1 has a row
         [],  # rumor signals
@@ -199,6 +199,8 @@ def test_roster_current_week_projections_with_real_service(client, monkeypatch):
     assert [p["projected_points"] for p in body["starters"]] == [15.5, None]
     assert [p["projected_points"] for p in body["bench"]] == [9.2, None, None, 0.0]
     assert body["bench"][0]["net_vorp"] is None
+    assert body["starters"][0]["projection_sources"] == {"espn": 16.0, "sleeper": 15.0}
+    assert body["starters"][1]["projection_sources"] is None
     assert [p["core_player_id"] for p in body["starters"]] == ["p1", None]
     assert body["starters"][0]["espn"] == {
         "pos_rank": 5, "percent_owned": 90.0, "percent_started": 75.0,

@@ -47,6 +47,7 @@ from src.models import (
     CREATE_PLAYER_INJURIES_TABLE,
     CREATE_INDICES,
     ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS,
+    ADD_WEEKLY_STATS_PROJECTION_SOURCE_COLUMNS,
     CREATE_FANTASY_SCORE_HISTORY_TABLES,
 )
 
@@ -73,6 +74,7 @@ def run_migrations():
             cursor.execute(ADD_WEEKLY_STATS_VORP_COLUMNS)
             cursor.execute(ADD_WEEKLY_STATS_DEFENSE_MATCHUP_COLUMN)
             cursor.execute(ADD_WEEKLY_STATS_ACTUAL_SOURCE_COLUMNS)
+            cursor.execute(ADD_WEEKLY_STATS_PROJECTION_SOURCE_COLUMNS)
             cursor.execute(MIGRATE_WEEKLY_STATS_PK_ADD_SEASON)
             # MIGRATE_WEEKLY_STATS_PK_ADD_SEASON silently skips (via a Postgres NOTICE, not
             # an error) if pre-existing rows have a NULL season. If that happened, the CORE-04

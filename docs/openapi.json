@@ -4732,6 +4732,16 @@
             ],
             "title": "Projected Points"
           },
+          "projection_sources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProjectionSources"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rumor_confidence": {
             "anyOf": [
               {
@@ -6257,6 +6267,16 @@
             ],
             "title": "Projected Points"
           },
+          "projection_sources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProjectionSources"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "slot": {
             "title": "Slot",
             "type": "string"
@@ -6597,6 +6617,35 @@
           "room_url"
         ],
         "title": "PracticeSyncJobRequest",
+        "type": "object"
+      },
+      "ProjectionSources": {
+        "description": "weekly_stats' stored per-source projections; `projected_points` is the mean of the\nnon-null ones. None means that source has no projection for the week (or hasn't synced).",
+        "properties": {
+          "espn": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Espn"
+          },
+          "sleeper": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sleeper"
+          }
+        },
+        "title": "ProjectionSources",
         "type": "object"
       },
       "ProposalEvaluation": {

@@ -29,11 +29,11 @@ def test_main_runs_all_stages_for_target_through_four_week_horizon(monkeypatch):
 def test_main_shares_a_600_second_budget_across_stages(monkeypatch):
     monkeypatch.setenv("CURRENT_YEAR", "2026")
     with patch.object(job, "resolve_upcoming_week", return_value=18), \
-         patch.object(job.time, "monotonic", side_effect=[0, 1, 2, 10, 11, 20, 21, 22]), \
+         patch.object(job.time, "monotonic", side_effect=[0, 1, 2, 10, 11, 20, 21, 30, 31, 32]), \
          patch.object(job.subprocess, "run") as run:
         assert job.main() == 0
 
-    assert [c.kwargs["timeout"] for c in run.call_args_list] == [599, 590, 580]
+    assert [c.kwargs["timeout"] for c in run.call_args_list] == [599, 590, 580, 570]
 
 
 def test_main_fails_a_week_when_its_shared_budget_is_exhausted(monkeypatch):
@@ -56,14 +56,16 @@ def test_main_stops_after_target_week_fails(monkeypatch):
 
 def test_main_skips_failed_future_week_stages_and_continues_horizon(monkeypatch):
     monkeypatch.setenv("CURRENT_YEAR", "2026")
-    outcomes = [None, None, None, subprocess.CalledProcessError(1, "stage"), None, None, None, None, None, None]
+    stage_count = len(job.STAGES)
+    # Week 7 succeeds, week 8's first stage fails, weeks 9 and 10 succeed.
+    outcomes = [None] * stage_count + [subprocess.CalledProcessError(1, "stage")] + [None] * (2 * stage_count)
     with patch.object(job, "resolve_upcoming_week", return_value=7), \
          patch.object(job.subprocess, "run", side_effect=outcomes) as run:
         assert job.main() == 1
 
     weeks = [int(c.args[0][-1]) for c in run.call_args_list]
     stages = [c.args[0][3] for c in run.call_args_list]
-    assert weeks == [7, 7, 7, 8, 9, 9, 9, 10, 10, 10]
+    assert weeks == [7] * stage_count + [8] + [9] * stage_count + [10] * stage_count
     assert stages == [*job.STAGES, *job.STAGES[:1], *job.STAGES, *job.STAGES]
 
 
@@ -261,3 +263,11 @@ def test_last_playoff_week_reads_only_the_configured_league():
         # The practice league's null settings, and a league never synced, mean nothing to do.
         assert job.load_last_playoff_week("460500313", 2026) is None
         assert job.load_last_playoff_week("999", 2026) is None
+
+
+def test_espn_projections_run_after_sleeper_and_before_vorp():
+    """sync_espn_projections only updates rows sync_projections wrote, and vorp_matrix
+    reads the consensus both feed (#462)."""
+    stages = list(job.STAGES)
+    assert stages.index("src.ingestion.sync_projections") < stages.index("src.ingestion.sync_espn_projections")
+    assert stages.index("src.ingestion.sync_espn_projections") < stages.index("src.optimization.vorp_matrix")

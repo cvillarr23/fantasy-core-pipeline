@@ -8,8 +8,9 @@ VORP measures a player's projected value above a replacement player. Use this pa
 
 ```mermaid
 flowchart LR
-    S[Sleeper skill projections] -->|pts_ppr| P[Exact-week stats]
-    E[ESPN K and D/ST projections] -->|projected_points| P
+    S[Sleeper skill projections] -->|sleeper_projected_points| P[Consensus projected_points]
+    X[ESPN skill projections] -->|espn_projected_points| P
+    E[ESPN K and D/ST projections] -->|espn_projected_points| P
     P -->|points and signals| C[Matchup coefficient]
     C -->|adjusted points| B[Replacement baseline]
     L[League slots and roster usage] -->|starter demand| B
@@ -24,7 +25,7 @@ flowchart LR
 | Schedule | Daily at 18:00 America/Chicago |
 | Season | `CURRENT_YEAR` |
 | Horizon | Upcoming week through `min(week + 3, 18)` |
-| Week budget | 600 seconds shared across three stages |
+| Week budget | 600 seconds shared across four stages |
 | Target-week failure | Stop; fail the Job |
 | Future-week failure | Skip that week's remaining stages; try other weeks; fail the Job |
 | Completed work | Keep committed weeks; no automatic whole-run retry |
@@ -33,7 +34,8 @@ flowchart LR
 flowchart LR
     R[Resolve upcoming week] -->|current season| S[sync_projections]
     S -->|skill points committed| K[sync_kicker_dst]
-    K -->|K and D/ST points committed| V[vorp_matrix]
+    K -->|K and D/ST points committed| X[sync_espn_projections]
+    X -->|consensus committed| V[vorp_matrix]
     V -->|week complete| N[Next horizon week]
     N -->|through week 18| S
 ```
@@ -52,9 +54,24 @@ The resolver chooses the earliest regular-season week with an unfinished game. A
 | Sleeper scoring field missing/null | Store 0 for a known player |
 | Player absent from response or unknown locally | Do not create a projection row |
 
-`sync_projections` reads regular-season `pts_ppr` for QB/RB/WR/TE and upserts only `projected_points`, preserving advanced metrics. `sync_kicker_dst` supplies ESPN K/D-ST projections.
+`sync_projections` reads regular-season `pts_ppr` for QB/RB/WR/TE and upserts only `sleeper_projected_points`, preserving advanced metrics. `sync_kicker_dst` supplies ESPN K/D-ST projections.
 
 </details>
+
+## Which projection does VORP use?
+
+`projected_points` is the consensus (#462): the mean of the non-null `espn_projected_points` and `sleeper_projected_points` (`src/projection_consensus.py`). Each sync writes only its own source column, then recomputes `projected_points` in the same transaction. Everything downstream reads `projected_points`, so VORP, the lineup solver, waivers, trade scoring and the roster/matchup pages all see the same number.
+
+| Situation | `projected_points` |
+| --- | --- |
+| Both sources | Their mean |
+| Sleeper only (the ESPN sync hasn't run, or ESPN didn't return the player) | Sleeper's value |
+| ESPN only (K and D/ST) | ESPN's value |
+| Neither source (rows from before #462, metrics-only and backtest rows) | Left as it was |
+
+`sync_espn_projections` only updates rows Sleeper already wrote. It never inserts one, so which players have a row (and "no row means bye") stays Sleeper's call, and the free-agent replacement pool doesn't grow. A player ESPN doesn't project that week, or whose team is on bye per the NFL schedule, gets `espn_projected_points = NULL` and falls back to Sleeper. Players are matched by `players.espn_id` only.
+
+The ESPN market multiplier (`ESPN_MARKET_WEIGHT`) is unchanged and still applies after the baseline, to `vorp_base`. ESPN's view now enters twice: as half of the projection, and as the start% adjustment. The two are separate signals (ESPN's model and managers' start decisions), and the weight bounds the second one.
 
 ## How is VORP calculated?
 

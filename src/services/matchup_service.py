@@ -121,7 +121,8 @@ def _load_weekly_metrics_by_espn_id(season: int, week: int, team_id: str) -> dic
     with get_db_cursor() as cursor:
         cursor.execute(
             """
-            SELECT p.espn_id, s.vorp_score, s.projected_points
+            SELECT p.espn_id, s.vorp_score, s.projected_points,
+                   s.espn_projected_points, s.sleeper_projected_points
             FROM league_rosters r
             JOIN players p ON r.player_id = p.player_id
             LEFT JOIN weekly_stats s ON s.player_id = r.player_id AND s.season = %s AND s.week = %s
@@ -130,9 +131,60 @@ def _load_weekly_metrics_by_espn_id(season: int, week: int, team_id: str) -> dic
             (season, week, team_id),
         )
         return {
-            espn_id: {"net_vorp": vorp, "projected_points": projected_points}
-            for espn_id, vorp, projected_points in cursor.fetchall()
+            espn_id: {
+                "net_vorp": vorp,
+                "projected_points": projected_points,
+                "projection_sources": _projection_sources(espn, sleeper),
+            }
+            for espn_id, vorp, projected_points, espn, sleeper in cursor.fetchall()
         }
+
+
+def _projection_sources(espn, sleeper) -> dict | None:
+    """The stored per-source split, or None for a row neither source has written (one from
+    before #462, whose projected_points has no recorded source)."""
+    if espn is None and sleeper is None:
+        return None
+    return {"espn": espn, "sleeper": sleeper}
+
+
+def _load_consensus_projections_by_espn_id(espn_ids: list, season: int, week: int) -> dict:
+    """espn_id -> {"projected_points", "projection_sources"} for the players with a stored
+    source this week. Keyed by players.espn_id only: a line's player_id is ESPN's id, which
+    can collide with an unrelated players.player_id."""
+    if not espn_ids:
+        return {}
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT p.espn_id, s.projected_points, s.espn_projected_points, s.sleeper_projected_points
+            FROM players p
+            JOIN weekly_stats s ON s.player_id = p.player_id AND s.season = %s AND s.week = %s
+            WHERE p.espn_id = ANY(%s)
+              AND (s.espn_projected_points IS NOT NULL OR s.sleeper_projected_points IS NOT NULL);
+            """,
+            (season, week, espn_ids),
+        )
+        return {
+            str(espn_id): {"projected_points": projected, "projection_sources": _projection_sources(espn, sleeper)}
+            for espn_id, projected, espn, sleeper in cursor.fetchall()
+        }
+
+
+def _apply_consensus_projections(player_lines: list, season: int, week: int) -> None:
+    """Mutates player_lines in place: projected_points becomes the stored ESPN+Sleeper
+    consensus, the number the lineup optimizer's badge ranks by (#462). A player with no
+    stored source keeps ESPN's box-score projection, and a lookup failure keeps every box
+    value, since this is display-only."""
+    try:
+        consensus = _load_consensus_projections_by_espn_id(
+            sorted({line["espn_id"] for line in player_lines}), season, week
+        )
+    except Exception as exc:
+        logger.warning(f"Showing ESPN box-score projections for Season {season} Week {week}: could not read consensus: {exc}")
+        consensus = {}
+    for line in player_lines:
+        line.update(consensus.get(line["espn_id"], {"projection_sources": None}))
 
 
 def _load_espn_ownership_by_espn_id(season: int, week: int, team_id: str) -> dict:
@@ -223,13 +275,16 @@ def _apply_core_player_ids(player_lines: list) -> None:
 
 
 def _with_core_player_ids(matchup: dict) -> dict:
-    """Both sides' lines identified with one lookup, for live and stored weeks alike."""
-    _apply_core_player_ids([
+    """Both sides' lines identified with one lookup each, and given the consensus
+    projection, for live and stored weeks alike."""
+    lines = [
         line
         for side in ("our_team", "opponent")
         for group in ("starters", "bench")
         for line in matchup[side][group]
-    ])
+    ]
+    _apply_core_player_ids(lines)
+    _apply_consensus_projections(lines, matchup["season"], matchup["week"])
     return matchup
 
 
@@ -260,6 +315,7 @@ def _shape_lineup_player_line(player, bye_weeks: dict | None = None) -> dict:
         "suggested_swap": None,
         "net_vorp": None,
         "projected_points": None,
+        "projection_sources": None,
         "rumor_sentiment": None,
         "rumor_confidence": None,
         "rumor_suggested_action": None,
