@@ -31,7 +31,9 @@ erDiagram
         varchar player_id PK
         int season PK
         int week PK
-        real projected_points
+        real projected_points "consensus"
+        real sleeper_projected_points
+        real espn_projected_points
         real vorp_score
     }
     league_rosters {
@@ -179,7 +181,7 @@ erDiagram
 | Table | Holds | Written by |
 |---|---|---|
 | `players` | One row per player: name, position, team, injury status and the three id spaces. | `sync_players` (Sleeper). `sync_id_crosswalk`, `sync_skill_position_crosswalk` and `sync_kicker_dst` backfill `espn_id` and `gsis_id`. |
-| `weekly_stats` | One row per player per week: nflverse usage metrics, projections, actual points and the VORP audit columns. | `metrics_extractor` (usage metrics), `sync_projections` and `sync_kicker_dst` (`projected_points`), `vorp_matrix` (VORP columns), `sync_actual_scores` (`actual_points`). |
+| `weekly_stats` | One row per player per week: nflverse usage metrics, projections, actual points and the VORP audit columns. | `metrics_extractor` (usage metrics), `sync_projections` (`sleeper_projected_points`), `sync_espn_projections` and `sync_kicker_dst` (`espn_projected_points`), each recomputing `projected_points` as the mean of the non-null sources ([consensus](./decision-pipelines/projections-and-vorp.md#which-projection-does-vorp-use)), `vorp_matrix` (VORP columns), `sync_actual_scores` (`actual_points`). |
 | `player_injuries` | ESPN's current injury report: one row per injured player keyed by `espn_id` (never `player_id`), with the feed's `status`, `fantasy_status`, injury type and detail, `return_date` and `reported_at`. Replaced wholesale on every sync, so a missing row means healthy. ESPN's live fantasy `injuryStatus` stays the authority on status; this table only adds the return date. The trade context maps it onto `expected_return_week`. | `sync_injuries` |
 | `espn_player_ownership` | One row per player per week: ESPN's percent owned, percent started, 24h change in percent owned and positional rank. Every metric is nullable. Older weeks are kept as history. `vorp_matrix` reads `percent_started` when `ESPN_MARKET_WEIGHT` is nonzero. Backtests never write stand-in data here: their FantasyPros ECR goes in `fp_weekly_ecr`, which exists only in `backtest_<season>` schemas (`backtest_schema.BACKTEST_ONLY_DDL`). | `sync_espn_ownership` |
 | `defense_position_strength` | Last season's points allowed by defense and position, as a z-score. Used only when `MATCHUP_WEIGHTING_ENABLED=true`. | `sync_defense_strength` |

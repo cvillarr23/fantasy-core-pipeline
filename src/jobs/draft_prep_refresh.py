@@ -1,4 +1,4 @@
-"""Refresh projections, kicker/DST projections, and VORP for the upcoming weeks.
+"""Refresh Sleeper and ESPN projections (skill players and K/D-ST), and VORP, for the upcoming weeks.
 
 Run as ``python -m src.jobs.draft_prep_refresh [--week-offset N]``. Each week's stages run in
 order with a shared 600-second budget.
@@ -33,6 +33,9 @@ HORIZON_EXTRA_WEEKS = 3
 STAGES = (
     "src.ingestion.sync_projections",
     "src.ingestion.sync_kicker_dst",
+    # After sync_projections (it only updates the rows Sleeper wrote) and before vorp_matrix,
+    # which reads the ESPN+Sleeper consensus projected_points (#462).
+    "src.ingestion.sync_espn_projections",
     "src.optimization.vorp_matrix",
 )
 

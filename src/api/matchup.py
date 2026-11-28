@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from src.nfl_schedule import RegularSeasonOverError, WeekResolutionError
 from src.schemas.espn_ownership import EspnOwnership
+from src.schemas.projections import ProjectionSources
 from src.schemas.live import GameDetailResponse, LiveBlock, MatchupFeedResponse, ScoreBreakdownLine
 from src.services import live_service
 from src.services.matchup_service import (
@@ -43,7 +44,11 @@ class PlayerLine(BaseModel):
     # block's home/away use. None when ESPN gives no team.
     pro_team: Optional[str] = None
     points: Optional[float]
+    # The ESPN+Sleeper consensus from weekly_stats, the number the lineup optimizer ranks by.
+    # ESPN's own box-score projection when the week has no stored projection for the player.
     projected_points: Optional[float]
+    # The stored per-source split behind projected_points; None when it's ESPN's box-score value.
+    projection_sources: Optional[ProjectionSources] = None
     # The player's NFL bye week; None when the schedule couldn't be read.
     bye_week: Optional[int] = None
     # Where the player's NFL game stands. None when the scoreboard can't be read, the team has no
@@ -189,7 +194,9 @@ class LineupPlayerLine(BaseModel):
     deficit_flag: bool
     suggested_swap: Optional[dict] = None
     net_vorp: Optional[float] = None
+    # The ESPN+Sleeper consensus from weekly_stats (see PlayerLine.projected_points).
     projected_points: Optional[float] = None
+    projection_sources: Optional[ProjectionSources] = None
     rumor_sentiment: Optional[str] = None
     rumor_confidence: Optional[float] = None
     rumor_suggested_action: Optional[str] = None

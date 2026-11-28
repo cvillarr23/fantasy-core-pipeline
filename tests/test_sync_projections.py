@@ -50,7 +50,9 @@ def test_persist_projections_filters_unknown_player_ids():
     assert rows[0][0] == "4046"
 
 
-def test_persist_projections_set_clause_touches_only_projected_points():
+def test_persist_projections_writes_only_the_sleeper_source_on_conflict():
+    """An existing row keeps its ESPN half and every other column; the consensus is
+    recomputed afterwards rather than overwritten with Sleeper's value."""
     frame = sp.build_projection_frame([_proj_row()])
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
@@ -59,9 +61,24 @@ def test_persist_projections_set_clause_touches_only_projected_points():
     sp.persist_projections(mock_conn, frame, known_player_ids={"4046"})
 
     query = mock_cursor.executemany.call_args.args[0]
-    assert "SET projected_points = EXCLUDED.projected_points" in query
+    set_clause = " ".join(query.split("DO UPDATE SET", 1)[1].split())
+    assert set_clause == "sleeper_projected_points = EXCLUDED.sleeper_projected_points;"
+    assert "espn_projected_points" not in query
     assert "vorp_score" not in query
     assert "actual_points" not in query
+    assert mock_cursor.executemany.call_args.args[1] == [("4046", 2024, 1, 16.31, 16.31)]
+
+
+def test_persist_projections_recomputes_the_consensus_for_written_rows():
+    frame = sp.build_projection_frame([_proj_row(player_id="4046"), _proj_row(player_id="6794")])
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("src.ingestion.sync_projections.recompute_consensus") as recompute:
+        sp.persist_projections(mock_conn, frame, known_player_ids={"4046", "6794"})
+
+    recompute.assert_called_once_with(mock_cursor, 2024, 1, ["4046", "6794"])
 
 
 def test_fetch_projections_retries_then_raises_after_exhausting_attempts():

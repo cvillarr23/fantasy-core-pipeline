@@ -31,6 +31,7 @@ from espn_api.football.constant import POSITION_MAP
 from src.database import get_db_connection
 from src.ingestion.sync_league import build_league
 from src.nfl_byes import bye_week_for, bye_weeks_or_empty
+from src.projection_consensus import recompute_consensus
 from src.services import run_log_service
 
 logger = logging.getLogger("KickerDSTSync")
@@ -162,7 +163,11 @@ def persist_projections(conn, matches: list, season: int, week: int, bye_weeks: 
 
     ESPN projects some bye-week players at 0 instead of leaving the week out, so a player
     whose team is on bye in `week` per `bye_weeks` (the NFL schedule) counts as having no
-    projection too."""
+    projection too.
+
+    The value goes to espn_projected_points, and projected_points is recomputed as the
+    consensus (src/projection_consensus.py). ESPN is the only K/D-ST source, so the
+    consensus is ESPN's value."""
     if not matches:
         return 0
     rows, without_projection = [], []
@@ -171,12 +176,12 @@ def persist_projections(conn, matches: list, season: int, week: int, bye_weeks: 
         if points is None or bye_week_for(espn_player.proTeam, bye_weeks or {}) == week:
             without_projection.append(player_id)
         else:
-            rows.append((player_id, season, week, points, _normalize_team(espn_player.proTeam)))
+            rows.append((player_id, season, week, points, points, _normalize_team(espn_player.proTeam)))
     upsert_query = """
-        INSERT INTO weekly_stats (player_id, season, week, projected_points, team)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO weekly_stats (player_id, season, week, espn_projected_points, projected_points, team)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (player_id, season, week) DO UPDATE SET
-            projected_points = EXCLUDED.projected_points,
+            espn_projected_points = EXCLUDED.espn_projected_points,
             team = EXCLUDED.team;
     """
     delete_query = """
@@ -187,6 +192,7 @@ def persist_projections(conn, matches: list, season: int, week: int, bye_weeks: 
     with conn.cursor() as cursor:
         if rows:
             cursor.executemany(upsert_query, rows)
+            recompute_consensus(cursor, season, week, [row[0] for row in rows])
         if without_projection:
             cursor.execute(delete_query, (without_projection, season, week))
     return len(rows)

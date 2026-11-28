@@ -19,7 +19,8 @@ flowchart TD
     SL --> KD[sync_kicker_dst]
     KD --> SK[sync_skill_position_crosswalk]
     SK --> PR[sync_projections]
-    PR --> ME[metrics_extractor]
+    PR --> EP[sync_espn_projections]
+    EP --> ME[metrics_extractor]
     ME --> VM[vorp_matrix]
     VM --> LS[lineup_solver]
     VM --> WE[waiver_evaluator]
@@ -32,6 +33,7 @@ flowchart TD
 | `metrics_extractor` after `sync_id_crosswalk` | It needs a fresh `gsis_id`. |
 | `sync_kicker_dst` after `sync_league` | It reuses the ESPN connection and needs the K and D/ST rows from `sync_players`. |
 | `sync_espn_ownership` after `sync_id_crosswalk` | It maps ESPN ids to players through `players.espn_id`. |
+| `sync_espn_projections` after `sync_projections` | It only updates the rows Sleeper wrote for the week. |
 | `vorp_matrix` after projections and metrics | VORP is computed from `projected_points` and the usage metrics. |
 | `lineup_solver` after `vorp_matrix` | Its objective is each player's `weekly_stats.vorp_score`. |
 
@@ -42,11 +44,12 @@ flowchart TD
 | `sync_players` | Sleeper player master | `players` | Retags Sleeper's `DEF` as `D/ST`. Gated to once a day by a Redis lock; pass `--force` to override. It also [publishes injury alerts](./queue-publishing.md#direct-publisher-injury-alerts). |
 | `sync_id_crosswalk` | DynastyProcess crosswalk | `players.espn_id`, `players.gsis_id` | Covers most skill players, and no K or D/ST. |
 | `sync_league` | ESPN league API | `league_settings`, `league_teams`, `league_rosters` | Needs `ESPN_LEAGUE_ID`, `ESPN_S2`, `ESPN_SWID`. `--season` is required. |
-| `sync_kicker_dst` | ESPN `kona_player_info` | `players.espn_id`, `weekly_stats.projected_points` for K and D/ST | Takes `--season` and `--week`. A matched player with no projection gets no row, never a 0.0 row. |
+| `sync_kicker_dst` | ESPN `kona_player_info` | `players.espn_id`, `weekly_stats.espn_projected_points` (and the consensus `projected_points`) for K and D/ST | Takes `--season` and `--week`. A matched player with no projection gets no row, never a 0.0 row. |
 | `sync_skill_position_crosswalk` | ESPN `kona_player_info`, no ownership filter | `players.espn_id` | Fills the QB, RB, WR and TE players the crosswalk missed. Matches by name and team. |
 | `sync_espn_ownership` | ESPN `kona_player_info`, sorted by percent owned | `espn_player_ownership` | Percent owned, percent started, 24h change and positional rank for about the 1000 most-owned players. ESPN's `-1` and missing fields are stored as NULL. Takes optional `--season` and `--week`, defaulting to the current season and upcoming week. A rerun in the same week upserts that week's row. |
 | `sync_injuries` | ESPN's public NFL injuries feed (`site.api.espn.com/.../nfl/injuries`) | `player_injuries` | One row per injured player, keyed by ESPN athlete id (parsed from the athlete's `/id/<n>/` link), with status, injury and `returnDate`. Each run replaces the table, since a player missing from the feed is healthy. An empty or unparsable feed fails and keeps the old snapshot, as does one with no injured player from September through January (a dropped `status` field would otherwise wipe the table). No arguments. Trade scoring maps `return_date` onto a week ([injury timelines](../README.md#trade-scoring)). |
-| `sync_projections` | Sleeper projections | `weekly_stats.projected_points` | QB, RB, WR and TE only. Takes `--season` and `--week`. |
+| `sync_projections` | Sleeper projections | `weekly_stats.sleeper_projected_points` and the consensus `projected_points` | QB, RB, WR and TE only. Takes `--season` and `--week`. |
+| `sync_espn_projections` | ESPN `kona_player_info` for the target `scoringPeriodId`, no ownership filter | `weekly_stats.espn_projected_points` and the consensus `projected_points` | QB, RB, WR and TE with a `players.espn_id`, matched by that id only. Updates existing rows only, never inserts. No projection or a schedule bye stores NULL, so the consensus falls back to Sleeper. Takes `--season` and `--week`. See [the consensus](./decision-pipelines/projections-and-vorp.md#which-projection-does-vorp-use). |
 | `metrics_extractor` | nflverse play-by-play, snaps, schedule | `weekly_stats` usage and betting columns | Defaults to the last completed week. See below. |
 | `vorp_matrix` | `weekly_stats`, `league_settings` | `weekly_stats` VORP columns | Takes `--season` and `--week`. |
 | `sync_defense_strength` | nflverse, previous season | `defense_position_strength` | Only needed when `MATCHUP_WEIGHTING_ENABLED=true`. |
@@ -119,7 +122,7 @@ Team codes are nflverse codes (`WAS`, not ESPN's `WSH`), the same as `players.te
 | `fantasy-weekly-ingestor` | Tuesday 16:00 | `sync_league`, then `metrics_extractor` |
 | `fantasy-sync-actual-scores` | Tuesday 17:05 | `sync_actual_scores` |
 | `fantasy-sync-actual-scores-reconcile` | Friday 10:00 | `sync_actual_scores` again, to pick up stat corrections |
-| `fantasy-draft-prep-refresher` | Daily 18:00 | For the upcoming week and up to three more: `sync_projections`, `sync_kicker_dst`, `vorp_matrix`. Under the launcher, `projections-refresh` fans out one child per week (`--week-offset 0..3`), and the children run in parallel within the pod cap. `--rest-of-season` refreshes the weeks after that horizon through the last fantasy playoff week, in order, for the trade score's rest-of-season term |
+| `fantasy-draft-prep-refresher` | Daily 18:00 | For the upcoming week and up to three more: `sync_projections`, `sync_kicker_dst`, `sync_espn_projections`, `vorp_matrix`. Under the launcher, `projections-refresh` fans out one child per week (`--week-offset 0..3`), and the children run in parallel within the pod cap. `--rest-of-season` refreshes the weeks after that horizon through the last fantasy playoff week, in order, for the trade score's rest-of-season term |
 | `fantasy-lineup-optimizer` | Tuesday 19:15 | `lineup_solver` |
 | `fantasy-weekly-waiver-trigger` | Tuesday 20:30 | `waiver_evaluator` |
 | `fantasy-rumor-syncer` | Every 30 min | `sync_rumors` |

@@ -201,6 +201,14 @@
   team is on bye with a `team` but `opponent: null` and no scoring stats. That row is
   skipped, never stored as 0.0, and a 0.0 row an earlier run wrote for him is deleted
   (unless actual scores were synced).
+- `weekly_stats.projected_points` is the ESPN+Sleeper consensus (#462): the mean of the
+  non-null `espn_projected_points`/`sleeper_projected_points`. A projection writer sets only its
+  source column, then calls `projection_consensus.recompute_consensus` in the same transaction,
+  which leaves rows with neither source alone. `sync_espn_projections` (QB/RB/WR/TE, by
+  `players.espn_id` only, after `sync_projections` in draft_prep_refresh) only UPDATEs rows
+  Sleeper wrote, so row existence and the free-agent baseline pool stay Sleeper's. Matchup
+  and roster lines serve the stored consensus plus `projection_sources`, looked up by
+  `players.espn_id`. Trade-score formulas didn't change, so `SCORING_VERSION` didn't either.
 
 ## Bye weeks across recommenders
 
